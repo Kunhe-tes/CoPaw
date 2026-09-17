@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 MODEL_SUMMARY_TIMEOUT_SECONDS = 0.6
 _MODEL_SUMMARY_CACHE_LIMIT = 256
+_SHELL_COMMAND_TOOLS = {"execute_shell_command", "start_background_process"}
 _SUMMARY_MODEL_CACHE_LIMIT = 32
 
 TOOL_DISPLAY_NAMES = {
@@ -37,9 +38,6 @@ TOOL_DISPLAY_NAMES = {
     "browser_use": "网页操作",
     "desktop_screenshot": "截取屏幕",
     "get_current_time": "获取时间",
-    "set_user_timezone": "设置时区",
-    "view_image": "查看图片",
-    "view_video": "查看视频",
     "send_file_to_user": "发送文件",
 }
 
@@ -65,10 +63,17 @@ def _summary_trace_cache_key(
     return (trace_id or "__no_trace__"), _runtime_scope_key()
 
 
-def reset_summary_caches() -> None:
+def reset_summary_caches(scope_id: str | None = None) -> None:
     """清理摘要生成相关缓存。"""
-    cached_models = list(_summary_models_by_trace.values())
-    _summary_models_by_trace.clear()
+    if scope_id is None:
+        keys = list(_summary_models_by_trace)
+    else:
+        keys = [
+            key
+            for key in _summary_models_by_trace
+            if key[1][0] == str(scope_id)
+        ]
+    cached_models = [_summary_models_by_trace.pop(key) for key in keys]
     _model_summary_cache.clear()
     for model in cached_models:
         dispose_cached_model(model)
@@ -204,7 +209,7 @@ def _extract_common_object(arguments: Any) -> str:
 
 def _get_call_object_hint(tool_name: str, arguments: Any) -> str:
     """Return a safe object hint for call-summary prompts."""
-    if tool_name == "execute_shell_command":
+    if tool_name in _SHELL_COMMAND_TOOLS:
         return "无"
     if tool_name == "browser_use":
         return _extract_browser_object(arguments) or "无"
@@ -227,6 +232,32 @@ def _parse_json_like(
         return None
 
 
+_OBJECT_ACTION_HINTS = {
+    "browser_use": "",
+    "read_file": "读取",
+    "write_file": "写入",
+    "append_file": "写入",
+    "edit_file": "编辑",
+    "grep_search": "搜索",
+    "memory_search": "搜索",
+    "glob_search": "查找",
+}
+
+
+def _format_object_action(
+    display_name: str,
+    obj: str,
+    action: str | None = None,
+) -> str:
+    if obj == "无":
+        return f"正在{display_name}"
+    if action is None:
+        return f"正在{display_name}：{obj}"
+    if action:
+        return f"正在{action} {obj}"
+    return f"正在 {obj}"
+
+
 def _build_call_action_hint(
     tool_name: str,
     server_label: Optional[str],
@@ -234,25 +265,22 @@ def _build_call_action_hint(
 ) -> str:
     """Build a concrete user-facing action hint for summaries."""
     display_name = get_tool_display_name(tool_name, server_label)
-    if tool_name == "execute_shell_command":
+    if tool_name in _SHELL_COMMAND_TOOLS:
+        if tool_name != "execute_shell_command":
+            display_name = get_tool_display_name(
+                "execute_shell_command",
+                server_label,
+            )
         return f"开始{display_name}"
 
     obj = _get_call_object_hint(tool_name, arguments)
-    if tool_name == "browser_use":
-        return f"正在 {obj}" if obj != "无" else f"正在{display_name}"
-    if tool_name == "read_file":
-        return f"正在读取 {obj}" if obj != "无" else f"正在{display_name}"
-    if tool_name in {"write_file", "append_file"}:
-        return f"正在写入 {obj}" if obj != "无" else f"正在{display_name}"
-    if tool_name == "edit_file":
-        return f"正在编辑 {obj}" if obj != "无" else f"正在{display_name}"
-    if tool_name in {"grep_search", "memory_search"}:
-        return f"正在搜索 {obj}" if obj != "无" else f"正在{display_name}"
-    if tool_name == "glob_search":
-        return f"正在查找 {obj}" if obj != "无" else f"正在{display_name}"
-    if obj != "无":
-        return f"正在{display_name}：{obj}"
-    return f"正在{display_name}"
+    if tool_name in _OBJECT_ACTION_HINTS:
+        return _format_object_action(
+            display_name,
+            obj,
+            _OBJECT_ACTION_HINTS[tool_name],
+        )
+    return _format_object_action(display_name, obj)
 
 
 def _generate_rule_based_call_summary(
@@ -264,13 +292,32 @@ def _generate_rule_based_call_summary(
     return _build_call_action_hint(tool_name, server_label, arguments)
 
 
+_GOVERNANCE_OUTPUT_SUMMARY = {
+    "pending": "操作等待审批",
+    "rejected": "操作已拒绝",
+    "blocked": "操作已拦截",
+}
+
+
+def _resolve_output_governance(value: Any) -> str | None:
+    """返回可信内部标记携带的工具治理状态。"""
+    if isinstance(value, str) and value in _GOVERNANCE_OUTPUT_SUMMARY:
+        return value
+    return None
+
+
 def _generate_rule_based_output_summary(
     tool_name: str,
     output: str | Dict[str, Any] | None,
+    governance_status: Any = None,
 ) -> str:
     """Generate a rule-based summary for tool output."""
+    governance = _resolve_output_governance(governance_status)
+    if governance is not None:
+        return _GOVERNANCE_OUTPUT_SUMMARY[governance]
+
     display_name = get_tool_display_name(tool_name)
-    if tool_name == "execute_shell_command":
+    if tool_name in _SHELL_COMMAND_TOOLS:
         parsed = (
             _parse_json_like(output) if isinstance(output, str) else output
         )
@@ -315,7 +362,7 @@ def _normalize_preview(value: Any, max_length: int = 1200) -> str:
 
 def _redact_for_model(kind: str, tool_name: str, value: Any) -> str:
     """Redact sensitive or overly technical details before prompting."""
-    if tool_name == "execute_shell_command":
+    if tool_name in _SHELL_COMMAND_TOOLS:
         if kind == "call":
             return "执行了一项系统操作，请概括目的，不要透露命令、参数、路径。"
         return "系统操作已返回结果，请概括是否完成，不要透露输出细节。"
@@ -554,6 +601,11 @@ def generate_tool_call_summary(
 def generate_tool_output_summary(
     tool_name: str,
     output: str | Dict[str, Any] | None,
+    governance_status: Any = None,
 ) -> str:
     """Generate user-friendly summary for tool output."""
-    return _generate_rule_based_output_summary(tool_name, output)
+    return _generate_rule_based_output_summary(
+        tool_name,
+        output,
+        governance_status,
+    )

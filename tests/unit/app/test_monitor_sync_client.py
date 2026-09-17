@@ -9,6 +9,7 @@ import asyncio
 
 from swe.app.crons.monitor_sync_client import (
     MonitorSyncClient,
+    _has_dispatch_execution_meta,
     get_monitor_sync_client,
     get_monitor_api_url,
 )
@@ -81,9 +82,10 @@ class TestMonitorSyncClient:
                 return []
 
         class _HttpClient:
-            async def post(self, path, json):
+            async def post(self, path, json, headers=None):
                 posted["path"] = path
                 posted["json"] = json
+                posted["headers"] = headers or {}
                 return _Response()
 
         client._client = _HttpClient()
@@ -97,7 +99,6 @@ class TestMonitorSyncClient:
 
         assert posted["path"] == "/monitor/sync/notifications/claim"
         assert posted["json"]["source_ids"] == ["source-a", "source-b"]
-
 
 class TestSyncRequestFormat:
     """Tests for sync request data format."""
@@ -149,9 +150,83 @@ class TestSyncRequestFormat:
         assert runtime.get("timeout_seconds") == 7200
         assert meta.get("creator_user_id") == "user-001"
 
+    def test_job_sync_data_includes_owning_agent_id_in_meta(self):
+        client = MonitorSyncClient("http://test:8080/api")
+        job = MagicMock()
+        job.model_dump.return_value = {
+            "id": "job-001",
+            "name": "Test Job",
+            "tenant_id": "tenant-001",
+            "enabled": True,
+            "task_type": "agent",
+            "schedule": {"cron": "0 9 * * *", "timezone": "UTC"},
+            "dispatch": {"channel": "console", "target": {}},
+            "runtime": {},
+            "meta": {"creator_user_id": "user-001"},
+        }
+
+        payload = client._build_job_sync_data(job, agent_id="agent-x")
+
+        assert json.loads(payload["meta"])["agent_id"] == "agent-x"
+
 
 class TestExecutionRecordFormat:
     """Tests for execution record format."""
+
+    @pytest.mark.parametrize(
+        "cron_dispatch",
+        [
+            {"b3_trace_id": "abc123"},
+            {"intent_id": 7, "batch_id": "batch-1"},
+            {"intent_id": 0, "batch_id": "batch-1", "dispatch_attempt": 1},
+            {"intent_id": -1, "batch_id": "batch-1", "dispatch_attempt": 1},
+            {"intent_id": True, "batch_id": "batch-1", "dispatch_attempt": 1},
+            {"intent_id": 7, "batch_id": "", "dispatch_attempt": 1},
+            {"intent_id": 7, "batch_id": "   ", "dispatch_attempt": 1},
+            {"intent_id": 7, "batch_id": None, "dispatch_attempt": 1},
+            {"intent_id": 7, "batch_id": 123, "dispatch_attempt": 1},
+            {"intent_id": 7, "batch_id": True, "dispatch_attempt": 1},
+            {"intent_id": 7, "batch_id": "batch-1", "dispatch_attempt": 0},
+            {"intent_id": 7, "batch_id": "batch-1", "dispatch_attempt": -1},
+            {"intent_id": 7, "batch_id": "batch-1", "dispatch_attempt": True},
+        ],
+    )
+    def test_dispatch_execution_meta_rejects_incomplete_or_invalid_identity(
+        self,
+        cron_dispatch,
+    ):
+        exec_data = {"meta": json.dumps({"cron_dispatch": cron_dispatch})}
+
+        assert _has_dispatch_execution_meta(exec_data) is False
+
+    @pytest.mark.parametrize(
+        "raw_meta",
+        [
+            "{",
+            json.dumps([]),
+            json.dumps(None),
+            json.dumps(7),
+            json.dumps({"cron_dispatch": "invalid"}),
+        ],
+    )
+    def test_dispatch_execution_meta_rejects_malformed_metadata(self, raw_meta):
+        assert _has_dispatch_execution_meta({"meta": raw_meta}) is False
+
+    def test_dispatch_execution_meta_accepts_complete_identity(self):
+        exec_data = {
+            "meta": json.dumps(
+                {
+                    "cron_dispatch": {
+                        "intent_id": 7,
+                        "batch_id": "batch-1",
+                        "dispatch_attempt": 1,
+                        "b3_trace_id": "abc123",
+                    },
+                },
+            ),
+        }
+
+        assert _has_dispatch_execution_meta(exec_data) is True
 
     @pytest.mark.asyncio
     async def test_record_execution_disabled(self):
@@ -168,6 +243,157 @@ class TestExecutionRecordFormat:
             status="success",
             actual_time=datetime.now(timezone.utc),
         )
+
+    @pytest.mark.asyncio
+    async def test_b3_only_execution_routes_to_monitor(self):
+        """B3 tracing metadata must not be mistaken for dispatch identity."""
+        client = MonitorSyncClient("http://monitor/api")
+        job = MagicMock()
+        job.id = "job-1"
+        job.name = "Job"
+        job.tenant_id = "tenant-a"
+        job.source_id = "source-a"
+        job.task_type = "agent"
+        job.meta = {}
+
+        monitor_call = object()
+        client._do_record_execution = MagicMock(return_value=monitor_call)
+        client._sync_fire_and_forget = MagicMock()
+        client._record_dispatch_execution_with_retry = AsyncMock()
+
+        await client.record_execution(
+            job=job,
+            status="success",
+            actual_time=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            meta={"cron_dispatch": {"b3_trace_id": "abc123"}},
+        )
+
+        client._record_dispatch_execution_with_retry.assert_not_awaited()
+        client._do_record_execution.assert_called_once()
+        client._sync_fire_and_forget.assert_called_once_with(monitor_call)
+
+    @pytest.mark.asyncio
+    async def test_complete_dispatch_identity_routes_only_to_scheduler(self):
+        """A complete dispatch identity must use only Scheduler feedback."""
+        client = MonitorSyncClient("http://monitor/api")
+        job = MagicMock()
+        job.id = "child-1"
+        job.name = "Child"
+        job.tenant_id = "tenant-a"
+        job.source_id = "source-a"
+        job.task_type = "agent"
+        job.meta = {}
+
+        client._record_dispatch_execution_with_retry = AsyncMock()
+        client._do_record_execution = MagicMock()
+        client._sync_fire_and_forget = MagicMock()
+
+        await client.record_execution(
+            job=job,
+            status="success",
+            actual_time=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            meta={
+                "cron_dispatch": {
+                    "intent_id": 7,
+                    "batch_id": "batch-1",
+                    "dispatch_attempt": 1,
+                },
+            },
+        )
+
+        client._record_dispatch_execution_with_retry.assert_awaited_once()
+        client._do_record_execution.assert_not_called()
+        client._sync_fire_and_forget.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_dispatch_execution_sync_retries_until_monitor_ack(
+        self,
+        monkeypatch,
+    ):
+        """Dispatch-managed completion must not be fire-and-forget."""
+        from swe.app.crons import monitor_sync_client as module
+
+        client = MonitorSyncClient("http://test:8080/api")
+        attempts = []
+
+        class _Response:
+            def __init__(self, status_code):
+                self.status_code = status_code
+
+        class _HttpClient:
+            async def post(self, path, json, headers=None):
+                attempts.append((path, json, headers or {}))
+                return _Response(500 if len(attempts) < 3 else 200)
+
+        async def _no_sleep(_seconds):
+            return None
+
+        monkeypatch.setattr(module.asyncio, "sleep", _no_sleep)
+        client._scheduler_client = _HttpClient()
+        job = MagicMock()
+        job.id = "child-1"
+        job.name = "Child"
+        job.tenant_id = "tenant-a"
+        job.source_id = "source-a"
+        job.task_type = "agent"
+        job.meta = {}
+
+        await client.record_execution(
+            job=job,
+            status="success",
+            actual_time=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            meta={
+                "cron_dispatch": {
+                    "intent_id": 7,
+                    "batch_id": "batch-1",
+                    "dispatch_attempt": 1,
+                },
+            },
+        )
+
+        assert len(attempts) == 3
+        assert attempts[-1][0] == "/scheduler/cron/execution"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_execution_sync_works_when_monitor_sync_disabled(
+        self,
+    ):
+        """Scheduler feedback must not depend on Monitor HTTP sync."""
+        client = MonitorSyncClient("", scheduler_base_url="http://scheduler/api")
+        attempts = []
+
+        class _Response:
+            status_code = 200
+
+        class _HttpClient:
+            async def post(self, path, json, headers=None):
+                attempts.append((path, json, headers or {}))
+                return _Response()
+
+        client._scheduler_client = _HttpClient()
+        job = MagicMock()
+        job.id = "child-1"
+        job.name = "Child"
+        job.tenant_id = "tenant-a"
+        job.source_id = "source-a"
+        job.task_type = "agent"
+        job.meta = {}
+
+        await client.record_execution(
+            job=job,
+            status="success",
+            actual_time=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            meta={
+                "cron_dispatch": {
+                    "intent_id": 7,
+                    "batch_id": "batch-1",
+                    "dispatch_attempt": 1,
+                },
+            },
+        )
+
+        assert attempts
+        assert attempts[0][0] == "/scheduler/cron/execution"
 
     def test_format_optional_time_converts_utc_to_beijing(self):
         """Test _format_optional_time converts UTC to Beijing timezone."""
@@ -283,6 +509,76 @@ class TestExecutionRecordFormat:
         assert result["notification_status"] == "pending"
         assert result["notification_due_at"] == "2026-05-19T18:05:00+08:00"
 
+    def test_suppressed_agent_success_does_not_require_notification(self):
+        """Suppressed successful agent runs must not enter notification queue."""
+        client = MonitorSyncClient("http://test:8080/api")
+        job = MagicMock()
+        job.id = "job-001"
+        job.name = "Test Job"
+        job.tenant_id = "tenant-001"
+        job.task_type = "agent"
+        job.meta = {}
+
+        actual_time = datetime(2026, 6, 5, 15, 30, 0, tzinfo=timezone.utc)
+        due_at = datetime(2026, 6, 5, 16, 30, 0, tzinfo=timezone.utc)
+        result = client._build_execution_sync_data(
+            job=job,
+            status="success",
+            actual_time=actual_time,
+            end_time=actual_time,
+            duration_ms=100,
+            error_message="",
+            is_manual=False,
+            trace_id="",
+            session_id="",
+            input_snapshot=None,
+            output_preview="",
+            instance_id="",
+            executor_leader="",
+            scheduled_time=None,
+            notification_due_at=due_at,
+            notification_timezone="Asia/Shanghai",
+            suppress_notification=True,
+        )
+
+        assert result["notification_status"] == "not_required"
+        assert result["notification_due_at"] is None
+        assert result["notification_timezone"] == ""
+
+    def test_background_cron_success_does_not_require_notification(self):
+        """Non-agent background cron jobs never create zhaohu completion notices."""
+        client = MonitorSyncClient("http://test:8080/api")
+        job = MagicMock()
+        job.id = "dream-001"
+        job.name = "Dream Job"
+        job.tenant_id = "tenant-001"
+        job.task_type = "dream"
+        job.meta = {}
+
+        actual_time = datetime(2026, 6, 5, 10, 0, 0, tzinfo=timezone.utc)
+        result = client._build_execution_sync_data(
+            job=job,
+            status="success",
+            actual_time=actual_time,
+            end_time=actual_time,
+            duration_ms=100,
+            error_message="",
+            is_manual=False,
+            trace_id="",
+            session_id="",
+            input_snapshot=None,
+            output_preview="",
+            instance_id="",
+            executor_leader="",
+            scheduled_time=None,
+            notification_due_at=actual_time,
+            notification_timezone="Asia/Shanghai",
+        )
+
+        assert result["notification_status"] == "not_required"
+        assert result["notification_due_at"] is None
+        assert result["notification_timezone"] == ""
+
     def test_build_execution_sync_data_includes_model_meta(self):
         from swe.app.crons.models import (
             CronJobRequest,
@@ -298,6 +594,7 @@ class TestExecutionRecordFormat:
             id="job-1",
             name="agent job",
             tenant_id="tenant-a",
+            source_id="source-a",
             schedule=ScheduleSpec(cron="* * * * *"),
             task_type="agent",
             request=CronJobRequest(input={"text": "ping"}),
@@ -340,6 +637,7 @@ class TestExecutionRecordFormat:
             },
         )
 
+        assert payload["source_id"] == "source-a"
         assert json.loads(payload["meta"]) == {
             "original_model_slot": {
                 "provider_id": "openai",

@@ -13,7 +13,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, FastAPI, Request
+from fastapi.testclient import TestClient
 from starlette.responses import Response
 from swe.config.context import encode_scope_id
 
@@ -43,6 +44,153 @@ class TestTenantWorkspaceLoading:
     def test_workspace_loaded_from_pool(self):
         """Workspace is loaded from TenantWorkspacePool."""
         raise AssertionError("Test requires full app dependencies")
+
+
+class TestTenantWorkspaceBootstrapUnavailableResponse:
+    """ASGI response behavior for retryable bootstrap failures."""
+
+    def test_dispatch_returns_retryable_503_over_asgi(self):
+        """A bootstrap failure must not become a BaseHTTPMiddleware 500."""
+        from swe.app.middleware.tenant_workspace import (
+            TenantWorkspaceMiddleware,
+        )
+        from swe.app.workspace.bootstrap_state import (
+            TenantBootstrapUnavailable,
+        )
+
+        app = FastAPI()
+        pool = MagicMock()
+        failure = TenantBootstrapUnavailable("state changed")
+        pool.ensure_bootstrap = AsyncMock(side_effect=failure)
+        app.state.tenant_workspace_pool = pool
+        app.add_middleware(TenantWorkspaceMiddleware)
+
+        @app.middleware("http")
+        async def set_tenant_state(request, call_next):
+            request.state.tenant_id = "tenant-asgi"
+            request.state.source_id = None
+            request.state.scope_id = None
+            request.state.user_name = "alice"
+            request.state.bbk_id = "bbk-1"
+            return await call_next(request)
+
+        @app.get("/api/workspace-probe")
+        async def workspace_probe():
+            return {"ok": True}
+
+        response = TestClient(
+            app,
+            raise_server_exceptions=False,
+        ).get("/api/workspace-probe")
+
+        assert response.status_code == 503
+        assert response.json() == {"detail": "Tenant bootstrap unavailable"}
+        assert response.headers["Retry-After"] == str(
+            failure.retry_after_seconds,
+        )
+
+
+class TestTenantWorkspaceIdentityLookup:
+    """Tests for avoiding redundant identity resolution in workspace loading."""
+
+    @pytest.mark.asyncio
+    async def test_get_workspace_skips_identity_lookup_when_identity_complete(
+        self,
+    ):
+        from swe.app.middleware import tenant_workspace as workspace_module
+        from swe.app.middleware.tenant_workspace import (
+            TenantWorkspaceMiddleware,
+        )
+
+        request = MagicMock(spec=Request)
+        request.state = MagicMock()
+        request.state.tenant_id = "tenant-ready"
+        request.state.source_id = None
+        request.state.scope_id = None
+        request.state.user_name = "alice"
+        request.state.bbk_id = "bbk-1"
+        request.headers = {}
+        request.app = MagicMock()
+        request.app.state = MagicMock()
+        pool = MagicMock()
+        pool.ensure_bootstrap = AsyncMock()
+        pool.get_tenant_workspace_dir = MagicMock(
+            return_value=Path("/tmp/tenant-ready"),
+        )
+        request.app.state.tenant_workspace_pool = pool
+
+        middleware = TenantWorkspaceMiddleware(app=MagicMock())
+        resolved = MagicMock(user_name="alice", bbk_id="bbk-1")
+        with patch.object(
+            workspace_module,
+            "resolve_user_identity",
+            new=AsyncMock(return_value=resolved),
+        ) as resolve_identity:
+            context = await middleware._get_workspace(request, "tenant-ready")
+
+        assert context is not None
+        resolve_identity.assert_not_awaited()
+        pool.ensure_bootstrap.assert_awaited_once_with(
+            "tenant-ready",
+            source_id=None,
+            scope_id=None,
+            tenant_name="alice",
+            bbk_id="bbk-1",
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("missing_field", ["user_name", "bbk_id"])
+    async def test_get_workspace_resolves_identity_when_field_missing(
+        self,
+        missing_field,
+    ):
+        from swe.app.middleware import tenant_workspace as workspace_module
+        from swe.app.middleware.tenant_workspace import (
+            TenantWorkspaceMiddleware,
+        )
+
+        request = MagicMock(spec=Request)
+        request.state = MagicMock()
+        request.state.tenant_id = "tenant-missing"
+        request.state.source_id = None
+        request.state.scope_id = None
+        request.state.user_name = "alice"
+        request.state.bbk_id = "bbk-1"
+        setattr(request.state, missing_field, None)
+        request.headers = {}
+        request.app = MagicMock()
+        request.app.state = MagicMock()
+        pool = MagicMock()
+        pool.ensure_bootstrap = AsyncMock()
+        pool.get_tenant_workspace_dir = MagicMock(
+            return_value=Path("/tmp/tenant-missing"),
+        )
+        request.app.state.tenant_workspace_pool = pool
+
+        middleware = TenantWorkspaceMiddleware(app=MagicMock())
+        resolved = MagicMock(user_name="resolved-name", bbk_id="resolved-bbk")
+        with patch.object(
+            workspace_module,
+            "resolve_user_identity",
+            new=AsyncMock(return_value=resolved),
+        ) as resolve_identity:
+            context = await middleware._get_workspace(
+                request,
+                "tenant-missing",
+            )
+
+        assert context is not None
+        resolve_identity.assert_awaited_once()
+        assert (
+            resolve_identity.await_args.kwargs["allow_remote_lookup"] is True
+        )
+        pool.ensure_bootstrap.assert_awaited_once_with(
+            "tenant-missing",
+            source_id=None,
+            scope_id=None,
+            tenant_name="resolved-name",
+            bbk_id="resolved-bbk",
+        )
 
     @pytest.mark.skip(reason="Requires full app dependencies")
     def test_workspace_stored_in_request_state(self):
@@ -118,6 +266,21 @@ class TestTenantWorkspaceExemptions:
             is True
         )
 
+    def test_runtime_memory_diagnostic_route_exempt(self):
+        """Runtime memory diagnostics should bypass workspace loading."""
+        from swe.app.middleware.tenant_workspace import (
+            TenantWorkspaceMiddleware,
+        )
+
+        middleware = TenantWorkspaceMiddleware(app=MagicMock())
+
+        assert (
+            middleware._is_workspace_exempt(
+                "/api/runtime/memory-diagnostic",
+            )
+            is True
+        )
+
 
 class TestTenantWorkspaceHelpers:
     """Tests for workspace helper functions."""
@@ -152,16 +315,17 @@ class TestTenantWorkspaceHelpers:
                 raise RuntimeError("Workspace not set")
 
     @pytest.mark.asyncio
-    async def test_dispatch_uses_effective_tenant_id_for_source_scoped_default(
+    async def test_dispatch_uses_storage_tenant_id_for_source_scoped_default(
         self,
     ):
-        """Workspace loading should use effective_tenant_id when present."""
+        """Workspace loading should use the storage tenant for default source."""
         from swe.app.middleware.tenant_workspace import (
             TenantWorkspaceMiddleware,
         )
 
         scope_id = encode_scope_id("default", "RMASSIST")
-        effective_root = Path(f"/tmp/{scope_id}")
+        storage_tenant_id = "default_RMASSIST"
+        effective_root = Path(f"/tmp/{storage_tenant_id}")
 
         mock_req = MagicMock(spec=Request)
         mock_req.method = "GET"
@@ -196,8 +360,42 @@ class TestTenantWorkspaceHelpers:
             bbk_id=mock_req.state.bbk_id,
         )
         pool.get_tenant_workspace_dir.assert_called_once_with(
-            scope_id,
+            storage_tenant_id,
         )
+
+    @pytest.mark.asyncio
+    async def test_dispatch_returns_retryable_503_for_bootstrap_unavailable(
+        self,
+    ):
+        """Lock/recovery failures expose a stable retryable HTTP contract."""
+        from swe.app.middleware.tenant_workspace import (
+            TenantWorkspaceMiddleware,
+        )
+        from swe.app.workspace.bootstrap_state import (
+            TenantBootstrapUnavailable,
+        )
+
+        request = MagicMock(spec=Request)
+        request.method = "GET"
+        request.state = MagicMock()
+        request.state.tenant_id = "tenant-a"
+        request.state.source_id = None
+        request.state.scope_id = None
+        request.url = MagicMock()
+        request.url.path = "/api/test"
+        middleware = TenantWorkspaceMiddleware(app=MagicMock())
+        middleware._get_workspace = AsyncMock(
+            side_effect=TenantBootstrapUnavailable("locked"),
+        )
+
+        async def call_next(_request):
+            return Response(content=b"OK", status_code=200)
+
+        response = await middleware.dispatch(request, call_next)
+
+        assert response.status_code == 503
+        assert response.body == b'{"detail":"Tenant bootstrap unavailable"}'
+        assert response.headers["Retry-After"] == "2"
 
     @pytest.mark.asyncio
     async def test_dispatch_allows_public_static_without_tenant_context(self):
@@ -224,6 +422,48 @@ class TestTenantWorkspaceHelpers:
         response = await middleware.dispatch(mock_req, call_next)
 
         assert response.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_dispatch_skips_public_static_even_with_tenant_context(self):
+        """Public static routes must not bootstrap workspace from headers."""
+        from swe.app.middleware import tenant_workspace as workspace_module
+        from swe.app.middleware.tenant_workspace import (
+            TenantWorkspaceMiddleware,
+        )
+
+        scope_id = encode_scope_id("default", "RMASSIST")
+        mock_req = MagicMock(spec=Request)
+        mock_req.method = "GET"
+        mock_req.state = MagicMock()
+        mock_req.state.tenant_id = "default"
+        mock_req.state.effective_tenant_id = scope_id
+        mock_req.state.scope_id = scope_id
+        mock_req.state.source_id = "RMASSIST"
+        mock_req.url = MagicMock()
+        mock_req.url.path = f"/static/{scope_id}/default/report.html"
+        mock_req.app = MagicMock()
+        mock_req.app.state = MagicMock()
+
+        pool = MagicMock()
+        pool.ensure_bootstrap = AsyncMock()
+        pool.get_tenant_workspace_dir = MagicMock()
+        mock_req.app.state.tenant_workspace_pool = pool
+
+        middleware = TenantWorkspaceMiddleware(app=MagicMock())
+
+        async def call_next(_request):
+            return Response(content=b"OK", status_code=200)
+
+        with patch.object(
+            workspace_module,
+            "resolve_user_identity",
+            new=AsyncMock(side_effect=AssertionError("remote lookup called")),
+        ):
+            response = await middleware.dispatch(mock_req, call_next)
+
+        assert response.status_code == 200
+        pool.ensure_bootstrap.assert_not_awaited()
+        pool.get_tenant_workspace_dir.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_get_workspace_logs_bootstrap_duration(self):

@@ -69,6 +69,18 @@ Do not use this skill to introduce new visual direction, broad restyling, design
 - Do not add competing design manuals, broad global restyles, hover-only primary actions, nested decorative cards, generic hero layouts, decorative gradients, or one-note palettes.
 - Check real-data resilience: long Chinese names, long English identifiers, provider URLs, IDs, empty values, large counts, many rows, and narrow embedded containers.
 
+### Supplemental Audit Checks
+
+Use these checks as CoPaw-adapted additions inspired by external frontend audit playbooks. They are subordinate to the user request, `AGENTS.md`, `console/DESIGN.md`, established project tooling, and the rest of this checklist.
+
+- AI-pattern check: flag decorative gradients, gradient text, default glassmorphism, generic metric heroes, repetitive icon-card grids, side-stripe accents, nested decorative cards, excessive radius, and heavy decorative shadows.
+- Accessibility check: verify contrast, visible focus, keyboard reachability, semantic controls, real labels, icon button names, reduced motion, and non-color-only state communication.
+- Responsive and data-resilience check: verify long Chinese names, long English IDs, URLs, paths, model names, empty values, large counts, narrow containers, and embedded `hideMenu=true` behavior.
+- Interaction and state check: verify hover, focus, active, disabled, loading, empty, error, unavailable, success, destructive, and in-progress states where applicable.
+- Motion and performance check: avoid layout-property animation, layout-shifting hover effects, expensive decorative filters, unnecessary heavy imports, and unstable async rendering.
+- Implementation hygiene check: preserve API contracts, route paths, permissions, iframe messages, Zustand state meaning, validation, error handling, and business outcomes.
+- Report format: classify findings as `pass`, `warn`, `fail`, or `na`; assign P0-P3 severity; include location, user impact, recommendation, and the top 3-5 fixes when a formal review is requested.
+
 ## Verification
 
 Before finishing frontend changes, run the relevant existing checks for the changed surface when feasible:

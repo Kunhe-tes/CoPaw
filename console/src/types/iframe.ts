@@ -42,7 +42,10 @@ export interface AuthHeaderItem {
  *   - hideMenu: 是否隐藏菜单（支持 boolean 或字符串 "true"/"false"）
  *   - isSuperManager: 是否为超级管理员
  *   - manager: 是否为普通管理员
+ *   - skipPreviewTracking: 是否跳过 HTML preview 埋点（支持 boolean 或字符串 "true"/"false"）
  *   - auth: 自定义 headers 数组
+ *   - pageSource: "",  【必传】打开页面：商机中心-SJR、客户洞察-KHA、高级搜索-GJS、电访-GL6
+ *   - platformSource: "",  【必传】打开平台：W+
  */
 export interface IframeUserDataMessage {
   type: "USER_DATA";
@@ -61,12 +64,22 @@ export interface IframeUserDataMessage {
     isSuperManager?: boolean | string;
     /** 是否为普通管理员（支持 boolean 或字符串 "true"/"false"） */
     manager?: boolean | string;
+    /** 是否跳过 HTML preview 埋点（支持 boolean 或字符串 "true"/"false"） */
+    skipPreviewTracking?: boolean | string;
     /** 自定义 headers 数组，每项包含 headerName 和 headerValue */
     auth?: AuthHeaderItem[];
     /** 分行ID */
     bbkId?: string;
     /** 其他任意参数 */
     [key: string]: unknown;
+    bbkOrgId?: string;
+    userId?: string;
+    /** 是否隐藏聊天菜单（支持 boolean 或字符串 "true"/"false"） */
+    hideChat?: boolean | string;
+    /** 打开页面 */
+    pageSource?: string;
+    /** 打开平台 */
+    platformSource?: string;
   };
 }
 
@@ -136,10 +149,14 @@ export interface IframeContext {
   source: string | null;
   /** 是否隐藏菜单 */
   hideMenu: boolean;
+  /** 当前页面是否通过 origin=Y 入口访问 */
+  isOriginY: boolean;
   /** 是否为超级管理员 */
   isSuperManager: boolean;
   /** 是否为普通管理员 */
   manager: boolean;
+  /** 是否跳过 HTML preview 埋点 */
+  skipPreviewTracking: boolean;
   /** 自定义 headers 数组 */
   authHeaders: AuthHeaderItem[];
   /** 来源 origin */
@@ -167,4 +184,10 @@ export interface IframeContext {
   sessionId: string | null;
   /** 任务 ID，用于查找 task.chat_id 后导航 */
   taskId: string | null;
+  /** 是否隐藏聊天菜单 */
+  hideChat: boolean;
+  /** 打开页面 */
+  pageSource: string | null;
+  /** 打开平台 */
+  platformSource: string | null;
 }

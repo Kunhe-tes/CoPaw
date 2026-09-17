@@ -1,9 +1,6 @@
 import { Fragment, useState } from "react";
 import type { FeedbackRecord } from "@/api/types/feedback";
-import {
-  extractDecodedFileNameFromUrl,
-  isAutoPreviewHtmlLink,
-} from "@/components/agentscope-chat/FilePreviewModal/fileUtils";
+import { findAutoPreviewHtmlMessages } from "@/components/agentscope-chat/autoPreviewSelection";
 import type { IAgentScopeRuntimeWebUIMessage } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/types/IMessages";
 import {
   findFeedbackForResponse,
@@ -18,233 +15,15 @@ import type {
 import { formatMessageTime } from "../../messageMeta";
 import ApprovalActionCard from "../ApprovalActionCard";
 import RuntimeRequestCard from "../RuntimeRequestCard";
-import RuntimeResponseCard from "../RuntimeResponseCard";
+import RuntimeResponseCard, {
+  RuntimeResponseFeedbackCard,
+} from "../RuntimeResponseCard";
 import type { ResponseFeedbackTaskMeta } from "../ResponseFeedbackCard";
+import { FilePreviewPresentationProvider } from "@/components/agentscope-chat/FilePreviewPresentationContext";
 
-const MARKDOWN_LINK_PATTERN = /!?\[([^\]]*)\]\(([^)]+)\)/g;
-const PLAIN_URL_PATTERN = /https?:\/\/[^\s<>"']+/g;
-const TRAILING_URL_PUNCTUATION_PATTERN = /[\]),.。！？!?,，；;：:]+$/;
-
-type AutoPreviewHtmlMatch = {
-  url: string;
-  fileName?: string;
-};
 type RuntimeMessageCard = NonNullable<
   IAgentScopeRuntimeWebUIMessage["cards"]
 >[number];
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object";
-}
-
-function readString(value: unknown): string | undefined {
-  return typeof value === "string" && value ? value : undefined;
-}
-
-function toAutoPreviewHtmlMatch(
-  value: string,
-  fileName?: string,
-): AutoPreviewHtmlMatch | null {
-  const url = value.replace(TRAILING_URL_PUNCTUATION_PATTERN, "");
-  if (!isAutoPreviewHtmlLink(url, fileName)) {
-    return null;
-  }
-  return { url, fileName };
-}
-
-function findAutoPreviewHtmlTextMatch(
-  value: string,
-): AutoPreviewHtmlMatch | null {
-  const directMatch = toAutoPreviewHtmlMatch(value);
-  if (directMatch) return directMatch;
-
-  MARKDOWN_LINK_PATTERN.lastIndex = 0;
-  let match = MARKDOWN_LINK_PATTERN.exec(value);
-  while (match) {
-    const [, fileName, url] = match;
-    const markdownMatch = toAutoPreviewHtmlMatch(url, fileName);
-    if (markdownMatch) return markdownMatch;
-    match = MARKDOWN_LINK_PATTERN.exec(value);
-  }
-
-  PLAIN_URL_PATTERN.lastIndex = 0;
-  let urlMatch = PLAIN_URL_PATTERN.exec(value);
-  while (urlMatch) {
-    const plainMatch = toAutoPreviewHtmlMatch(urlMatch[0]);
-    if (plainMatch) return plainMatch;
-    urlMatch = PLAIN_URL_PATTERN.exec(value);
-  }
-
-  return null;
-}
-
-function findAutoPreviewHtmlValue(
-  value: unknown,
-  depth = 0,
-): AutoPreviewHtmlMatch | null {
-  if (depth > 6) {
-    return null;
-  }
-
-  if (typeof value === "string") {
-    const textMatch = findAutoPreviewHtmlTextMatch(value);
-    if (textMatch) return textMatch;
-
-    const trimmed = value.trim();
-    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-      try {
-        return findAutoPreviewHtmlValue(JSON.parse(trimmed), depth + 1);
-      } catch {
-        return null;
-      }
-    }
-
-    return null;
-  }
-
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const match = findAutoPreviewHtmlValue(item, depth + 1);
-      if (match) return match;
-    }
-    return null;
-  }
-
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const url =
-    readString(value.file_url) ||
-    readString(value.url) ||
-    readString(value.href);
-  const fileName =
-    readString(value.file_name) ||
-    readString(value.fileName) ||
-    readString(value.filename) ||
-    readString(value.name) ||
-    readString(value.file_id);
-  if (url) {
-    const directMatch = toAutoPreviewHtmlMatch(url, fileName);
-    if (directMatch) return directMatch;
-  }
-
-  for (const key of ["path", "content", "data", "output", "text", "value"]) {
-    const match = findAutoPreviewHtmlValue(value[key], depth + 1);
-    if (match) return match;
-  }
-
-  return null;
-}
-
-function buildAutoPreviewText(match: AutoPreviewHtmlMatch): string {
-  const fileName =
-    match.fileName || extractDecodedFileNameFromUrl(match.url, "preview.html");
-  return `[${fileName}](${match.url})`;
-}
-
-function buildAutoPreviewOutputMessage(
-  outputMessage: Record<string, unknown>,
-  match: AutoPreviewHtmlMatch,
-) {
-  return {
-    ...outputMessage,
-    role: "assistant",
-    type: "message",
-    content: [
-      {
-        type: "text",
-        status: "completed",
-        text: buildAutoPreviewText(match),
-      },
-    ],
-  };
-}
-
-function shouldReuseAutoPreviewContentItem(contentItem: unknown): boolean {
-  return isRecord(contentItem) && contentItem.type === "file";
-}
-
-function pickAutoPreviewHtmlResponseData(
-  data: ChatRuntimeResponseCardData,
-): ChatRuntimeResponseCardData | null {
-  const output = Array.isArray(data.output) ? data.output : [];
-
-  for (const outputMessage of output) {
-    if (!isRecord(outputMessage)) {
-      continue;
-    }
-
-    const content = Array.isArray(outputMessage.content)
-      ? outputMessage.content
-      : [];
-    for (const contentItem of content) {
-      const match = findAutoPreviewHtmlValue(contentItem);
-      if (match) {
-        const previewOutputMessage = shouldReuseAutoPreviewContentItem(
-          contentItem,
-        )
-          ? {
-              ...outputMessage,
-              content: [contentItem],
-            }
-          : buildAutoPreviewOutputMessage(outputMessage, match);
-        return {
-          ...data,
-          output: [
-            previewOutputMessage,
-          ] as ChatRuntimeResponseCardData["output"],
-        };
-      }
-    }
-
-    const match = findAutoPreviewHtmlValue(outputMessage);
-    if (match) {
-      return {
-        ...data,
-        output: [
-          buildAutoPreviewOutputMessage(outputMessage, match),
-        ] as ChatRuntimeResponseCardData["output"],
-      };
-    }
-  }
-
-  return null;
-}
-
-function findAutoPreviewHtmlMessages(
-  messages: IAgentScopeRuntimeWebUIMessage[],
-): IAgentScopeRuntimeWebUIMessage[] | null {
-  for (const message of messages) {
-    const cards = message.cards || [];
-    for (let cardIndex = 0; cardIndex < cards.length; cardIndex += 1) {
-      const card = cards[cardIndex];
-      if (card.code !== "AgentScopeRuntimeResponseCard") {
-        continue;
-      }
-
-      const autoPreviewData = pickAutoPreviewHtmlResponseData(
-        card.data as ChatRuntimeResponseCardData,
-      );
-      if (autoPreviewData) {
-        return [
-          {
-            ...message,
-            id: `${message.id}-auto-preview-${cardIndex}`,
-            cards: [
-              {
-                ...card,
-                data: autoPreviewData,
-              },
-            ],
-          },
-        ];
-      }
-    }
-  }
-
-  return null;
-}
 
 function mergeTaskRunDetailMessages(
   messages: IAgentScopeRuntimeWebUIMessage[],
@@ -312,6 +91,7 @@ function NestedTaskRunMessages(props: {
     feedback: FeedbackRecord,
     response: ChatRuntimeResponseCardData,
   ) => void;
+  onExternalApprovalResolved?: () => Promise<unknown> | unknown;
 }) {
   return (
     <>
@@ -332,20 +112,29 @@ function NestedTaskRunMessages(props: {
                 <RuntimeResponseCard
                   key={key}
                   data={card.data as ChatRuntimeResponseCardData}
-                  chatId={props.chatId}
                   isLast={
                     messageIndex === props.messages.length - 1 &&
                     cardIndex === (message.cards || []).length - 1
                   }
+                />
+              );
+            }
+            if (card.code === "ResponseFeedback") {
+              const response = card.data as ChatRuntimeResponseCardData;
+              return (
+                <RuntimeResponseFeedbackCard
+                  key={key}
+                  chatId={props.chatId}
+                  data={response}
+                  existingFeedback={findFeedbackForResponse(
+                    props.feedbackLookup,
+                    response,
+                  )}
+                  loadingFeedback={props.loadingFeedback}
+                  onFeedbackSaved={props.onFeedbackSaved}
                   sessionId={props.sessionId}
                   showFeedback={props.showFeedback}
                   task={props.task}
-                  loadingFeedback={props.loadingFeedback}
-                  existingFeedback={findFeedbackForResponse(
-                    props.feedbackLookup,
-                    card.data as ChatRuntimeResponseCardData,
-                  )}
-                  onFeedbackSaved={props.onFeedbackSaved}
                 />
               );
             }
@@ -354,6 +143,7 @@ function NestedTaskRunMessages(props: {
                 <ApprovalActionCard
                   key={key}
                   data={card.data as ChatApprovalActionCardData}
+                  onExternalApprovalResolved={props.onExternalApprovalResolved}
                 />
               );
             }
@@ -376,22 +166,20 @@ export default function TaskRunGroupCard(props: {
     feedback: FeedbackRecord,
     response: ChatRuntimeResponseCardData,
   ) => void;
+  onExternalApprovalResolved?: () => Promise<unknown> | unknown;
 }) {
   const { data } = props;
   const [resultExpanded, setResultExpanded] = useState(
     !data.collapsedByDefault,
   );
   const [stepsExpanded, setStepsExpanded] = useState(false);
-  const autoPreviewMessages = findAutoPreviewHtmlMessages([
-    ...data.finalMessages,
-    ...data.stepMessages,
-  ]);
+  // Prefer the last final result; only fall back to execution steps.
+  const autoPreviewMessages =
+    findAutoPreviewHtmlMessages(data.finalMessages) ||
+    findAutoPreviewHtmlMessages(data.stepMessages);
   const finalMessages = autoPreviewMessages || data.finalMessages;
   const stepMessages = autoPreviewMessages
-    ? mergeTaskRunDetailMessages([
-        ...data.stepMessages,
-        ...data.finalMessages,
-      ])
+    ? mergeTaskRunDetailMessages([...data.stepMessages, ...data.finalMessages])
     : data.stepMessages;
   const hasSteps = stepMessages.length > 0;
   const taskName = data.taskName || `任务 ${data.runIndex + 1}`;
@@ -454,16 +242,19 @@ export default function TaskRunGroupCard(props: {
         <div style={{ flex: 1, borderTop: "1px solid rgba(0, 0, 0, 0.12)" }} />
       </div>
       {resultExpanded && (
-        <NestedTaskRunMessages
-          chatId={props.chatId}
-          messages={finalMessages}
-          sessionId={props.sessionId}
-          showFeedback
-          task={props.task}
-          feedbackLookup={props.feedbackLookup}
-          loadingFeedback={props.loadingFeedback}
-          onFeedbackSaved={props.onFeedbackSaved}
-        />
+        <FilePreviewPresentationProvider value="modal">
+          <NestedTaskRunMessages
+            chatId={props.chatId}
+            messages={finalMessages}
+            sessionId={props.sessionId}
+            showFeedback
+            task={props.task}
+            feedbackLookup={props.feedbackLookup}
+            loadingFeedback={props.loadingFeedback}
+            onFeedbackSaved={props.onFeedbackSaved}
+            onExternalApprovalResolved={props.onExternalApprovalResolved}
+          />
+        </FilePreviewPresentationProvider>
       )}
       {resultExpanded && hasSteps && (
         <div
@@ -498,13 +289,18 @@ export default function TaskRunGroupCard(props: {
                 paddingLeft: 16,
               }}
             >
-              <NestedTaskRunMessages
-                messages={stepMessages}
-                showFeedback={false}
-                feedbackLookup={props.feedbackLookup}
-                loadingFeedback={props.loadingFeedback}
-                onFeedbackSaved={props.onFeedbackSaved}
-              />
+              <FilePreviewPresentationProvider value="modal">
+                <NestedTaskRunMessages
+                  messages={stepMessages}
+                  showFeedback={false}
+                  feedbackLookup={props.feedbackLookup}
+                  loadingFeedback={props.loadingFeedback}
+                  onFeedbackSaved={props.onFeedbackSaved}
+                  onExternalApprovalResolved={
+                    props.onExternalApprovalResolved
+                  }
+                />
+              </FilePreviewPresentationProvider>
             </div>
           )}
         </div>

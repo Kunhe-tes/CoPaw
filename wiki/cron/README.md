@@ -1,83 +1,79 @@
-﻿# Cron 定时任务模块索引
+# Cron 定时任务模块索引
 
-本文档面向 Swe / CoPaw 的普通使用者、接入方和维护者，说明 cron 定时任务模块在当前 `v1.0.0` 代码里的真实边界、运行链路、关键接口、数据字段、通知机制和排查入口。
+本文档面向 SWE / CoPaw 的使用者、接入方和维护者，说明 cron 模块在当前 `v1.0.0` 代码里的真实边界、运行链路、关键接口、数据字段、批调度、通知机制和排查入口。
 
-本文按 `v1.0.0` worktree 当前基线核对：`f0ed1c9e fix(cron): handle chained swe cron commands`。相关说明已参考 `src/swe/app/crons/`、Console、Monitor、ADR、playbook 和 cron 相关提交。
+本轮按 `7a9aac4fc fix(cron): add need_notification` 核对，并以 `src/swe/app/crons/`、`scheduler/`、`monitor/`、Console 和相关测试为事实来源。
 
 ## 新人推荐阅读顺序
 
-如果是第一次接触 cron，建议按下面顺序读：
-
-1. 先看 [Cron 总览与代码入口](cron-overview.md)，理解 cron 不是本地 APScheduler，而是 SWE + 外部调度平台 + Monitor + 通知 worker 的链路。
-2. 再看 [Cron 存储、调度与入口](cron-scheduler.md)，确认任务从 Console / CLI 创建后如何落盘、同步平台、再被回调触发。
-3. 然后看 [Cron 执行上下文](cron-execution-context.md)，理解 scheduled run 如何恢复 tenant、source、model、cookie 和 runner 上下文。
-4. 如果问题和任务列表、未读、完成提醒或 Monitor 数据有关，看 [Cron Monitor 与通知](cron-monitor-notification.md)。
-5. 如果问题涉及可配置完成通知延迟、广播通知延迟叠加、CLI / Console 延迟配置，看 [Cron 通知延迟](cron-notification-delay.md)。
-6. 如果问题涉及多租户广播、source 级会话历史清理、heartbeat、dream 或多实例部署，看 [Cron 广播与系统任务](cron-broadcast-system.md)。
-7. 如果问题涉及查看分发给哪些用户、批量删除或重跑分发子任务，看 [Cron 分发子任务管理](cron-distribution-management.md)。
-8. 最后用 [Cron 排查与提交脉络](cron-troubleshooting-history.md) 定位常见问题和相关提交。
+1. [Cron 总览与代码入口](cron-overview.md)：先理解普通调度、批调度和手动运行的边界。
+2. [Cron 存储、调度与入口](cron-scheduler.md)：理解 `jobs.json`、外部平台和回调入口。
+3. [Cron 批调度与独立 Scheduler](cron-batch-dispatch.md)：理解批次、intent、模型作用域容量、回执和重试。
+4. [Cron 执行上下文](cron-execution-context.md)：理解 tenant、source、model、auth 和 dispatch meta。
+5. [Cron Monitor 与通知](cron-monitor-notification.md) 与 [Cron 通知延迟](cron-notification-delay.md)：理解执行记录、批次看板、通知领取和 due time。
+6. [Cron 广播与系统任务](cron-broadcast-system.md) 与 [Cron 分发子任务管理](cron-distribution-management.md)：理解异步广播、模式同步、归档维护和子任务管理。
+7. [Cron 排查与提交脉络](cron-troubleshooting-history.md)：按症状定位源码与提交。
 
 ## 文档目录
 
 | 文档 | 适合回答的问题 |
 | --- | --- |
-| [Cron 总览与代码入口](cron-overview.md) | cron 是什么、覆盖哪些场景、主链路是什么、核心代码在哪、任务模型字段含义 |
-| [Cron 存储、调度与入口](cron-scheduler.md) | jobs.json 如何保存、外部平台如何同步、Console / CLI / 回调分别怎么进入 |
-| [Cron 执行上下文](cron-execution-context.md) | 单次执行流程、成功/取消判定、source 隔离、model_slot、cron_auth.json 和 cookie 来源 |
-| [Cron Monitor 与通知](cron-monitor-notification.md) | 任务卡片、未读计数、自动暂停、Monitor 同步、完成通知领取和推送 |
-| [Cron 通知延迟](cron-notification-delay.md) | `meta.notification_delay_minutes`、自动/手动执行差异、广播 offset 叠加、CLI 和 Console 配置 |
-| [Cron 广播与系统任务](cron-broadcast-system.md) | 广播任务如何派生子任务、source 级会话历史清理如何注册和执行、heartbeat / dream 怎么跑、多实例 coordination 当前边界 |
-| [Cron 分发子任务管理](cron-distribution-management.md) | 反查分发子任务、批量删除、批量重跑、重新分发覆盖配置的字段边界 |
-| [Cron 排查与提交脉络](cron-troubleshooting-history.md) | pending approval、source 串租户、Monitor 取消态、通知缺失、星期转换等问题怎么查 |
+| [Cron 总览与代码入口](cron-overview.md) | cron 覆盖哪些场景、三条执行链路是什么、核心模型与源码在哪 |
+| [Cron 存储、调度与入口](cron-scheduler.md) | 任务如何落盘、普通/批调度 timer 如何注册、Console/CLI/回调如何进入 |
+| [Cron 批调度与独立 Scheduler](cron-batch-dispatch.md) | 批次与 intent 如何创建、排序、限流、回执、重试和查询 |
+| [Cron 执行上下文](cron-execution-context.md) | 单次执行如何恢复 source、model、auth、B3 和 dispatch 身份 |
+| [Cron Monitor 与通知](cron-monitor-notification.md) | execution、批次看板、外部子任务统计、未读、通知领取与推送 |
+| [Cron 通知延迟](cron-notification-delay.md) | 普通、广播和批调度执行怎样计算 `notification_due_at` |
+| [Cron 广播与系统任务](cron-broadcast-system.md) | 异步广播、批调度模式、source 级清理/归档维护、heartbeat/dream |
+| [Cron 分发子任务管理](cron-distribution-management.md) | 快照刷新、分发子任务反查、批量删除/重跑、模式同步 |
+| [Cron 排查与提交脉络](cron-troubleshooting-history.md) | 没有触发、intent 卡住、通知缺失、同步不完整等问题怎么查 |
 
 ## 示例目录
 
-如果需要直接照着跑，先看 [Cron 示例索引](examples/README.md)。示例按当前代码里的真实接口和字段写：
+可复制示例见 [Cron 示例索引](examples/README.md)：
 
 | 示例 | 用途 |
 | --- | --- |
-| [API 创建 Agent 任务](examples/api-agent-daily/README.md) | 用 `POST /api/cron/jobs` 创建每日 Agent 定时任务，并手动触发一次 |
-| [CLI 创建固定文本任务](examples/cli-text-weekly/README.md) | 用 `swe cron create/list/update/run/pause/resume/delete` 管理一个固定文本任务 |
-| [外部调度回调](examples/callback-jobparam/README.md) | 说明 `jobParam` 解码格式和直接回调格式 |
-| [广播到多个租户](examples/broadcast-to-tenants/README.md) | 把一个源任务复制到多个租户，并理解错峰和 warning |
-| [Cron 授权状态](examples/cron-auth/README.md) | 写入 `cron_auth.json`、刷新 cookie/auth token、清理非目标 source 授权 |
-| [Monitor 与通知排查](examples/monitor-notification-debug/README.md) | 查询 job/execution、标记已读、定位通知未发送 |
+| [API 创建 Agent 任务](examples/api-agent-daily/README.md) | 创建每日 Agent 定时任务并手动触发 |
+| [CLI 创建固定文本任务](examples/cli-text-weekly/README.md) | 用 `swe cron` 管理固定文本任务 |
+| [外部调度回调](examples/callback-jobparam/README.md) | 区分普通 timer 回调 SWE 与批调度 timer 回调 Scheduler |
+| [批调度模式](examples/batch-dispatch/README.md) | 开关批调度、查询批次与 worker 状态 |
+| [广播到多个租户](examples/broadcast-to-tenants/README.md) | 发起异步广播并轮询任务结果 |
+| [Cron 授权状态](examples/cron-auth/README.md) | 写入和清理 `cron_auth.json` |
+| [Monitor 与通知排查](examples/monitor-notification-debug/README.md) | 查询 execution、标记已读、定位通知未发送 |
 
 ## 先看结论
 
-- SWE 保存任务定义、执行业务逻辑，并把任务定义和执行记录同步给 Monitor。
-- 外部调度平台只负责到点回调 `/api/internal/cron/callback`，不直接执行 Agent。
-- `CronManager` 管任务生命周期、外部平台同步、任务卡片、Monitor 同步和 source 配置绑定。
-- `CronExecutor` 管单次执行，负责绑定 tenant/source/model/auth 上下文，再调用 runner 或发送固定文本。
-- 当前 `v1.0.0` 基线里已有 `src/swe/app/crons/coordination.py`，但它没有接入 `Workspace` / `CronManager` 的实际装配链路；不要把它误当成当前生产执行入口。
+- SWE 是 cron 任务定义和执行逻辑的 owner；`CronManager` 管生命周期，`CronExecutor` 管单次执行。
+- 普通模式下，外部调度平台到点回调 SWE `/api/internal/cron/callback`。
+- 批调度模式下，外部平台只触发父任务的批调度物理 timer，并回调独立 Scheduler `/api/scheduler/cron/callback`；Scheduler 创建 intents，再逐个回调任务所属 SWE。
+- Monitor 保存 job/execution，并提供 cron 查询、批次看板、worker 状态和完成通知领取。
+- Scheduler 的 `effective_workers` 是模型作用域容量槽位，不是操作系统进程数；它没有后台扫描所有父任务。
+- `src/swe/app/crons/coordination.py` 仍未接入普通 `Workspace` / `CronManager` 装配；不要和已投入批调度链路的 Scheduler 数据库 lease 混为一谈。
 
 ## 关键源码入口
 
 | 入口 | 文件 | 主要职责 |
 | --- | --- | --- |
-| Workspace 装配 | `src/swe/app/workspace/workspace.py` | 每个 Workspace 注册一个 `CronManager`，repo 使用 `workspace_dir / "jobs.json"` |
-| 数据模型 | `src/swe/app/crons/models.py` | `CronJobSpec`、`ScheduleSpec`、`CronJobState`、`CronTaskView` |
-| SWE Cron API | `src/swe/app/crons/api.py` | `/api/cron/*` 任务 CRUD、手动运行、广播、任务已读 |
-| 生命周期中心 | `src/swe/app/crons/manager.py` | 创建/更新/删除/暂停/恢复/执行、任务卡片、Monitor 同步、source 配置绑定 |
-| 单次执行 | `src/swe/app/crons/executor.py` | 绑定 tenant/source/model/auth，上下文内执行 text 或 agent 任务 |
-| 外部调度适配 | `src/swe/app/crons/scheduler_adapter.py` | `NoopSchedulerAdapter` 与 `RealSchedulerAdapter`，对接外部 job-admin API |
-| 外部回调 | `src/swe/app/routers/internal.py` | `/api/internal/cron/callback` 解码 `jobParam` 并分发 job / heartbeat / dream |
-| Source 系统任务调度 | `src/swe/app/source_system_config/task_scheduler.py` | 根据 source 系统特性配置注册、更新、暂停 source 级清理任务，并按 source 枚举 runtime scope 执行清理 |
-| Source 系统任务绑定 | `src/swe/app/source_system_config/task_binding_store.py` | 按 `source_id + task_type` 保存外部调度任务 ID，避免同一 source 下多个 tenant 重复注册清理任务 |
-| 授权状态 | `src/swe/app/crons/auth_state.py` | 保存 `cron_auth.json`，刷新 user_info/auth_token/cookie |
-| Monitor 同步客户端 | `src/swe/app/crons/monitor_sync_client.py` | SWE 调用 Monitor 同步 job、execution、通知领取状态 |
-| 完成通知 worker | `src/swe/app/crons/notification_worker.py` | 后台扫描 Monitor pending 通知并推送完成提醒 |
-| Monitor 同步服务 | `monitor/src/monitor/app/services/cron/sync_service.py` | 写入 `swe_cron_jobs`、`swe_cron_executions` |
-| Monitor 通知服务 | `monitor/src/monitor/app/services/cron/notification_service.py` | 原子领取待通知 execution，回写 sent / failed |
-| Console API | `console/src/api/modules/cronjob.ts` | 前端调用 `/cron/jobs`、广播、运行、已读等接口 |
-| CLI | `src/swe/cli/cron_cmd.py` | `swe cron list/get/state/create/update/delete/pause/resume/run` |
+| Workspace 装配 | `src/swe/app/workspace/workspace.py` | 每个 Workspace 注册一个 `CronManager`，任务 repo 为 `workspace_dir / "jobs.json"` |
+| SWE Cron API | `src/swe/app/crons/api.py` | CRUD、运行、异步广播、子任务、批调度模式切换 |
+| 生命周期中心 | `src/swe/app/crons/manager.py` | 外部 timer、执行、任务卡片、Monitor/Scheduler 同步 |
+| 单次执行 | `src/swe/app/crons/executor.py` | tenant/source/model/auth 上下文和 agent/text 执行 |
+| 外部回调 | `src/swe/app/routers/internal.py` | 普通 timer、Scheduler dispatch、系统任务回调 |
+| 外部调度适配 | `src/swe/app/crons/scheduler_adapter.py` | 对接外部 job-admin API |
+| 独立 Scheduler API | `scheduler/src/scheduler/app/routers/cron.py` | 批调度父回调与 execution 回执 |
+| Scheduler 编排 | `scheduler/src/scheduler/app/services/cron/scheduling_service.py` | intent 派发、重试、超时和容量 |
+| Monitor Cron API | `monitor/src/monitor/app/routers/cron.py` | job/execution、批次详情和 worker 查询 |
+| Monitor 外部 API | `monitor/src/monitor/app/routers/external.py` | 最新 execution 子任务数的网关接口 |
+| Source 系统任务 | `src/swe/app/source_system_config/task_scheduler.py` | source 级清理与归档维护任务 |
+| Console Cron | `console/src/pages/Control/CronJobs/` | 表单、列表、广播、模式切换和子任务管理 |
 
 ## 版本边界
 
-- 当前 wiki 以 `v1.0.0` 的 `f0ed1c9e` 为事实来源。
-- 当前基线已包含 `51febe0a fix(cron): persist broadcast target identity`，广播目标的 `tenant_name`、`bbk_id` 会随 `targets` 请求体写入子任务。
-- 当前基线已包含 `f0ed1c9e fix(cron): handle chained swe cron commands`，Agent shell 拦截器可以处理 `echo ready && swe cron list` 这类链式命令。
-- 当前本地修改补充了 `meta.notification_delay_minutes`，自动成功执行的完成通知可以按任务配置延迟，广播子任务会在原有错峰通知 offset 上继续叠加这个延迟。
-- 当前本地修改补充了分发子任务管理：任意任务都能反查子任务，已分发子任务支持批量删除和批量重跑，重新分发会覆盖任务定义配置但保留目标用户身份和暂停状态。
-- 当前本地修改把定时任务会话历史清理收敛为 source 级系统任务：配置仍在 `swe_source_system_config`，外部任务绑定记录在 `swe_source_system_task_binding`，同一 `source_id` 只注册一条清理任务。
-- 这里记录的是当前代码真实行为，不把尚未装配的 coordination 原语描述成已经生效的运行路径。
+- 当前 wiki 的代码基线是 `7a9aac4fc`，不是旧的 `f0ed1c9e` 快照。
+- 当前实现包含独立 Scheduler 管理的批调度、模型作用域 capacity/lease、阅读热度排序、execution 回执和补位。
+- 广播接口是异步任务接口；子任务列表来自带状态的分发快照，可显式刷新。
+- Monitor 完成通知领取要求 execution 同时满足 `status=success`、`async_status=success`、`need_notification=1`、`notification_status=pending`。
+- Source 系统任务除 task session cleanup 外，还包含 `archive_maintenance`；同一 source 各维护任务分别只有一条外部绑定。
+- `skill_ids` 是任务和技能就绪度治理的关联标识，不代表 CronExecutor 会自动加载技能。
+- 这里记录当前代码真实行为，不把未装配原语或已经移除的启动全量扫描描述成生产路径。

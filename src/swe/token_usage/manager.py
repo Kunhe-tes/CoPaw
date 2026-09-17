@@ -8,11 +8,11 @@ import threading
 from datetime import date, timedelta
 from pathlib import Path
 
-import aiofiles
 from pydantic import BaseModel, Field
 
 from ..config.context import get_current_workspace_dir
 from ..constant import WORKING_DIR, TOKEN_USAGE_FILE
+from swe.runtime_workers import run_runtime_state_work
 
 logger = logging.getLogger(__name__)
 
@@ -126,17 +126,12 @@ class TokenUsageManager:
         )
         return normalized
 
-    async def _load_data(self) -> dict:
-        """Load full token usage data from disk."""
-        if not self._path.exists():
-            return {}
+    def _load_data_sync(self) -> dict:
+        """Load and normalize full token usage data from disk."""
         try:
-            async with aiofiles.open(
-                self._path,
-                mode="r",
-                encoding="utf-8",
-            ) as f:
-                raw = await f.read()
+            if not self._path.exists():
+                return {}
+            raw = self._path.read_text(encoding="utf-8")
             return self._normalize_data(
                 json.loads(raw) if raw.strip() else {},
             )
@@ -148,22 +143,40 @@ class TokenUsageManager:
             )
             return {}
 
-    async def _save_data(self, data: dict) -> None:
+    async def _load_data(self) -> dict:
+        """Load full token usage data from disk."""
+        return await run_runtime_state_work(self._load_data_sync)
+
+    def _save_data_sync(self, data: dict) -> None:
         """Persist token usage data to disk."""
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            with open(
-                self._path,
-                mode="w",
+            self._path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2),
                 encoding="utf-8",
-            ) as f:
-                f.write(json.dumps(data, ensure_ascii=False, indent=2))
+            )
         except OSError as e:
             logger.warning(
                 "Failed to write token usage to %s: %s",
                 self._path,
                 e,
             )
+
+    async def _save_data(self, data: dict) -> None:
+        """Persist token usage data to disk."""
+        save_task = asyncio.create_task(
+            run_runtime_state_work(self._save_data_sync, data),
+        )
+        try:
+            await asyncio.shield(save_task)
+        except asyncio.CancelledError:
+            while not save_task.done():
+                try:
+                    await asyncio.shield(save_task)
+                except asyncio.CancelledError:
+                    continue
+            await save_task
+            raise
 
     async def record(
         self,

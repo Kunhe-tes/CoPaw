@@ -108,3 +108,51 @@ def test_import_reme_light_retries_with_shim_for_local_backend(monkeypatch):
     assert calls == ["reme.reme_light", "reme.reme_light"]
     assert shim_called == [True]
     assert clear_called == [True]
+
+
+def test_reme_file_logging_is_suppressed(tmp_path, monkeypatch):
+    """SWE should not let ReMe create cwd/logs/<timestamp>.log files."""
+    import swe.agents.memory.reme_light_memory_manager as module
+    from loguru import logger as reme_logger
+
+    reme_application = SimpleNamespace()
+    reme_utils = SimpleNamespace()
+    reme_logger_utils = SimpleNamespace()
+
+    def original_init_logger(
+        log_dir="logs",
+        level="INFO",
+        log_to_console=True,
+    ):
+        from reme.core.utils.logger_utils import init_logger
+
+        init_logger(
+            log_dir=log_dir,
+            level=level,
+            log_to_console=log_to_console,
+        )
+
+    reme_application.init_logger = original_init_logger
+    reme_utils.init_logger = original_init_logger
+    reme_logger_utils.init_logger = original_init_logger
+
+    monkeypatch.setitem(
+        sys.modules,
+        "reme.core.application",
+        reme_application,
+    )
+    monkeypatch.setitem(sys.modules, "reme.core.utils", reme_utils)
+    monkeypatch.setitem(
+        sys.modules,
+        "reme.core.utils.logger_utils",
+        reme_logger_utils,
+    )
+    monkeypatch.chdir(tmp_path)
+
+    try:
+        module._install_reme_file_logging_suppression()
+        reme_application.init_logger(log_to_console=False)
+        reme_logger.info("this should not create a ReMe file log")
+        assert not (tmp_path / "logs").exists()
+    finally:
+        reme_logger.remove()

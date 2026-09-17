@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   generateCronExpression,
   validateHour,
@@ -18,6 +18,10 @@ import {
   type ScheduleConfig,
 } from "./cron";
 import dayjs from "dayjs";
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("generateCronExpression", () => {
   it("generates daily cron expression", () => {
@@ -164,20 +168,28 @@ describe("weekdayNumberToLabel", () => {
 
 describe("calculateNextRun", () => {
   it("calculates next daily run (same day if time not passed)", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-03T10:15:00"));
+
     const now = dayjs();
-    const futureHour = now.hour() + 1;
-    const config: ScheduleConfig = { frequency: "daily", hour: futureHour, minute: 0 };
+    const config: ScheduleConfig = { frequency: "daily", hour: 11, minute: 0 };
     const nextRun = calculateNextRun(config);
-    expect(nextRun.hour()).toBe(futureHour);
+
+    expect(nextRun.hour()).toBe(11);
+    expect(nextRun.date()).toBe(now.date());
     expect(nextRun.isAfter(now)).toBe(true);
   });
 
   it("calculates next daily run (next day if time passed)", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-03T10:15:00"));
+
     const now = dayjs();
-    const pastHour = now.hour() - 1;
-    const config: ScheduleConfig = { frequency: "daily", hour: pastHour, minute: 0 };
+    const config: ScheduleConfig = { frequency: "daily", hour: 9, minute: 0 };
     const nextRun = calculateNextRun(config);
+
     expect(nextRun.date()).toBe(now.add(1, "day").date());
+    expect(nextRun.hour()).toBe(9);
   });
 
   it("calculates next weekly run", () => {

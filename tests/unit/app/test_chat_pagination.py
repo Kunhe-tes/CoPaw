@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timezone
+import json
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -12,12 +14,14 @@ from swe.app.runner.manager import ChatManager
 from swe.app.runner.models import ChatSpec, ChatsFile
 from swe.app.runner.repo import BaseChatRepository
 from swe.app.routers.agent_scoped import create_agent_scoped_router
+from swe.app.answer_turn.models import TurnStatus
 
 
 def _chat(
     chat_id: str,
     updated_at: str,
     *,
+    created_at: str | None = None,
     user_id: str = "user-1",
     channel: str = "console",
 ) -> ChatSpec:
@@ -27,7 +31,7 @@ def _chat(
         session_id=f"session-{chat_id}",
         user_id=user_id,
         channel=channel,
-        created_at=datetime.fromisoformat(updated_at),
+        created_at=datetime.fromisoformat(created_at or updated_at),
         updated_at=datetime.fromisoformat(updated_at),
     )
 
@@ -94,7 +98,7 @@ async def test_repository_returns_empty_page_after_last_result() -> None:
     assert page.has_more is False
 
 
-async def test_repository_cursor_pagination_is_stable_when_updated_at_changes() -> (
+async def test_repository_cursor_pagination_is_best_effort_when_updated_at_changes() -> (
     None
 ):
     repo = _InMemoryChatRepository(_stored_chats())
@@ -118,8 +122,129 @@ async def test_repository_cursor_pagination_is_stable_when_updated_at_changes() 
         cursor=first_page.next_cursor,
     )
 
-    assert [chat.id for chat in second_page.items] == ["chat-old"]
+    assert second_page.items == []
     assert second_page.has_more is False
+
+
+async def test_repository_page_orders_by_last_update_not_creation() -> None:
+    repo = _InMemoryChatRepository(
+        [
+            _chat(
+                "created-last",
+                "2026-06-01T00:00:00+00:00",
+                created_at="2026-06-03T00:00:00+00:00",
+            ),
+            _chat(
+                "updated-last",
+                "2026-06-03T00:00:00+00:00",
+                created_at="2026-06-01T00:00:00+00:00",
+            ),
+        ],
+    )
+
+    page = await repo.paginate_chats(page=1, page_size=2)
+
+    assert [chat.id for chat in page.items] == [
+        "updated-last",
+        "created-last",
+    ]
+
+
+async def test_repository_cursor_orders_by_last_update_not_creation() -> None:
+    repo = _InMemoryChatRepository(
+        [
+            _chat(
+                "created-last",
+                "2026-06-01T00:00:00+00:00",
+                created_at="2026-06-03T00:00:00+00:00",
+            ),
+            _chat(
+                "updated-last",
+                "2026-06-03T00:00:00+00:00",
+                created_at="2026-06-01T00:00:00+00:00",
+            ),
+        ],
+    )
+
+    page = await repo.paginate_chats_cursor(page_size=2)
+
+    assert [chat.id for chat in page.items] == [
+        "updated-last",
+        "created-last",
+    ]
+
+
+async def test_repository_cursor_uses_id_boundary_for_equal_update_times() -> (
+    None
+):
+    repo = _InMemoryChatRepository(
+        [
+            _chat("chat-a", "2026-06-03T00:00:00+00:00"),
+            _chat("chat-z", "2026-06-03T00:00:00+00:00"),
+        ],
+    )
+
+    first_page = await repo.paginate_chats_cursor(page_size=1)
+    assert [chat.id for chat in first_page.items] == ["chat-z"]
+    assert first_page.next_cursor is not None
+
+    second_page = await repo.paginate_chats_cursor(
+        page_size=1,
+        cursor=first_page.next_cursor,
+    )
+
+    assert [chat.id for chat in second_page.items] == ["chat-a"]
+    assert second_page.next_cursor is None
+
+
+async def test_repository_cursor_continues_legacy_creation_time_payload() -> (
+    None
+):
+    repo = _InMemoryChatRepository(
+        [
+            _chat(
+                "page-one",
+                "2026-06-01T00:00:00+00:00",
+                created_at="2026-06-03T00:00:00+00:00",
+            ),
+            _chat(
+                "omitted-by-recency",
+                "2026-06-10T00:00:00+00:00",
+                created_at="2026-06-02T00:00:00+00:00",
+            ),
+            _chat(
+                "page-two",
+                "2026-06-02T00:00:00+00:00",
+                created_at="2026-06-01T00:00:00+00:00",
+            ),
+        ],
+    )
+    legacy_cursor = base64.urlsafe_b64encode(
+        json.dumps(
+            ["2026-06-03T00:00:00+00:00", "page-one"],
+            separators=(",", ":"),
+        ).encode("utf-8"),
+    ).decode("ascii")
+
+    first_legacy_page = await repo.paginate_chats_cursor(
+        page_size=1,
+        cursor=legacy_cursor,
+    )
+
+    assert [chat.id for chat in first_legacy_page.items] == [
+        "omitted-by-recency",
+    ]
+    assert first_legacy_page.next_cursor is not None
+    assert json.loads(
+        base64.urlsafe_b64decode(first_legacy_page.next_cursor),
+    ) == ["2026-06-02T00:00:00+00:00", "omitted-by-recency"]
+
+    second_legacy_page = await repo.paginate_chats_cursor(
+        page_size=1,
+        cursor=first_legacy_page.next_cursor,
+    )
+
+    assert [chat.id for chat in second_legacy_page.items] == ["page-two"]
 
 
 async def test_manager_exposes_repository_pagination() -> None:
@@ -141,9 +266,18 @@ class _FakeTaskTracker:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    async def get_status(self, chat_id: str) -> str:
+    async def read_status(self, chat_id: str) -> str:
         self.calls.append(chat_id)
         return "running" if chat_id == "chat-z" else "idle"
+
+
+class _FakeCoordinator:
+    def __init__(self, tracker: _FakeTaskTracker) -> None:
+        self.tracker = tracker
+
+    async def status(self, chat_id: str) -> TurnStatus | None:
+        status = await self.tracker.read_status(chat_id)
+        return TurnStatus.RUNNING if status == "running" else None
 
 
 def _api_client(
@@ -155,7 +289,11 @@ def _api_client(
         ),
     )
     tracker = _FakeTaskTracker()
-    workspace = SimpleNamespace(chat_manager=manager, task_tracker=tracker)
+    workspace = SimpleNamespace(
+        chat_manager=manager,
+        task_tracker=tracker,
+        answer_turn_coordinator=_FakeCoordinator(tracker),
+    )
     app = FastAPI()
     app.include_router(router)
 
@@ -173,7 +311,11 @@ def _api_client(
 def _agent_scoped_api_client() -> tuple[TestClient, _FakeTaskTracker]:
     manager = ChatManager(repo=_InMemoryChatRepository(_stored_chats()))
     tracker = _FakeTaskTracker()
-    workspace = SimpleNamespace(chat_manager=manager, task_tracker=tracker)
+    workspace = SimpleNamespace(
+        chat_manager=manager,
+        task_tracker=tracker,
+        answer_turn_coordinator=_FakeCoordinator(tracker),
+    )
     app = FastAPI()
     app.include_router(create_agent_scoped_router(), prefix="/api")
 
@@ -188,7 +330,7 @@ def _agent_scoped_api_client() -> tuple[TestClient, _FakeTaskTracker]:
     return TestClient(app), tracker
 
 
-def test_chat_list_without_pagination_keeps_legacy_array_and_order() -> None:
+def test_chat_list_without_pagination_orders_by_last_update() -> None:
     client, tracker = _api_client()
 
     response = client.get(
@@ -200,11 +342,11 @@ def test_chat_list_without_pagination_keeps_legacy_array_and_order() -> None:
     payload = response.json()
     assert isinstance(payload, list)
     assert [chat["id"] for chat in payload] == [
-        "chat-old",
-        "chat-a",
         "chat-z",
+        "chat-a",
+        "chat-old",
     ]
-    assert tracker.calls == ["chat-old", "chat-a", "chat-z"]
+    assert tracker.calls == ["chat-z", "chat-a", "chat-old"]
 
 
 def test_chat_list_with_pagination_returns_metadata_and_page_statuses() -> (
@@ -233,7 +375,7 @@ def test_chat_list_with_pagination_returns_metadata_and_page_statuses() -> (
     assert tracker.calls == ["chat-z", "chat-a"]
 
 
-def test_chat_list_supports_stable_cursor_pagination() -> None:
+def test_chat_list_supports_best_effort_cursor_pagination() -> None:
     client, tracker = _api_client()
 
     first_response = client.get(

@@ -1,0 +1,170 @@
+.page {
+  min-height: 100%;
+  overflow-x: hidden;
+  background: #ffffff;
+  color: #182230;
+}
+
+.content {
+  padding: 24px;
+}
+
+.toolbar {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.searchBox {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+  max-width: 500px;
+}
+
+.filters {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.select {
+  width: 132px;
+}
+
+.taskTypeSelect {
+  width: 180px;
+}
+
+.searchInput {
+  flex: 1;
+  min-width: 240px;
+}
+
+.footer {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 12px;
+}
+
+.linkButton {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #175cd3;
+  text-align: left;
+  cursor: pointer;
+}
+
+.linkButton span,
+.linkButton small,
+.idCell,
+.metaCell strong,
+.metaCell span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.linkButton span {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.linkButton small,
+.metaCell span {
+  margin-top: 3px;
+  color: #667085;
+  font-size: 12px;
+}
+
+.metaCell {
+  min-width: 0;
+}
+
+.metaCell strong {
+  color: #101828;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.statusTag {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  min-width: 0;
+  padding-inline: 6px;
+  margin-inline-end: 0;
+  line-height: 20px;
+}
+
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.detailGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+}
+
+.detailGrid div {
+  min-width: 0;
+}
+
+.detailGrid span {
+  display: block;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.detailGrid strong {
+  display: block;
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+  color: #101828;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.detailBlock {
+  min-width: 0;
+}
+
+.detailBlock h3 {
+  margin: 0 0 10px;
+  color: #101828;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.detailBlock p {
+  margin: 0;
+  color: #475467;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 900px) {
+  .searchBox {
+    width: 100%;
+    max-width: none;
+  }
+
+  .select,
+  .taskTypeSelect,
+  .searchInput {
+    width: 100%;
+  }
+
+  .detailGrid {
+    grid-template-columns: 1fr;
+  }
+}

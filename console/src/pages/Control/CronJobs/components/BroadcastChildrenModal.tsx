@@ -1,14 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Key } from "react";
-import { Alert, Space, Tag, Typography } from "antd";
+import { Alert, Input, Select, Space, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { Button, Modal, Table } from "@agentscope-ai/design";
 import api from "../../../../api";
 import type {
   CronBroadcastChildItem,
   CronBroadcastChildOperationResult,
+  CronBroadcastChildrenResponse,
   CronJobSpecOutput,
 } from "../../../../api/types";
+import styles from "./BroadcastChildrenModal.module.less";
 
 type CronJob = CronJobSpecOutput;
 const { Text } = Typography;
@@ -17,6 +19,8 @@ const MODAL_WIDTH = 1280;
 const MODAL_MAX_WIDTH = "calc(100vw - 48px)";
 const TABLE_SCROLL_X = 1120;
 const TABLE_SCROLL_Y = "calc(100vh - 380px)";
+const DEFAULT_TABLE_PAGE_SIZE = 8;
+const TABLE_PAGE_SIZE_OPTIONS = ["8", "20", "50", "100"];
 
 interface BroadcastChildrenModalProps {
   open: boolean;
@@ -24,8 +28,53 @@ interface BroadcastChildrenModalProps {
   onClose: () => void;
 }
 
+interface ApplySnapshotOptions {
+  clearSelection?: boolean;
+  excludeRowKeys?: Set<string>;
+}
+
 function rowKey(item: CronBroadcastChildItem): string {
   return `${item.tenant_id}:${item.job_id}`;
+}
+
+function operationResultKey(item: CronBroadcastChildOperationResult): string {
+  return `${item.tenant_id}:${item.job_id}`;
+}
+
+function normalizeSearchKeyword(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function normalizeBbkId(value?: string | null): string {
+  return String(value || "").trim();
+}
+
+function buildBbkIdOptions<T extends { bbk_id?: string | null }>(
+  items: T[],
+): { label: string; value: string }[] {
+  return Array.from(
+    new Set(items.map((item) => normalizeBbkId(item.bbk_id)).filter(Boolean)),
+  )
+    .sort((a, b) => a.localeCompare(b, "zh-CN", { numeric: true }))
+    .map((value) => ({ label: value, value }));
+}
+
+function matchesTenantSearch(
+  item: CronBroadcastChildItem,
+  keyword: string,
+): boolean {
+  if (!keyword) return true;
+  return [item.tenant_name, item.tenant_id].some((value) =>
+    String(value || "").toLowerCase().includes(keyword),
+  );
+}
+
+function matchesBbkId(
+  item: CronBroadcastChildItem,
+  selectedBbkId: string,
+): boolean {
+  if (!selectedBbkId) return true;
+  return normalizeBbkId(item.bbk_id) === selectedBbkId;
 }
 
 function resultLine(item: CronBroadcastChildOperationResult): string {
@@ -67,50 +116,143 @@ function renderTenantCell(record: CronBroadcastChildItem) {
   );
 }
 
+function formatDateTime(value: string | null | undefined): string {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString("zh-CN");
+}
+
 export function BroadcastChildrenModal({
   open,
   job,
   onClose,
 }: BroadcastChildrenModalProps) {
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [children, setChildren] = useState<CronBroadcastChildItem[]>([]);
+  const [lookupStatus, setLookupStatus] =
+    useState<CronBroadcastChildrenResponse["status"]>("idle");
+  const [tenantCount, setTenantCount] = useState(0);
+  const [failedTenants, setFailedTenants] = useState(0);
+  const [failureSummary, setFailureSummary] = useState<string | null>(null);
+  const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const [selectedRowKeys, setSelectedRowKeys] = useState<Key[]>([]);
   const [operationResults, setOperationResults] = useState<
     CronBroadcastChildOperationResult[]
   >([]);
+  const jobId = job?.id;
+  const [tablePage, setTablePage] = useState(1);
+  const [tablePageSize, setTablePageSize] = useState(DEFAULT_TABLE_PAGE_SIZE);
+  const [searchInputText, setSearchInputText] = useState("");
+  const [appliedSearchText, setAppliedSearchText] = useState("");
+  const [selectedBbkId, setSelectedBbkId] = useState("");
 
   const selectedItems = useMemo(() => {
     const selected = new Set(selectedRowKeys.map(String));
     return children.filter((item) => selected.has(rowKey(item)));
   }, [children, selectedRowKeys]);
+  const filteredChildren = useMemo(() => {
+    const keyword = normalizeSearchKeyword(appliedSearchText);
+    return children.filter(
+      (item) =>
+        matchesTenantSearch(item, keyword) && matchesBbkId(item, selectedBbkId),
+    );
+  }, [children, appliedSearchText, selectedBbkId]);
+  const bbkIdOptions = useMemo(() => buildBbkIdOptions(children), [children]);
   const duplicateTenantNameSummaries = useMemo(
     () => buildDuplicateTenantNameSummaries(children),
     [children],
   );
   const hasFailedResults = operationResults.some((result) => !result.success);
+  const isLookupRunning = lookupStatus === "running";
 
-  const loadChildren = async () => {
-    if (!job) return;
+  const applySnapshot = useCallback(
+    (
+      response: CronBroadcastChildrenResponse,
+      options: ApplySnapshotOptions = {},
+    ) => {
+      const items = response.items || [];
+      setChildren(
+        options.excludeRowKeys
+          ? items.filter((item) => !options.excludeRowKeys?.has(rowKey(item)))
+          : items,
+      );
+      setLookupStatus(response.status || "idle");
+      setTenantCount(response.tenant_count || 0);
+      setFailedTenants(response.failed_tenants || 0);
+      setFailureSummary(response.failure_summary || null);
+      setUpdatedAt(response.updated_at || null);
+      if (options.clearSelection) {
+        setSelectedRowKeys([]);
+      }
+    },
+    [],
+  );
+
+  const loadChildren = useCallback(async () => {
+    if (!jobId) return;
     setLoading(true);
     try {
-      const response = await api.listCronBroadcastChildren(job.id);
-      setChildren(response.items || []);
+      const response = await api.listCronBroadcastChildren(jobId);
+      applySnapshot(response);
       setSelectedRowKeys([]);
     } finally {
       setLoading(false);
     }
-  };
+  }, [applySnapshot, jobId]);
+
+  const triggerBackgroundRefresh = useCallback(
+    async (options: ApplySnapshotOptions = {}) => {
+      if (!jobId) return;
+      setRefreshing(true);
+      try {
+        const response = await api.refreshCronBroadcastChildren(jobId);
+        applySnapshot(response, options);
+      } finally {
+        setRefreshing(false);
+      }
+    },
+    [applySnapshot, jobId],
+  );
 
   useEffect(() => {
     if (!open) {
       setChildren([]);
+      setLookupStatus("idle");
+      setTenantCount(0);
+      setFailedTenants(0);
+      setFailureSummary(null);
+      setUpdatedAt(null);
       setSelectedRowKeys([]);
       setOperationResults([]);
+      setTablePage(1);
+      setTablePageSize(DEFAULT_TABLE_PAGE_SIZE);
+      setSearchInputText("");
+      setAppliedSearchText("");
+      setSelectedBbkId("");
       return;
     }
-    void loadChildren();
-  }, [open, job?.id]);
+    setTablePage(1);
+    setSearchInputText("");
+    setAppliedSearchText("");
+    setSelectedBbkId("");
+    void (async () => {
+      await loadChildren();
+      await triggerBackgroundRefresh();
+    })();
+  }, [loadChildren, open, triggerBackgroundRefresh]);
+
+  useEffect(() => {
+    const maxPage = Math.max(
+      1,
+      Math.ceil(filteredChildren.length / tablePageSize),
+    );
+    setTablePage((current) => Math.min(current, maxPage));
+  }, [filteredChildren.length, tablePageSize]);
 
   const batchRefs = selectedItems.map((item) => ({
     tenant_id: item.tenant_id,
@@ -123,7 +265,20 @@ export function BroadcastChildrenModal({
     try {
       const response = await api.deleteCronBroadcastChildren(job.id, batchRefs);
       setOperationResults(response.results || []);
-      await loadChildren();
+      const deletedRowKeys = new Set(
+        (response.results || [])
+          .filter((result) => result.success && result.status === "deleted")
+          .map(operationResultKey),
+      );
+      if (deletedRowKeys.size > 0) {
+        setChildren((current) =>
+          current.filter((item) => !deletedRowKeys.has(rowKey(item))),
+        );
+      }
+      await triggerBackgroundRefresh({
+        clearSelection: true,
+        excludeRowKeys: deletedRowKeys,
+      });
     } finally {
       setSubmitting(false);
     }
@@ -135,11 +290,33 @@ export function BroadcastChildrenModal({
     try {
       const response = await api.runCronBroadcastChildren(job.id, batchRefs);
       setOperationResults(response.results || []);
-      await loadChildren();
+      await triggerBackgroundRefresh({ clearSelection: true });
     } finally {
       setSubmitting(false);
     }
   };
+
+  let dataTimeText = "尚未生成";
+  if (isLookupRunning) {
+    dataTimeText = updatedAt
+      ? `${formatDateTime(updatedAt)}（刷新中）`
+      : "正在生成中";
+  } else if (updatedAt) {
+    dataTimeText = formatDateTime(updatedAt);
+  }
+  let lookupStatusText = "未生成";
+  if (isLookupRunning) {
+    lookupStatusText = "生成中";
+  } else if (lookupStatus === "completed") {
+    lookupStatusText = "已生成";
+  } else if (lookupStatus === "failed") {
+    lookupStatusText = "失败";
+  }
+  const tableEmptyText = isLookupRunning
+    ? "正在生成中"
+    : lookupStatus === "idle"
+    ? "点击刷新生成分发用户列表"
+    : "当前任务尚未分发给任何用户";
 
   const columns: ColumnsType<CronBroadcastChildItem> = [
     {
@@ -209,7 +386,10 @@ export function BroadcastChildrenModal({
       style={{ maxWidth: MODAL_MAX_WIDTH }}
       width={MODAL_WIDTH}
     >
-      <div style={{ display: "grid", gap: 12, minWidth: 0 }}>
+      <div
+        className={styles.content}
+        style={{ display: "grid", gap: 12, minWidth: 0 }}
+      >
         {duplicateTenantNameSummaries.length > 0 && (
           <Alert
             type="warning"
@@ -219,10 +399,21 @@ export function BroadcastChildrenModal({
           />
         )}
 
-        <Space>
-          <Button onClick={loadChildren} loading={loading}>
+        <Space wrap>
+          <Button
+            onClick={() => {
+              void triggerBackgroundRefresh({ clearSelection: true });
+            }}
+            loading={loading || refreshing}
+          >
             刷新
           </Button>
+          <Text type="secondary">状态：{lookupStatusText}</Text>
+          <Text type="secondary">扫描用户：{tenantCount}</Text>
+          {failedTenants > 0 && (
+            <Text type="warning">读取失败：{failedTenants}</Text>
+          )}
+          <Text type="secondary">数据时间：{dataTimeText}</Text>
           <Button
             danger
             disabled={selectedItems.length === 0}
@@ -249,6 +440,42 @@ export function BroadcastChildrenModal({
           </Button>
         </Space>
 
+        {failureSummary && (
+          <Alert type="warning" showIcon message={failureSummary} />
+        )}
+
+        <Space wrap>
+          <Input.Search
+            allowClear
+            enterButton="搜索"
+            placeholder="搜索用户姓名或 UID"
+            value={searchInputText}
+            onChange={(event) => {
+              setSearchInputText(event.target.value);
+            }}
+            onSearch={(value) => {
+              setAppliedSearchText(value);
+              setSelectedRowKeys([]);
+              setTablePage(1);
+            }}
+            style={{ width: 320, maxWidth: "100%" }}
+          />
+          <Select
+            allowClear
+            placeholder="筛选机构"
+            options={bbkIdOptions}
+            value={selectedBbkId || undefined}
+            onChange={(value) => {
+              setSelectedBbkId(value || "");
+              setSelectedRowKeys([]);
+              setTablePage(1);
+            }}
+            showSearch
+            optionFilterProp="label"
+            style={{ width: 180, maxWidth: "100%" }}
+          />
+        </Space>
+
         {operationResults.length > 0 && (
           <Alert
             type={hasFailedResults ? "warning" : "success"}
@@ -265,14 +492,24 @@ export function BroadcastChildrenModal({
         <Table
           rowKey={rowKey}
           columns={columns}
-          dataSource={children}
-          loading={loading}
+          dataSource={filteredChildren}
+          loading={loading || refreshing}
           rowSelection={{
             selectedRowKeys,
             onChange: setSelectedRowKeys,
           }}
-          pagination={{ pageSize: 8 }}
-          locale={{ emptyText: "当前任务尚未分发给任何用户" }}
+          pagination={{
+            current: tablePage,
+            pageSize: tablePageSize,
+            showSizeChanger: true,
+            pageSizeOptions: TABLE_PAGE_SIZE_OPTIONS,
+            showTotal: (total) => `共 ${total} 条`,
+            onChange: (nextPage, nextPageSize) => {
+              setTablePage(nextPage);
+              setTablePageSize(nextPageSize || DEFAULT_TABLE_PAGE_SIZE);
+            },
+          }}
+          locale={{ emptyText: tableEmptyText }}
           scroll={{ x: TABLE_SCROLL_X, y: TABLE_SCROLL_Y }}
         />
       </div>

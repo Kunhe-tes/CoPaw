@@ -1,8 +1,8 @@
 import React, { useEffect } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { Form } from "antd";
 import type { FormInstance } from "antd";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -11,6 +11,10 @@ vi.mock("react-i18next", () => ({
 }));
 
 import { LlmRateLimiterCard } from "./LlmRateLimiterCard";
+
+afterEach(() => {
+  cleanup();
+});
 
 const initialValues = {
   llm_max_concurrent: 10,

@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS swe_skills (
     tenant_name VARCHAR(256) DEFAULT '' COMMENT '租户名称',
     bbk_id VARCHAR(64) DEFAULT '' COMMENT 'BBK标识符',
     source VARCHAR(32) DEFAULT 'customized' COMMENT '来源：builtin/customized/marketplace',
+    source_id VARCHAR(64) DEFAULT '' COMMENT '来源ID',
     enabled TINYINT(1) DEFAULT 0 COMMENT '是否启用',
     description TEXT COMMENT '技能描述',
     version_text VARCHAR(32) DEFAULT '1.0.0' COMMENT '版本号',
@@ -17,8 +18,8 @@ CREATE TABLE IF NOT EXISTS swe_skills (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
-    UNIQUE KEY uk_skill_id_tenant (skill_id, tenant_id),
     INDEX idx_tenant_skill_name (tenant_id, skill_name),
+    INDEX idx_skill_name_tenant_source (skill_name, tenant_id, source_id),
     INDEX idx_tenant_enabled (tenant_id, enabled),
     INDEX idx_bbk_id (bbk_id),
     INDEX idx_source (source)

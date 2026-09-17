@@ -21,6 +21,7 @@ async def _create_traces_table(db: DatabaseConnection) -> None:
     CREATE TABLE IF NOT EXISTS `swe_tracing_traces` (
         `id` BIGINT AUTO_INCREMENT COMMENT '自增主键',
         `trace_id` VARCHAR(36) NOT NULL COMMENT '追踪唯一标识',
+        `b3_trace_id` VARCHAR(64) DEFAULT NULL COMMENT 'Upstream B3 trace identifier',
         `source_id` VARCHAR(64) NOT NULL COMMENT '数据源标识',
         `user_id` VARCHAR(128) DEFAULT NULL COMMENT '用户ID',
         `user_name` VARCHAR(256) DEFAULT NULL COMMENT '用户名称',
@@ -42,6 +43,7 @@ async def _create_traces_table(db: DatabaseConnection) -> None:
         PRIMARY KEY (`id`),
         UNIQUE KEY `uk_trace_id` (`trace_id`),
         INDEX `idx_source_id` (`source_id`),
+        INDEX `idx_source_b3_trace` (`source_id`, `b3_trace_id`),
         INDEX `idx_source_start_time` (`source_id`, `start_time`),
         INDEX `idx_source_user` (`source_id`, `user_id`),
         INDEX `idx_start_time` (`start_time`)

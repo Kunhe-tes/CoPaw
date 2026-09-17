@@ -4,14 +4,17 @@
 from __future__ import annotations
 
 import logging
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from ..deps import require_source_id
+from ...marketplace.zip_download import build_skill_zip
 from ...marketplace.version_models import (
     VersionCompareRequest,
     VersionCompareResult,
@@ -158,6 +161,15 @@ def _validate_item_exists(
         )
 
 
+def _build_version_download_name(
+    versions: VersionsManifest,
+    version_id: str,
+) -> str:
+    """构建历史版本下载文件名。"""
+    skill_name = versions.skill_name or "skill"
+    return f"{skill_name}-{version_id}.zip"
+
+
 @router.get(
     "/market/skills/{item_id}/versions",
     response_model=VersionsManifest,
@@ -205,6 +217,63 @@ async def get_version_detail(
             detail=f"Version {version_id} not found",
         )
     return detail
+
+
+@router.get(
+    "/market/skills/{item_id}/versions/{version_id}/download",
+    status_code=status.HTTP_200_OK,
+)
+async def download_version_snapshot(
+    request: Request,
+    item_id: str,
+    version_id: str,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+):
+    """下载指定历史版本快照 ZIP。"""
+    source_id = require_source_id(x_source_id)
+    svc = _get_version_service(request)
+
+    _validate_item_exists(svc, source_id, item_id)
+
+    versions = svc._load_versions_manifest(source_id, item_id)
+    version_info = next(
+        (
+            version
+            for version in versions.versions
+            if version.version_id == version_id
+        ),
+        None,
+    )
+    if version_info is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Version {version_id} not found",
+        )
+
+    version_dir = svc._get_version_dir(source_id, item_id, version_id)
+    if not version_dir.is_dir():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Version {version_id} not found",
+        )
+
+    with tempfile.TemporaryDirectory(
+        prefix="copaw_skill_version_download_",
+    ) as temp_dir:
+        zip_path = build_skill_zip(
+            version_dir,
+            _build_version_download_name(versions, version_id),
+            Path(temp_dir),
+        )
+        zip_bytes = zip_path.read_bytes()
+
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{zip_path.name}"',
+        },
+    )
 
 
 @router.post(

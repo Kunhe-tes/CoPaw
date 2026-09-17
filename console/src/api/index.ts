@@ -27,9 +27,12 @@ import { mySkillsApi } from "./modules/mySkills";
 import { myMcpApi } from "./modules/myMcp";
 import { marketMcpApi } from "./modules/marketMcp";
 import { feedbackApi } from "./modules/feedback";
+import { approvalApi } from "./modules/approval";
 import { htmlPreviewEventsApi } from "./modules/htmlPreviewEvents";
 import { systemCheckApi } from "./modules/systemCheck";
 import { skillReadinessApi } from "./modules/skillReadiness";
+import { sourceToolsApi } from "./modules/sourceTools";
+import { expertsApi } from "./modules/experts";
 
 export const api = {
   // Root
@@ -100,6 +103,9 @@ export const api = {
   // Feedback
   ...feedbackApi,
 
+  // Approvals
+  ...approvalApi,
+
   // HTML Preview Events
   ...htmlPreviewEventsApi,
 
@@ -108,6 +114,9 @@ export const api = {
 
   // Skill Readiness
   ...skillReadinessApi,
+  // Source-owned custom built-in tools
+  ...sourceToolsApi,
+  ...expertsApi,
 };
 
 export default api;
@@ -119,3 +128,4 @@ export * from "./modules/mySkills";
 export * from "./modules/myMcp";
 export * from "./modules/marketMcp";
 export * from "./modules/skillReadiness";
+export * from "./modules/approval";

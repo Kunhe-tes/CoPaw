@@ -15,11 +15,11 @@
 | 工具成功后同时读取工具结果和最近对话 | `PostToolUse` | `command` + 快照 | [snapshot-post-tool-audit-demo](snapshot-post-tool-audit-demo/SKILL.md) |
 | 工具失败后注入统一兜底话术 | `PostToolUseFailure` | `command` | [mcp-failure-fallback-demo](mcp-failure-fallback-demo/SKILL.md) |
 | HTTP 401/403 后阻止继续基于失败结果推进 | `PostToolUse` / `PostToolUseFailure` | `command` | [http-auth-failure-guard-demo](http-auth-failure-guard-demo/SKILL.md) |
-| 最终回复发出前做完成度门禁 | `BeforeStop` | `prompt` | [before-stop-prompt-demo](before-stop-prompt-demo/SKILL.md) |
-| 最终回复必须满足客户交付规范 | `BeforeStop` | `prompt` | [final-output-prompt-guard-demo](final-output-prompt-guard-demo/SKILL.md) |
-| 最终回复需要结合完整会话历史审查 | `BeforeStop` | `command` + 外部 HTTP | [before-stop-history-http-guard-demo](before-stop-history-http-guard-demo/SKILL.md) |
-| 控制 `BeforeStop` 自动续跑次数 | Agent 运行配置 | `running.hook_runtime` | 见下方“完成门禁预算配置” |
-| 当前轮结束时写入收尾说明或停止原因 | `Stop` | `command` | [stop-command-summary-demo](stop-command-summary-demo/SKILL.md) |
+| 最终回复发出前做完成度门禁 | `Stop` | `prompt` | [stop-prompt-demo](stop-prompt-demo/SKILL.md) |
+| 最终回复必须满足客户交付规范 | `Stop` | `prompt` | [final-output-prompt-guard-demo](final-output-prompt-guard-demo/SKILL.md) |
+| 最终回复需要结合完整会话历史审查 | `Stop` | `command` + 外部 HTTP | [stop-history-http-guard-demo](stop-history-http-guard-demo/SKILL.md) |
+| 控制 `Stop` 自动续跑次数 | Agent 运行配置 | `running.hook_runtime` | 见下方“完成门禁预算配置” |
+| 当前轮结束时发送审计、埋点或外部通知 | `Stop` | `command` | [stop-command-summary-demo](stop-command-summary-demo/SKILL.md) |
 
 ## 再按配置层级选放置位置
 
@@ -41,24 +41,24 @@
 | 改写工具输入 | `hookSpecificOutput.updatedInput` | [pre-tool-use-command-demo](pre-tool-use-command-demo/SKILL.md) |
 | 注入上下文 | `hookSpecificOutput.additionalContext` | [hook-http-demo](hook-http-demo/SKILL.md)、[mcp-failure-fallback-demo](mcp-failure-fallback-demo/SKILL.md) |
 | 设置会话标题 | `hookSpecificOutput.sessionTitle` | [user-prompt-submit-command-demo](user-prompt-submit-command-demo/SKILL.md) |
-| 停止当前流程 | `continue = false` | [stop-command-summary-demo](stop-command-summary-demo/SKILL.md) |
+| 终止当前回合 | `continue = false` 或 `decision = "stop"` | 使用 `SessionStart`、`UserPromptSubmit` 或工具事件的对应 demo；`Stop` 不参与控制 |
 
 ## 完成门禁预算配置
 
-`BeforeStop` 返回 `block` 后会让 Agent 在同一次请求里继续尝试完成任务。这个自动续跑需要单独配置预算，通常写在当前 workspace 的 `agent.json`：
+`Stop` 返回 `block` 后会让 Agent 在同一次请求里继续尝试完成任务。这个自动续跑需要单独配置预算，通常写在当前 workspace 的 `agent.json`：
 
 ```json
 {
   "running": {
     "hook_runtime": {
-      "max_before_stop_turns": 2,
+      "max_stop_turns": 2,
       "max_automatic_follow_up_turns": 4
     }
   }
 }
 ```
 
-这个配置不是 handler demo，所以不需要新建 `hooks/hooks.json`。给客户交付 `BeforeStop` 类示例时，应同时说明这两个预算值，避免规则过严导致同一请求反复续跑。
+这个配置不是 handler demo，所以不需要新建 `hooks/hooks.json`。给客户交付 `Stop` 类示例时，应同时说明这两个预算值，避免规则过严导致同一请求反复续跑。
 
 ## 交付客户时的推荐拆分
 
@@ -71,7 +71,9 @@
 ## 不建议混用的点
 
 - 不要把 `tool_response` 和 `conversation_snapshot` 混成一个概念；前者是当前工具结果，后者是最近对话裁剪。
-- 不要在 `BeforeStop` 返回 `additionalContext` 或 `continue: false`；它只适合 `allow` / `block`。
+- 不要在 `Stop` 返回 `additionalContext` 或 `continue: false`；它只适合 `allow` / `block`。
+- `Stop` 就是完成 gate：只返回 `allow` 或 `block`。任一显式 `block` 会续跑；`failPolicy: block` 的 handler 失败则以未完成结束而不续跑。
+- 不要把工具后置事件的普通 `block` 当成回合终止；要结束当前回合，使用 `continue: false` 或 `decision: "stop"`。终止会取消尚未完成的并行工具调用，但不会撤销已经发生的外部副作用。
 - 不要在 Skill 级 `command` handler 使用 `command` 字符串；用 `argv`。
 - 不要让多个 handler 同时返回 `updatedInput`；运行时会阻断以避免结果不确定。
 - 不要依赖多个 handler 的执行顺序；同一分组下 handler 会并发执行。

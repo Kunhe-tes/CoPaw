@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from swe.agents.skill_tool_registry import SkillToolRegistry
 from swe.tracing.config import TracingConfig
 from swe.tracing.manager import (
     TraceContext,
@@ -279,6 +280,32 @@ class TestTraceManager:
         await manager.close()
 
     @pytest.mark.asyncio
+    async def test_start_trace_persists_b3_trace_id(
+        self,
+        enabled_config,
+        mock_db,
+    ):
+        """A new trace keeps execution and upstream B3 identities distinct."""
+        manager = TraceManager(enabled_config, mock_db)
+        await manager.initialize()
+
+        try:
+            trace_id = await manager.start_trace(
+                user_id="user-1",
+                session_id="session-1",
+                channel="console",
+                source_id="default",
+                trace_id="execution-trace-id",
+                b3_trace_id="upstream-b3-trace-id",
+            )
+
+            trace = manager._active_traces[trace_id]
+            assert trace.trace_id == "execution-trace-id"
+            assert trace.b3_trace_id == "upstream-b3-trace-id"
+        finally:
+            await manager.close()
+
+    @pytest.mark.asyncio
     async def test_attach_existing_trace_with_matching_identity(
         self,
         enabled_config,
@@ -410,6 +437,46 @@ class TestTraceManager:
         assert (
             trace_id not in manager._active_traces
         )  # pylint: disable=protected-access
+
+        await manager.close()
+
+    @pytest.mark.asyncio
+    async def test_end_trace_flushes_spans_emitted_by_skill_detector(
+        self,
+        enabled_config,
+        mock_db,
+    ):
+        """技能检测收尾产生的 span 也必须在 trace 收尾前落库。"""
+        manager = TraceManager(enabled_config, mock_db)
+        await manager.initialize()
+
+        trace_id = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-1",
+            channel="console",
+            source_id="default",
+        )
+
+        class Detector:
+            async def on_reasoning_end(self):
+                await manager.emit_skill_invocation(
+                    trace_id=trace_id,
+                    skill_name="pdf",
+                    source_id="default",
+                )
+
+        ctx = get_current_trace()
+        assert ctx is not None
+        ctx.skill_detector = Detector()
+
+        await manager.end_trace(trace_id, TraceStatus.COMPLETED)
+
+        assert len(manager._span_queue) == 0
+        mock_db.execute_many.assert_called_once()
+        _, params_list = mock_db.execute_many.call_args.args
+        assert len(params_list) == 1
+        assert params_list[0][1] == trace_id
+        assert params_list[0][15] == "pdf"
 
         await manager.close()
 
@@ -653,6 +720,240 @@ class TestTraceManager:
             span_id
         ]  # pylint: disable=protected-access
         assert span.mcp_server == "weather-server"
+
+        await manager.close()
+
+    @pytest.mark.asyncio
+    async def test_emit_tool_call_filters_hook_skill_from_span(
+        self,
+        enabled_config,
+        mock_db,
+    ):
+        """hook 运行时技能仍可被识别，但不应写入 tool span skill_name。"""
+        manager = TraceManager(enabled_config, mock_db)
+        await manager.initialize()
+
+        trace_id = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-1",
+            channel="console",
+            source_id="default",
+        )
+
+        class FakeDetector:
+            def __init__(self):
+                self._skill_runtime_profiles = {
+                    "hook-http-demo": type(
+                        "Profile",
+                        (),
+                        {"has_hook_config": True},
+                    )(),
+                }
+
+            async def on_tool_call(self, **kwargs):
+                return "hook-http-demo", {"hook-http-demo": 1.0}
+
+            def get_skill_description(self, skill_name):
+                return f"desc:{skill_name}"
+
+            def get_skill_runtime_profile(self, skill_name):
+                return self._skill_runtime_profiles.get(skill_name)
+
+        from swe.tracing.manager import get_current_trace
+
+        ctx = get_current_trace()
+        assert ctx is not None
+        ctx.set_skill_detector(FakeDetector(), ["hook-http-demo"])
+
+        span_id = await manager.emit_tool_call_start(
+            trace_id=trace_id,
+            tool_name="execute_shell_command",
+            tool_input={"command": "echo hello"},
+            source_id="default",
+        )
+
+        span = manager._pending_spans[
+            span_id
+        ]  # pylint: disable=protected-access
+        assert span.skill_name is None
+        # skill_description 字段已从 Span 模型移除，不再写入 span
+        assert not hasattr(span, "skill_description")
+
+        await manager.close()
+
+    @pytest.mark.asyncio
+    async def test_emit_tool_call_keeps_hook_skill_md_read_in_span(
+        self,
+        enabled_config,
+        mock_db,
+    ):
+        """hook 技能读取自身 SKILL.md 时，tool span 仍应保留 skill_name。"""
+        manager = TraceManager(enabled_config, mock_db)
+        await manager.initialize()
+
+        trace_id = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-1",
+            channel="console",
+            source_id="default",
+        )
+
+        class FakeDetector:
+            def __init__(self):
+                self._skill_runtime_profiles = {
+                    "hook-http-demo": type(
+                        "Profile",
+                        (),
+                        {"has_hook_config": True},
+                    )(),
+                }
+
+            async def on_tool_call(self, **kwargs):
+                return "hook-http-demo", {"hook-http-demo": 1.0}
+
+            def get_skill_description(self, skill_name):
+                return f"desc:{skill_name}"
+
+            def get_skill_runtime_profile(self, skill_name):
+                return self._skill_runtime_profiles.get(skill_name)
+
+            def _detect_skill_from_skill_md_read(self, tool_name, tool_input):
+                if (
+                    tool_name == "read_file"
+                    and tool_input.get(
+                        "file_path",
+                    )
+                    == "/workspace/skills/hook-http-demo/SKILL.md"
+                ):
+                    return "hook-http-demo"
+                return None
+
+        from swe.tracing.manager import get_current_trace
+
+        ctx = get_current_trace()
+        assert ctx is not None
+        ctx.set_skill_detector(FakeDetector(), ["hook-http-demo"])
+
+        span_id = await manager.emit_tool_call_start(
+            trace_id=trace_id,
+            tool_name="read_file",
+            tool_input={
+                "file_path": "/workspace/skills/hook-http-demo/SKILL.md",
+            },
+            source_id="default",
+        )
+
+        span = manager._pending_spans[
+            span_id
+        ]  # pylint: disable=protected-access
+        assert span.skill_name == "hook-http-demo"
+
+        await manager.close()
+
+    @pytest.mark.asyncio
+    async def test_emit_tool_call_keeps_non_hook_skill_in_span(
+        self,
+        enabled_config,
+        mock_db,
+    ):
+        """普通技能的 tool span 仍应保留 skill_name。"""
+        manager = TraceManager(enabled_config, mock_db)
+        await manager.initialize()
+
+        trace_id = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-1",
+            channel="console",
+            source_id="default",
+        )
+
+        class FakeDetector:
+            async def on_tool_call(self, **kwargs):
+                return "weather", {"weather": 1.0}
+
+            def get_skill_description(self, skill_name):
+                return f"desc:{skill_name}"
+
+            def get_skill_runtime_profile(self, skill_name):
+                return type(
+                    "Profile",
+                    (),
+                    {"has_hook_config": False},
+                )()
+
+        ctx = get_current_trace()
+        assert ctx is not None
+        ctx.set_skill_detector(FakeDetector(), ["weather"])
+
+        span_id = await manager.emit_tool_call_start(
+            trace_id=trace_id,
+            tool_name="weather_query",
+            tool_input={"location": "Shanghai"},
+            source_id="default",
+        )
+
+        span = manager._pending_spans[
+            span_id
+        ]  # pylint: disable=protected-access
+        assert span.skill_name == "weather"
+        # skill_description 字段已从 Span 模型移除
+        assert not hasattr(span, "skill_description")
+
+        await manager.close()
+
+    @pytest.mark.asyncio
+    async def test_emit_tool_call_uses_precomputed_attribution_once(
+        self,
+        enabled_config,
+        mock_db,
+    ):
+        """预计算 attribution 存在时，不应再次调用 detector.on_tool_call。"""
+        manager = TraceManager(enabled_config, mock_db)
+        await manager.initialize()
+
+        trace_id = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-1",
+            channel="console",
+            source_id="default",
+        )
+
+        class FakeDetector:
+            on_tool_call = AsyncMock(
+                side_effect=AssertionError(
+                    "detector.on_tool_call should not be called twice",
+                ),
+            )
+
+            def get_skill_description(self, skill_name):
+                return f"desc:{skill_name}"
+
+            def get_skill_runtime_profile(self, skill_name):
+                return type(
+                    "Profile",
+                    (),
+                    {"has_hook_config": False},
+                )()
+
+        ctx = get_current_trace()
+        assert ctx is not None
+        ctx.set_skill_detector(FakeDetector(), ["fill-metadata"])
+
+        span_id = await manager.emit_tool_call_start(
+            trace_id=trace_id,
+            tool_name="read_file",
+            tool_input={"file_path": "steps/step1.md"},
+            source_id="default",
+            use_precomputed_attribution=True,
+            precomputed_attribution={"primary_skill": "fill-metadata"},
+        )
+
+        span = manager._pending_spans[
+            span_id
+        ]  # pylint: disable=protected-access
+        assert span.skill_name == "fill-metadata"
+        # skill_description 字段已从 Span 模型移除
+        assert not hasattr(span, "skill_description")
 
         await manager.close()
 
@@ -1049,13 +1350,13 @@ class TestSessionName:
         await manager.close()
 
     @pytest.mark.asyncio
-    async def test_setup_skill_detector_does_not_start_skill_immediately(
+    async def test_setup_skill_detector_does_not_infer_from_user_message(
         self,
         enabled_config,
         mock_db,
         monkeypatch,
     ):
-        """Layer 0 仅做检测缓存，正式 skill span 由会话 detector 启动。"""
+        """追踪初始化不会从用户正文推断 skill。"""
         manager = TraceManager(enabled_config, mock_db)
         await manager.initialize()
 
@@ -1084,8 +1385,46 @@ class TestSessionName:
             enabled_skills=["xlsx"],
         )
 
-        detector_instance.detect_from_user_message.assert_called_once()
+        detector_instance.detect_from_user_message.assert_not_called()
         detector_instance.start_skill.assert_not_awaited()
+        await manager.close()
+
+    @pytest.mark.asyncio
+    async def test_setup_skill_detector_uses_supplied_skill_registry(
+        self,
+        enabled_config,
+        mock_db,
+        monkeypatch,
+    ):
+        """追踪技能探测器应使用调用方提供的 registry 快照。"""
+        manager = TraceManager(enabled_config, mock_db)
+        await manager.initialize()
+        trace_id = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-1",
+            channel="console",
+            source_id="source-1",
+        )
+        registry = SkillToolRegistry()
+        captured_kwargs = {}
+        detector_instance = MagicMock()
+
+        def build_detector(**kwargs):
+            captured_kwargs.update(kwargs)
+            return detector_instance
+
+        monkeypatch.setattr(
+            "swe.agents.skill_invocation_detector.SkillInvocationDetector",
+            build_detector,
+        )
+
+        await manager.setup_skill_detector(
+            trace_id=trace_id,
+            enabled_skills=["xlsx"],
+            skill_tool_registry=registry,
+        )
+
+        assert captured_kwargs["registry"] is registry
         await manager.close()
 
     def test_trace_model_with_session_name(self):

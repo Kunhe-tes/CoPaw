@@ -7,6 +7,16 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from ...constant import (
+    DEFAULT_LLM_CHAT_MAX_CONCURRENT,
+    DEFAULT_LLM_CRON_MAX_CONCURRENT,
+    LLM_ACQUIRE_TIMEOUT,
+    LLM_MAX_CONCURRENT,
+    LLM_MAX_QPM,
+    LLM_RATE_LIMIT_JITTER,
+    LLM_RATE_LIMIT_PAUSE,
+)
+
 
 @dataclass(frozen=True)
 class SourceSystemConfigSetting:
@@ -15,9 +25,16 @@ class SourceSystemConfigSetting:
     key: str
     path: tuple[str, ...]
     default_value: Any
-    value_type: Literal["bool", "int", "str"]
-    ge: int | None = None
-    le: int | None = None
+    value_type: Literal[
+        "bool",
+        "int",
+        "float",
+        "str",
+        "optional_int",
+        "optional_float",
+    ]
+    ge: float | None = None
+    le: float | None = None
 
 
 SourceSystemConfigSwitch = SourceSystemConfigSetting
@@ -27,6 +44,15 @@ CHAT_TASK_PROGRESS_ENABLED_SWITCH = SourceSystemConfigSwitch(
     key="feature_switches.chat_task_progress_enabled",
     path=("feature_switches", "chat_task_progress_enabled"),
     default_value=True,
+    value_type="bool",
+)
+NORMAL_MODE_PLAN_INTERACTION_TOOLS_ENABLED_SWITCH = SourceSystemConfigSwitch(
+    key="feature_switches.normal_mode_plan_interaction_tools_enabled",
+    path=(
+        "feature_switches",
+        "normal_mode_plan_interaction_tools_enabled",
+    ),
+    default_value=False,
     value_type="bool",
 )
 
@@ -73,18 +99,13 @@ DATABASE_ACCESS_GUARD_ENABLED_SWITCH = SourceSystemConfigSwitch(
     default_value=True,
     value_type="bool",
 )
-FILE_READ_TRUNCATION_ENABLED_SETTING = SourceSystemConfigSetting(
-    key="file_read_truncation.enabled",
-    path=("file_read_truncation", "enabled"),
-    default_value=True,
-    value_type="bool",
-)
-FILE_READ_TRUNCATION_MAX_BYTES_SETTING = SourceSystemConfigSetting(
-    key="file_read_truncation.max_bytes",
-    path=("file_read_truncation", "max_bytes"),
-    default_value=50000,
-    value_type="int",
-    ge=1000,
+APPROVAL_NOTIFICATIONS_ZHAOHU_TOOL_GUARD_ENABLED_SETTING = (
+    SourceSystemConfigSetting(
+        key="approval_notifications.zhaohu_tool_guard_enabled",
+        path=("approval_notifications", "zhaohu_tool_guard_enabled"),
+        default_value=False,
+        value_type="bool",
+    )
 )
 
 CRON_UNREAD_AUTO_PAUSE_ENABLED_SETTING = SourceSystemConfigSetting(
@@ -106,14 +127,12 @@ CRON_TASK_SESSION_CLEANUP_ENABLED_SETTING = SourceSystemConfigSetting(
     default_value=False,
     value_type="bool",
 )
-CRON_TASK_SESSION_CLEANUP_RETENTION_DAYS_SETTING = (
-    SourceSystemConfigSetting(
-        key="cron_task_session_cleanup.retention_days",
-        path=("cron_task_session_cleanup", "retention_days"),
-        default_value=30,
-        value_type="int",
-        ge=1,
-    )
+CRON_TASK_SESSION_CLEANUP_RETENTION_DAYS_SETTING = SourceSystemConfigSetting(
+    key="cron_task_session_cleanup.retention_days",
+    path=("cron_task_session_cleanup", "retention_days"),
+    default_value=30,
+    value_type="int",
+    ge=1,
 )
 CRON_TASK_SESSION_CLEANUP_CRON_SETTING = SourceSystemConfigSetting(
     key="cron_task_session_cleanup.cron",
@@ -121,11 +140,159 @@ CRON_TASK_SESSION_CLEANUP_CRON_SETTING = SourceSystemConfigSetting(
     default_value="0 1 * * *",
     value_type="str",
 )
+ARCHIVE_MAINTENANCE_ENABLED_SETTING = SourceSystemConfigSetting(
+    key="archive_maintenance.enabled",
+    path=("archive_maintenance", "enabled"),
+    default_value=True,
+    value_type="bool",
+)
+ARCHIVE_MAINTENANCE_CRON_SETTING = SourceSystemConfigSetting(
+    key="archive_maintenance.cron",
+    path=("archive_maintenance", "cron"),
+    default_value="0 3 * * *",
+    value_type="str",
+)
+ARCHIVE_MAINTENANCE_OLD_ORPHAN_DAYS_SETTING = SourceSystemConfigSetting(
+    key="archive_maintenance.old_orphan_days",
+    path=("archive_maintenance", "old_orphan_days"),
+    default_value=3,
+    value_type="int",
+    ge=1,
+)
+ARCHIVE_MAINTENANCE_MAX_WORKSPACES_PER_RUN_SETTING = SourceSystemConfigSetting(
+    key="archive_maintenance.max_workspaces_per_run",
+    path=("archive_maintenance", "max_workspaces_per_run"),
+    default_value=200,
+    value_type="int",
+    ge=1,
+)
+ARCHIVE_MAINTENANCE_MAX_FILES_PER_WORKSPACE_SETTING = (
+    SourceSystemConfigSetting(
+        key="archive_maintenance.max_files_per_workspace",
+        path=("archive_maintenance", "max_files_per_workspace"),
+        default_value=100,
+        value_type="int",
+        ge=1,
+    )
+)
+ARCHIVE_MAINTENANCE_MAX_FILES_PER_RUN_SETTING = SourceSystemConfigSetting(
+    key="archive_maintenance.max_files_per_run",
+    path=("archive_maintenance", "max_files_per_run"),
+    default_value=5000,
+    value_type="int",
+    ge=1,
+)
+ARCHIVE_MAINTENANCE_TIMEOUT_SECONDS_SETTING = SourceSystemConfigSetting(
+    key="archive_maintenance.timeout_seconds",
+    path=("archive_maintenance", "timeout_seconds"),
+    default_value=900,
+    value_type="int",
+    ge=1,
+)
+QUERY_RETRY_ENABLED_SETTING = SourceSystemConfigSetting(
+    key="query_retry.enabled",
+    path=("query_retry", "enabled"),
+    default_value=False,
+    value_type="bool",
+)
+QUERY_RETRY_MAX_RETRIES_SETTING = SourceSystemConfigSetting(
+    key="query_retry.max_retries",
+    path=("query_retry", "max_retries"),
+    default_value=3,
+    value_type="int",
+    ge=1,
+)
+QUERY_RETRY_BACKOFF_BASE_SETTING = SourceSystemConfigSetting(
+    key="query_retry.backoff_base",
+    path=("query_retry", "backoff_base"),
+    default_value=2.0,
+    value_type="float",
+    ge=0.5,
+)
+QUERY_RETRY_BACKOFF_CAP_SETTING = SourceSystemConfigSetting(
+    key="query_retry.backoff_cap",
+    path=("query_retry", "backoff_cap"),
+    default_value=30.0,
+    value_type="float",
+    ge=1.0,
+)
+LLM_MAX_CONCURRENT_SETTING = SourceSystemConfigSetting(
+    key="llm_rate_limiter.llm_max_concurrent",
+    path=("llm_rate_limiter", "llm_max_concurrent"),
+    default_value=LLM_MAX_CONCURRENT,
+    value_type="int",
+    ge=1,
+)
+LLM_CHAT_MAX_CONCURRENT_SETTING = SourceSystemConfigSetting(
+    key="llm_rate_limiter.llm_chat_max_concurrent",
+    path=("llm_rate_limiter", "llm_chat_max_concurrent"),
+    default_value=DEFAULT_LLM_CHAT_MAX_CONCURRENT,
+    value_type="optional_int",
+    ge=1,
+)
+LLM_CRON_MAX_CONCURRENT_SETTING = SourceSystemConfigSetting(
+    key="llm_rate_limiter.llm_cron_max_concurrent",
+    path=("llm_rate_limiter", "llm_cron_max_concurrent"),
+    default_value=DEFAULT_LLM_CRON_MAX_CONCURRENT,
+    value_type="optional_int",
+    ge=1,
+)
+LLM_MAX_QPM_SETTING = SourceSystemConfigSetting(
+    key="llm_rate_limiter.llm_max_qpm",
+    path=("llm_rate_limiter", "llm_max_qpm"),
+    default_value=LLM_MAX_QPM,
+    value_type="int",
+    ge=0,
+)
+LLM_RATE_LIMIT_PAUSE_SETTING = SourceSystemConfigSetting(
+    key="llm_rate_limiter.llm_rate_limit_pause",
+    path=("llm_rate_limiter", "llm_rate_limit_pause"),
+    default_value=LLM_RATE_LIMIT_PAUSE,
+    value_type="float",
+    ge=1.0,
+)
+LLM_RATE_LIMIT_JITTER_SETTING = SourceSystemConfigSetting(
+    key="llm_rate_limiter.llm_rate_limit_jitter",
+    path=("llm_rate_limiter", "llm_rate_limit_jitter"),
+    default_value=LLM_RATE_LIMIT_JITTER,
+    value_type="float",
+    ge=0.0,
+)
+LLM_ACQUIRE_TIMEOUT_SETTING = SourceSystemConfigSetting(
+    key="llm_rate_limiter.llm_acquire_timeout",
+    path=("llm_rate_limiter", "llm_acquire_timeout"),
+    default_value=LLM_ACQUIRE_TIMEOUT,
+    value_type="float",
+    ge=10.0,
+)
+LLM_CHAT_ACQUIRE_TIMEOUT_SETTING = SourceSystemConfigSetting(
+    key="llm_rate_limiter.llm_chat_acquire_timeout",
+    path=("llm_rate_limiter", "llm_chat_acquire_timeout"),
+    default_value=None,
+    value_type="optional_float",
+    ge=10.0,
+)
+LLM_CRON_ACQUIRE_TIMEOUT_SETTING = SourceSystemConfigSetting(
+    key="llm_rate_limiter.llm_cron_acquire_timeout",
+    path=("llm_rate_limiter", "llm_cron_acquire_timeout"),
+    default_value=None,
+    value_type="optional_float",
+    ge=10.0,
+)
+CRON_NOTIFICATIONS_SKIP_WEEKEND_ZHAOHU_ENABLED_SETTING = (
+    SourceSystemConfigSetting(
+        key="cron_notifications.skip_weekend_zhaohu_enabled",
+        path=("cron_notifications", "skip_weekend_zhaohu_enabled"),
+        default_value=False,
+        value_type="bool",
+    )
+)
 SYSTEM_PROMPT_INJECTIONS_PATH = ("system_prompt_injections",)
 SYSTEM_PROMPT_INJECTIONS_DEFAULT: list[str] = []
 
 CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES: tuple[SourceSystemConfigSwitch, ...] = (
     CHAT_TASK_PROGRESS_ENABLED_SWITCH,
+    NORMAL_MODE_PLAN_INTERACTION_TOOLS_ENABLED_SWITCH,
     DATABASE_ACCESS_GUARD_ENABLED_SWITCH,
 )
 CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS: tuple[
@@ -133,34 +300,68 @@ CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS: tuple[
     ...,
 ] = (
     CHAT_TASK_PROGRESS_ENABLED_SWITCH,
+    NORMAL_MODE_PLAN_INTERACTION_TOOLS_ENABLED_SWITCH,
     DATABASE_ACCESS_GUARD_ENABLED_SWITCH,
     TOOL_RESULT_COMPACT_ENABLED_SETTING,
     TOOL_RESULT_COMPACT_RECENT_N_SETTING,
     TOOL_RESULT_COMPACT_OLD_MAX_BYTES_SETTING,
     TOOL_RESULT_COMPACT_RECENT_MAX_BYTES_SETTING,
     TOOL_RESULT_COMPACT_RETENTION_DAYS_SETTING,
-    FILE_READ_TRUNCATION_ENABLED_SETTING,
-    FILE_READ_TRUNCATION_MAX_BYTES_SETTING,
+    APPROVAL_NOTIFICATIONS_ZHAOHU_TOOL_GUARD_ENABLED_SETTING,
     CRON_UNREAD_AUTO_PAUSE_ENABLED_SETTING,
     CRON_UNREAD_AUTO_PAUSE_THRESHOLD_SETTING,
     CRON_TASK_SESSION_CLEANUP_ENABLED_SETTING,
     CRON_TASK_SESSION_CLEANUP_RETENTION_DAYS_SETTING,
     CRON_TASK_SESSION_CLEANUP_CRON_SETTING,
+    ARCHIVE_MAINTENANCE_ENABLED_SETTING,
+    ARCHIVE_MAINTENANCE_CRON_SETTING,
+    ARCHIVE_MAINTENANCE_OLD_ORPHAN_DAYS_SETTING,
+    ARCHIVE_MAINTENANCE_MAX_WORKSPACES_PER_RUN_SETTING,
+    ARCHIVE_MAINTENANCE_MAX_FILES_PER_WORKSPACE_SETTING,
+    ARCHIVE_MAINTENANCE_MAX_FILES_PER_RUN_SETTING,
+    ARCHIVE_MAINTENANCE_TIMEOUT_SECONDS_SETTING,
+    QUERY_RETRY_ENABLED_SETTING,
+    QUERY_RETRY_MAX_RETRIES_SETTING,
+    QUERY_RETRY_BACKOFF_BASE_SETTING,
+    QUERY_RETRY_BACKOFF_CAP_SETTING,
+    LLM_MAX_CONCURRENT_SETTING,
+    LLM_CHAT_MAX_CONCURRENT_SETTING,
+    LLM_CRON_MAX_CONCURRENT_SETTING,
+    LLM_MAX_QPM_SETTING,
+    LLM_RATE_LIMIT_PAUSE_SETTING,
+    LLM_RATE_LIMIT_JITTER_SETTING,
+    LLM_ACQUIRE_TIMEOUT_SETTING,
+    LLM_CHAT_ACQUIRE_TIMEOUT_SETTING,
+    LLM_CRON_ACQUIRE_TIMEOUT_SETTING,
+    CRON_NOTIFICATIONS_SKIP_WEEKEND_ZHAOHU_ENABLED_SETTING,
 )
 
 _MISSING = object()
 _TRUE_STRINGS = frozenset({"true", "1", "yes", "on"})
 _FALSE_STRINGS = frozenset({"false", "0", "no", "off"})
-_IMMEDIATE_TRUNCATION_ENABLED_SETTINGS = (
-    FILE_READ_TRUNCATION_ENABLED_SETTING,
+_MODEL_CALL_POLICY_SETTINGS = (
+    QUERY_RETRY_ENABLED_SETTING,
+    QUERY_RETRY_MAX_RETRIES_SETTING,
+    QUERY_RETRY_BACKOFF_BASE_SETTING,
+    QUERY_RETRY_BACKOFF_CAP_SETTING,
+    LLM_MAX_CONCURRENT_SETTING,
+    LLM_CHAT_MAX_CONCURRENT_SETTING,
+    LLM_CRON_MAX_CONCURRENT_SETTING,
+    LLM_MAX_QPM_SETTING,
+    LLM_RATE_LIMIT_PAUSE_SETTING,
+    LLM_RATE_LIMIT_JITTER_SETTING,
+    LLM_ACQUIRE_TIMEOUT_SETTING,
+    LLM_CHAT_ACQUIRE_TIMEOUT_SETTING,
+    LLM_CRON_ACQUIRE_TIMEOUT_SETTING,
 )
 _DEPRECATED_SYSTEM_SECTION_KEYS = frozenset(
     {
         "external_tool_output_truncation",
+        "file_read_truncation",
     },
 )
 _PRESERVED_DEFAULT_SETTING_PATHS = frozenset(
-    setting.path for setting in _IMMEDIATE_TRUNCATION_ENABLED_SETTINGS
+    setting.path for setting in _MODEL_CALL_POLICY_SETTINGS
 )
 
 
@@ -208,7 +409,6 @@ def prune_registered_default_overrides(
             pruned.pop(SYSTEM_PROMPT_INJECTIONS_PATH[0], None)
         else:
             pruned[SYSTEM_PROMPT_INJECTIONS_PATH[0]] = normalized
-    _drop_immediate_truncation_sections_without_enabled(pruned)
     return pruned
 
 
@@ -226,6 +426,28 @@ def is_chat_task_progress_enabled(config: Any | None) -> bool:
         CHAT_TASK_PROGRESS_ENABLED_SWITCH.key,
         value,
         default=bool(CHAT_TASK_PROGRESS_ENABLED_SWITCH.default_value),
+        strict=False,
+    )
+
+
+def is_normal_mode_plan_interaction_tools_enabled(
+    config: Any | None,
+) -> bool:
+    """读取普通模式计划交互工具开关，缺失时回退为默认关闭。"""
+    raw_config = _normalize_config_payload(config)
+    merged = merge_source_system_config_with_defaults(raw_config)
+    value = _get_nested_value(
+        merged,
+        NORMAL_MODE_PLAN_INTERACTION_TOOLS_ENABLED_SWITCH.path,
+    )
+    if value is _MISSING:
+        return bool(NORMAL_MODE_PLAN_INTERACTION_TOOLS_ENABLED_SWITCH.default_value)
+    return _coerce_registered_boolean_value(
+        NORMAL_MODE_PLAN_INTERACTION_TOOLS_ENABLED_SWITCH.key,
+        value,
+        default=bool(
+            NORMAL_MODE_PLAN_INTERACTION_TOOLS_ENABLED_SWITCH.default_value,
+        ),
         strict=False,
     )
 
@@ -308,13 +530,33 @@ def normalize_registered_setting_values(
             coerced = _coerce_registered_int_value(setting, value)
             _set_nested_value(normalized, setting.path, coerced)
             continue
-        if setting.value_type == "str":
-            coerced = _coerce_registered_string_value(setting, value)
-            if setting is CRON_TASK_SESSION_CLEANUP_CRON_SETTING:
-                coerced = _normalize_daily_cron_value(setting, coerced)
+        if setting.value_type == "optional_int":
+            coerced = _coerce_registered_optional_int_value(setting, value)
             _set_nested_value(normalized, setting.path, coerced)
+            continue
+        if setting.value_type == "float":
+            coerced = _coerce_registered_float_value(setting, value)
+            _set_nested_value(normalized, setting.path, coerced)
+            continue
+        if setting.value_type == "optional_float":
+            coerced = _coerce_registered_optional_float_value(setting, value)
+            _set_nested_value(normalized, setting.path, coerced)
+            continue
+        if setting.value_type == "str":
+            string_value = _coerce_registered_string_value(setting, value)
+            if setting in (
+                CRON_TASK_SESSION_CLEANUP_CRON_SETTING,
+                ARCHIVE_MAINTENANCE_CRON_SETTING,
+            ):
+                string_value = _normalize_daily_cron_value(
+                    setting,
+                    string_value,
+                )
+            _set_nested_value(normalized, setting.path, string_value)
     if validate_cross_ranges:
         _validate_explicit_tool_result_compact_ranges(raw_config, normalized)
+        _validate_explicit_query_retry_ranges(raw_config, normalized)
+        _validate_explicit_llm_rate_limiter_ranges(raw_config, normalized)
     return normalized
 
 
@@ -461,6 +703,45 @@ def _coerce_registered_int_value(
     return value
 
 
+def _coerce_registered_optional_int_value(
+    setting: SourceSystemConfigSetting,
+    value: Any,
+) -> int | None:
+    """将注册可空整数配置收敛并校验取值范围。"""
+    if value is None:
+        return None
+    return _coerce_registered_int_value(setting, value)
+
+
+def _coerce_registered_float_value(
+    setting: SourceSystemConfigSetting,
+    value: Any,
+) -> float:
+    """将注册浮点配置收敛并校验取值范围。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{setting.key} must be a number, got {value!r}")
+    coerced = float(value)
+    if setting.ge is not None and coerced < setting.ge:
+        raise ValueError(
+            f"{setting.key} must be greater than or equal to {setting.ge}",
+        )
+    if setting.le is not None and coerced > setting.le:
+        raise ValueError(
+            f"{setting.key} must be less than or equal to {setting.le}",
+        )
+    return coerced
+
+
+def _coerce_registered_optional_float_value(
+    setting: SourceSystemConfigSetting,
+    value: Any,
+) -> float | None:
+    """将注册可空浮点配置收敛并校验取值范围。"""
+    if value is None:
+        return None
+    return _coerce_registered_float_value(setting, value)
+
+
 def _coerce_registered_string_value(
     setting: SourceSystemConfigSetting,
     value: Any,
@@ -499,17 +780,6 @@ def _normalize_daily_cron_value(
     return f"{minute_int} {hour_int} * * *"
 
 
-def _drop_immediate_truncation_sections_without_enabled(
-    payload: dict[str, Any],
-) -> None:
-    """即时截断缺少 enabled 时视为未配置，避免空对象误判为显式接管。"""
-    for setting in _IMMEDIATE_TRUNCATION_ENABLED_SETTINGS:
-        section_key = setting.path[0]
-        section = payload.get(section_key)
-        if isinstance(section, dict) and "enabled" not in section:
-            payload.pop(section_key, None)
-
-
 def _drop_deprecated_system_sections(payload: dict[str, Any]) -> None:
     """移除已经下线的系统配置段，避免死配置在读写链路中回流。"""
     for key in _DEPRECATED_SYSTEM_SECTION_KEYS:
@@ -544,18 +814,99 @@ def _validate_explicit_tool_result_compact_ranges(
         )
 
 
+def _validate_explicit_query_retry_ranges(
+    raw_config: dict[str, Any],
+    payload: dict[str, Any],
+) -> None:
+    """只校验 source 原始输入中同时显式出现的 Query 重试退避关系。"""
+    raw_query_retry = raw_config.get("query_retry")
+    if not isinstance(raw_query_retry, dict):
+        return
+    if (
+        "backoff_base" not in raw_query_retry
+        or "backoff_cap" not in raw_query_retry
+    ):
+        return
+    backoff_base = _get_nested_value(
+        payload,
+        QUERY_RETRY_BACKOFF_BASE_SETTING.path,
+    )
+    backoff_cap = _get_nested_value(
+        payload,
+        QUERY_RETRY_BACKOFF_CAP_SETTING.path,
+    )
+    if backoff_cap < backoff_base:
+        raise ValueError(
+            "query_retry.backoff_cap must be greater than or equal to "
+            "query_retry.backoff_base",
+        )
+
+
+def _validate_explicit_llm_rate_limiter_ranges(
+    raw_config: dict[str, Any],
+    payload: dict[str, Any],
+) -> None:
+    """只校验 source 原始输入中显式出现的 LLM 限流等待关系。"""
+    raw_rate_limiter = raw_config.get("llm_rate_limiter")
+    if not isinstance(raw_rate_limiter, dict):
+        return
+    pause = _get_nested_value(payload, LLM_RATE_LIMIT_PAUSE_SETTING.path)
+    jitter = _get_nested_value(payload, LLM_RATE_LIMIT_JITTER_SETTING.path)
+    if pause is _MISSING or jitter is _MISSING:
+        return
+    cooldown = float(pause) + float(jitter)
+    timeout_settings = (
+        LLM_ACQUIRE_TIMEOUT_SETTING,
+        LLM_CHAT_ACQUIRE_TIMEOUT_SETTING,
+        LLM_CRON_ACQUIRE_TIMEOUT_SETTING,
+    )
+    for setting in timeout_settings:
+        if setting.path[-1] not in raw_rate_limiter:
+            continue
+        value = _get_nested_value(payload, setting.path)
+        if value is None:
+            continue
+        if value <= cooldown:
+            raise ValueError(
+                f"{setting.key} must be greater than "
+                "llm_rate_limiter.llm_rate_limit_pause + "
+                "llm_rate_limiter.llm_rate_limit_jitter",
+            )
+
+
 __all__ = [
+    "ARCHIVE_MAINTENANCE_CRON_SETTING",
+    "ARCHIVE_MAINTENANCE_ENABLED_SETTING",
+    "ARCHIVE_MAINTENANCE_MAX_FILES_PER_RUN_SETTING",
+    "ARCHIVE_MAINTENANCE_MAX_FILES_PER_WORKSPACE_SETTING",
+    "ARCHIVE_MAINTENANCE_MAX_WORKSPACES_PER_RUN_SETTING",
+    "ARCHIVE_MAINTENANCE_OLD_ORPHAN_DAYS_SETTING",
+    "ARCHIVE_MAINTENANCE_TIMEOUT_SECONDS_SETTING",
+    "APPROVAL_NOTIFICATIONS_ZHAOHU_TOOL_GUARD_ENABLED_SETTING",
     "CHAT_TASK_PROGRESS_ENABLED_SWITCH",
     "CRON_TASK_SESSION_CLEANUP_CRON_SETTING",
     "CRON_TASK_SESSION_CLEANUP_ENABLED_SETTING",
     "CRON_TASK_SESSION_CLEANUP_RETENTION_DAYS_SETTING",
+    "CRON_NOTIFICATIONS_SKIP_WEEKEND_ZHAOHU_ENABLED_SETTING",
     "CRON_UNREAD_AUTO_PAUSE_ENABLED_SETTING",
     "CRON_UNREAD_AUTO_PAUSE_THRESHOLD_SETTING",
     "CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS",
     "CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES",
     "DATABASE_ACCESS_GUARD_ENABLED_SWITCH",
-    "FILE_READ_TRUNCATION_ENABLED_SETTING",
-    "FILE_READ_TRUNCATION_MAX_BYTES_SETTING",
+    "LLM_ACQUIRE_TIMEOUT_SETTING",
+    "LLM_CHAT_ACQUIRE_TIMEOUT_SETTING",
+    "LLM_CHAT_MAX_CONCURRENT_SETTING",
+    "LLM_CRON_ACQUIRE_TIMEOUT_SETTING",
+    "LLM_CRON_MAX_CONCURRENT_SETTING",
+    "LLM_MAX_CONCURRENT_SETTING",
+    "LLM_MAX_QPM_SETTING",
+    "LLM_RATE_LIMIT_JITTER_SETTING",
+    "LLM_RATE_LIMIT_PAUSE_SETTING",
+    "NORMAL_MODE_PLAN_INTERACTION_TOOLS_ENABLED_SWITCH",
+    "QUERY_RETRY_BACKOFF_BASE_SETTING",
+    "QUERY_RETRY_BACKOFF_CAP_SETTING",
+    "QUERY_RETRY_ENABLED_SETTING",
+    "QUERY_RETRY_MAX_RETRIES_SETTING",
     "SourceSystemConfigSwitch",
     "SourceSystemConfigSetting",
     "SYSTEM_PROMPT_INJECTIONS_DEFAULT",
@@ -569,6 +920,7 @@ __all__ = [
     "get_system_prompt_injections",
     "is_chat_task_progress_enabled",
     "is_database_access_guard_enabled",
+    "is_normal_mode_plan_interaction_tools_enabled",
     "merge_source_system_config_with_defaults",
     "normalize_registered_setting_values",
     "normalize_registered_switch_values",

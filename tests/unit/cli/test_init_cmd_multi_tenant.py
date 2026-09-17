@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 import pytest
 from click.testing import CliRunner
-from swe.cli.init_cmd import init_cmd
+from swe.cli.init_cmd import init_cmd, init_source_template_cmd
 
 
 def _patch_provider_manager(monkeypatch):
@@ -107,3 +107,45 @@ def test_init_cmd_does_not_import_telemetry(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert (tmp_path / "default" / "config.json").exists()
+
+
+def test_init_source_template_cmd_uses_explicit_provisioner(
+    tmp_path,
+    monkeypatch,
+):
+    """The dedicated command cannot be confused with regular tenant init."""
+    import swe.app.workspace.source_template_provisioner as provisioner_module
+
+    observed = {}
+
+    class FakeProvisioner:
+        def __init__(self, base_working_dir):
+            observed["base_working_dir"] = base_working_dir
+
+        async def ensure(self, source_id):
+            observed["source_id"] = source_id
+            return type(
+                "Result",
+                (),
+                {
+                    "source_id": source_id,
+                    "template_name": "default_ruice",
+                    "status": "created",
+                },
+            )()
+
+    monkeypatch.setattr("swe.cli.init_cmd.WORKING_DIR", tmp_path)
+    monkeypatch.setattr(
+        provisioner_module,
+        "SourceTemplateProvisioner",
+        FakeProvisioner,
+    )
+
+    result = CliRunner().invoke(
+        init_source_template_cmd,
+        ["--source-id", "ruice"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert observed == {"base_working_dir": tmp_path, "source_id": "ruice"}
+    assert "status=created" in result.output

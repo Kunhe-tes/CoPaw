@@ -111,6 +111,66 @@ async def test_profile_identity_block_requires_heading_and_fields(
 
 
 @pytest.mark.asyncio
+async def test_profile_identity_block_accepts_second_level_heading(
+    tmp_path,
+    monkeypatch,
+):
+    context = _context(tmp_path, monkeypatch)
+    profile_path = config_utils.get_tenant_working_dir(context.scope_id) / "PROFILE.md"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text(
+        "## 用户身份信息\n"
+        "分行号：001\n"
+        "网点机构编号：002\n"
+        "岗位编号：003\n"
+        "客户经理ID：alice\n",
+        encoding="utf-8",
+    )
+
+    result = await ProfileIdentityBlockStrategy().run(
+        context,
+        SkillReadinessCheckConfig(name="profile_identity_block"),
+    )
+
+    assert result.status == "pass"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "identity_line",
+    [
+        "# 用户身份信息\n",
+        "#### 用户身份信息\n",
+        "###### 用户身份信息\n",
+        "用户身份信息\n",
+    ],
+)
+async def test_profile_identity_block_accepts_standalone_identity_line(
+    tmp_path,
+    monkeypatch,
+    identity_line,
+):
+    context = _context(tmp_path, monkeypatch)
+    profile_path = config_utils.get_tenant_working_dir(context.scope_id) / "PROFILE.md"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text(
+        identity_line
+        + "分行号：001\n"
+        + "网点机构编号：002\n"
+        + "岗位编号：003\n"
+        + "客户经理ID：alice\n",
+        encoding="utf-8",
+    )
+
+    result = await ProfileIdentityBlockStrategy().run(
+        context,
+        SkillReadinessCheckConfig(name="profile_identity_block"),
+    )
+
+    assert result.status == "pass"
+
+
+@pytest.mark.asyncio
 async def test_profile_identity_block_uses_current_workspace_profile(
     tmp_path,
     monkeypatch,

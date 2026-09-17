@@ -1,4 +1,4 @@
-import { Button, Flex, Input } from "antd";
+import { Flex, Input } from "antd";
 import { Suggestion } from "@ant-design/x";
 import classnames from "classnames";
 import { useMergedState } from "rc-util";
@@ -13,9 +13,10 @@ import { ActionButtonContext } from "./components/ActionButton";
 import ClearButton from "./components/ClearButton";
 import LoadingButton from "./components/LoadingButton";
 import SendButton from "./components/SendButton";
-import SpeechButton from "./components/SpeechButton";
+// import DictationControl from "../DictationControl";
+import dictationStyles from "../DictationControl/index.module.less";
+// import { appendChatInputText } from "../chatInputDraft";
 import Style from "./style";
-import useSpeech, { type AllowSpeech } from "./useSpeech";
 import ModeSelect from "./ModeSelect";
 import type {
   InputRef as AntdInputRef,
@@ -24,11 +25,15 @@ import type {
   GetProps,
 } from "antd";
 import BeforeUIContainer from "./BeforeUIContainer";
+import { SkillTokenEditor } from "../SkillMentions/SkillTokenEditor";
+import type { SkillMentionsData } from "../SkillMentions/useSkillMentions";
 
 export type SubmitType = "enter" | "shiftEnter" | false;
 
 type TextareaProps = GetProps<typeof Input.TextArea>;
 type SuggestionItems = Exclude<GetProp<typeof Suggestion, "items">, () => void>;
+
+const SHOW_LENGTH_COUNTER = false;
 
 export interface SenderComponents {
   input?: React.ComponentType<TextareaProps>;
@@ -40,7 +45,7 @@ export type ActionsRender = (
     components: {
       SendButton: React.ComponentType<ButtonProps>;
       ClearButton: React.ComponentType<ButtonProps>;
-      LoadingButton: React.ComponentType<ButtonProps>;
+      LoadingButton: typeof LoadingButton;
     };
   },
 ) => React.ReactNode;
@@ -56,6 +61,7 @@ export interface SenderProps
    * ]
    */
   suggestions?: { label?: string | React.ReactNode; value: string }[];
+  skillMentions?: SkillMentionsData;
 
   /**
    * @description 输入框的默认初始值，仅在非受控模式下生效
@@ -186,6 +192,8 @@ export interface SenderProps
    * @descriptionEn Prefix UI
    */
   prefix?: React.ReactNode | React.ReactNode[];
+  /** Custom content or renderer for the send/stop action area. */
+  actions?: React.ReactNode | ActionsRender;
   /**
    * @description 头部 UI
    * @descriptionEn Header UI
@@ -279,6 +287,7 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     defaultValue,
     value,
     readOnly,
+    placeholder,
     enableFocusExpand = false,
     sendDisabled = false,
     allowEmptySubmit = false,
@@ -289,17 +298,17 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     onChange,
     onFocus,
     onBlur,
-    // @ts-ignore
     actions,
     onKeyPress,
     onKeyDown,
     suggestions,
+    skillMentions,
     disabled,
     header,
     // @ts-ignore
     onPaste,
     // @ts-ignore
-    allowSpeech,
+    // allowSpeech,
     // @ts-ignore
     onPasteFile,
     // @ts-ignore
@@ -308,18 +317,39 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
   } = props;
 
   const [focus, setFocus] = useState(false);
+  // const [speechRecording, setSpeechRecording] = useState(false);
+  const speechRecording = false;
   const autoSize = React.useMemo(() => ({ maxRows: 5, minRows: 2 }), []);
 
   const { direction, getPrefixCls } = useProviderContext();
   const prefixCls = getPrefixCls("sender");
 
   const containerRef = React.useRef<HTMLDivElement>(null);
+  const [mentionMenuContainer, setMentionMenuContainer] =
+    useState<HTMLDivElement | null>(null);
+  const setContainerRef = React.useCallback((node: HTMLDivElement | null) => {
+    containerRef.current = node;
+    setMentionMenuContainer(node);
+  }, []);
   const inputRef = React.useRef<AntdInputRef>(null);
+  const tokenEditorRef = React.useRef<HTMLDivElement>(null);
 
   useProxyImperativeHandle(ref, () => ({
     nativeElement: containerRef.current!,
-    focus: inputRef.current?.focus!,
-    blur: inputRef.current?.blur!,
+    focus: () => {
+      if (tokenEditorRef.current) {
+        tokenEditorRef.current.focus();
+      } else {
+        inputRef.current?.focus();
+      }
+    },
+    blur: () => {
+      if (tokenEditorRef.current) {
+        tokenEditorRef.current.blur();
+      } else {
+        inputRef.current?.blur();
+      }
+    },
   }));
 
   useFocusWithin(containerRef, {
@@ -356,6 +386,7 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     [`${prefixCls}-disabled`]: disabled,
     [`${prefixCls}-focus`]: focus && enableFocusExpand,
     [`${prefixCls}-blur`]: !focus && enableFocusExpand,
+    [`${prefixCls}-with-skill-editor`]: Boolean(skillMentions),
   });
 
   const actionBtnCls = `${prefixCls}-actions-btn`;
@@ -373,13 +404,8 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     }
   };
 
-  const [speechPermission, triggerSpeech, speechRecording] = useSpeech(
-    (transcript) => {
-      triggerValueChange(`${innerValue} ${transcript}`);
-    },
-    allowSpeech,
-  );
-  const hasSuggestions = Array.isArray(suggestions) && suggestions.length > 0;
+  const hasSuggestions =
+    !skillMentions && Array.isArray(suggestions) && suggestions.length > 0;
   const slashCommandKeyword = React.useMemo(
     () => getSlashCommandKeyword(innerValue),
     [innerValue],
@@ -449,12 +475,14 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     isCompositionRef.current = true;
   };
 
-  const onInternalCompositionEnd = (
-    e: React.CompositionEvent<HTMLTextAreaElement>,
-  ) => {
+  const onInternalCompositionEnd = (e: React.CompositionEvent<HTMLElement>) => {
     isCompositionRef.current = false;
     if (props.maxLength) {
-      const currentValue = (e.target as HTMLTextAreaElement).value;
+      const target = e.target as HTMLElement;
+      const currentValue =
+        target instanceof HTMLTextAreaElement
+          ? target.value
+          : target.textContent || "";
       if (currentValue.length > props.maxLength) {
         triggerValueChange(currentValue.slice(0, props.maxLength));
       }
@@ -513,15 +541,33 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     );
   }, [props.prefix]);
 
-  let actionNode: React.ReactNode = (
-    <Flex className={`${actionListCls}-presets`}>
-      {loading ? (
-        <LoadingButton loading={loading} disabled={!!disabled} />
-      ) : (
-        <SendButton disabled={!!disabled} />
-      )}
-    </Flex>
+  // 临时屏蔽语音输入 UI，保留控件实现以便后续重新开放。
+  // const dictationControl = allowSpeech ? (
+  //   <DictationControl
+  //     disabled={!!disabled || !!readOnly || !!loading}
+  //     onActiveChange={setSpeechRecording}
+  //     onTranscript={(text) => {
+  //       const next = appendChatInputText(innerValue, text);
+  //       triggerValueChange(
+  //         props.maxLength ? next.slice(0, props.maxLength) : next,
+  //       );
+  //       (tokenEditorRef.current || inputRef.current)?.focus();
+  //     }}
+  //   />
+  // ) : null;
+  const defaultActionNode = (
+    <>
+      {/* {dictationControl} */}
+      <Flex className={`${actionListCls}-presets`}>
+        {loading ? (
+          <LoadingButton loading={loading} disabled={!!disabled} />
+        ) : (
+          <SendButton disabled={!!disabled} />
+        )}
+      </Flex>
+    </>
   );
+  let actionNode: React.ReactNode = defaultActionNode;
 
   if (typeof actions === "function") {
     actionNode = actions(actionNode, {
@@ -532,7 +578,12 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
       },
     });
   } else if (actions) {
-    actionNode = actions;
+    actionNode = (
+      <>
+        {/* {dictationControl} */}
+        {actions}
+      </>
+    );
   }
 
   const contextValue = {
@@ -540,13 +591,14 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     onSend: triggerSend,
     onSendDisabled:
       ((!innerValue || !innerValue.trim()) && !allowEmptySubmit) ||
-      sendDisabled,
+      sendDisabled ||
+      speechRecording,
     onClear: triggerClear,
     onClearDisabled: !innerValue,
     onCancel,
     onCancelDisabled: !loading,
-    onSpeech: () => triggerSpeech(false),
-    onSpeechDisabled: !speechPermission,
+    onSpeech: () => undefined,
+    onSpeechDisabled: true,
     speechRecording,
     disabled: !!disabled,
   };
@@ -557,6 +609,54 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     open?: boolean;
   }) => {
     suggestionOpenRef.current = !!suggestionProps?.open;
+
+    if (skillMentions) {
+      return (
+        <SkillTokenEditor
+          {...domProps}
+          ref={tokenEditorRef}
+          aria-label={props.placeholder || "消息"}
+          className={classnames(
+            inputCls,
+            `${prefixCls}-skill-editor`,
+            classNames.input,
+          )}
+          disabled={!!disabled}
+          mentionMenuContainer={mentionMenuContainer}
+          readOnly={readOnly}
+          onKeyDown={(event) => {
+            const shouldSubmit =
+              event.key === "Enter" &&
+              !event.nativeEvent.isComposing &&
+              ((submitType === "enter" && !event.shiftKey) ||
+                (submitType === "shiftEnter" && event.shiftKey));
+            if (shouldSubmit) {
+              event.preventDefault();
+              triggerSend();
+              return;
+            }
+            onKeyDown?.(event);
+          }}
+          onCompositionStart={onInternalCompositionStart}
+          onCompositionEnd={onInternalCompositionEnd}
+          onPaste={onInternalPaste}
+          onValueChange={(nextValue) =>
+            triggerValueChange(
+              props.maxLength && !isCompositionRef.current
+                ? nextValue.slice(0, props.maxLength)
+                : nextValue,
+            )
+          }
+          placeholder={placeholder}
+          skillMentions={skillMentions}
+          style={styles.input}
+          value={innerValue.slice(
+            0,
+            props.maxLength || Number.MAX_SAFE_INTEGER,
+          )}
+        />
+      );
+    }
 
     return (
       <InputTextArea
@@ -599,8 +699,6 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
               suggestionProps?.onTrigger?.(false);
             }
           }
-
-          triggerSpeech(true);
         }}
         onKeyPress={onKeyPress}
         onPressEnter={onInternalPressEnter}
@@ -656,7 +754,7 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     <>
       <Style />
 
-      <div ref={containerRef} className={mergedCls} style={style}>
+      <div ref={setContainerRef} className={mergedCls} style={style}>
         {header && (
           <SendHeaderContext.Provider
             value={{ prefixCls, focus, enableFocusExpand }}
@@ -680,34 +778,37 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
           )}
 
           <div className={`${prefixCls}-content-bottom`}>
-            {prefix.length > 0 && (
-              <div
-                className={classnames(`${prefixCls}-prefix`, classNames.prefix)}
-                style={styles.prefix}
-              >
-                <Flex gap={8}>
-                  {/* {allowSpeech && (
-                    <ActionButtonContext.Provider value={contextValue}>
-                      <SpeechButton />
-                    </ActionButtonContext.Provider>
-                  )} */}
-                  {prefix}
-                </Flex>
-              </div>
-            )}
-            <div
-              className={classnames(actionListCls, classNames.actions)}
-              style={styles.actions}
-            >
-              {props.maxLength ? (
-                <div className={`${actionListCls}-length`}>
-                  {Math.min(innerValue.length, props.maxLength)}/
-                  {props.maxLength}
+            <div className={dictationStyles.toolbar}>
+              {!speechRecording && prefix.length > 0 && (
+                <div
+                  className={classnames(
+                    `${prefixCls}-prefix`,
+                    classNames.prefix,
+                  )}
+                  style={styles.prefix}
+                >
+                  <Flex gap={8}>{prefix}</Flex>
                 </div>
-              ) : null}
-              <ActionButtonContext.Provider value={contextValue}>
-                {actionNode}
-              </ActionButtonContext.Provider>
+              )}
+              <div
+                className={classnames(
+                  actionListCls,
+                  classNames.actions,
+                  dictationStyles.send,
+                  speechRecording && dictationStyles.actionGroupActive,
+                )}
+                style={styles.actions}
+              >
+                {SHOW_LENGTH_COUNTER && props.maxLength ? (
+                  <div className={`${actionListCls}-length`}>
+                    {Math.min(innerValue.length, props.maxLength)}/
+                    {props.maxLength}
+                  </div>
+                ) : null}
+                <ActionButtonContext.Provider value={contextValue}>
+                  {actionNode}
+                </ActionButtonContext.Provider>
+              </div>
             </div>
           </div>
         </div>

@@ -130,10 +130,16 @@ export interface MCPDistributeResult {
 
 /** MCP 分发响应 */
 export interface MCPDistributeResponse {
+  /** 异步任务 ID */
+  task_id: string;
+  /** 异步任务状态 */
+  status: string;
+  /** 是否复用已有任务 */
+  reused?: boolean;
   /** 来源条目标识 */
-  source_agent_id: string;
+  source_agent_id?: string;
   /** 分发结果列表 */
-  results: MCPDistributeResult[];
+  results?: MCPDistributeResult[];
 }
 
 /** MCP 市场元数据更新请求 */

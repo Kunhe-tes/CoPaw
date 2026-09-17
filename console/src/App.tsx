@@ -11,6 +11,8 @@ import "dayjs/locale/zh-cn";
 dayjs.extend(relativeTime);
 dayjs.locale("zh-cn");
 import MainLayout from "./layouts/MainLayout";
+import ChatSharePage from "./pages/ChatShare";
+import WealthWorkbench from "./pages/WealthWorkbench";
 import { ThemeProvider, useTheme } from "./contexts/ThemeContext";
 // ==================== 品牌主题 (Kun He) ====================
 import {
@@ -134,6 +136,16 @@ function AppInner() {
         <AntdApp>
           <Routes>
             <Route path="/login" element={<LoginPage />} />
+            <Route path="/chat-share/:token" element={<ChatSharePage />} />
+            {/* 智能财富工作台：独立骨架，不挂 MainLayout，样式与原型自包含 */}
+            <Route
+              path="/wealth/*"
+              element={
+                <AuthGuard>
+                  <WealthWorkbench />
+                </AuthGuard>
+              }
+            />
             <Route
               path="/*"
               element={
@@ -157,11 +169,11 @@ function App() {
   return (
     <ThemeProvider>
       <DynamicRenderProvider>
-      {/* ==================== 品牌主题 (Kun He) ==================== */}
-      {/* 包裹 BrandThemeProvider，根据 source 动态切换品牌配置 */}
-      <BrandThemeProvider>
-        <AppInner />
-      </BrandThemeProvider>
+        {/* ==================== 品牌主题 (Kun He) ==================== */}
+        {/* 包裹 BrandThemeProvider，根据 source 动态切换品牌配置 */}
+        <BrandThemeProvider>
+          <AppInner />
+        </BrandThemeProvider>
       </DynamicRenderProvider>
       {/* ==================== 品牌主题结束 ==================== */}
     </ThemeProvider>

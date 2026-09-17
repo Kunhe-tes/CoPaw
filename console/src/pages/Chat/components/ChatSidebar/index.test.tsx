@@ -1,5 +1,5 @@
 import React from "react";
-import { fireEvent, render, waitFor } from "@testing-library/react";
+import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import { Modal } from "antd";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ChatSidebar from ".";
@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   hasMoreSessions: vi.fn(),
   getSessionTotal: vi.fn(),
   getSessions: vi.fn(),
+  openExternalLink: vi.fn(),
   context: {
     sessions: [
       {
@@ -36,6 +37,11 @@ const mocks = vi.hoisted(() => ({
     getSessions: vi.fn(),
     isSessionsListLoading: false,
   },
+  iframeState: {
+    bbk: null as string | null,
+    source: null as string | null,
+    isOriginY: false,
+  },
 }));
 
 vi.mock("react-router-dom", () => ({
@@ -44,9 +50,29 @@ vi.mock("react-router-dom", () => ({
 }));
 
 vi.mock("antd", () => ({
-  Image: Object.assign(() => null, {
-    PreviewGroup: ({ children }: { children: React.ReactNode }) => children,
-  }),
+  Tooltip: ({ children }: { children: React.ReactNode }) => children,
+  Image: Object.assign(
+    ({ src }: { src?: string }) =>
+      src ? (
+        <img alt="guide-preview" data-testid="guide-image" src={src} />
+      ) : null,
+    {
+      PreviewGroup: ({
+        children,
+        preview,
+      }: {
+        children: React.ReactNode;
+        preview?: { visible?: boolean };
+      }) => (
+        <div
+          data-testid="guide-preview"
+          data-visible={String(Boolean(preview?.visible))}
+        >
+          {children}
+        </div>
+      ),
+    },
+  ),
   Modal: { confirm: vi.fn() },
 }));
 
@@ -104,6 +130,21 @@ vi.mock("@/stores/agentStore", () => ({
   }),
 }));
 
+vi.mock("@/stores/iframeStore", () => ({
+  useIframeStore: (
+    selector: (state: {
+      bbk: string | null;
+      source: string | null;
+      isOriginY: boolean;
+    }) => unknown,
+  ) => selector(mocks.iframeState),
+}));
+
+vi.mock("@/assets/others/note.png", () => ({ default: "guide-image.png" }));
+vi.mock("@/assets/others/sh_note.png", () => ({
+  default: "sh-guide-image.png",
+}));
+
 vi.mock("../../sessionApi", () => ({
   default: {
     getSessionList: vi.fn(),
@@ -124,12 +165,17 @@ describe("ChatSidebar infinite history scrolling", () => {
     mocks.hasMoreSessions.mockReset();
     mocks.getSessionTotal.mockReset();
     mocks.getSessions.mockReset();
+    mocks.openExternalLink.mockReset();
+    vi.stubGlobal("open", mocks.openExternalLink);
     vi.mocked(Modal.confirm).mockReset();
     vi.mocked(sessionApi.getSessionList).mockReset();
     vi.mocked(sessionApi.removeSession).mockReset();
     mocks.context.setSessions = mocks.setSessions;
     mocks.context.setSessionLoading = mocks.setSessionLoading;
     mocks.context.getSessions = mocks.getSessions;
+    mocks.iframeState.bbk = null;
+    mocks.iframeState.source = null;
+    mocks.iframeState.isOriginY = false;
     mocks.hasMoreSessions.mockReturnValue(true);
     mocks.getSessionTotal.mockReturnValue(120);
     mocks.getSessions.mockImplementation(() => mocks.context.sessions);
@@ -169,6 +215,33 @@ describe("ChatSidebar infinite history scrolling", () => {
     const { getAllByText } = render(<ChatSidebar tasks={[]} />);
 
     expect(getAllByText("历史记录(120)").length).toBeGreaterThan(0);
+  });
+
+  it("restores the sidebar from the collapsed toolbar", () => {
+    const { container } = render(<ChatSidebar tasks={[]} />);
+    const view = within(container);
+    const collapseButton = view.getByRole("button", { name: "收起导航" });
+
+    expect(collapseButton).toHaveClass(
+      "chat-sidebar-collapse-toggle--expanded",
+    );
+    expect(collapseButton.closest(".chat-sidebar-new-topic")).not.toBeNull();
+
+    fireEvent.click(collapseButton);
+
+    expect(view.getByRole("button", { name: "展开导航" })).toBeInTheDocument();
+    expect(container.querySelector(".chat-sidebar")).toBeNull();
+  });
+
+  it("subtracts visible task count from the history total", () => {
+    const tasks = [
+      { id: "task-1", task: { unread_execution_count: 0 } },
+      { id: "task-2", task: { unread_execution_count: 0 } },
+    ];
+
+    const { getAllByText } = render(<ChatSidebar tasks={tasks as never} />);
+
+    expect(getAllByText("历史记录(118)").length).toBeGreaterThan(0);
   });
 
   it("excludes the deleted session when refreshing after delete", async () => {
@@ -254,5 +327,80 @@ describe("ChatSidebar infinite history scrolling", () => {
         ]),
       );
     });
+  });
+
+  it("previews the guide image when bbk is 121 and source is RMASSIST", () => {
+    mocks.iframeState.bbk = "121";
+    mocks.iframeState.source = "RMASSIST";
+    mocks.iframeState.isOriginY = true;
+
+    const { container } = render(<ChatSidebar tasks={[]} />);
+    const guide = container.querySelector(
+      '[data-testid="guide-image"]',
+    ) as HTMLImageElement;
+
+    expect(guide).toHaveAttribute("src", "sh-guide-image.png");
+    expect(
+      container.querySelector('[data-testid="guide-preview"]'),
+    ).toHaveAttribute("data-visible", "false");
+
+    fireEvent.click(
+      container.querySelector(".chat-sidebar-footer-item") as HTMLElement,
+    );
+
+    expect(
+      container.querySelector('[data-testid="guide-preview"]'),
+    ).toHaveAttribute("data-visible", "true");
+    expect(mocks.openExternalLink).not.toHaveBeenCalled();
+  });
+
+  it("opens the placeholder link when the operation guide context does not match", () => {
+    mocks.iframeState.bbk = "121";
+    mocks.iframeState.source = "OTHER";
+    mocks.iframeState.isOriginY = true;
+
+    const { container } = render(<ChatSidebar tasks={[]} />);
+
+    expect(container.querySelector(".chat-sidebar-footer")).toHaveTextContent(
+      "操作指南",
+    );
+    expect(container.querySelector('[data-testid="guide-image"]')).toBeNull();
+    fireEvent.click(
+      container.querySelector(".chat-sidebar-footer-item") as HTMLElement,
+    );
+    expect(mocks.openExternalLink).toHaveBeenCalledWith(
+      "https://example.com",
+      "_blank",
+      "noopener,noreferrer",
+    );
+  });
+
+  it("hides the operation guide when origin is not Y", () => {
+    mocks.iframeState.bbk = "100";
+    mocks.iframeState.source = "OTHER";
+
+    const { container } = render(<ChatSidebar tasks={[]} />);
+
+    expect(container.querySelector(".chat-sidebar-footer")).toBeNull();
+    expect(container.querySelector('[data-testid="guide-image"]')).toBeNull();
+    expect(mocks.openExternalLink).not.toHaveBeenCalled();
+  });
+
+  it("accounts for the hidden header when source is ruice", () => {
+    mocks.iframeState.bbk = "100";
+    mocks.iframeState.source = "ruice";
+    mocks.iframeState.isOriginY = true;
+
+    const { container } = render(<ChatSidebar tasks={[]} />);
+    const recordList = container.querySelector(
+      ".chat-sidebar-content-record-list",
+    );
+
+    expect(recordList).toHaveClass(
+      "chat-sidebar-content-record-list--without-header",
+    );
+    expect(container.querySelector(".chat-sidebar-footer")).toHaveTextContent(
+      "操作指南",
+    );
   });
 });

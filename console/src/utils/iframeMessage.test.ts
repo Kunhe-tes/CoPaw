@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   cleanupIframeMessageListener,
   fetchAndSetUserName,
+  initIframeMessageListener,
   handleUrlOriginParam,
   resetIframeContextForStandalone,
 } from "./iframeMessage";
@@ -15,7 +16,6 @@ import {
   fetchCustomerInfo,
   fetchUserInit,
 } from "../api/modules/customerInfo";
-import { envApi } from "../api/modules/env";
 
 vi.mock("../api/modules/userInfo", async (importOriginal) => {
   const actual =
@@ -42,18 +42,57 @@ vi.mock("../api/modules/auth", () => ({
   },
 }));
 
-vi.mock("../api/modules/env", () => ({
-  envApi: {
-    patchEnvs: vi.fn().mockResolvedValue([]),
-  },
-}));
-
 const mockedFetchUserInfo = vi.mocked(fetchUserInfo);
 const mockedEnsureValidToken = vi.mocked(ensureValidToken);
 const mockedIsExternalTokenEnabled = vi.mocked(isExternalTokenEnabled);
 const mockedFetchCustomerInfo = vi.mocked(fetchCustomerInfo);
 const mockedFetchUserInit = vi.mocked(fetchUserInit);
-const mockedPatchEnvs = vi.mocked(envApi.patchEnvs);
+
+const originalWindowTopDescriptor = Object.getOwnPropertyDescriptor(
+  window,
+  "top",
+);
+
+function mockInIframe(): void {
+  Object.defineProperty(window, "top", {
+    configurable: true,
+    value: {},
+  });
+}
+
+function restoreWindowTop(): void {
+  if (originalWindowTopDescriptor) {
+    Object.defineProperty(window, "top", originalWindowTopDescriptor);
+  }
+}
+
+async function dispatchUserDataMessage(data: Record<string, unknown>) {
+  mockedFetchUserInfo.mockResolvedValueOnce({
+    code: "SUC0000",
+    message: "success",
+    result: true,
+    data: [{ userName: "张三", pathName: "某企业/总行/生产部" }],
+  });
+
+  mockInIframe();
+  initIframeMessageListener();
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      origin: "https://parent.example",
+      data: {
+        type: "USER_DATA",
+        data: {
+          sapId: "80000001",
+          ...data,
+        },
+      },
+    }),
+  );
+
+  await vi.waitFor(() => {
+    expect(useIframeStore.getState().initialized).toBe(true);
+  });
+}
 
 describe("fetchAndSetUserName", () => {
   beforeEach(() => {
@@ -76,11 +115,11 @@ describe("fetchAndSetUserName", () => {
     vi.clearAllMocks();
     mockedIsExternalTokenEnabled.mockReturnValue(false);
     mockedEnsureValidToken.mockResolvedValue("token");
-    mockedPatchEnvs.mockResolvedValue([]);
   });
 
   afterEach(() => {
     cleanupIframeMessageListener();
+    restoreWindowTop();
     vi.useRealTimers();
   });
 
@@ -189,6 +228,34 @@ describe("fetchAndSetUserName", () => {
     expect(useIframeStore.getState().authHeaders).toEqual([]);
   });
 
+  it("USER_DATA skipPreviewTracking=true 时存储为跳过 preview 埋点", async () => {
+    await dispatchUserDataMessage({ skipPreviewTracking: true });
+
+    expect(useIframeStore.getState().skipPreviewTracking).toBe(true);
+  });
+
+  it('USER_DATA skipPreviewTracking="true" 时存储为跳过 preview 埋点', async () => {
+    await dispatchUserDataMessage({ skipPreviewTracking: "true" });
+
+    expect(useIframeStore.getState().skipPreviewTracking).toBe(true);
+  });
+
+  it("USER_DATA skipPreviewTracking=false 时保持记录 preview 埋点", async () => {
+    useIframeStore.getState().setContext({ skipPreviewTracking: true });
+
+    await dispatchUserDataMessage({ skipPreviewTracking: false });
+
+    expect(useIframeStore.getState().skipPreviewTracking).toBe(false);
+  });
+
+  it("USER_DATA 未传 skipPreviewTracking 时保持记录 preview 埋点", async () => {
+    useIframeStore.getState().setContext({ skipPreviewTracking: true });
+
+    await dispatchUserDataMessage({});
+
+    expect(useIframeStore.getState().skipPreviewTracking).toBe(false);
+  });
+
   it("origin=Y 切换 userId 时清空旧 userName", async () => {
     useIframeStore.getState().setContext({
       userId: "80000001",
@@ -199,8 +266,20 @@ describe("fetchAndSetUserName", () => {
 
     await handleUrlOriginParam();
 
+    expect(useIframeStore.getState().isOriginY).toBe(true);
+    expect(
+      JSON.parse(sessionStorage.getItem("swe-iframe-context") || "null")?.state,
+    ).not.toHaveProperty("isOriginY");
     expect(useIframeStore.getState().userId).toBe("80000002");
     expect(useIframeStore.getState().userName).toBeNull();
+  });
+
+  it("非 origin=Y 入口会清除本次页面的 origin 标记", async () => {
+    useIframeStore.getState().setOriginY(true);
+
+    await handleUrlOriginParam();
+
+    expect(useIframeStore.getState().isOriginY).toBe(false);
   });
 
   it("origin=Y 时从 cookie 读取 subBranchId", async () => {
@@ -306,80 +385,4 @@ describe("fetchAndSetUserName", () => {
     expect(mockedFetchUserInit).toHaveBeenCalledTimes(1);
   });
 
-  it("origin=Y 初始化后增量同步用户环境变量", async () => {
-    window.history.pushState({}, "", "/?origin=Y");
-    document.cookie = "userid=80000002; path=/";
-    document.cookie = "token=fresh-token; path=/";
-    document.cookie = "brnOrgId=COOKIE_BRN_SHOULD_NOT_BE_USED; path=/";
-    mockedFetchCustomerInfo.mockResolvedValueOnce({
-      returnCode: "SUC0000",
-      body: {
-        output: {
-          result: {
-            userChange: true,
-            sysId: "sys",
-            token: "response-token",
-            bbk: "bbk-001",
-            orgCode: "org",
-            orgLvl: "lvl",
-            userId: "80000003",
-            positionId: "position-001",
-          },
-        },
-      },
-    });
-
-    await handleUrlOriginParam();
-
-    expect(mockedPatchEnvs).toHaveBeenCalledWith({
-      values: expect.objectContaining({
-        token: "response-token",
-        bbkOrgId: "bbk-001",
-        brnOrgId: "org",
-        sapId: "80000003",
-        rtlPstId: "position-001",
-        sourceId: "RMASSIST",
-      }),
-      delete: [],
-    });
-    expect(mockedPatchEnvs.mock.calls[0][0]).not.toHaveProperty("preserve");
-  });
-
-  it("origin=Y 定时刷新后再次增量同步环境变量", async () => {
-    vi.useFakeTimers();
-    window.history.pushState({}, "", "/?origin=Y");
-    document.cookie = "userid=80000002; path=/";
-    document.cookie = "token=fresh-token; path=/";
-    mockedFetchCustomerInfo.mockResolvedValue({
-      returnCode: "SUC0000",
-      body: {
-        output: {
-          result: {
-            userChange: false,
-            sysId: "sys",
-            token: "response-token",
-            bbk: "bbk",
-            orgCode: "org",
-            orgLvl: "lvl",
-            userId: "80000002",
-            positionId: "position",
-          },
-        },
-      },
-    });
-
-    await handleUrlOriginParam();
-    await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
-
-    expect(mockedFetchCustomerInfo).toHaveBeenCalledTimes(2);
-    expect(mockedPatchEnvs).toHaveBeenCalledTimes(2);
-    expect(mockedPatchEnvs.mock.calls[1][0]).toMatchObject({
-      values: expect.objectContaining({
-        token: "fresh-token",
-        sapId: "80000002",
-        sourceId: "RMASSIST",
-      }),
-      delete: [],
-    });
-  });
 });

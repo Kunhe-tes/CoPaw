@@ -1,15 +1,27 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  ARCHIVE_MAINTENANCE_RUN_TIME_OPTIONS,
+  CRON_NOTIFICATION_DEFAULTS,
   CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS,
   CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES,
+  clearModelCallPolicyConfig,
+  enableModelCallPolicyConfig,
   normalizeSystemPromptInjections,
+  readArchiveMaintenanceConfig,
+  readCronNotificationConfig,
   readCronTaskSessionCleanupConfig,
   readCronUnreadAutoPauseConfig,
+  readLlmRateLimiterConfigState,
+  readQueryRetryConfigState,
   readSystemPromptInjections,
   validateSourceSystemConfig,
+  writeArchiveMaintenanceValue,
+  writeCronNotificationValue,
   writeCronTaskSessionCleanupValue,
   writeCronUnreadAutoPauseValue,
+  writeLlmRateLimiterValue,
+  writeQueryRetryValue,
   writeRegisteredSwitchValue,
   writeSystemPromptInjections,
   writeToolResultCompactValue,
@@ -49,6 +61,37 @@ describe("SystemConfigPage registry compatibility", () => {
     });
   });
 
+  it("writes zhaohu Tool Guard approval notification switch values", () => {
+    const definition = CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES.find(
+      (item) => item.key === "approval_notifications.zhaohu_tool_guard_enabled",
+    );
+    if (!definition) {
+      throw new Error(
+        "zhaohu Tool Guard notification switch is not registered",
+      );
+    }
+
+    expect(definition.defaultValue).toBe(false);
+
+    const next = writeRegisteredSwitchValue({}, definition, true);
+
+    expect(next).toEqual({
+      approval_notifications: {
+        zhaohu_tool_guard_enabled: true,
+      },
+    });
+  });
+
+  it("registers the normal-mode plan interaction tools switch", () => {
+    expect(CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES).toContainEqual({
+      key: "feature_switches.normal_mode_plan_interaction_tools_enabled",
+      path: ["feature_switches", "normal_mode_plan_interaction_tools_enabled"],
+      defaultValue: false,
+      title: "计划交互工具开放",
+      description: "开启后，普通模式可使用计划澄清与计划提案提交工具。",
+    });
+  });
+
   it("preserves nested tool config keys without native structuredClone", () => {
     vi.stubGlobal("structuredClone", undefined);
     const source = {
@@ -76,6 +119,39 @@ describe("SystemConfigPage registry compatibility", () => {
     });
   });
 
+  it("reads default cron notification settings", () => {
+    expect(readCronNotificationConfig({})).toEqual(
+      CRON_NOTIFICATION_DEFAULTS,
+    );
+  });
+
+  it("writes cron notification settings without mutating source", () => {
+    vi.stubGlobal("structuredClone", undefined);
+    const source = {
+      provider_policy: { default_model: "qwen-max" },
+      cron_notifications: {
+        unknown_retained: "yes",
+      },
+    };
+
+    const next = writeCronNotificationValue(
+      source,
+      "skip_weekend_zhaohu_enabled",
+      true,
+    );
+
+    expect(next).toEqual({
+      provider_policy: { default_model: "qwen-max" },
+      cron_notifications: {
+        skip_weekend_zhaohu_enabled: true,
+        unknown_retained: "yes",
+      },
+    });
+    expect(source.cron_notifications).toEqual({
+      unknown_retained: "yes",
+    });
+  });
+
   it("reads default cron task session cleanup settings", () => {
     expect(readCronTaskSessionCleanupConfig({})).toEqual({
       enabled: false,
@@ -89,6 +165,20 @@ describe("SystemConfigPage registry compatibility", () => {
     expect(CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS).toContain("01:00");
     expect(CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS).toContain("02:30");
     expect(CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS).toHaveLength(48);
+  });
+
+  it("reads default archive maintenance settings", () => {
+    expect(readArchiveMaintenanceConfig({})).toEqual({
+      enabled: true,
+      run_time: "03:00",
+      cron: "0 3 * * *",
+    });
+  });
+
+  it("offers selectable archive maintenance run times", () => {
+    expect(ARCHIVE_MAINTENANCE_RUN_TIME_OPTIONS).toContain("03:00");
+    expect(ARCHIVE_MAINTENANCE_RUN_TIME_OPTIONS).toContain("03:30");
+    expect(ARCHIVE_MAINTENANCE_RUN_TIME_OPTIONS).toHaveLength(48);
   });
 
   it("writes cron task session cleanup settings without mutating source", () => {
@@ -117,6 +207,32 @@ describe("SystemConfigPage registry compatibility", () => {
     });
   });
 
+  it("writes archive maintenance settings without mutating source", () => {
+    vi.stubGlobal("structuredClone", undefined);
+    const source = {
+      provider_policy: { default_model: "qwen-max" },
+      archive_maintenance: {
+        enabled: true,
+        unknown_retained: "yes",
+      },
+    };
+
+    const next = writeArchiveMaintenanceValue(source, "run_time", "03:30");
+
+    expect(next).toEqual({
+      provider_policy: { default_model: "qwen-max" },
+      archive_maintenance: {
+        enabled: true,
+        unknown_retained: "yes",
+        cron: "30 3 * * *",
+      },
+    });
+    expect(source.archive_maintenance).toEqual({
+      enabled: true,
+      unknown_retained: "yes",
+    });
+  });
+
   it("rejects invalid cron task session cleanup values", () => {
     expect(
       validateSourceSystemConfig({
@@ -132,6 +248,17 @@ describe("SystemConfigPage registry compatibility", () => {
         cron_task_session_cleanup: {
           enabled: true,
           retention_days: 30,
+          cron: "*/5 * * * *",
+        },
+      }),
+    ).toContain("cron");
+  });
+
+  it("rejects invalid archive maintenance cron values", () => {
+    expect(
+      validateSourceSystemConfig({
+        archive_maintenance: {
+          enabled: true,
           cron: "*/5 * * * *",
         },
       }),
@@ -158,6 +285,158 @@ describe("SystemConfigPage registry compatibility", () => {
     });
     expect(source.cron_unread_auto_pause).toEqual({
       enabled: true,
+    });
+  });
+
+  it("keeps query retry inherited until explicitly enabled", () => {
+    expect(readQueryRetryConfigState({})).toEqual({
+      explicit: false,
+      config: {
+        enabled: false,
+        max_retries: 3,
+        backoff_base: 2,
+        backoff_cap: 30,
+      },
+    });
+
+    const next = enableModelCallPolicyConfig({}, "query_retry");
+
+    expect(next).toEqual({
+      query_retry: {
+        enabled: false,
+        max_retries: 3,
+        backoff_base: 2,
+        backoff_cap: 30,
+      },
+    });
+  });
+
+  it("reads model call policy defaults from effective config", () => {
+    expect(
+      readQueryRetryConfigState(
+        {},
+        {
+          query_retry: {
+            enabled: true,
+            max_retries: 5,
+            backoff_base: 1.5,
+            backoff_cap: 60,
+          },
+        },
+      ),
+    ).toEqual({
+      explicit: false,
+      config: {
+        enabled: true,
+        max_retries: 5,
+        backoff_base: 1.5,
+        backoff_cap: 60,
+      },
+    });
+
+    expect(
+      enableModelCallPolicyConfig({}, "llm_rate_limiter", {
+        llm_rate_limiter: {
+          llm_max_concurrent: 8,
+          llm_chat_max_concurrent: 4,
+          llm_cron_max_concurrent: 6,
+          llm_max_qpm: 200,
+          llm_rate_limit_pause: 7,
+          llm_rate_limit_jitter: 2,
+          llm_acquire_timeout: 600,
+          llm_chat_acquire_timeout: 120,
+          llm_cron_acquire_timeout: null,
+        },
+      }),
+    ).toEqual({
+      llm_rate_limiter: {
+        llm_max_concurrent: 8,
+        llm_chat_max_concurrent: 4,
+        llm_cron_max_concurrent: 6,
+        llm_max_qpm: 200,
+        llm_rate_limit_pause: 7,
+        llm_rate_limit_jitter: 2,
+        llm_acquire_timeout: 600,
+        llm_chat_acquire_timeout: 120,
+        llm_cron_acquire_timeout: null,
+      },
+    });
+  });
+
+  it("writes and clears query retry overrides without mutating source", () => {
+    vi.stubGlobal("structuredClone", undefined);
+    const source = {
+      provider_policy: { default_model: "qwen-max" },
+      query_retry: {
+        enabled: true,
+        unknown_retained: "yes",
+      },
+    };
+
+    const next = writeQueryRetryValue(source, "max_retries", 2);
+    const cleared = clearModelCallPolicyConfig(next, "query_retry");
+
+    expect(next).toEqual({
+      provider_policy: { default_model: "qwen-max" },
+      query_retry: {
+        enabled: true,
+        max_retries: 2,
+        unknown_retained: "yes",
+      },
+    });
+    expect(cleared).toEqual({
+      provider_policy: { default_model: "qwen-max" },
+    });
+    expect(source.query_retry).toEqual({
+      enabled: true,
+      unknown_retained: "yes",
+    });
+  });
+
+  it("keeps llm rate limiter inherited until explicitly enabled", () => {
+    expect(readLlmRateLimiterConfigState({})).toEqual({
+      explicit: false,
+      config: {
+        llm_max_concurrent: 5,
+        llm_chat_max_concurrent: 2,
+        llm_cron_max_concurrent: 3,
+        llm_max_qpm: 100,
+        llm_rate_limit_pause: 5,
+        llm_rate_limit_jitter: 1,
+        llm_acquire_timeout: 300,
+        llm_chat_acquire_timeout: null,
+        llm_cron_acquire_timeout: null,
+      },
+    });
+  });
+
+  it("writes and clears llm rate limiter overrides without mutating source", () => {
+    vi.stubGlobal("structuredClone", undefined);
+    const source = {
+      provider_policy: { default_model: "qwen-max" },
+      llm_rate_limiter: {
+        llm_chat_max_concurrent: 1,
+        unknown_retained: "yes",
+      },
+    };
+
+    const next = writeLlmRateLimiterValue(source, "llm_max_qpm", 12);
+    const cleared = clearModelCallPolicyConfig(next, "llm_rate_limiter");
+
+    expect(next).toEqual({
+      provider_policy: { default_model: "qwen-max" },
+      llm_rate_limiter: {
+        llm_chat_max_concurrent: 1,
+        llm_max_qpm: 12,
+        unknown_retained: "yes",
+      },
+    });
+    expect(cleared).toEqual({
+      provider_policy: { default_model: "qwen-max" },
+    });
+    expect(source.llm_rate_limiter).toEqual({
+      llm_chat_max_concurrent: 1,
+      unknown_retained: "yes",
     });
   });
 

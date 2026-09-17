@@ -21,6 +21,7 @@ interface RecallModalProps {
   type: RecallTargetType;
   itemId: string;
   itemName: string;
+  skillName?: string;
   sourceId: string;
   onClose: () => void;
   onSuccess: () => void;
@@ -31,6 +32,7 @@ export function RecallModal({
   type,
   itemId,
   itemName,
+  skillName,
   sourceId,
   onClose,
   onSuccess,
@@ -53,7 +55,7 @@ export function RecallModal({
 
     Promise.all([
       type === "skill"
-        ? marketApi.getSkillDistributions(resolvedSourceId, itemId)
+        ? marketApi.getSkillDistributions(resolvedSourceId, itemId, skillName)
         : marketMcpApi.getMCPDistributions(resolvedSourceId, itemId),
       fetchTenantsBySource(resolvedSourceId),
     ])
@@ -66,7 +68,7 @@ export function RecallModal({
         message.error("获取分发记录失败");
       })
       .finally(() => setLoading(false));
-  }, [open, type, itemId, resolvedSourceId]);
+  }, [open, type, itemId, skillName, resolvedSourceId]);
 
   // 手动输入的用户 ID 中，存在于用户列表的部分
   const manualUserIdsInList = useMemo(() => {
@@ -220,6 +222,12 @@ export function RecallModal({
         <div style={{ fontWeight: 500 }}>
           当前条目：{itemName}（已分发 {uniqueDistributions.length} 个用户）
         </div>
+
+        <Alert
+          type="info"
+          showIcon
+          message="以下为当前实际持有该技能的用户列表，包含部分已不在当前系统中的用户"
+        />
 
         {loading ? (
           <Spin size="small" style={{ marginLeft: 16 }} />

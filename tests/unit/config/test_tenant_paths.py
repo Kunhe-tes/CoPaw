@@ -250,6 +250,15 @@ class TestTenantPathStrictHelpers:
         assert working_dir == WORKING_DIR / "default_CMSJY"
         assert config_path == WORKING_DIR / "default_CMSJY" / "config.json"
 
+    def test_request_working_dir_preserves_pre_resolved_default_source(
+        self,
+    ):
+        """请求级 helper 应保留上游已解析出的 default_{source} 模板。"""
+        with tenant_context(tenant_id="default", source_id="CMSJY"):
+            path = get_tenant_request_working_dir("default_CMSJY")
+
+        assert path == WORKING_DIR / "default_CMSJY"
+
     def test_default_source_template_runtime_and_storage_are_idempotent(self):
         """default_{source} 进入公共解析层后应保持幂等。"""
         assert (

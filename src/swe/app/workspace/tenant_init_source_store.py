@@ -8,6 +8,8 @@ each tenant, enabling source-based template isolation.
 import logging
 from typing import Any, Optional
 
+from ...utils.bbk import normalize_bbk_id_to_primary
+
 logger = logging.getLogger(__name__)
 
 # Global store singleton
@@ -82,6 +84,7 @@ class TenantInitSourceStore:
                 )
                 return init_source
 
+            normalized_bbk_id = normalize_bbk_id_to_primary(bbk_id)
             insert_query = (
                 "INSERT INTO swe_tenant_init_source "
                 "(tenant_id, source_id, tenant_name, bbk_id, init_source, tenant_type) "
@@ -94,7 +97,7 @@ class TenantInitSourceStore:
                         tenant_id,
                         source_id,
                         tenant_name,
-                        bbk_id,
+                        normalized_bbk_id,
                         init_source,
                         tenant_type,
                     ),
@@ -102,7 +105,7 @@ class TenantInitSourceStore:
                 logger.info(
                     f"Created init_source mapping: tenant={tenant_id}, "
                     f"source={source_id}, tenant_name={tenant_name}, "
-                    f"bbk_id={bbk_id}, init_source={init_source}, "
+                    f"bbk_id={normalized_bbk_id}, init_source={init_source}, "
                     f"tenant_type={tenant_type}",
                 )
             except Exception as e:
@@ -340,6 +343,7 @@ class TenantInitSourceStore:
             return False
 
         try:
+            normalized_bbk_id = normalize_bbk_id_to_primary(bbk_id)
             query = (
                 "UPDATE swe_tenant_init_source "
                 "SET tenant_name = %s, bbk_id = %s "
@@ -347,12 +351,12 @@ class TenantInitSourceStore:
             )
             await self.db.execute(
                 query,
-                (tenant_name, bbk_id, tenant_id, source_id),
+                (tenant_name, normalized_bbk_id, tenant_id, source_id),
             )
             logger.info(
                 f"Updated tenant info: tenant={tenant_id}, "
                 f"source={source_id}, tenant_name={tenant_name}, "
-                f"bbk_id={bbk_id}",
+                f"bbk_id={normalized_bbk_id}",
             )
             return True
         except Exception as e:

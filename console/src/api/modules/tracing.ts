@@ -17,12 +17,24 @@ export interface OverviewStats {
   total_sessions: number;
   total_conversations: number;
   total_skill_calls: number;  // 技能调用总次数
+  // 客户点击统计
+  plan_customers: number;      // 查看方案客户数
+  insight_customers: number;   // 去洞察客户数
+  phone_customers: number;     // 去电访客户数
   avg_duration_ms: number;
   top_tools: ToolUsage[];
   top_skills: SkillUsage[];
   top_mcp_tools: MCPToolUsage[];
   mcp_servers: MCPServerUsage[];
   daily_trend: DailyStats[];
+  growth_stats?: {
+    callsGrowth?: number | null;
+    tokensGrowth?: number | null;
+    sessionGrowth?: number | null;
+    userGrowth?: number | null;
+    cronGrowth?: number | null;
+    planCustomersGrowth?: number | null;
+  };
   branch_breakdown: OverviewBranchBreakdown;
 }
 
@@ -40,6 +52,7 @@ export interface OverviewBranchBreakdown {
   tokens: BranchMetricItem[];
   skills: BranchMetricItem[];
   cron_tasks: BranchMetricItem[];
+  customers: BranchMetricItem[];
 }
 
 export interface TaskStatusBreakdown {
@@ -50,18 +63,11 @@ export interface TaskStatusBreakdown {
 
 export interface TaskStatusSummary {
   total_tasks: number;
-  success: number;
+  success: number; // status='success' AND async_status='success'
+  running: number; // status='success' AND async_status IS NULL
   failed: number;
   cancelled: number;
   read_count: number;
-  new_cron_tasks: number;
-}
-
-export interface DepthSummary {
-  avg_rounds: number;
-  multi_round_ratio: number;
-  avg_duration_seconds: number;
-  avg_sessions_per_user: number;
 }
 
 export interface ModelUsage {
@@ -81,10 +87,18 @@ export interface ToolUsage {
 
 export interface SkillUsage {
   skill_name: string;
+  skill_id?: string;
+  cn_name?: string;
   skill_description?: string;
   count: number;
   avg_duration_ms: number;
 }
+
+/** 技能展示名优先返回中文 cn_name（自动 trim），回退原始 skill_name. */
+export const displaySkillName = (skill: SkillUsage): string => {
+  const cn = skill.cn_name?.trim();
+  return cn || skill.skill_name;
+};
 
 export interface MCPToolUsage {
   tool_name: string;
@@ -113,6 +127,12 @@ export interface ErrorSummary {
   total_errors: number;
   model_errors: number;
   tool_errors: number;
+  model_error_codes: ModelErrorCodeCount[];
+}
+
+export interface ModelErrorCodeCount {
+  code: string;
+  count: number;
 }
 
 export interface ErrorItem {
@@ -393,11 +413,17 @@ export const tracingApi = {
     startDate?: string,
     endDate?: string,
     bbkIds?: string,
+    options?: {
+      detail?: "full" | "summary";
+      timeRange?: "day" | "week" | "month" | "custom";
+    },
   ): Promise<OverviewStats> => {
     const params = new URLSearchParams();
     if (startDate) params.append("start_date", startDate);
     if (endDate) params.append("end_date", endDate);
     if (bbkIds) params.append("bbk_ids", bbkIds);
+    if (options?.detail) params.append("detail", options.detail);
+    if (options?.timeRange) params.append("time_range", options.timeRange);
     return request(`/monitor/tracing/overview?${params.toString()}`);
   },
 
@@ -604,6 +630,7 @@ export const tracingApi = {
       end_date?: string;
       query?: string;
       bbk_ids?: string;
+      exclude_cron_task_sessions?: boolean;
     },
   ): Promise<{
     items: UserMessageItem[];
@@ -616,7 +643,7 @@ export const tracingApi = {
     params.append("page_size", pageSize.toString());
     if (filters) {
       Object.entries(filters).forEach(([key, value]) => {
-        if (value) params.append(key, value);
+        if (value) params.append(key, String(value));
       });
     }
     return request(`/monitor/tracing/user-messages?${params.toString()}`);
@@ -630,6 +657,7 @@ export const tracingApi = {
       end_date?: string;
       query?: string;
       bbk_ids?: string;
+      exclude_cron_task_sessions?: boolean;
     },
     format: string = "xlsx",
   ): Promise<Blob> => {
@@ -637,7 +665,7 @@ export const tracingApi = {
     params.append("format", format);
     if (filters) {
       Object.entries(filters).forEach(([key, value]) => {
-        if (value) params.append(key, value);
+        if (value) params.append(key, String(value));
       });
     }
     // Use the proper API URL and include authorization token
@@ -698,38 +726,21 @@ export const tracingApi = {
     return request(`/monitor/tracing/channel-distribution${query}`);
   },
 
-  getGrowthStats: async (
-    startDate: string,
-    endDate: string,
-    timeRange: string = "day",
-    bbkIds?: string,
-  ): Promise<{
-    callsGrowth: number | null;
-    tokensGrowth: number | null;
-    sessionGrowth: number | null;
-    userGrowth: number | null;
-    skillGrowth: number | null;
-    cronGrowth: number | null;
-    // 深度指标环比
-    avgRoundsGrowth: number | null;
-    multiRoundRatioGrowth: number | null;
-    avgDurationGrowth: number | null;
-    avgSessionsPerUserGrowth: number | null;
-  }> => {
-    const params = new URLSearchParams();
-    params.append("start_date", startDate);
-    params.append("end_date", endDate);
-    params.append("time_range", timeRange);
-    if (bbkIds) params.append("bbk_ids", bbkIds);
-    return request(`/monitor/tracing/growth-stats?${params.toString()}`);
-  },
-
   getDailyTrend: async (
     startDate?: string,
     endDate?: string,
     bbkIds?: string,
   ): Promise<{
-    trendData: { date: string; calls: number; tokens: number; users: number }[];
+    trendData: {
+      date: string;
+      calls: number;
+      tokens: number;
+      users: number;
+      read_tasks: number;
+      plan_customers: number;
+      insight_customers: number;
+      phone_customers: number;
+    }[];
   }> => {
     const params = new URLSearchParams();
     if (startDate) params.append("start_date", startDate);
@@ -745,7 +756,16 @@ export const tracingApi = {
     endDate?: string,
     bbkIds?: string,
   ): Promise<{
-    trendData: { date: string; calls: number; tokens: number; users: number }[];
+    trendData: {
+      date: string;
+      calls: number;
+      tokens: number;
+      users: number;
+      read_tasks: number;
+      plan_customers: number;
+      insight_customers: number;
+      phone_customers: number;
+    }[];
   }> => {
     const params = new URLSearchParams();
     if (startDate) params.append("start_date", startDate);
@@ -871,24 +891,6 @@ export const tracingApi = {
     }
     const query = params.toString() ? `?${params.toString()}` : "";
     return request(`/monitor/tracing/task-status/summary${query}`);
-  },
-
-  // 使用深度汇总统计
-  getDepthSummary: async (
-    filters?: {
-      start_date?: string;
-      end_date?: string;
-      bbk_ids?: string;
-    },
-  ): Promise<DepthSummary> => {
-    const params = new URLSearchParams();
-    if (filters) {
-      Object.entries(filters).forEach(([key, value]) => {
-        if (value) params.append(key, value);
-      });
-    }
-    const query = params.toString() ? `?${params.toString()}` : "";
-    return request(`/monitor/tracing/depth/summary${query}`);
   },
 
   // 报错分析汇总统计

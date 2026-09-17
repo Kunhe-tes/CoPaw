@@ -8,6 +8,7 @@ import type {
   FeaturedCaseUpdate,
   FeaturedCaseDisplay,
   FeaturedCaseListResponse,
+  FeaturedCaseReorderResult,
 } from "../types/featuredCases";
 
 export const featuredCasesApi = {
@@ -15,22 +16,25 @@ export const featuredCasesApi = {
   listCases: () => request<FeaturedCaseDisplay[]>("/featured-cases"),
 
   /** Get case detail by id */
-  getCaseDetail: (id: number) =>
-    request<FeaturedCase>(`/featured-cases/${id}`),
+  getCaseDetail: (id: number) => request<FeaturedCase>(`/featured-cases/${id}`),
 
   // ==================== Admin endpoints ====================
 
   /** Admin: list cases for current source_id context */
-  adminListCases: (params?: { bbk_id?: string; page?: number; page_size?: number }) => {
+  adminListCases: (params: {
+    bbk_id: string;
+    page?: number;
+    page_size?: number;
+  }) => {
     const query = params
       ? new URLSearchParams(
           Object.entries(params)
-            .filter(([_, v]) => v !== undefined)
-            .map(([k, v]) => [k, String(v)])
+            .filter(([, value]) => value !== undefined)
+            .map(([k, v]) => [k, String(v)]),
         ).toString()
       : "";
     return request<FeaturedCaseListResponse>(
-      `/featured-cases/admin/cases${query ? `?${query}` : ""}`
+      `/featured-cases/admin/cases${query ? `?${query}` : ""}`,
     );
   },
 
@@ -41,7 +45,7 @@ export const featuredCasesApi = {
       {
         method: "POST",
         body: JSON.stringify(caseItem),
-      }
+      },
     ),
 
   /** Admin: update case */
@@ -51,15 +55,22 @@ export const featuredCasesApi = {
       {
         method: "PUT",
         body: JSON.stringify(caseItem),
-      }
+      },
     ),
 
   /** Admin: delete case */
   adminDeleteCase: (id: number) =>
-    request<{ success: boolean }>(
-      `/featured-cases/admin/cases/${id}`,
+    request<{ success: boolean }>(`/featured-cases/admin/cases/${id}`, {
+      method: "DELETE",
+    }),
+
+  /** Admin: atomically move a case within the current BBK queue */
+  adminReorderCase: (id: number, sortOrder: number) =>
+    request<{ success: boolean; data: FeaturedCaseReorderResult }>(
+      `/featured-cases/admin/cases/${id}/order`,
       {
-        method: "DELETE",
-      }
+        method: "PUT",
+        body: JSON.stringify({ sort_order: sortOrder }),
+      },
     ),
 };

@@ -24,11 +24,17 @@ vi.mock("@/components/agentscope-chat", () => ({
 }));
 
 vi.mock("@agentscope-ai/icons", () => ({
+  SparkCheckCircleFill: () => <span data-testid="success-icon" />,
   SparkDownLine: () => <span data-testid="chevron-down" />,
+  SparkErrorCircleFill: () => <span data-testid="error-icon" />,
+  SparkLoadingLine: () => <span data-testid="loading-icon" />,
+  SparkLockFill: () => <span data-testid="lock-icon" />,
+  SparkStopCircleLine: () => <span data-testid="stop-icon" />,
   SparkTimeLine: () => <span data-testid="time-icon" />,
   SparkTodoListLine: () => <span data-testid="todo-list-icon" />,
   SparkToolLine: () => <span data-testid="tool-icon" />,
   SparkUpLine: () => <span data-testid="chevron-up" />,
+  SparkWarningCircleFill: () => <span data-testid="warning-icon" />,
 }));
 
 vi.mock("./style", () => ({
@@ -76,7 +82,11 @@ vi.mock("./Error", () => ({
 }));
 
 vi.mock("./Actions", () => ({
-  default: () => <div data-testid="actions" />,
+  default: ({ hideReplace }: { hideReplace?: boolean }) => (
+    <div data-testid="actions" data-hide-replace={String(Boolean(hideReplace))}>
+      actions
+    </div>
+  ),
 }));
 
 vi.mock("./Suggestions", () => ({
@@ -161,6 +171,19 @@ function toolMessage(
   } as IAgentScopeRuntimeMessage;
 }
 
+function groupedToolMessage(
+  id: string,
+  status = AgentScopeRuntimeRunStatus.InProgress,
+  toolStatus: "running" | "success" | "failed" = "running",
+): IAgentScopeRuntimeMessage {
+  return toolMessage(id, status, {
+    call_id: id,
+    summary: "正在查看工作目录文件",
+    tool_status: toolStatus,
+    operation_group: { id: "inspect", title: "查看工作目录文件" },
+  });
+}
+
 function errorMessage(id: string, message: string): IAgentScopeRuntimeMessage {
   return {
     id,
@@ -179,6 +202,18 @@ function getDisclosureBody() {
 }
 
 describe("AgentScopeRuntimeResponseCard", () => {
+  it("renders content before response actions", () => {
+    const props = {
+      data: response([textMessage("message-1", "正文")]),
+      beforeActions: <div data-testid="plan-review">plan-review</div>,
+    } as React.ComponentProps<typeof AgentScopeRuntimeResponseCard> & {
+      beforeActions: React.ReactNode;
+    };
+    const { container } = render(<AgentScopeRuntimeResponseCard {...props} />);
+
+    expect(container.textContent).toBe("正文plan-reviewactions");
+  });
+
   it("renders fallback markdown when the final visible output is reasoning", () => {
     render(
       <AgentScopeRuntimeResponseCard
@@ -237,6 +272,50 @@ describe("AgentScopeRuntimeResponseCard", () => {
       }),
     ).toBeInTheDocument();
     expect(getDisclosureBody()).toHaveAttribute("hidden");
+  });
+
+  it("folds earlier answer text and process content while keeping only the final answer visible", () => {
+    render(
+      <AgentScopeRuntimeResponseCard
+        data={response([
+          textMessage("message-1", "正文 A"),
+          textMessage(
+            "reason-1",
+            "执行过程 B",
+            AgentScopeRuntimeMessageType.REASONING,
+          ),
+          textMessage("message-2", "正文 C"),
+        ])}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", {
+        name: /展开执行过程 · 1 个步骤/,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("正文 C")).toBeVisible();
+    expect(screen.getByText("正文 A")).not.toBeVisible();
+    expect(screen.getByText("执行过程 B")).not.toBeVisible();
+  });
+
+  it("does not count folded intermediate answer text as a process step", () => {
+    render(
+      <AgentScopeRuntimeResponseCard
+        data={response([
+          textMessage("message-1", "中间正文"),
+          textMessage("message-2", "最终正文"),
+        ])}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", {
+      name: "展开执行过程",
+    });
+    expect(trigger).toBeInTheDocument();
+    expect(trigger).not.toHaveAccessibleName(/0 个步骤/);
+    expect(screen.getByText("最终正文")).toBeVisible();
+    expect(screen.getByText("中间正文")).not.toBeVisible();
   });
 
   it("does not show duration from response-level timestamps alone", () => {
@@ -379,6 +458,78 @@ describe("AgentScopeRuntimeResponseCard", () => {
     expect(screen.getByText("tool-1")).toBeInTheDocument();
   });
 
+  it("renders the first running operation group immediately", () => {
+    render(
+      <AgentScopeRuntimeResponseCard
+        data={response(
+          [groupedToolMessage("tool-group-1")],
+          AgentScopeRuntimeRunStatus.InProgress,
+        )}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: /执行过程/ })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /展开操作组：查看工作目录文件/ }),
+    ).toBeVisible();
+  });
+
+  it("folds a completed operation group into process disclosure", () => {
+    render(
+      <AgentScopeRuntimeResponseCard
+        data={response([
+          groupedToolMessage(
+            "tool-group-1",
+            AgentScopeRuntimeRunStatus.Completed,
+            "success",
+          ),
+          textMessage("message-1", "最终正文"),
+        ])}
+      />,
+    );
+
+    const processTrigger = screen.getByRole("button", {
+      name: /展开执行过程 · 1 个步骤 · 工具调用 1 次/,
+    });
+    expect(screen.getByText("查看工作目录文件")).not.toBeVisible();
+
+    fireEvent.click(processTrigger);
+    expect(
+      screen.getByRole("button", { name: /展开操作组：查看工作目录文件/ }),
+    ).toBeVisible();
+  });
+
+  it("counts grouped reasoning and tools inside process disclosure", () => {
+    render(
+      <AgentScopeRuntimeResponseCard
+        data={response([
+          groupedToolMessage(
+            "tool-group-1",
+            AgentScopeRuntimeRunStatus.Completed,
+            "success",
+          ),
+          textMessage(
+            "reason-1",
+            "继续确认目录内容",
+            AgentScopeRuntimeMessageType.REASONING,
+          ),
+          groupedToolMessage(
+            "tool-group-2",
+            AgentScopeRuntimeRunStatus.Completed,
+            "success",
+          ),
+          textMessage("message-1", "最终正文"),
+        ])}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", {
+        name: /展开执行过程 · 3 个步骤 · 工具调用 2 次/,
+      }),
+    ).toBeInTheDocument();
+  });
+
   it("keeps approval requests visible when a final answer exists", () => {
     render(
       <AgentScopeRuntimeResponseCard
@@ -410,6 +561,32 @@ describe("AgentScopeRuntimeResponseCard", () => {
     expect(screen.getByText("执行失败")).toBeInTheDocument();
   });
 
+  it("keeps model_call_failed response errors directly visible with partial output", () => {
+    render(
+      <AgentScopeRuntimeResponseCard
+        isLast
+        data={{
+          ...response(
+            [textMessage("message-1", "partial answer")],
+            AgentScopeRuntimeRunStatus.Failed,
+          ),
+          error: {
+            code: "model_call_failed",
+            message: "provider diagnostic",
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByText("partial answer")).toBeInTheDocument();
+    expect(screen.getByText("provider diagnostic")).toBeInTheDocument();
+    expect(screen.getByTestId("actions")).toHaveAttribute(
+      "data-hide-replace",
+      "true",
+    );
+    expect(screen.queryByRole("button", { name: /执行过程/ })).toBeNull();
+  });
+
   it("summarizes failed process when a final answer exists", () => {
     render(
       <AgentScopeRuntimeResponseCard
@@ -435,6 +612,7 @@ describe("AgentScopeRuntimeResponseCard", () => {
     render(
       <AgentScopeRuntimeResponseCard
         data={response([
+          textMessage("message-1", "前置正文"),
           textMessage(
             "reason-1",
             "最后被误归类到 Thinking 的正文",
@@ -450,5 +628,6 @@ describe("AgentScopeRuntimeResponseCard", () => {
     expect(
       screen.getByRole("button", { name: /展开执行过程 · 1 个步骤/ }),
     ).toBeInTheDocument();
+    expect(screen.getByText("前置正文")).not.toBeVisible();
   });
 });

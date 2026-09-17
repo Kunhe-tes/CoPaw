@@ -45,6 +45,9 @@ __pycache__/
 config.json
 .pnpm-store/
 .superpowers/
+review
+skills-lock.json
+.playwright-cli/
 
 # IDEs and editors
 .idea/
@@ -150,3 +153,11 @@ openspec/changes/cron-job-overview-failed-detail-modal/specs/cron-job-overview-f
 # personal debug scripts (not meant to be tracked)
 /diff_dir.py
 /diff_dir_*/
+guide.md
+bbk_map.md
+/.ua/
+/.understand-anything.bak/
+/analysis/
+/ai-knowledge
+/.devagent
+/.understand-anything/

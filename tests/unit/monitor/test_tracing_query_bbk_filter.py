@@ -9,12 +9,14 @@ Tests for:
 
 import pytest
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock
 
 from monitor.app.services.tracing.query_service import (
     build_bbk_in_filter,
     build_cron_bbk_in_filter,
     TracingQueryService,
 )
+from monitor.app.models.tracing import OverviewBranchBreakdown
 
 
 class TestBuildBbkInFilter:
@@ -87,6 +89,92 @@ class TestBuildCronBbkInFilter:
         assert len(params) == 2
         assert "100" in params
         assert "V00" in params
+
+
+class TestOverviewStatsDetail:
+    """Tests for overview payload detail levels."""
+
+    @pytest.fixture
+    def service(self):
+        """Create TracingQueryService instance with mocked overview readers."""
+        service = TracingQueryService(MagicMock())
+        service._get_total_users = AsyncMock(return_value=(10, 2, 8))
+        service._get_online_users = AsyncMock(return_value=(1, ["u-1"]))
+        service._get_token_stats = AsyncMock(
+            return_value={
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "total_tokens": 150,
+                "total_traces": 7,
+                "total_sessions": 3,
+                "avg_duration": 1200,
+            },
+        )
+        service._get_branch_breakdown = AsyncMock(
+            return_value=OverviewBranchBreakdown(),
+        )
+        service._get_total_skill_calls = AsyncMock(return_value=4)
+        service._get_customer_click_stats = AsyncMock(
+            return_value={
+                "plan_customers": 5,
+                "insight_customers": 2,
+                "phone_customers": 1,
+            },
+        )
+        service._get_model_distribution = AsyncMock(return_value=[])
+        service._get_top_tools = AsyncMock(return_value=[])
+        service._get_top_skills = AsyncMock(return_value=[])
+        service._get_mcp_stats = AsyncMock(return_value=([], []))
+        service._get_growth_stats = AsyncMock(
+            return_value={"userGrowth": 5, "planCustomersGrowth": 6},
+        )
+        return service
+
+    @pytest.mark.asyncio
+    async def test_summary_detail_skips_resource_breakdown_queries(
+        self,
+        service,
+    ):
+        """Summary overview should avoid resource ranking queries not used by cards."""
+        result = await service.get_overview_stats(
+            "source-a",
+            datetime(2026, 6, 1),
+            datetime(2026, 6, 2),
+            "100",
+            include_resource_breakdown=False,
+        )
+
+        assert result.total_users == 10
+        assert result.total_tokens == 150
+        assert result.plan_customers == 5
+        assert result.branch_breakdown == OverviewBranchBreakdown()
+        assert result.growth_stats == {
+            "userGrowth": 5,
+            "planCustomersGrowth": 6,
+        }
+        service._get_growth_stats.assert_awaited_once()
+        service._get_model_distribution.assert_not_awaited()
+        service._get_top_tools.assert_not_awaited()
+        service._get_top_skills.assert_not_awaited()
+        service._get_mcp_stats.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_default_detail_keeps_existing_resource_queries(
+        self,
+        service,
+    ):
+        """Default overview detail should remain backward compatible."""
+        await service.get_overview_stats(
+            "source-a",
+            datetime(2026, 6, 1),
+            datetime(2026, 6, 2),
+            "100",
+        )
+
+        service._get_model_distribution.assert_awaited_once()
+        service._get_top_tools.assert_awaited_once()
+        service._get_top_skills.assert_awaited_once()
+        service._get_mcp_stats.assert_awaited_once()
 
 
 class TestBuildTracesWhereClause:
@@ -265,9 +353,9 @@ class TestBuildUsersQuerySubqueries:
         )
 
         # 简化后使用 MAX(t.user_name) 而不是子查询
-        assert "MAX(t.user_name)" in query, (
-            "user_name should use MAX aggregation after data is complete"
-        )
+        assert (
+            "MAX(t.user_name)" in query
+        ), "user_name should use MAX aggregation after data is complete"
 
     def test_bbk_id_subquery_filters_bbk(self, service):
         """bbk_id should use MAX aggregation instead of subquery."""
@@ -298,9 +386,9 @@ class TestBuildUsersQuerySubqueries:
         )
 
         # 简化后使用 MAX(t.bbk_id) 而不是子查询
-        assert "MAX(t.bbk_id)" in query, (
-            "bbk_id should use MAX aggregation after data is complete"
-        )
+        assert (
+            "MAX(t.bbk_id)" in query
+        ), "bbk_id should use MAX aggregation after data is complete"
 
     def test_total_skills_subquery_filters_bbk(self, service):
         """total_skills subquery should filter by bbk_id."""
@@ -405,3 +493,102 @@ class TestBuildUsersQuerySignature:
             "_build_users_query must accept bbk_ids parameter to pass "
             "to subqueries for bbk filtering"
         )
+
+
+def test_users_query_binds_datetime_values_to_cron_time_placeholders():
+    """Source IDs must not shift into cron DATETIME placeholders."""
+    from unittest.mock import MagicMock
+
+    service = TracingQueryService(MagicMock())
+    start_date = datetime(2026, 7, 14)
+    end_date = datetime(2026, 7, 15)
+    where_sql, params = service._build_traces_where_clause(
+        source_id="RMASSIST",
+        filter_user_type="filtered",
+        user_id=None,
+        bbk_ids="201",
+        start_date=start_date,
+        end_date=end_date,
+    )
+    cron_sql, cron_params = service._build_cron_subquery(
+        source_id="RMASSIST",
+        start_date=start_date,
+        end_date=end_date,
+        bbk_ids="201",
+    )
+    query, final_params = service._build_users_query(
+        source_id="RMASSIST",
+        where_sql=where_sql,
+        cron_subquery_sql=cron_sql,
+        order_by="manual_calls DESC, user_id ASC",
+        params=params,
+        cron_params=cron_params,
+        page_size=20,
+        offset=0,
+        bbk_ids="201",
+    )
+
+    actual_time_start_index = query[
+        : query.index("e.actual_time >= %s")
+    ].count(
+        "%s",
+    )
+    actual_time_end_index = query[: query.index("e.actual_time < %s")].count(
+        "%s",
+    )
+
+    assert query.count("%s") == len(final_params)
+    assert final_params[actual_time_start_index] == start_date
+    assert final_params[actual_time_end_index] == end_date
+
+
+@pytest.mark.asyncio
+async def test_get_skills_paginated_excludes_internal_skills():
+    """技能排行榜 SQL 应屏蔽内部技能，避免运营看板被系统能力刷榜。"""
+    db = MagicMock()
+    db.fetch_one = AsyncMock(return_value={"total": 0})
+    db.fetch_all = AsyncMock(return_value=[])
+    service = TracingQueryService(db)
+
+    await service.get_skills_paginated(
+        source_id="RMASSIST",
+        page=2,
+        page_size=20,
+        start_date=datetime(2026, 7, 1),
+        end_date=datetime(2026, 7, 9),
+        bbk_ids="201",
+    )
+
+    count_query, count_params = db.fetch_one.await_args.args
+    data_query, data_params = db.fetch_all.await_args.args
+
+    assert "skill_name NOT IN (%s, %s)" in count_query
+    assert "skill_name NOT IN (%s, %s)" in data_query
+    assert "cron" in count_params
+    assert "skill-creator" in count_params
+    assert "cron" in data_params
+    assert "skill-creator" in data_params
+    assert data_params[-2:] == (20, 20)
+    assert data_query.count("%s") == len(data_params)
+
+
+@pytest.mark.asyncio
+async def test_get_top_skills_excludes_internal_skills():
+    """首页热门技能 SQL 应与分页排行榜保持同一屏蔽口径。"""
+    db = MagicMock()
+    db.fetch_all = AsyncMock(return_value=[])
+    service = TracingQueryService(db)
+
+    await service._get_top_skills(
+        source_id="all",
+        start_date=datetime(2026, 7, 1),
+        end_date=datetime(2026, 7, 9),
+        bbk_ids="201",
+    )
+
+    query, params = db.fetch_all.await_args.args
+
+    assert "skill_name NOT IN (%s, %s)" in query
+    assert "cron" in params
+    assert "skill-creator" in params
+    assert query.count("%s") == len(params)

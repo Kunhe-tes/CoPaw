@@ -8,14 +8,18 @@ and resolves multi-skill attribution conflicts.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
+from collections.abc import Mapping
 from datetime import datetime
 from inspect import isawaitable
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional, TYPE_CHECKING
 
 from .skill_context_manager import (
+    SkillExecutionContext,
     SkillContextManager,
     get_skill_context_manager,
 )
@@ -23,15 +27,26 @@ from .skill_feature_inferencer import (
     SkillFeatureInferencer,
     get_skill_feature_inferencer,
 )
+from .skill_runtime_profile import SkillRuntimeProfile
 from .skill_tool_registry import SkillToolRegistry, get_skill_tool_registry
+from .skills_manager import get_workspace_skill_manifest_path
 
 if TYPE_CHECKING:
     from ..tracing.manager import TraceManager
 
 logger = logging.getLogger(__name__)
 
+
 # 技能描述缓存
 _SKILL_DESCRIPTION_CACHE: dict[str, str] = {}
+_GENERIC_CONTINUATION_TOOLS = {
+    "execute_shell_command",
+    "read_file",
+    "write_file",
+    "grep_search",
+    "glob_search",
+    "unknown_tool",
+}
 
 
 def _get_skill_description(skill_name: str) -> str:
@@ -174,6 +189,8 @@ class SkillInvocationDetector:
         user_name: Optional[str] = None,
         bbk_id: Optional[str] = None,
         workspace_dir: Optional[Path] = None,
+        skill_dirs: Optional[dict[str, Path]] = None,
+        skill_signatures: Optional[dict[str, str]] = None,
         skill_hook_loader: (
             Callable[[str], Awaitable[None] | None] | None
         ) = None,
@@ -213,6 +230,8 @@ class SkillInvocationDetector:
         self._user_name = user_name
         self._bbk_id = bbk_id
         self._workspace_dir = workspace_dir
+        self._skill_dirs = dict(skill_dirs or {})
+        self._skill_signatures = dict(skill_signatures or {})
         self._skill_hook_loader = skill_hook_loader
         self._confirmed_skill_callback = confirmed_skill_callback
 
@@ -230,29 +249,76 @@ class SkillInvocationDetector:
         self._skill_call_history: dict[str, int] = {}
         self._idle_counters: dict[str, int] = {}
         self._recent_tools: list[str] = []
+        self._skill_runtime_profiles: dict[str, SkillRuntimeProfile] = {}
 
         # Layer 0: User message detection cache
         self._message_detected_skill: Optional[str] = None
         self._message_detected_confidence: float = 0.0
+        self._locked_skill_from_md: Optional[str] = None
+        self._pending_pruned_contexts: list[SkillExecutionContext] = []
+        self._pruned_context_tasks: set[asyncio.Task[None]] = set()
+        self._pending_skill_md_continuation: Optional[str] = None
 
-    def set_enabled_skills(self, skills: list[str]) -> None:
+    def set_enabled_skills(
+        self,
+        skills: list[str],
+        metadata_by_name: dict[str, Any] | None = None,
+    ) -> None:
         """Set the list of enabled skills and cache their descriptions.
 
-        Reads skill descriptions from workspace skill.json manifest at
-        setup time, so they're ready when start_skill is called.
+        Reads skill descriptions from the workspace management manifest at
+        ``skill.json`` during setup time, so they're ready
+        when start_skill is called.
 
         Args:
             skills: List of skill names that are currently enabled
         """
         self._enabled_skills = set(skills)
 
-        # Pre-cache descriptions from workspace manifest
-        if self._workspace_dir:
-            skill_json_path = self._workspace_dir / "skill.json"
+        if metadata_by_name is not None:
+            self._cache_skill_metadata(skills, metadata_by_name)
 
-            if skill_json_path.exists():
+        # 技能启用集变化后，立即清理已经失效的 SKILL.md 锁定状态，
+        # 避免后续工具调用继续被已禁用技能短路归因。
+        if (
+            self._locked_skill_from_md
+            and self._locked_skill_from_md not in self._enabled_skills
+        ):
+            self._locked_skill_from_md = None
+        if (
+            self._pending_skill_md_continuation
+            and self._pending_skill_md_continuation not in self._enabled_skills
+        ):
+            self._pending_skill_md_continuation = None
+
+        # 用户消息识别缓存同样依赖当前启用技能集合；
+        # 如果缓存技能已被禁用，必须同步失效，避免兜底层返回陈旧结果。
+        if (
+            self._message_detected_skill
+            and self._message_detected_skill not in self._enabled_skills
+        ):
+            self._message_detected_skill = None
+            self._message_detected_confidence = 0.0
+
+        removed_contexts = self._context_manager.prune_disabled_skills(
+            self._enabled_skills,
+        )
+        if removed_contexts:
+            logger.info(
+                "Pruned disabled skill contexts after enabled skills update: %s",
+                [context.skill_name for context in removed_contexts],
+            )
+            self._schedule_pruned_context_finalization(removed_contexts)
+
+        # Pre-cache descriptions from workspace manifest
+        if metadata_by_name is None and self._workspace_dir:
+            manifest_path = get_workspace_skill_manifest_path(
+                self._workspace_dir,
+            )
+
+            if manifest_path.exists():
                 try:
-                    with open(skill_json_path, "r", encoding="utf-8") as f:
+                    with open(manifest_path, "r", encoding="utf-8") as f:
                         manifest = json.load(f)
 
                     for skill_name in skills:
@@ -300,6 +366,280 @@ class SkillInvocationDetector:
                 except Exception as e:
                     logger.warning("Failed to read skill manifest: %s", e)
 
+    def _cache_skill_metadata(
+        self,
+        skills: list[str],
+        metadata_by_name: Mapping[str, Any],
+    ) -> None:
+        """Cache descriptions and stable IDs supplied by a query snapshot."""
+        for skill_name in skills:
+            metadata = metadata_by_name.get(skill_name) or {}
+            if not isinstance(metadata, Mapping):
+                continue
+            description = metadata.get("description") or ""
+            if description:
+                self._skill_descriptions[skill_name] = str(description)
+            skill_id = metadata.get("skill_id") or ""
+            if skill_id:
+                self._skill_ids[skill_name] = str(skill_id)
+            cn_name = metadata.get("cn_name") or ""
+            if cn_name:
+                self._skill_cn_names[skill_name] = str(cn_name)
+
+    def set_skill_runtime_profiles(
+        self,
+        profiles: dict[str, SkillRuntimeProfile],
+    ) -> None:
+        """设置平台内部的 skill 运行时画像。"""
+        self._skill_runtime_profiles = dict(profiles)
+
+    def get_skill_runtime_profile(
+        self,
+        skill_name: str,
+    ) -> Optional[SkillRuntimeProfile]:
+        """返回 skill 的运行时画像，只供外部只读消费。"""
+        return self._skill_runtime_profiles.get(skill_name)
+
+    def _is_declared_tool_bootstrap_allowed(self, skill_name: str) -> bool:
+        """判断 skill 是否允许仅凭 declared tool 自动启动。"""
+        profile = self.get_skill_runtime_profile(skill_name)
+        if profile is None:
+            return True
+        return bool(profile.declared_tool_bootstrap_allowed)
+
+    def _can_bootstrap_from_input_evidence(
+        self,
+        confidence: float,
+    ) -> bool:
+        """仅允许强输入证据自动启动新技能。"""
+        return confidence >= 0.8
+
+    def _can_continue_with_runtime_evidence(
+        self,
+        skill_name: Optional[str],
+    ) -> bool:
+        """运行时弱信号只能续接当前已激活技能。"""
+        current = self._context_manager.current_skill
+        return bool(skill_name and current and current == skill_name)
+
+    def _can_bootstrap_from_message_match(
+        self,
+        skill_name: Optional[str],
+    ) -> bool:
+        """消息级命中只能与结构化证据组合后激活技能。"""
+        return bool(
+            skill_name
+            and self._message_detected_skill == skill_name
+            and self._message_detected_confidence >= 0.7,
+        )
+
+    def _should_apply_pending_continuation(
+        self,
+        pending_skill: Optional[str],
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> bool:
+        """判断 one-shot continuation 是否仍与当前 skill 相关。"""
+        current = self._context_manager.current_skill
+        if not pending_skill or pending_skill != current:
+            return False
+        return self._tool_input_targets_skill_assets(
+            pending_skill,
+            tool_input,
+        )
+
+    @staticmethod
+    def _is_generic_continuation_tool(tool_name: str) -> bool:
+        """判断工具是否属于通用平台工具。"""
+        return tool_name in _GENERIC_CONTINUATION_TOOLS
+
+    @classmethod
+    def _is_ambiguous_continuation_tool(cls, tool_name: str) -> bool:
+        """判断工具是否缺乏 skill 专属性，容易导致误归因。"""
+        return cls._is_generic_continuation_tool(
+            tool_name,
+        ) or tool_name.startswith("mcp_")
+
+    def _is_unconfirmed_restored_current_skill(
+        self,
+        current_skill: str,
+    ) -> bool:
+        """判断当前 skill 是否仅来自 session restore 且尚未确认。"""
+        context = self._context_manager.current_context
+        if context is None or context.skill_name != current_skill:
+            return False
+        if context.trigger_reason != "session_restore":
+            return False
+        return not (context.tools_called or context.mcp_tools_called)
+
+    def _should_continue_declared_current_skill(
+        self,
+        current_skill: str,
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> bool:
+        """当前 skill 命中 declared tools 时，判断是否允许直接续接。"""
+        if not self._is_unconfirmed_restored_current_skill(current_skill):
+            return True
+        if not self._is_ambiguous_continuation_tool(tool_name):
+            return True
+        return self._tool_input_targets_skill_assets(current_skill, tool_input)
+
+    def _tool_input_targets_skill_assets(
+        self,
+        skill_name: str,
+        tool_input: dict[str, Any],
+    ) -> bool:
+        """检查工具输入是否引用了当前 skill 目录下的资产。"""
+        skill_dirs = self._get_skill_asset_dirs(skill_name)
+        if not skill_dirs:
+            return False
+
+        for value in self._iter_tool_input_strings(tool_input):
+            if self._string_targets_skill_assets(value, skill_dirs):
+                return True
+        return False
+
+    def _detect_skill_from_tool_input_assets(
+        self,
+        tool_input: dict[str, Any],
+    ) -> Optional[str]:
+        """Resolve a tool input to one enabled skill's real asset directory."""
+        matches = [
+            skill_name
+            for skill_name in self._enabled_skills
+            if self._tool_input_targets_skill_assets(skill_name, tool_input)
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    def _iter_tool_input_strings(self, value: Any) -> list[str]:
+        """递归提取工具参数中的所有字符串值。"""
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, dict):
+            dict_strings: list[str] = []
+            for nested in value.values():
+                dict_strings.extend(self._iter_tool_input_strings(nested))
+            return dict_strings
+        if isinstance(value, (list, tuple, set)):
+            list_strings: list[str] = []
+            for nested in value:
+                list_strings.extend(self._iter_tool_input_strings(nested))
+            return list_strings
+        return []
+
+    def _get_skill_asset_dirs(self, skill_name: str) -> list[Path]:
+        """返回可能的 skill 目录列表。"""
+        candidate_dirs: list[Path] = []
+
+        snapshot_dir = self._skill_dirs.get(skill_name)
+        if snapshot_dir is not None:
+            candidate_dirs.append(snapshot_dir)
+
+        if self._workspace_dir and snapshot_dir is None:
+            try:
+                from .skills_manager import get_workspace_skills_dir
+
+                candidate_dirs.append(
+                    get_workspace_skills_dir(self._workspace_dir) / skill_name,
+                )
+            except Exception:
+                candidate_dirs.append(
+                    self._workspace_dir / "skills" / skill_name,
+                )
+
+        try:
+            from .skills_manager import get_builtin_skills_dir
+
+            candidate_dirs.append(get_builtin_skills_dir() / skill_name)
+        except Exception:
+            pass
+
+        deduped: list[Path] = []
+        seen: set[str] = set()
+        for skill_dir in candidate_dirs:
+            key = str(skill_dir)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(skill_dir)
+        return deduped
+
+    def _string_targets_skill_assets(
+        self,
+        value: str,
+        skill_dirs: list[Path],
+    ) -> bool:
+        """检查字符串参数是否指向 skill 目录中的文件。"""
+        stripped = value.strip()
+        if not stripped:
+            return False
+
+        direct_path = self._normalize_candidate_path(stripped)
+        if direct_path and self._matches_skill_asset_candidate(
+            direct_path,
+            skill_dirs,
+            workspace_dir=self._workspace_dir,
+        ):
+            return True
+
+        for token in re.findall(r'(?:"[^"]+"|\'[^\']+\'|\S+)', stripped):
+            normalized = self._normalize_candidate_path(token)
+            if not normalized:
+                continue
+            if self._matches_skill_asset_candidate(
+                normalized,
+                skill_dirs,
+                workspace_dir=self._workspace_dir,
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _normalize_candidate_path(token: str) -> Optional[str]:
+        """清洗字符串中的潜在路径片段。"""
+        candidate = token.strip().strip("\"'")
+        if not candidate:
+            return None
+        candidate = candidate.rstrip(",;")
+        if candidate.startswith("-"):
+            return None
+        if not any(marker in candidate for marker in ("/", "\\", ".", ":")):
+            return None
+        return candidate
+
+    @staticmethod
+    def _matches_skill_asset_candidate(
+        candidate: str,
+        skill_dirs: list[Path],
+        *,
+        workspace_dir: Optional[Path] = None,
+    ) -> bool:
+        """判断候选路径是否解析到 skill 目录内的真实资产。"""
+        candidate_path = Path(candidate)
+        for skill_dir in skill_dirs:
+            if not skill_dir.exists():
+                continue
+            try:
+                resolved_skill_dir = skill_dir.resolve(strict=True)
+                if candidate_path.is_absolute():
+                    resolved_candidate = candidate_path.resolve(strict=True)
+                elif workspace_dir is not None:
+                    resolved_candidate = (
+                        workspace_dir / candidate_path
+                    ).resolve(
+                        strict=True,
+                    )
+                else:
+                    continue
+                resolved_candidate.relative_to(resolved_skill_dir)
+            except (OSError, ValueError):
+                continue
+            return True
+        return False
+
     def detect_from_user_message(
         self,
         user_message: str,
@@ -326,6 +666,10 @@ class SkillInvocationDetector:
         if skill:
             self._message_detected_skill = skill
             self._message_detected_confidence = confidence
+        else:
+            # 清理上一轮缓存，避免同一 detector 被复用时沿用陈旧命中。
+            self._message_detected_skill = None
+            self._message_detected_confidence = 0.0
 
         return skill, confidence
 
@@ -360,13 +704,13 @@ class SkillInvocationDetector:
         tool_input: Optional[dict[str, Any]] = None,
         mcp_server: Optional[str] = None,
     ) -> tuple[Optional[str], dict[str, float]]:
-        """Process a tool call and determine skill attribution.
+        """Process exact evidence of actual skill use.
 
-        This is the main entry point for skill detection. It:
-        1. Queries the registry for explicit declarations
-        2. Falls back to feature inference if needed
-        3. Manages skill activation/deactivation
-        4. Returns attribution with weights
+        Runtime attribution intentionally accepts only two evidence classes:
+        reading an enabled skill's ``SKILL.md`` and a real asset path under one
+        enabled skill directory. Feature inference, declared tools, MCP
+        servers, tool hints, and recent tool sequences are discovery metadata,
+        not runtime activation evidence.
 
         Args:
             tool_name: Name of the tool being called
@@ -380,47 +724,35 @@ class SkillInvocationDetector:
         """
         tool_input = tool_input or {}
 
-        # Track recent tools for sequence matching
-        self._recent_tools.append(tool_name)
-        if len(self._recent_tools) > 10:
-            self._recent_tools.pop(0)
+        await self._drain_pending_pruned_contexts()
 
-        # Step 0: Check if Agent is reading a skill's SKILL.md (highest priority)
-        # 当Agent主动读取某技能的SKILL.md文件时，直接激活该技能
+        # Reading SKILL.md is the only detector-originated hook-load path.
         skill_from_md_read = self._detect_skill_from_skill_md_read(
             tool_name,
             tool_input,
         )
         if skill_from_md_read:
-            await self._ensure_skill_active(
+            return await self._activate_and_record_skill(
                 skill_from_md_read,
                 1.0,
                 tool_name,
-            )
-            self._context_manager.record_tool_call(tool_name, mcp_server)
-            return skill_from_md_read, {skill_from_md_read: 1.0}
-
-        # Step 1: Check for explicit declaration
-        declared_skills = self._registry.get_skills_for_tool(tool_name)
-
-        # Filter to enabled skills only
-        declared_skills = [
-            s for s in declared_skills if s in self._enabled_skills
-        ]
-
-        if declared_skills:
-            return await self._handle_declared_skills(
-                declared_skills,
-                tool_name,
-                tool_input,
+                mcp_server,
+                load_hooks=True,
             )
 
-        # Step 2-4: Fallback to inference for legacy skills
-        return await self._infer_skill_attribution(
-            tool_name,
+        skill_from_asset_path = self._detect_skill_from_tool_input_assets(
             tool_input,
-            mcp_server,
         )
+        if skill_from_asset_path:
+            return await self._activate_and_record_skill(
+                skill_from_asset_path,
+                1.0,
+                tool_name,
+                mcp_server,
+                load_hooks=False,
+            )
+
+        return None, {}
 
     async def _handle_declared_skills(
         self,
@@ -439,13 +771,40 @@ class SkillInvocationDetector:
             Tuple of (primary_skill, weights)
         """
         current = self._context_manager.current_skill
-
         # Check if current active skill is in the list
         if current and current in skills:
+            if not self._should_continue_declared_current_skill(
+                current,
+                tool_name,
+                tool_input,
+            ):
+                return None, {}
             # Continue current skill
             self._update_skill_state(current)
             self._context_manager.record_tool_call(tool_name)
             return current, {current: 1.0}
+
+        if not current:
+            for skill in skills:
+                if not self._can_bootstrap_from_message_match(skill):
+                    continue
+                confidence = self._message_detected_confidence
+                await self._ensure_skill_active(
+                    skill,
+                    confidence,
+                    tool_name,
+                )
+                self._context_manager.record_tool_call(tool_name)
+                return skill, {skill: confidence}
+
+        bootstrap_skills = [
+            skill
+            for skill in skills
+            if self._is_declared_tool_bootstrap_allowed(skill)
+        ]
+        # declared/tool ownership 属于运行时续接证据，不再负责 bootstrap。
+        if not bootstrap_skills or not current:
+            return None, {}
 
         # Check if current skill should end (idle threshold)
         if current:
@@ -457,22 +816,16 @@ class SkillInvocationDetector:
                 current = None
 
         # Calculate weights for multi-skill attribution
-        weights = self._calculate_weights(skills, tool_name, tool_input)
+        weights = self._calculate_weights(
+            bootstrap_skills,
+            tool_name,
+            tool_input,
+        )
 
         # Select primary skill (highest weight)
         primary_skill = (
             max(weights, key=lambda k: weights[k]) if weights else None
         )
-
-        # Start new skill if none active
-        if not current and primary_skill:
-            await self.start_skill(
-                primary_skill,
-                trigger_tool=tool_name,
-                trigger_reason="declared",
-                confidence=weights[primary_skill],
-            )
-            self._context_manager.record_tool_call(tool_name)
 
         return primary_skill, weights
 
@@ -481,6 +834,7 @@ class SkillInvocationDetector:
         tool_name: str,
         tool_input: dict[str, Any],
         mcp_server: Optional[str] = None,
+        pending_skill_md_continuation: Optional[str] = None,
     ) -> tuple[Optional[str], dict[str, float]]:
         """Infer skill attribution for tools without explicit declarations.
 
@@ -500,74 +854,263 @@ class SkillInvocationDetector:
             Tuple of (primary_skill, weights)
         """
         enabled_skills = list(self._enabled_skills)
-
-        # Layer 0: Check cached user message detection
-        if (
-            self._message_detected_skill
-            and self._message_detected_confidence >= 0.7
+        for resolver in (
+            self._try_infer_from_mcp_server,
+            self._try_infer_from_tool_input,
+            self._try_infer_from_tool_sequence,
+            self._try_infer_from_message_asset_bootstrap,
+            self._try_infer_from_tool_hints,
         ):
-            skill = self._message_detected_skill
-            confidence = self._message_detected_confidence
-            await self._ensure_skill_active(skill, confidence, tool_name)
-            self._context_manager.record_tool_call(tool_name, mcp_server)
-            return skill, {skill: confidence}
-
-        # Layer 1: MCP server matching
-        if mcp_server:
-            skill, confidence = self._inferencer.infer_skill_from_mcp_server(
-                mcp_server,
+            result = await resolver(
                 enabled_skills,
+                tool_name,
+                tool_input,
+                mcp_server,
             )
-            if skill and confidence >= 0.8:
-                await self._ensure_skill_active(skill, confidence, tool_name)
-                self._context_manager.record_tool_call(tool_name, mcp_server)
-                return skill, {skill: confidence}
+            if result is not None:
+                return result
 
-        # Layer 2: Feature matching
+        fallback = await self._try_infer_from_pending_or_message_fallback(
+            tool_name,
+            tool_input,
+            mcp_server,
+            pending_skill_md_continuation,
+        )
+        if fallback is not None:
+            return fallback
+
+        # No attribution possible
+        return None, {}
+
+    async def _activate_and_record_skill(
+        self,
+        skill_name: str,
+        confidence: float,
+        tool_name: str,
+        mcp_server: Optional[str],
+        *,
+        weights: Optional[dict[str, float]] = None,
+        load_hooks: bool = False,
+    ) -> tuple[str, dict[str, float]]:
+        """激活技能并记录本次工具调用。"""
+        await self._ensure_skill_active(
+            skill_name,
+            confidence,
+            tool_name,
+            load_hooks=load_hooks,
+        )
+        self._context_manager.record_tool_call(tool_name, mcp_server)
+        return skill_name, weights or {skill_name: confidence}
+
+    async def _try_infer_from_mcp_server(
+        self,
+        enabled_skills: list[str],
+        tool_name: str,
+        _tool_input: dict[str, Any],
+        mcp_server: Optional[str],
+    ) -> Optional[tuple[str, dict[str, float]]]:
+        """尝试使用 MCP server 证据归因。"""
+        if not mcp_server:
+            return None
+
+        skill, confidence = self._inferencer.infer_skill_from_mcp_server(
+            mcp_server,
+            enabled_skills,
+        )
+        if not skill:
+            return None
+        if not (
+            self._can_continue_with_runtime_evidence(skill)
+            or self._can_bootstrap_from_message_match(skill)
+        ):
+            return None
+
+        return await self._activate_and_record_skill(
+            skill,
+            confidence,
+            tool_name,
+            mcp_server,
+        )
+
+    async def _try_infer_from_tool_input(
+        self,
+        enabled_skills: list[str],
+        tool_name: str,
+        tool_input: dict[str, Any],
+        mcp_server: Optional[str],
+    ) -> Optional[tuple[str, dict[str, float]]]:
+        """尝试使用工具输入特征归因。"""
         skill, confidence = self._inferencer.infer_skill_from_tool_input(
             tool_name,
             tool_input,
             enabled_skills,
         )
-        if skill and confidence >= 0.6:
-            await self._ensure_skill_active(skill, confidence, tool_name)
-            self._context_manager.record_tool_call(tool_name, mcp_server)
-            return skill, {skill: confidence}
+        if not skill:
+            return None
+        if not (
+            self._can_bootstrap_from_input_evidence(confidence)
+            or self._can_continue_with_runtime_evidence(skill)
+            or self._can_bootstrap_from_message_match(skill)
+        ):
+            return None
 
-        # Layer 3: Tool sequence patterns
+        return await self._activate_and_record_skill(
+            skill,
+            confidence,
+            tool_name,
+            mcp_server,
+        )
+
+    async def _try_infer_from_tool_sequence(
+        self,
+        enabled_skills: list[str],
+        tool_name: str,
+        _tool_input: dict[str, Any],
+        mcp_server: Optional[str],
+    ) -> Optional[tuple[str, dict[str, float]]]:
+        """尝试使用工具序列特征归因。"""
         skill, confidence = self._inferencer.infer_skill_from_tool_sequence(
             self._recent_tools,
             enabled_skills,
         )
-        if skill and confidence >= 0.5:
-            await self._ensure_skill_active(skill, confidence, tool_name)
-            self._context_manager.record_tool_call(tool_name, mcp_server)
-            return skill, {skill: confidence}
+        if not skill or not self._can_continue_with_runtime_evidence(skill):
+            return None
 
-        # Layer 4: Tool hints
+        return await self._activate_and_record_skill(
+            skill,
+            confidence,
+            tool_name,
+            mcp_server,
+        )
+
+    async def _try_infer_from_message_asset_bootstrap(
+        self,
+        _enabled_skills: list[str],
+        tool_name: str,
+        tool_input: dict[str, Any],
+        mcp_server: Optional[str],
+    ) -> Optional[tuple[str, dict[str, float]]]:
+        """尝试使用消息命中加 skill 资产证据进行启动。"""
+        message_skill = self._message_detected_skill
+        current = self._context_manager.current_skill
+        if current is not None or message_skill is None:
+            return None
+        if not self._can_bootstrap_from_message_match(message_skill):
+            return None
+        if not self._tool_input_targets_skill_assets(
+            message_skill,
+            tool_input,
+        ):
+            return None
+
+        return await self._activate_and_record_skill(
+            message_skill,
+            1.0,
+            tool_name,
+            mcp_server,
+        )
+
+    async def _try_infer_from_tool_hints(
+        self,
+        enabled_skills: list[str],
+        tool_name: str,
+        _tool_input: dict[str, Any],
+        mcp_server: Optional[str],
+    ) -> Optional[tuple[str, dict[str, float]]]:
+        """尝试使用 tool hints 归因。"""
         inferred = self._inferencer.get_skills_for_tool(
             tool_name,
             enabled_skills,
         )
-        if inferred:
-            primary_skill = inferred[0][0]
-            weights = dict(inferred)
-            await self._ensure_skill_active(
+        raw_inferred = list(inferred)
+        continued = [
+            (skill_name, confidence)
+            for skill_name, confidence in inferred
+            if self._can_continue_with_runtime_evidence(skill_name)
+        ]
+        if continued:
+            primary_skill = continued[0][0]
+            weights = dict(continued)
+            return await self._activate_and_record_skill(
                 primary_skill,
                 weights.get(primary_skill, 0.4),
                 tool_name,
+                mcp_server,
+                weights=weights,
             )
-            self._context_manager.record_tool_call(tool_name, mcp_server)
-            return primary_skill, weights
 
-        # No attribution possible
-        return None, {}
+        bootstrap = [
+            (skill_name, confidence)
+            for skill_name, confidence in raw_inferred
+            if self._can_bootstrap_from_message_match(skill_name)
+        ]
+        if not bootstrap:
+            return None
+
+        primary_skill = bootstrap[0][0]
+        weights = dict(bootstrap)
+        return await self._activate_and_record_skill(
+            primary_skill,
+            weights.get(primary_skill, 0.4),
+            tool_name,
+            mcp_server,
+            weights=weights,
+        )
+
+    async def _try_infer_from_pending_or_message_fallback(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        mcp_server: Optional[str],
+        pending_skill_md_continuation: Optional[str],
+    ) -> Optional[tuple[str, dict[str, float]]]:
+        """尝试使用 pending continuation 或消息兜底归因。"""
+        current = self._context_manager.current_skill
+        if self._should_apply_pending_continuation(
+            pending_skill_md_continuation,
+            tool_name,
+            tool_input,
+        ):
+            if current is None:
+                return None
+            # 仅对紧随 SKILL.md 读取后的下一次无证据工具调用延续归因，
+            # 避免恢复的 session skill 在无证据场景下直接丢失。
+            self._update_skill_state(current)
+            self._context_manager.record_tool_call(tool_name, mcp_server)
+            self._pending_skill_md_continuation = None
+            return current, {current: 1.0}
+
+        if not self._should_apply_message_fallback() or current is None:
+            return None
+
+        return await self._activate_and_record_skill(
+            current,
+            self._message_detected_confidence,
+            tool_name,
+            mcp_server,
+        )
+
+    def _should_apply_message_fallback(self) -> bool:
+        """仅在当前 skill 已有确认调用时允许消息级兜底续接。"""
+        current = self._context_manager.current_skill
+        context = self._context_manager.current_context
+        if (
+            not current
+            or self._message_detected_skill != current
+            or self._message_detected_confidence < 0.7
+            or context is None
+            or context.skill_name != current
+        ):
+            return False
+        return bool(context.tools_called or context.mcp_tools_called)
 
     async def _ensure_skill_active(
         self,
         skill_name: str,
         confidence: float,
         trigger_tool: str,
+        *,
+        load_hooks: bool = False,
     ) -> None:
         """Ensure a skill is active, starting it if needed.
 
@@ -593,7 +1136,67 @@ class SkillInvocationDetector:
             trigger_tool=trigger_tool,
             trigger_reason="inferred",
             confidence=confidence,
+            load_hooks=load_hooks,
         )
+
+    def _schedule_pruned_context_finalization(
+        self,
+        contexts: list[SkillExecutionContext],
+    ) -> None:
+        """为被裁剪的技能上下文安排 tracing 收尾."""
+        if not contexts:
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._pending_pruned_contexts.extend(contexts)
+            return
+
+        task = loop.create_task(self._finalize_pruned_contexts(contexts))
+        self._pruned_context_tasks.add(task)
+        task.add_done_callback(self._pruned_context_tasks.discard)
+
+    async def _drain_pending_pruned_contexts(self) -> None:
+        """在显式 await 边界补齐延迟的上下文收尾."""
+        if self._pending_pruned_contexts:
+            pending_contexts = self._pending_pruned_contexts
+            self._pending_pruned_contexts = []
+            await self._finalize_pruned_contexts(pending_contexts)
+
+        if self._pruned_context_tasks:
+            await asyncio.gather(
+                *list(self._pruned_context_tasks),
+                return_exceptions=True,
+            )
+
+    async def _finalize_pruned_contexts(
+        self,
+        contexts: list[SkillExecutionContext],
+    ) -> None:
+        """结束因启用技能变化而被移除的上下文."""
+        for context in contexts:
+            await self._emit_skill_end_for_context(context)
+
+    def _flush_pruned_contexts_for_reset(self) -> None:
+        """在 reset 前尽量完成被裁剪上下文的 tracing 收尾."""
+        pending_contexts = self._pending_pruned_contexts
+        self._pending_pruned_contexts = []
+
+        if not pending_contexts:
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self._finalize_pruned_contexts(pending_contexts))
+            return
+
+        task = loop.create_task(
+            self._finalize_pruned_contexts(pending_contexts),
+        )
+        self._pruned_context_tasks.add(task)
+        task.add_done_callback(self._pruned_context_tasks.discard)
 
     def _calculate_weights(
         self,
@@ -720,16 +1323,57 @@ class SkillInvocationDetector:
         if path.name != "SKILL.md":
             return None
 
-        skill_name = path.parent.name
-        if skill_name in self._enabled_skills:
-            logger.info(
-                "Detected skill '%s' from SKILL.md read: %s",
-                skill_name,
-                file_path,
-            )
-            return skill_name
+        if self._workspace_dir and not path.is_absolute():
+            path = self._workspace_dir / path
 
-        return None
+        skill_name = path.parent.name
+        if skill_name not in self._enabled_skills:
+            return None
+
+        if self._workspace_dir:
+            resolved_path = path.resolve(strict=False)
+            expected_paths = [
+                skill_dir.resolve(strict=False) / "SKILL.md"
+                for skill_dir in self._get_skill_asset_dirs(skill_name)
+            ]
+            if resolved_path not in expected_paths or not path.is_file():
+                return None
+
+        logger.info(
+            "Detected skill '%s' from SKILL.md read: %s",
+            skill_name,
+            file_path,
+        )
+        return skill_name
+
+    async def validate_tool_call_snapshot(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> bool:
+        """Check snapshot content before attributing a workspace skill read."""
+        if tool_name != "read_file" or not self._skill_signatures:
+            return True
+        skill_name = self._detect_skill_from_skill_md_read(
+            tool_name,
+            tool_input,
+        )
+        if skill_name is None:
+            return True
+        expected = self._skill_signatures.get(skill_name)
+        skill_dir = self._skill_dirs.get(skill_name)
+        if expected is None or skill_dir is None:
+            return False
+        from .skills_manager import _build_signature
+
+        actual = await asyncio.to_thread(_build_signature, skill_dir)
+        if actual != expected:
+            logger.warning(
+                "Skipping skill attribution for changed skill '%s'",
+                skill_name,
+            )
+            return False
+        return True
 
     def _update_skill_state(self, skill: str) -> None:
         """Update skill state after a tool call.
@@ -770,6 +1414,8 @@ class SkillInvocationDetector:
         trigger_tool: str,
         trigger_reason: str = "inferred",
         confidence: float = 1.0,
+        *,
+        load_hooks: bool = False,
     ) -> None:
         """Start a new skill invocation.
 
@@ -778,23 +1424,16 @@ class SkillInvocationDetector:
             trigger_tool: Tool that triggered this skill
             trigger_reason: How the skill was detected
             confidence: Attribution confidence
+            load_hooks: Whether this evidence permits loading skill hooks
         """
-        # Get skill description - prefer cached manifest, fallback to SKILL.md
-        skill_description = self.get_skill_description(skill_name)
-
-        # Get skill_id and cn_name from cache
+        # Get skill_id from cache; description is read by tracing only if needed
         skill_id = self._skill_ids.get(skill_name)
-        cn_name = self._skill_cn_names.get(skill_name)
 
-        # Debug log for skill_id and cn_name
         logger.debug(
-            "start_skill: skill_name=%s, skill_id=%s, cn_name=%s, description=%s",
+            "start_skill: skill_name=%s, skill_id=%s",
             skill_name,
             skill_id,
-            cn_name,
-            skill_description[:50] if skill_description else None,
         )
-
         # Emit tracing event first to get span_id
         span_id = None
         if self._trace_manager and self._trace_id:
@@ -814,8 +1453,6 @@ class SkillInvocationDetector:
                     user_name=self._user_name,
                     bbk_id=self._bbk_id,
                     skill_id=skill_id,
-                    cn_name=cn_name,
-                    skill_description=skill_description,
                 )
             except Exception as e:
                 logger.warning("Failed to emit skill start event: %s", e)
@@ -843,7 +1480,7 @@ class SkillInvocationDetector:
                     e,
                 )
 
-        if self._skill_hook_loader is not None:
+        if load_hooks and self._skill_hook_loader is not None:
             try:
                 result = self._skill_hook_loader(skill_name)
                 if isawaitable(result):
@@ -874,6 +1511,16 @@ class SkillInvocationDetector:
         if context is None:
             return
 
+        await self._emit_skill_end_for_context(context)
+
+    async def _emit_skill_end_for_context(
+        self,
+        context: SkillExecutionContext,
+    ) -> None:
+        """根据上下文发出技能结束事件."""
+        if context is None:
+            return
+
         # Emit tracing event with span_id from context
         if self._trace_manager and self._trace_id and context.span_id:
             try:
@@ -897,6 +1544,8 @@ class SkillInvocationDetector:
 
         Ends all active skills when reasoning completes.
         """
+        await self._drain_pending_pruned_contexts()
+
         # End all skills in the stack (from top to bottom)
         while self._context_manager.skill_depth > 0:
             current = self._context_manager.current_skill
@@ -907,17 +1556,32 @@ class SkillInvocationDetector:
 
         # Clear any remaining state
         self._context_manager.clear()
+        self._locked_skill_from_md = None
+        self._pending_skill_md_continuation = None
 
     def reset(self) -> None:
         """Reset detector state for a new request."""
+        self._flush_pruned_contexts_for_reset()
         self._skill_activation_time.clear()
         self._skill_call_history.clear()
         self._idle_counters.clear()
         self._recent_tools.clear()
         self._context_manager.clear()
+        self._locked_skill_from_md = None
+        self._pending_skill_md_continuation = None
         # Clear Layer 0 cache
         self._message_detected_skill = None
         self._message_detected_confidence = 0.0
+
+    def restore_confirmed_skill(
+        self,
+        skill_name: str,
+        *,
+        allow_one_shot_continuation: bool = True,
+    ) -> bool:
+        """Ignore persisted attribution; only current-turn exact evidence counts."""
+        del skill_name, allow_one_shot_continuation
+        return False
 
 
 # Global detector instance (per-request, should be reset)

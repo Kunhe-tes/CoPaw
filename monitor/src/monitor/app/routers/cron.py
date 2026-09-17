@@ -7,21 +7,38 @@ Provides endpoints for frontend to query job definitions and execution history.
 import logging
 from datetime import datetime
 from io import BytesIO
+from typing import Annotated
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
+from fastapi.routing import APIRoute
+from pydantic import BeforeValidator
 
 from ..models.cron import (
+    CronScheduleBucketMinutes,
+    CronScheduleDistributionErrorDetail,
+    CronScheduleDistributionErrorResponse,
     CronJobModel,
     CronJobQueryParams,
+    CronScheduleDistributionDetailsResponse,
+    CronScheduleDistributionResponse,
     CronOverviewResponse,
     CronOverviewStatsResponse,
+    CronDispatchBatchDetailResponse,
+    CronDispatchBatchesResponse,
+    CronDispatchDetailQueryParams,
+    CronDispatchWorkersResponse,
     CronBranchRankingResponse,
+    CronBranchTaskRankingResponse,
     CronBranchErrorResponse,
     BranchSkillResponse,
+    BranchManagerSummaryResponse,
     BranchSkillManagerResponse,
     BranchSkillManagerCustomerResponse,
+    ManagerSkillResponse,
+    ManagerCustomerResponse,
     ExecutionModel,
     ExecutionQueryParams,
     PaginatedResponse,
@@ -29,14 +46,61 @@ from ..models.cron import (
     MarkReadResponse,
     SubscriptionDetailItem,
     SubscriptionOverviewItem,
+    TaskType,
     UnreadCountResponse,
+    BroadcastSourceJobQueryParams,
 )
 from ..services.cron import QueryService, get_query_service
 from ..services.cron.export_service import ExportService, get_export_service
+from ..services.cron.query_service import (
+    ScheduleCalculationLimitExceededError,
+    ScheduleDefinitionRevisionConflictError,
+    ScheduleDistributionValidationError,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/monitor/cron", tags=["cron"])
+
+
+def _schedule_distribution_error_detail(
+    *,
+    code: str,
+    message: str,
+    actual_revision: str | None = None,
+) -> dict:
+    """Build the stable detail object shared by the two new endpoints."""
+    return CronScheduleDistributionErrorDetail(
+        code=code,
+        message=message,
+        actual_revision=actual_revision,
+    ).model_dump(exclude_none=True)
+
+
+class _ScheduleDistributionRoute(APIRoute):
+    """Wrap only schedule-distribution request validation errors."""
+
+    def get_route_handler(self):
+        original_handler = super().get_route_handler()
+
+        async def wrapped_handler(request: Request):
+            try:
+                return await original_handler(request)
+            except RequestValidationError as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail=_schedule_distribution_error_detail(
+                        code="schedule_distribution_validation_error",
+                        message="Invalid schedule distribution request.",
+                    ),
+                ) from exc
+
+        return wrapped_handler
+
+
+schedule_distribution_router = APIRouter(
+    route_class=_ScheduleDistributionRoute,
+)
 
 
 def _get_source_id_from_header(request: Request) -> str:
@@ -87,6 +151,224 @@ async def get_overview(
     )
 
 
+@router.get("/dispatch/batches", response_model=CronDispatchBatchesResponse)
+async def list_dispatch_batches(
+    request: Request,
+    start_time: datetime | None = Query(default=None, description="开始时间"),
+    end_time: datetime | None = Query(default=None, description="结束时间"),
+    status: str | None = Query(default=None, description="批次状态"),
+    query: str | None = Query(default=None, description="全局筛选词"),
+    page: int = Query(default=1, ge=1, description="页码"),
+    page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
+    service: QueryService = Depends(get_query_service),
+) -> CronDispatchBatchesResponse:
+    """查询当前渠道的批调度 batch 概览。"""
+    actual_source_id = _get_source_id_from_header(request)
+    return await service.get_dispatch_batches(
+        source_id=actual_source_id,
+        start_time=start_time,
+        end_time=end_time,
+        status=status,
+        query=query,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.get(
+    "/dispatch/batches/{batch_id}",
+    response_model=CronDispatchBatchDetailResponse,
+)
+async def get_dispatch_batch_detail(
+    request: Request,
+    batch_id: str,
+    intent_limit: int = Query(
+        default=100,
+        ge=1,
+        le=500,
+        description="Intent 数量",
+    ),
+    event_limit: int = Query(
+        default=100,
+        ge=1,
+        le=500,
+        description="事件数量",
+    ),
+    intent_page: int = Query(default=1, ge=1, description="Intent 页码"),
+    event_page: int = Query(default=1, ge=1, description="事件页码"),
+    intent_query: str | None = Query(
+        default=None,
+        max_length=256,
+        description="Intent 全局筛选",
+    ),
+    intent_role: str | None = Query(
+        default=None,
+        max_length=16,
+        description="Intent 角色",
+    ),
+    intent_status: str | None = Query(
+        default=None,
+        max_length=16,
+        description="Intent 状态",
+    ),
+    service: QueryService = Depends(get_query_service),
+) -> CronDispatchBatchDetailResponse:
+    """查询单个批调度 batch 的 intent 和事件明细。"""
+    actual_source_id = _get_source_id_from_header(request)
+    detail = await service.get_dispatch_batch_detail(
+        source_id=actual_source_id,
+        batch_id=batch_id,
+        params=CronDispatchDetailQueryParams(
+            intent_page=intent_page,
+            intent_limit=intent_limit,
+            intent_query=intent_query,
+            intent_role=intent_role,
+            intent_status=intent_status,
+            event_page=event_page,
+            event_limit=event_limit,
+        ),
+    )
+    if not detail:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    return detail
+
+
+@router.get("/dispatch/workers", response_model=CronDispatchWorkersResponse)
+async def get_dispatch_workers(
+    request: Request,
+    start_time: datetime | None = Query(default=None, description="开始时间"),
+    end_time: datetime | None = Query(default=None, description="结束时间"),
+    capacity_cursor: str | None = Query(default=None, max_length=2048),
+    service: QueryService = Depends(get_query_service),
+) -> CronDispatchWorkersResponse:
+    """查询当前渠道下模型策略和 worker capacity 变动。"""
+    actual_source_id = _get_source_id_from_header(request)
+    try:
+        return await service.get_dispatch_workers(
+            source_id=actual_source_id,
+            start_time=start_time,
+            end_time=end_time,
+            capacity_cursor=capacity_cursor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@schedule_distribution_router.get(
+    "/schedule-distribution",
+    response_model=CronScheduleDistributionResponse,
+    responses={
+        422: {"model": CronScheduleDistributionErrorResponse},
+    },
+)
+async def get_schedule_distribution(
+    request: Request,
+    bucket_minutes: Annotated[
+        CronScheduleBucketMinutes,
+        BeforeValidator(int),
+        Query(description="统计桶间隔（分钟）"),
+    ],
+    start_time: datetime = Query(
+        ...,
+        description="统计开始时间（必须包含 UTC offset）",
+    ),
+    end_time: datetime = Query(
+        ...,
+        description="统计结束时间（必须包含 UTC offset）",
+    ),
+    service: QueryService = Depends(get_query_service),
+) -> CronScheduleDistributionResponse:
+    """统计当前来源下 Scheduled Job 的计划触发次数分布。"""
+    actual_source_id = _get_source_id_from_header(request)
+    try:
+        return await service.get_schedule_distribution(
+            source_id=actual_source_id,
+            start_time=start_time,
+            end_time=end_time,
+            bucket_minutes=bucket_minutes,
+        )
+    except (
+        ScheduleDistributionValidationError,
+        ScheduleCalculationLimitExceededError,
+    ) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=_schedule_distribution_error_detail(
+                code=exc.code,
+                message=exc.message,
+            ),
+        ) from exc
+
+
+@schedule_distribution_router.get(
+    "/schedule-distribution/details",
+    response_model=CronScheduleDistributionDetailsResponse,
+    responses={
+        422: {"model": CronScheduleDistributionErrorResponse},
+        409: {"model": CronScheduleDistributionErrorResponse},
+    },
+)
+async def get_schedule_distribution_details(
+    request: Request,
+    start_time: datetime = Query(
+        ...,
+        description="所选桶开始时间（必须包含 UTC offset）",
+    ),
+    end_time: datetime = Query(
+        ...,
+        description="所选桶结束时间（必须包含 UTC offset）",
+    ),
+    task_type: TaskType | None = Query(
+        default=None,
+        description="任务类型筛选：text/agent",
+    ),
+    page: int = Query(default=1, ge=1, description="页码"),
+    page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
+    expected_revision: str | None = Query(
+        default=None,
+        min_length=1,
+        max_length=128,
+        description="前一页返回的任务定义版本",
+    ),
+    service: QueryService = Depends(get_query_service),
+) -> CronScheduleDistributionDetailsResponse:
+    """查询所选时间桶内计划触发明细，不返回任务正文或原始元数据。"""
+    actual_source_id = _get_source_id_from_header(request)
+    try:
+        return await service.get_schedule_distribution_details(
+            source_id=actual_source_id,
+            start_time=start_time,
+            end_time=end_time,
+            task_type=task_type,
+            page=page,
+            page_size=page_size,
+            expected_revision=expected_revision,
+        )
+    except ScheduleDefinitionRevisionConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=_schedule_distribution_error_detail(
+                code=exc.code,
+                message=exc.message,
+                actual_revision=exc.actual_revision,
+            ),
+        ) from exc
+    except (
+        ScheduleDistributionValidationError,
+        ScheduleCalculationLimitExceededError,
+    ) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=_schedule_distribution_error_detail(
+                code=exc.code,
+                message=exc.message,
+            ),
+        ) from exc
+
+
+router.include_router(schedule_distribution_router)
+
+
 @router.get("/jobs", response_model=PaginatedResponse[CronJobModel])
 async def list_jobs(
     request: Request,
@@ -132,6 +414,41 @@ async def list_jobs(
         page_size=page_size,
     )
     return await service.list_jobs(params)
+
+
+@router.get(
+    "/jobs/by-broadcast-source",
+    response_model=list[CronJobModel],
+)
+async def query_jobs_by_broadcast_source(
+    request: Request,
+    tenant_id: str | None = Query(default=None, description="租户ID筛选"),
+    bbk_id: str | None = Query(
+        default=None,
+        description="分行号筛选（二级分行号）",
+    ),
+    broadcast_source_job_id: str = Query(..., description="分发源定时任务ID"),
+    service: QueryService = Depends(get_query_service),
+) -> list[CronJobModel]:
+    """根据分发源定时任务ID查询定时任务列表。
+
+    Args:
+        request: FastAPI request object
+        tenant_id: 租户ID筛选
+        bbk_id: 分行号筛选（二级分行号，会转换为一级分行号）
+        broadcast_source_job_id: 分发源定时任务ID
+        service: Query service
+
+    Returns:
+        定时任务列表
+    """
+    actual_source_id = _get_source_id_from_header(request)
+    return await service.query_jobs_by_broadcast_source(
+        tenant_id=tenant_id,
+        bbk_id=bbk_id,
+        source_id=actual_source_id,
+        broadcast_source_job_id=broadcast_source_job_id,
+    )
 
 
 @router.get(
@@ -390,6 +707,40 @@ async def export_data(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/export-detail")
+async def export_skill_usage_detail(
+    request: Request,
+    start_date: str | None = Query(default=None, description="开始日期"),
+    end_date: str | None = Query(default=None, description="结束日期"),
+    bbk_ids: str | None = Query(default=None, description="分行号筛选"),
+    query_service: QueryService = Depends(get_query_service),
+    export_service: ExportService = Depends(get_export_service),
+) -> StreamingResponse:
+    """Export overview execution/customer detail rows to Excel."""
+    actual_source_id = _get_source_id_from_header(request)
+    try:
+        rows = await query_service.get_skill_usage_details_for_export(
+            start_date=start_date,
+            end_date=end_date,
+            bbk_ids=bbk_ids,
+            source_id=actual_source_id,
+        )
+        excel_bytes = export_service.export_skill_usage_details(rows)
+        filename = quote("定时任务客户经理技能明细.xlsx")
+        return StreamingResponse(
+            BytesIO(excel_bytes),
+            media_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{filename}",
+            },
+        )
+    except Exception as e:
+        logger.error("Failed to export cron overview detail: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/jobs/{job_id}/mark-read", response_model=MarkReadResponse)
 async def mark_job_as_read(
     request: Request,
@@ -522,6 +873,50 @@ async def get_branch_behavior(
     )
 
 
+@router.get(
+    "/branch-task-behavior",
+    response_model=CronBranchTaskRankingResponse,
+)
+async def get_branch_task_behavior(
+    request: Request,
+    start_date: str | None = Query(
+        default=None,
+        description="开始日期 (YYYY-MM-DD)",
+    ),
+    end_date: str | None = Query(
+        default=None,
+        description="结束日期 (YYYY-MM-DD)",
+    ),
+    bbk_ids: str | None = Query(
+        default=None,
+        description="分行号筛选（逗号分隔）",
+    ),
+    service: QueryService = Depends(get_query_service),
+) -> CronBranchTaskRankingResponse:
+    """获取分行任务视角综合排行。
+
+    返回各分行的覆盖客户经理数、定时任务数、成功执行数、成功率、
+    已读任务数、查看方案任务数/点击数、点击去洞察任务数/点击数、
+    点击去电访任务数/点击数、报错执行次数。
+
+    Args:
+        start_date: 开始日期筛选 (YYYY-MM-DD格式)
+        end_date: 结束日期筛选 (YYYY-MM-DD格式)
+        bbk_ids: 分行号筛选（多个用逗号分隔）
+        service: Query service
+
+    Returns:
+        分行任务视角排行数据
+    """
+    actual_source_id = _get_source_id_from_header(request)
+    return await service.get_branch_task_behavior(
+        start_date=start_date,
+        end_date=end_date,
+        bbk_ids=bbk_ids,
+        source_id=actual_source_id,
+    )
+
+
 @router.get("/branch-error", response_model=CronBranchErrorResponse)
 async def get_branch_error(
     request: Request,
@@ -591,6 +986,47 @@ async def get_branch_skills(
     """
     actual_source_id = _get_source_id_from_header(request)
     return await service.get_branch_skills(
+        bbk_id=bbk_id,
+        start_date=start_date,
+        end_date=end_date,
+        source_id=actual_source_id,
+    )
+
+
+@router.get(
+    "/branch-manager-summary",
+    response_model=BranchManagerSummaryResponse,
+)
+async def get_branch_manager_summary(
+    request: Request,
+    bbk_id: str = Query(..., description="分行ID"),
+    start_date: str | None = Query(
+        default=None,
+        description="开始日期 (YYYY-MM-DD)",
+    ),
+    end_date: str | None = Query(
+        default=None,
+        description="结束日期 (YYYY-MM-DD)",
+    ),
+    service: QueryService = Depends(get_query_service),
+) -> BranchManagerSummaryResponse:
+    """获取分行客户经理汇总数据。
+
+    返回指定分行在时间范围内的客户经理统计，包括技能数量、
+    任务总数、成功执行数、已读任务数、推荐客户数、查看方案客户数、
+    去洞察客户数、去电访客户数。
+
+    Args:
+        bbk_id: 分行ID
+        start_date: 开始日期
+        end_date: 结束日期
+        service: Query service
+
+    Returns:
+        客户经理汇总列表
+    """
+    actual_source_id = _get_source_id_from_header(request)
+    return await service.get_branch_manager_summary(
         bbk_id=bbk_id,
         start_date=start_date,
         end_date=end_date,
@@ -681,6 +1117,92 @@ async def get_branch_skill_manager_customers(
         bbk_id=bbk_id,
         skill_name=skill_name,
         user_id=user_id,
+        start_date=start_date,
+        end_date=end_date,
+        source_id=actual_source_id,
+    )
+
+
+@router.get("/manager-skills", response_model=ManagerSkillResponse)
+async def get_manager_skills(
+    request: Request,
+    bbk_id: str = Query(..., description="分行ID"),
+    user_id: str = Query(..., description="客户经理ID"),
+    start_date: str | None = Query(
+        default=None,
+        description="开始日期 (YYYY-MM-DD)",
+    ),
+    end_date: str | None = Query(
+        default=None,
+        description="结束日期 (YYYY-MM-DD)",
+    ),
+    service: QueryService = Depends(get_query_service),
+) -> ManagerSkillResponse:
+    """获取客户经理技能维度数据。
+
+    返回指定客户经理在各技能下的统计，包括定时任务数、成功执行数、
+    成功率、已读任务数、报错次数。
+
+    Args:
+        bbk_id: 分行ID
+        user_id: 客户经理ID
+        start_date: 开始日期
+        end_date: 结束日期
+        service: Query service
+
+    Returns:
+        技能维度列表
+    """
+    actual_source_id = _get_source_id_from_header(request)
+    return await service.get_manager_skills(
+        bbk_id=bbk_id,
+        user_id=user_id,
+        start_date=start_date,
+        end_date=end_date,
+        source_id=actual_source_id,
+    )
+
+
+@router.get("/manager-customers", response_model=ManagerCustomerResponse)
+async def get_manager_customers(
+    request: Request,
+    bbk_id: str = Query(..., description="分行ID"),
+    user_id: str = Query(..., description="客户经理ID"),
+    skill_name: str | None = Query(
+        default=None,
+        description="技能名称（可选，用于筛选特定技能的客户）",
+    ),
+    start_date: str | None = Query(
+        default=None,
+        description="开始日期 (YYYY-MM-DD)",
+    ),
+    end_date: str | None = Query(
+        default=None,
+        description="结束日期 (YYYY-MM-DD)",
+    ),
+    service: QueryService = Depends(get_query_service),
+) -> ManagerCustomerResponse:
+    """获取客户经理客户维度数据。
+
+    返回指定客户经理点击过的客户统计，包括是否点击方案、是否点击洞察、
+    是否点击电访、点击时间。
+
+    Args:
+        bbk_id: 分行ID
+        user_id: 客户经理ID
+        skill_name: 技能名称（可选，用于筛选特定技能的客户）
+        start_date: 开始日期
+        end_date: 结束日期
+        service: Query service
+
+    Returns:
+        客户维度列表
+    """
+    actual_source_id = _get_source_id_from_header(request)
+    return await service.get_manager_customers(
+        bbk_id=bbk_id,
+        user_id=user_id,
+        skill_name=skill_name,
         start_date=start_date,
         end_date=end_date,
         source_id=actual_source_id,

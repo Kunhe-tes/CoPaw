@@ -12,7 +12,6 @@ from .notification_service import (
     CronNotificationService,
     get_cron_notification_service,
 )
-
 __all__ = [
     "SyncService",
     "get_sync_service",

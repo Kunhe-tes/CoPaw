@@ -4,7 +4,7 @@ import DownloadFileCard from "@/components/agentscope-chat/DownloadFileCard";
 
 const { Title, Paragraph } = Typography;
 
-const AUTO_PREVIEW_FILE_NAME = "存款到期完整客户名单-1779875663603.html";
+const AUTO_PREVIEW_FILE_NAME = "report[auto-preview]-1779875663603.html";
 
 function buildHtmlPreviewUrl(description: string): string {
   const html = `<!doctype html>
@@ -140,7 +140,7 @@ function TestDownloadCardPage() {
         }
       >
         <Paragraph>
-          下面这张卡片的文件名包含 <code>存款到期完整客户名单</code>，
+          下面这张卡片使用 <code>auto-preview</code> 标记，
           页面加载后应自动弹出 HTML 预览。关闭弹窗后可点击右上角按钮重新触发。
         </Paragraph>
         <Space wrap align="start">

@@ -28,6 +28,8 @@ _EXPORT_HEADERS = [
     "start_time",
     "duration_ms",
 ]
+_EXPORT_MESSAGE_MAX_LENGTH = 32767
+_EXPORT_MESSAGE_TRUNCATION_SUFFIX = "...(已截断)"
 
 
 class TracingExportService:
@@ -62,6 +64,7 @@ class TracingExportService:
         end_date: Optional[datetime] = None,
         query_text: Optional[str] = None,
         bbk_id: Optional[str] = None,
+        exclude_cron_task_sessions: bool = False,
     ) -> StreamingResponse:
         """导出用户消息为 CSV 格式.
 
@@ -86,6 +89,7 @@ class TracingExportService:
             query_text=query_text,
             export=True,
             bbk_ids=bbk_id,
+            exclude_cron_task_sessions=exclude_cron_task_sessions,
         )
 
         output = io.StringIO()
@@ -113,6 +117,7 @@ class TracingExportService:
         end_date: Optional[datetime] = None,
         query_text: Optional[str] = None,
         bbk_id: Optional[str] = None,
+        exclude_cron_task_sessions: bool = False,
     ) -> StreamingResponse:
         """导出用户消息为 JSON 格式.
 
@@ -137,6 +142,7 @@ class TracingExportService:
             query_text=query_text,
             export=True,
             bbk_ids=bbk_id,
+            exclude_cron_task_sessions=exclude_cron_task_sessions,
         )
 
         data = [message.model_dump() for message in messages]
@@ -163,6 +169,7 @@ class TracingExportService:
         end_date: Optional[datetime] = None,
         query_text: Optional[str] = None,
         bbk_id: Optional[str] = None,
+        exclude_cron_task_sessions: bool = False,
     ) -> StreamingResponse:
         """导出用户消息为 XLSX 格式.
 
@@ -205,6 +212,7 @@ class TracingExportService:
             query_text=query_text,
             export=True,
             bbk_ids=bbk_id,
+            exclude_cron_task_sessions=exclude_cron_task_sessions,
         )
 
         wb = Workbook()
@@ -290,8 +298,27 @@ class TracingExportService:
             message.user_name or "",
             message.session_id,
             message.channel,
-            message.user_message or "",
+            self._truncate_export_message(message.user_message),
             message.model_name or "",
             message.start_time.isoformat() if message.start_time else "",
             message.duration_ms or "",
         ]
+
+    def _truncate_export_message(self, message: Optional[str]) -> str:
+        """截断导出消息，避免超出 Excel 单元格长度限制.
+
+        Args:
+            message: 原始用户消息
+
+        Returns:
+            截断后的用户消息；若未超长则原样返回
+        """
+        if not message:
+            return ""
+        if len(message) <= _EXPORT_MESSAGE_MAX_LENGTH:
+            return message
+
+        truncated_length = _EXPORT_MESSAGE_MAX_LENGTH - len(
+            _EXPORT_MESSAGE_TRUNCATION_SUFFIX,
+        )
+        return message[:truncated_length] + _EXPORT_MESSAGE_TRUNCATION_SUFFIX

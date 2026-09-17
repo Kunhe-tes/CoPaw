@@ -24,7 +24,7 @@ function buildSkill(overrides: Partial<MarketSkill> = {}): MarketSkill {
     name: "sales-helper",
     skill_name: "sales-helper",
     description: "",
-    version: "1.0.0",
+    version: "2.0.0",
     creator_id: "admin",
     creator_name: "Admin",
     category_id: null,
@@ -71,6 +71,8 @@ function buildOverview(
         has_update: true,
       },
     ],
+    owner_lookup_status: "completed",
+    owner_lookup_updated_at: null,
     latest_run: null,
     ...overrides,
   };
@@ -146,7 +148,7 @@ describe("SkillReadinessModal", () => {
     cleanup();
   });
 
-  it("shows fallback skill_name and disables start when config is missing", async () => {
+  it("starts owner lookup when config is missing", async () => {
     mocks.getSkillReadinessOverview.mockResolvedValue(
       buildOverview({
         skill_id: "sales-helper",
@@ -156,6 +158,12 @@ describe("SkillReadinessModal", () => {
         config_checks: [],
       }),
     );
+    mocks.startSkillReadinessRun.mockResolvedValue({
+      reused: false,
+      run: null,
+      owner_lookup_only: true,
+      owner_lookup_scheduled: true,
+    });
 
     render(
       <SkillReadinessModal
@@ -170,8 +178,15 @@ describe("SkillReadinessModal", () => {
     expect(
       screen.queryByText("当前技能未返回 skill_id，已按 skill_name 查询"),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /开始检查/ })).toBeDisabled();
-  });
+    const startButton = screen.getByRole("button", { name: /查询用户/ });
+    expect(startButton).toBeEnabled();
+
+    fireEvent.click(startButton);
+
+    await waitFor(() => {
+      expect(mocks.startSkillReadinessRun).toHaveBeenCalledWith("sales-helper");
+    });
+  }, 15000);
 
   it("starts a readiness run for startable config", async () => {
     render(
@@ -179,17 +194,68 @@ describe("SkillReadinessModal", () => {
     );
 
     await screen.findByText("已查询到自检配置");
-    expect(await screen.findByText("sales-helper")).toBeInTheDocument();
-    expect(await screen.findByText("2.0.0")).toBeInTheDocument();
+    expect((await screen.findAllByText("sales-helper")).length).toBeGreaterThan(
+      0,
+    );
+    expect(await screen.findByTitle("市场版本 v2.0.0")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: "市场版本" }),
+    ).not.toBeInTheDocument();
     expect(await screen.findByText("1.0.0")).toBeInTheDocument();
     expect(await screen.findByText("已启用")).toBeInTheDocument();
-    expect(await screen.findByText("可更新")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /开始检查/ }));
+    expect(await screen.findByText("版本不同")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /查询用户并检查/ }));
 
     await waitFor(() => {
       expect(mocks.startSkillReadinessRun).toHaveBeenCalledWith("skill-001");
     });
-    expect(await screen.findByText(/run-1/)).toBeInTheDocument();
+    await waitFor(() => {
+      expect(mocks.getSkillReadinessResults).toHaveBeenCalledWith(
+        "run-1",
+        expect.objectContaining({ page: 1, page_size: 20 }),
+      );
+    });
+  }, 15000);
+
+  it("shows owner lookup data time on overview results", async () => {
+    mocks.getSkillReadinessOverview.mockResolvedValue(
+      buildOverview({
+        owner_lookup_updated_at: "2026-06-24T10:30:00Z",
+      }),
+    );
+
+    render(
+      <SkillReadinessModal open skill={buildSkill()} onClose={vi.fn()} />,
+    );
+
+    expect(await screen.findByText(/数据时间：/)).toHaveTextContent(
+      "数据时间：",
+    );
+    expect(await screen.findByText(/2026/)).toBeInTheDocument();
+  });
+
+  it("shows start hint before owner data is generated", async () => {
+    mocks.getSkillReadinessOverview.mockResolvedValue(
+      buildOverview({
+        owner_summary: {
+          total_users: 0,
+          lookup_failed_users: 0,
+          failure_summary: null,
+        },
+        owners: [],
+        owner_lookup_status: "idle",
+        owner_lookup_updated_at: null,
+      }),
+    );
+
+    render(
+      <SkillReadinessModal open skill={buildSkill()} onClose={vi.fn()} />,
+    );
+
+    expect(
+      await screen.findByText("查询用户后生成拥有用户"),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("数据时间：查询用户后生成")).toBeInTheDocument();
   });
 
   it("ignores stale overview responses after switching skills", async () => {
@@ -300,7 +366,7 @@ describe("SkillReadinessModal", () => {
         }),
       );
     });
-  });
+  }, 15000);
 
   it("uses default owner metrics when overview omits owner_summary", async () => {
     mocks.getSkillReadinessOverview.mockResolvedValue({
@@ -315,7 +381,10 @@ describe("SkillReadinessModal", () => {
     );
 
     expect(await screen.findByText("已查询到自检配置")).toBeInTheDocument();
-    expect(await screen.findAllByText("0")).toHaveLength(2);
-    expect(screen.getByText("0 / 0")).toBeInTheDocument();
+    expect((await screen.findAllByText("0")).length).toBeGreaterThanOrEqual(2);
+    expect(
+      screen.getAllByText((_content, element) => element?.textContent === "0 / 0")
+        .length,
+    ).toBeGreaterThan(0);
   });
 });

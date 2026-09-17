@@ -131,6 +131,49 @@ describe("AgentScopeRuntimeResponseBuilder tool output frames", () => {
     expect(data.data.live_output_truncated).toBe(false);
   });
 
+  it("uses the server-provided live output budget", () => {
+    const builder = new AgentScopeRuntimeResponseBuilder({
+      id: "response-1",
+      status: AgentScopeRuntimeRunStatus.InProgress,
+      created_at: 1,
+    });
+
+    builder.handle({
+      id: "call-message",
+      object: "message",
+      role: "assistant",
+      type: AgentScopeRuntimeMessageType.PLUGIN_CALL,
+      status: AgentScopeRuntimeRunStatus.InProgress,
+      content: [
+        {
+          type: AgentScopeRuntimeContentType.DATA,
+          status: AgentScopeRuntimeRunStatus.InProgress,
+          data: {
+            call_id: "call-1",
+            name: "execute_shell_command",
+            arguments: '{"command":"pnpm test"}',
+          },
+        },
+      ],
+    });
+
+    builder.handle({
+      object: "tool_output_frame",
+      tool_call_id: "call-1",
+      tool_name: "execute_shell_command",
+      sequence: 1,
+      source: "stdout",
+      text: "x".repeat(96),
+      budget_bytes: 80,
+      truncated: true,
+    } as never);
+
+    const data = builder.data.output[0].content[0] as IDataContent;
+    const output = data.data.live_output as string;
+    expect(new TextEncoder().encode(output).length).toBeLessThanOrEqual(80);
+    expect(output).toContain("[早期实时输出已省略]");
+  });
+
   it("keeps final tool output authoritative after live frames", () => {
     const builder = new AgentScopeRuntimeResponseBuilder({
       id: "response-1",
@@ -190,6 +233,51 @@ describe("AgentScopeRuntimeResponseBuilder tool output frames", () => {
     );
     expect((merged[0].content[1] as IDataContent).data.output).toBe(
       "final output\n",
+    );
+  });
+});
+
+describe("AgentScopeRuntimeResponseBuilder failed responses", () => {
+  it("preserves partial output when a terminal model_call_failed response has no output", () => {
+    const builder = new AgentScopeRuntimeResponseBuilder({
+      id: "response-1",
+      status: AgentScopeRuntimeRunStatus.InProgress,
+      created_at: 1,
+    });
+
+    builder.handle({
+      id: "message-1",
+      object: "message",
+      role: "assistant",
+      type: AgentScopeRuntimeMessageType.MESSAGE,
+      status: AgentScopeRuntimeRunStatus.Completed,
+      content: [
+        {
+          type: AgentScopeRuntimeContentType.TEXT,
+          status: AgentScopeRuntimeRunStatus.Completed,
+          text: "partial answer",
+        },
+      ],
+    });
+
+    builder.handle({
+      id: "response-1",
+      object: "response",
+      status: AgentScopeRuntimeRunStatus.Failed,
+      created_at: 1,
+      completed_at: 2,
+      output: [],
+      error: {
+        code: "model_call_failed",
+        message: "provider diagnostic",
+      },
+    });
+
+    expect(builder.data.status).toBe(AgentScopeRuntimeRunStatus.Failed);
+    expect(builder.data.error?.code).toBe("model_call_failed");
+    expect(builder.data.output).toHaveLength(1);
+    expect((builder.data.output[0].content[0] as { text?: string }).text).toBe(
+      "partial answer",
     );
   });
 });

@@ -28,14 +28,16 @@ from ..models.tracing import (
     ModelOutputRequest,
     MCPSummary,
     TaskStatusSummary,
-    DepthSummary,
     ExtractCustomerNamesRequest,
     ExtractCustomerNamesResponse,
     InputTokensMismatchItem,
     InputTokensFixItem,
+    InitSpanSkillIdRequest,
+    InitSpanSkillIdResponse,
 )
 from ..services.tracing import TracingQueryService, TracingExportService
 from ..services.tracing.extract_service import ExtractCustomerNamesService
+from ..services.tracing.skill_id_initializer import SkillIdInitializer
 from ..database import get_es_client, get_db_connection
 from ...config.constant import USER_INFO_API_URL
 
@@ -147,6 +149,14 @@ async def get_overview(
         description="开始日期 (YYYY-MM-DD)",
     ),
     end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
+    detail: Literal["full", "summary"] = Query(
+        "full",
+        description="返回明细级别；summary 跳过页面不展示的资源排行数据",
+    ),
+    time_range: Literal["day", "week", "month", "custom"] = Query(
+        "day",
+        description="环比时间粒度",
+    ),
 ) -> OverviewStats:
     """获取运营概览统计.
 
@@ -169,6 +179,8 @@ async def get_overview(
         start,
         end,
         bbk_ids,
+        include_resource_breakdown=detail == "full",
+        time_range=time_range,
     )
 
 
@@ -580,6 +592,10 @@ async def get_user_messages(
         description="搜索用户消息内容",
     ),
     bbk_ids: Optional[str] = Query(None, description="按分行号筛选"),
+    exclude_cron_task_sessions: bool = Query(
+        False,
+        description="是否排除 session_id 以 cron-task 开头的会话",
+    ),
 ) -> dict:
     """获取用户消息列表（含 Token 信息）.
 
@@ -614,6 +630,7 @@ async def get_user_messages(
         query_text=query,
         export=False,
         bbk_ids=bbk_ids,
+        exclude_cron_task_sessions=exclude_cron_task_sessions,
     )
     return {
         "items": [m.model_dump() for m in messages],
@@ -646,6 +663,10 @@ async def export_user_messages(
         alias="format",
     ),
     bbk_ids: Optional[str] = Query(None, description="按分行号筛选"),
+    exclude_cron_task_sessions: bool = Query(
+        False,
+        description="是否排除 session_id 以 cron-task 开头的会话",
+    ),
 ) -> StreamingResponse:
     """导出用户消息.
 
@@ -675,6 +696,7 @@ async def export_user_messages(
             end_date=end,
             query_text=query,
             bbk_id=bbk_ids,
+            exclude_cron_task_sessions=exclude_cron_task_sessions,
         )
     if export_format == "xlsx":
         return await export_service.export_user_messages_xlsx(
@@ -685,6 +707,7 @@ async def export_user_messages(
             end_date=end,
             query_text=query,
             bbk_id=bbk_ids,
+            exclude_cron_task_sessions=exclude_cron_task_sessions,
         )
     return await export_service.export_user_messages_csv(
         source_id=actual_source_id,
@@ -694,6 +717,7 @@ async def export_user_messages(
         end_date=end,
         query_text=query,
         bbk_id=bbk_ids,
+        exclude_cron_task_sessions=exclude_cron_task_sessions,
     )
 
 
@@ -755,50 +779,6 @@ async def get_channel_distribution(
     end = _parse_date(end_date, "end_date", add_day=True)
 
     return await service.get_channel_distribution(actual_source_id, start, end)
-
-
-# ===== 环比增长 =====
-
-
-@router.get("/growth-stats", response_model=dict)
-async def get_growth_stats(
-    request: Request,
-    start_date: str = Query(..., description="开始日期 (YYYY-MM-DD)"),
-    end_date: str = Query(..., description="结束日期 (YYYY-MM-DD)"),
-    time_range: str = Query(
-        "day",
-        description="时间范围: day, week, month, custom",
-    ),
-    bbk_ids: Optional[str] = Query(None, description="分行ID筛选"),
-) -> dict:
-    """获取运营看板环比指标。
-
-    口径说明：
-    - 该接口返回的是当前统计窗口相对上一对比窗口的环比结果。
-    - 分行维度通过 bbk_ids 过滤。
-    - time_range 只决定上一对比窗口的回溯长度，不改变当前窗口
-      的起止日期输入。
-    - 返回字段的业务口径由服务层统一定义，供总览卡片和使用深度卡片
-      复用，避免前端自行推导环比口径。
-    """
-    actual_source_id = _get_source_id_from_header(request)
-    service = TracingQueryService.get_instance()
-
-    start = _parse_date(start_date, "start_date")
-    end = _parse_date(end_date, "end_date", add_day=True)
-    if start is None or end is None:
-        raise HTTPException(
-            status_code=400,
-            detail="start_date and end_date are required",
-        )
-
-    return await service.get_growth_stats(
-        actual_source_id,
-        start,
-        end,
-        time_range,
-        bbk_ids,
-    )
 
 
 # ===== 日趋势 =====
@@ -1167,35 +1147,6 @@ async def get_error_list(
     return result
 
 
-# ===== 使用深度统计 =====
-
-
-@router.get("/depth/summary", response_model=DepthSummary)
-async def get_depth_summary(
-    request: Request,
-    start_date: Optional[str] = Query(
-        None,
-        description="开始日期 (YYYY-MM-DD)",
-    ),
-    end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
-    bbk_ids: Optional[str] = Query(None, description="分行ID筛选"),
-) -> DepthSummary:
-    """获取使用深度汇总统计."""
-    actual_source_id = _get_source_id_from_header(request)
-    service = TracingQueryService.get_instance()
-
-    start = _parse_date(start_date, "start_date")
-    end = _parse_date(end_date, "end_date", add_day=True)
-
-    summary = await service.get_depth_summary(
-        actual_source_id,
-        start,
-        end,
-        bbk_ids,
-    )
-    return summary
-
-
 # ===== Model Output 写入 =====
 
 
@@ -1551,6 +1502,60 @@ async def extract_customer_names(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to extract customer names: {e}",
+        ) from e
+
+
+# ===== 历史 span skill_id 初始化 =====
+
+
+@router.post(
+    "/admin/spans/init-skill-id",
+    response_model=InitSpanSkillIdResponse,
+    summary="初始化历史 span 的 skill_id",
+    description=(
+        "按 source_id + skill_name 从 swe_skills 匹配并回填 "
+        "swe_tracing_spans.skill_id。同一 (source_id, skill_name) 在 "
+        "swe_skills 存在多个候选时按 cn_name 非空、enabled=1、updated_at DESC、"
+        "id DESC 稳定选择一个 skill_id 写入；接口幂等，仅处理 skill_id 为空的"
+        "记录。服务内部按 start_time + span_id 复合游标自动分批扫描，单次请求会"
+        "持续处理到没有剩余记录。dry_run=true 时仅统计，不写库。"
+    ),
+)
+async def init_span_skill_id(
+    body: InitSpanSkillIdRequest,
+) -> InitSpanSkillIdResponse:
+    """初始化历史 span 的 skill_id.
+
+    仅在以下条件同时满足时回写 span.skill_id：
+    - swe_tracing_spans.skill_id 为空
+    - swe_skills 中存在与该 (source_id, skill_name) 对应的候选
+    - 多个候选时按稳定优先级选出一个 skill_id
+
+    Args:
+        body: 初始化请求参数（source_id、batch_size、dry_run）
+
+    Returns:
+        初始化结果统计
+
+    Raises:
+        HTTPException: dry_run=false 时如出现数据库异常，返回 500
+    """
+    try:
+        db = get_db_connection()
+        initializer = SkillIdInitializer(db=db)
+        result = await initializer.initialize(
+            source_id=body.source_id,
+            batch_size=body.batch_size,
+            dry_run=body.dry_run,
+        )
+        return InitSpanSkillIdResponse(**result.to_dict())
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to init span skill_id: %s", e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to init span skill_id: {e}",
         ) from e
 
 

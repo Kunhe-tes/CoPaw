@@ -1,11 +1,9 @@
 import { Layout } from "antd";
 import { Routes, Route, useLocation, Navigate } from "react-router-dom";
 import { useEffect } from "react";
-
-// ==================== iframe 集成 (Kun He) ====================
 // useIframeStore: 获取父窗口传递的 hideMenu 参数
 import { useIframeStore } from "../../stores/iframeStore";
-// ==================== iframe 集成结束 ====================
+import { useChatPresentationStore } from "../../stores/chatPresentationStore";
 import { useSourceSystemConfigStore } from "../../stores/sourceSystemConfigStore";
 import { DEFAULT_SOURCE_ID } from "../../constants/identity";
 
@@ -18,8 +16,10 @@ import ChannelsPage from "../../pages/Control/Channels";
 import SessionsPage from "../../pages/Control/Sessions";
 import CronJobsPage from "../../pages/Control/CronJobs";
 import FeaturedCasesPage from "../../pages/Control/FeaturedCases";
+import ScenarioPresetsPage from "../../pages/Control/ScenarioPresets";
 import GreetingPage from "../../pages/Control/Greeting";
 import HeartbeatPage from "../../pages/Control/Heartbeat";
+import HookManagementPage from "../../pages/Control/HookManagement";
 import AgentConfigPage from "../../pages/Agent/Config";
 import SystemConfigPage from "../../pages/SystemConfigPage";
 import SystemCheckPage from "../../pages/SystemCheck";
@@ -34,17 +34,23 @@ import SecurityPage from "../../pages/Settings/Security";
 import TokenUsagePage from "../../pages/Settings/TokenUsage";
 import VoiceTranscriptionPage from "../../pages/Settings/VoiceTranscription";
 import AgentsPage from "../../pages/Settings/Agents";
+import SkillConfigPage from "../../pages/Settings/SkillConfig";
 import AnalyticsPage from "../../pages/Analytics";
 import InstancePage from "../../pages/Instance";
 import MonitorPage from "../../pages/Monitor";
 import ContinuousIterationPage from "../../pages/Harness/ContinuousIteration";
 // ==================== 测试页面 (用于验证新功能) ====================
 import TestDownloadCardPage from "../../pages/TestDownloadCard";
+import TestFileManagerDrawerPage from "../../pages/TestFileManagerDrawer";
 import TestUserDetailModalPage from "../../pages/TestUserDetailModal";
+import ReportViewPage from "../../pages/ReportView";
 // ==================== 测试页面结束 ====================
 import MarketPage from "../../pages/Market";
 import MySkillsPage from "../../pages/MySkills";
 import MyMCPPage from "../../pages/MyMCP";
+import WPlusSopWorkspace from "../../pages/WPlusSopWorkspace";
+import ExpertsPage from "../../pages/Experts";
+import ExpertCommunityPage from "../../pages/ExpertCommunity";
 
 import { useDynamicRender } from "@/components/agentscope-chat/DynamicRenderContext";
 
@@ -57,7 +63,9 @@ const pathToKey: Record<string, string> = {
   "/cron-jobs": "cron-jobs",
   "/greeting-management": "greeting-management",
   "/featured-cases-management": "featured-cases-management",
+  "/scenario-presets-management": "scenario-presets-management",
   "/heartbeat": "heartbeat",
+  "/hook-management": "hook-management",
   "/skills": "skills",
   "/skill-pool": "skill-pool",
   "/tools": "tools",
@@ -72,6 +80,7 @@ const pathToKey: Record<string, string> = {
   "/security": "security",
   "/token-usage": "token-usage",
   "/voice-transcription": "voice-transcription",
+  "/skill-config": "skill-config",
   "/analytics/users": "analytics-users",
   "/analytics/sessions": "analytics-sessions",
   "/analytics/messages": "analytics-messages",
@@ -80,6 +89,8 @@ const pathToKey: Record<string, string> = {
   "/analytics/claw-data-overview": "analytics-claw-data-overview",
   "/analytics/cron-job-overview": "analytics-cron-job-overview",
   "/analytics/continuous-governance": "analytics-continuous-governance",
+  "/monitor/tasks": "monitor-task-center",
+  "/monitor/cron-batch-dispatch": "monitor-cron-batch-dispatch",
   "/instance/overview": "instance-overview",
   "/instance/instances": "instance-instances",
   "/instance/allocations": "instance-allocations",
@@ -88,6 +99,8 @@ const pathToKey: Record<string, string> = {
   "/market": "market",
   "/my-skills": "my-skills",
   "/my-mcp": "my-mcp",
+  "/experts": "experts",
+  "/expert-community": "expert-community",
 };
 
 export default function MainLayout() {
@@ -98,18 +111,25 @@ export default function MainLayout() {
   // 动态渲染模版上下文
   const dynamicRender = useDynamicRender(); // 使用 useDynamicRender 钩子
 
-  // ==================== iframe 集成 (Kun He) ====================
-  // Sidebar 显示控制：
-  // iframe 传递的 hideMenu === true 时隐藏 Sidebar
-  // URL 参数 origin=Y 会自动设置 hideMenu=true（见 iframeMessage.ts）
+  // 检测是否为 reportView 页面，如果是则跳过预加载所有模块
+  const isReportViewPage = currentPath === "/reportView";
+
+  // Global shell display control:
+  // - iframe hideMenu === true hides Header and Sidebar
+  // - origin=Y maps to hideMenu=true (see iframeMessage.ts)
+  // - showContentOnly initializes a runtime presentation flag before React renders
   const hideMenu = useIframeStore((state) => state.hideMenu);
+  const hideChat = useIframeStore((state) => state.hideChat);
+  const showContentOnly = useChatPresentationStore(
+    (state) => state.showContentOnly,
+  );
   const activeSourceId =
     useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
   const loadEffectiveConfig = useSourceSystemConfigStore(
     (state) => state.loadEffectiveConfig,
   );
-  const shouldHideSidebar = hideMenu;
-  // ==================== iframe 集成结束 ====================
+  const hideGlobalShell = hideMenu || showContentOnly;
+  const hideHeader = hideGlobalShell || activeSourceId === "ruice";
 
   useEffect(() => {
     loadEffectiveConfig(activeSourceId);
@@ -117,30 +137,40 @@ export default function MainLayout() {
 
   // 初始化动态渲染模版（应用启动时预加载）
   useEffect(() => {
-    dynamicRender.initialize();
-  }, [dynamicRender]);
+    dynamicRender.initialize({ skipPreload: isReportViewPage });
+  }, [dynamicRender, isReportViewPage]);
 
   return (
     <Layout className={styles.mainLayout}>
-      {/* ==================== 首页改版 (Kun He) ==================== */}
-      {/* Header 和 Sidebar 一起根据 hideMenu 控制显隐 */}
-      {!shouldHideSidebar && <Header />}
-      {/* ==================== 首页改版结束 ==================== */}
+      {!hideHeader && <Header />}
       <Layout>
-        {/* ==================== iframe 集成 (Kun He) ==================== */}
-        {/* 条件渲染 Sidebar：根据 origin 参数或 hideMenu 决定是否显示 */}
-        {!shouldHideSidebar && <Sidebar selectedKey={selectedKey} />}
-        {/* ==================== iframe 集成结束 ==================== */}
+        {!hideGlobalShell && (
+          <Sidebar selectedKey={selectedKey} withoutHeader={hideHeader} />
+        )}
         <Content
           className={`page-container${
-            shouldHideSidebar ? "" : " page-container--with-sidebar"
+            hideGlobalShell ? "" : " page-container--with-sidebar"
+          }${isReportViewPage ? " page-container--no-rightPadding" : ""}${
+            showContentOnly ? ` ${styles.contentOnlyContainer}` : ""
           }`}
         >
-          <ConsoleCronBubble />
-          <div className="page-content">
+          {!showContentOnly && <ConsoleCronBubble />}
+          <div
+            className={`page-content${
+              isReportViewPage ? " single-page-content" : ""
+            }${showContentOnly ? ` ${styles.contentOnlyContent}` : ""}`}
+          >
             <Routes>
-              <Route path="/" element={<Navigate to="/chat" replace />} />
+              {hideChat ? (
+                <Route path="/" element={<Navigate to="/market" replace />} />
+              ) : (
+                <Route path="/" element={<Navigate to="/chat" replace />} />
+              )}
               <Route path="/chat/*" element={<Chat />} />
+              <Route
+                path="/wplus-sop/:sessionId"
+                element={<WPlusSopWorkspace />}
+              />
               <Route path="/channels" element={<ChannelsPage />} />
               <Route path="/sessions" element={<SessionsPage />} />
               <Route path="/cron-jobs" element={<CronJobsPage />} />
@@ -149,7 +179,12 @@ export default function MainLayout() {
                 path="/featured-cases-management"
                 element={<FeaturedCasesPage />}
               />
+              <Route
+                path="/scenario-presets-management"
+                element={<ScenarioPresetsPage />}
+              />
               <Route path="/heartbeat" element={<HeartbeatPage />} />
+              <Route path="/hook-management" element={<HookManagementPage />} />
               <Route path="/skills" element={<SkillsPage />} />
               <Route path="/skill-pool" element={<SkillPoolPage />} />
               <Route path="/tools" element={<ToolsPage />} />
@@ -159,7 +194,10 @@ export default function MainLayout() {
               <Route path="/models" element={<ModelsPage />} />
               <Route path="/environments" element={<EnvironmentsPage />} />
               <Route path="/agent-config" element={<AgentConfigPage />} />
-              <Route path="/system-config-page" element={<SystemConfigPage />} />
+              <Route
+                path="/system-config-page"
+                element={<SystemConfigPage />}
+              />
               <Route path="/system-check" element={<SystemCheckPage />} />
               <Route path="/security" element={<SecurityPage />} />
               <Route path="/token-usage" element={<TokenUsagePage />} />
@@ -167,6 +205,7 @@ export default function MainLayout() {
                 path="/voice-transcription"
                 element={<VoiceTranscriptionPage />}
               />
+              <Route path="/skill-config" element={<SkillConfigPage />} />
               <Route path="/analytics/*" element={<AnalyticsPage />} />
               <Route path="/monitor/*" element={<MonitorPage />} />
               <Route path="/instance/*" element={<InstancePage />} />
@@ -180,13 +219,23 @@ export default function MainLayout() {
                 element={<TestDownloadCardPage />}
               />
               <Route
+                path="/test-file-manager-drawer"
+                element={<TestFileManagerDrawerPage />}
+              />
+              <Route
                 path="/test-user-detail-modal"
                 element={<TestUserDetailModalPage />}
               />
               {/* ==================== 测试路由结束 ==================== */}
+              <Route path="/reportView" element={<ReportViewPage />} />
               <Route path="/market" element={<MarketPage />} />
               <Route path="/my-skills" element={<MySkillsPage />} />
               <Route path="/my-mcp" element={<MyMCPPage />} />
+              <Route path="/experts" element={<ExpertsPage />} />
+              <Route
+                path="/expert-community"
+                element={<ExpertCommunityPage />}
+              />
             </Routes>
           </div>
         </Content>

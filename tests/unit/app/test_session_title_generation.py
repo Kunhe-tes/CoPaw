@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -24,8 +25,18 @@ def _should_generate_session_title(chat, fallback_name: str) -> bool:
 
 
 @pytest.mark.asyncio
-async def test_console_stream_waits_for_session_title_task():
-    """主回答结束后，SSE 应等待标题任务写入并推送刷新事件。"""
+async def test_console_stream_defers_waiting_for_session_title_task():
+    """标题任务未完成时，SSE 应先输出模型事件，流尾再补发标题事件。"""
+
+    class FakeMessageEvent:
+        object = "message"
+        status = None
+        type = "message"
+        output = []
+        metadata = None
+
+        def model_dump_json(self):
+            return json.dumps({"object": "message", "type": "message"})
 
     async def process(request):
         async def update_title():
@@ -40,7 +51,7 @@ async def test_console_stream_waits_for_session_title_task():
             "_session_title_task",
             asyncio.create_task(update_title()),
         )
-        yield SimpleNamespace(object="message", status=None, type="message")
+        yield FakeMessageEvent()
 
     channel = ConsoleChannel(
         process=process,
@@ -56,6 +67,7 @@ async def test_console_stream_waits_for_session_title_task():
 
     events = [event async for event in channel.stream_one(request)]
 
+    assert '"object": "message"' in events[0]
     assert any(
         '"object": "session_title_updated"' in event
         and '"session_title": "费用分析"' in event
@@ -93,6 +105,129 @@ async def test_console_stream_reads_session_title_written_during_process():
         and '"session_title": "Hook 标题"' in event
         for event in events
     )
+
+
+@pytest.mark.asyncio
+async def test_console_stream_emits_compaction_boundary_metadata_only():
+    """归档完成后，前端收到独立的分割线事件而不是空助手消息。"""
+
+    async def process(_request):
+        yield SimpleNamespace(
+            object="message",
+            status=None,
+            type="message",
+            output=[],
+            metadata={
+                "conversation_compaction_boundary": {
+                    "id": "boundary-1",
+                    "archived_message_count": 3,
+                },
+            },
+        )
+
+    channel = ConsoleChannel(
+        process=process,
+        enabled=True,
+        bot_prefix="Friday",
+    )
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        input=None,
+        channel_meta={"chat_id": "chat-from-runtime-metadata"},
+    )
+
+    events = [event async for event in channel.stream_one(request)]
+
+    assert any(
+        '"object": "conversation_compacted"' in event
+        and '"chat_id": "chat-from-runtime-metadata"' in event
+        and '"archived_message_count": 3' in event
+        for event in events
+    )
+    assert not any('"object": "message"' in event for event in events)
+
+
+@pytest.mark.asyncio
+async def test_console_compaction_uses_chat_id_from_reassigned_metadata():
+    """Boundary frames must not reuse metadata captured before title emit."""
+
+    async def process(request):
+        request.channel_meta = {"chat_id": "chat-after-title"}
+        yield SimpleNamespace(
+            object="message",
+            status=None,
+            type="message",
+            output=[],
+            metadata={
+                "conversation_compaction_boundary": {
+                    "id": "boundary-1",
+                    "archived_message_count": 3,
+                },
+            },
+        )
+
+    channel = ConsoleChannel(
+        process=process,
+        enabled=True,
+        bot_prefix="Friday",
+    )
+    request = SimpleNamespace(
+        chat_id="legacy-chat-id",
+        session_id="session-1",
+        user_id="user-1",
+        input=None,
+        channel_meta={
+            "chat_id": "stale-chat-id",
+            "session_title": "Already emitted",
+        },
+    )
+
+    events = [event async for event in channel.stream_one(request)]
+
+    assert any('"chat_id": "chat-after-title"' in event for event in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "channel_meta",
+    [{}, {"chat_id": ""}, {"chat_id": 42}],
+)
+async def test_console_compaction_uses_legacy_chat_id_for_invalid_metadata(
+    channel_meta,
+):
+    """SSE must preserve the legacy request field when metadata is unusable."""
+
+    async def process(_request):
+        yield SimpleNamespace(
+            object="message",
+            status=None,
+            type="message",
+            output=[],
+            metadata={
+                "conversation_compaction_boundary": {
+                    "id": "boundary-1",
+                    "archived_message_count": 3,
+                },
+            },
+        )
+
+    channel = ConsoleChannel(
+        process=process,
+        enabled=True,
+        bot_prefix="Friday",
+    )
+    request = SimpleNamespace(
+        chat_id="legacy-chat-id",
+        session_id="session-1",
+        user_id="user-1",
+        input=None,
+        channel_meta=channel_meta,
+    )
+
+    events = [event async for event in channel.stream_one(request)]
+
+    assert any('"chat_id": "legacy-chat-id"' in event for event in events)
 
 
 def test_should_generate_session_title_for_legacy_auto_name():

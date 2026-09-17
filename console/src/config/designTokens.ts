@@ -31,10 +31,10 @@ export const DESIGN_TOKENS = {
   caseCardHeight: 168,
   caseCardGap: 12,
 
-  toolbarWidth: 64,
+  toolbarWidth: 48,
   toolbarIconSize: 28,
   toolbarIconGap: 24,
-  toolbarIconPaddingLeft: 18,
+  toolbarIconPaddingLeft: 10,
   toolbarIconPaddingTop: 24,
   panelGap: 8,
   panelPadding: 20,

@@ -101,7 +101,7 @@ async def generate_daily_spans(  # noqa: C901
         print(f"  {day_label} ({day_type}): 计划生成 {daily_spans} 条")
 
         for _ in range(daily_spans):
-            skill_name, skill_desc = random.choices(
+            skill_name, _ = random.choices(
                 SKILLS,
                 weights=SKILL_WEIGHTS,
                 k=1,
@@ -160,7 +160,6 @@ async def generate_daily_spans(  # noqa: C901
                     session_id,
                     "web",
                     skill_name,
-                    skill_desc,
                 ),
             )
 
@@ -199,8 +198,7 @@ async def verify_results(db, start_date, end_date):
     print("\n=== 匹配运营看板查询条件 ===")
     rows = await db.fetch_all(
         """
-        SELECT skill_name, MAX(skill_description) as skill_description,
-               COUNT(*) as cnt
+        SELECT skill_name, COUNT(*) as cnt
         FROM swe_tracing_spans
         WHERE start_time >= %s AND start_time <= %s
           AND event_type = 'skill_invocation'
@@ -260,11 +258,11 @@ async def main():
             INSERT INTO swe_tracing_spans (
                 span_id, trace_id, source_id, name, event_type,
                 start_time, end_time, duration_ms, user_id,
-                bbk_id, session_id, channel, skill_name, skill_description
+                bbk_id, session_id, channel, skill_name
             ) VALUES (
                 %s, %s, %s, %s, %s,
                 %s, %s, %s, %s,
-                %s, %s, %s, %s, %s
+                %s, %s, %s, %s
             )
         """
 

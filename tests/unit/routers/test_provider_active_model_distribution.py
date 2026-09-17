@@ -10,6 +10,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from swe.app.routers import providers as providers_router
 from swe.config.context import encode_scope_id, tenant_context
@@ -17,17 +19,86 @@ from swe.providers.provider_manager import ProviderManager
 from swe.providers.models import ModelSlotConfig
 
 
+class FakeTenantWorkspacePool:
+    """Record tenant bootstrap requests from active-model distribution."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str | None]] = []
+
+    async def ensure_bootstrap(
+        self,
+        tenant_id: str,
+        *,
+        source_id: str | None = None,
+    ) -> None:
+        self.calls.append((tenant_id, source_id))
+
+
 def _request(
     tenant_id: str = "tenant-source",
     source_id: str | None = None,
     scope_id: str | None = None,
+    headers: dict[str, str] | None = None,
+    app: Any | None = None,
 ) -> SimpleNamespace:
-    return SimpleNamespace(
+    state = app.state if app is not None else None
+    if state is None:
+        state = SimpleNamespace()
+    if not hasattr(state, "tenant_workspace_pool"):
+        state.tenant_workspace_pool = FakeTenantWorkspacePool()
+    request = SimpleNamespace(
+        headers=headers or {},
         state=SimpleNamespace(
             tenant_id=tenant_id,
             source_id=source_id,
             scope_id=scope_id,
+            tenant_workspace_pool=state.tenant_workspace_pool,
         ),
+    )
+    if app is not None:
+        request.app = app
+    return request
+
+
+class FakeAsyncTaskDb:
+    """提供异步任务写入器所需的数据库连接状态。"""
+
+    is_connected = True
+
+
+class DisconnectedAsyncTaskDb(FakeAsyncTaskDb):
+    """模拟连接状态标记为断开但仍可执行写入的任务库。"""
+
+    is_connected = False
+
+
+class LazyAsyncTaskDb(FakeAsyncTaskDb):
+    """模拟从配置懒加载出来的任务库连接。"""
+
+    connected = False
+
+    async def connect(self) -> None:
+        self.connected = True
+
+
+def _patch_resolve_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    names: dict[str, str] | None = None,
+) -> None:
+    """替换分发目标身份解析，避免单测触发远端查询。"""
+    name_map = names or {"tenant-a": "用户A"}
+
+    async def fake_resolve_user_identity(**kwargs):  # noqa: ANN003
+        tenant_id = kwargs["tenant_id"]
+        return SimpleNamespace(
+            user_name=name_map.get(tenant_id),
+            bbk_id=None,
+        )
+
+    monkeypatch.setattr(
+        providers_router,
+        "resolve_user_identity",
+        fake_resolve_user_identity,
     )
 
 
@@ -41,7 +112,7 @@ class FakeProvider:
     api_key: str = ""
     base_url: str = ""
     chat_model: str = "OpenAIChatModel"
-    generate_kwargs: dict[str, Any] = field(default_factory=dict)
+    model_configs: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def has_model(self, model_id: str) -> bool:
         return any(
@@ -59,7 +130,7 @@ class FakeProvider:
             "models": self.models,
             "extra_models": self.extra_models,
             "is_custom": self.is_custom,
-            "generate_kwargs": self.generate_kwargs,
+            "model_configs": self.model_configs,
         }
 
 
@@ -98,7 +169,7 @@ class FakeManager:
             models=list(payload.get("models") or []),
             extra_models=list(payload.get("extra_models") or []),
             is_custom=bool(payload.get("is_custom")),
-            generate_kwargs=dict(payload.get("generate_kwargs") or {}),
+            model_configs=dict(payload.get("model_configs") or {}),
         )
         self._providers[provider.id] = provider
 
@@ -206,7 +277,10 @@ def test_distribute_active_model_to_bootstrapped_tenant(
                 base_url="https://api.openai.com/v1",
                 models=[{"id": "gpt-5.4", "name": "GPT-5.4"}],
                 extra_models=[{"id": "gpt-5.4-mini", "name": "GPT-5.4 mini"}],
-                generate_kwargs={"temperature": 0.2},
+                model_configs={
+                    "gpt-5.4": {"temperature": 0.2},
+                    "gpt-5.4-mini": {"temperature": 0.8},
+                },
             ),
         },
     )
@@ -275,6 +349,9 @@ def test_distribute_active_model_to_bootstrapped_tenant(
     )
     assert ensured == ["tenant-existing"]
     assert target_manager.overwritten_payloads[0]["api_key"] == "sk-source"
+    assert target_manager.overwritten_payloads[0]["model_configs"] == {
+        "gpt-5.4": {"temperature": 0.2},
+    }
     assert target_manager.activated == [("openai", "gpt-5.4")]
 
 
@@ -292,7 +369,6 @@ def test_distribute_active_model_bootstraps_missing_tenant(
         },
     )
     target_manager = FakeManager()
-    bootstrap_calls: list[str] = []
 
     monkeypatch.setattr(
         providers_router,
@@ -329,16 +405,12 @@ def test_distribute_active_model_bootstraps_missing_tenant(
         def has_seeded_bootstrap(self) -> bool:
             return False
 
-        def ensure_seeded_bootstrap(self) -> dict[str, object]:
-            assert self.source_id == "ruice"
-            bootstrap_calls.append(self.tenant_id)
-            return {"minimal": True}
-
     monkeypatch.setattr(providers_router, "TenantInitializer", FakeInitializer)
 
+    request = _request(source_id="ruice")
     result = asyncio.run(
         providers_router.distribute_active_model(
-            _request(source_id="ruice"),
+            request,
             providers_router.ActiveModelDistributionRequest(
                 target_tenant_ids=["tenant-new"],
                 overwrite=True,
@@ -347,7 +419,9 @@ def test_distribute_active_model_bootstraps_missing_tenant(
         ),
     )
 
-    assert bootstrap_calls == ["tenant-new"]
+    assert request.state.tenant_workspace_pool.calls == [
+        ("tenant-new", "ruice"),
+    ]
     assert result.results[0].success is True
     assert result.results[0].bootstrapped is True
 
@@ -473,7 +547,7 @@ def test_distribute_active_model_overwrites_builtin_provider_and_switches_active
                 base_url="https://api.openai.com/v1",
                 models=[{"id": "gpt-4.1", "name": "GPT-4.1"}],
                 extra_models=[{"id": "gpt-5.4", "name": "GPT-5.4"}],
-                generate_kwargs={"temperature": 0.3},
+                model_configs={"gpt-5.4": {"temperature": 0.3}},
             ),
         },
     )
@@ -533,6 +607,7 @@ def test_distribute_active_model_overwrites_builtin_provider_and_switches_active
     assert overwritten.api_key == "sk-new"
     assert overwritten.base_url == "https://api.openai.com/v1"
     assert overwritten.has_model("gpt-5.4") is True
+    assert overwritten.model_configs == {"gpt-5.4": {"temperature": 0.3}}
     assert result.results[0].active_llm_updated == ModelSlotConfig(
         provider_id="openai",
         model="gpt-5.4",
@@ -558,7 +633,7 @@ def test_distribute_active_model_overwrites_custom_provider_and_switches_active_
                 models=[
                     {"id": "claude-enterprise", "name": "Claude Enterprise"},
                 ],
-                generate_kwargs={"top_p": 0.9},
+                model_configs={"claude-enterprise": {"top_p": 0.9}},
             ),
         },
     )
@@ -608,6 +683,7 @@ def test_distribute_active_model_overwrites_custom_provider_and_switches_active_
     assert overwritten.is_custom is True
     assert overwritten.api_key == "secret-token"
     assert overwritten.base_url == "https://corp.example/v1"
+    assert overwritten.model_configs == {"claude-enterprise": {"top_p": 0.9}}
     assert result.results[0].provider_updated == "corp-gateway"
     assert result.results[0].active_llm_updated == ModelSlotConfig(
         provider_id="corp-gateway",
@@ -707,3 +783,319 @@ def test_distribute_active_model_rejects_missing_overwrite() -> None:
 
     assert exc_info.value.status_code == 400
     assert "overwrite=true" in str(exc_info.value.detail)
+
+
+def test_distribute_active_model_returns_async_task_submission(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """提交活跃模型分发后应返回受理中的任务信息。"""
+    source_manager = FakeManager(
+        active_model=ModelSlotConfig(provider_id="openai", model="gpt-5.4"),
+        providers={
+            "openai": FakeProvider(
+                id="openai",
+                models=[{"id": "gpt-5.4", "name": "GPT-5.4"}],
+            ),
+        },
+    )
+    submitted: dict[str, Any] = {}
+    task_ids: list[str] = []
+    _patch_resolve_identity(monkeypatch)
+
+    class FakeStore:
+        def __init__(self, db) -> None:  # noqa: ANN001
+            submitted["db"] = db
+
+        async def start_task(self, **kwargs) -> None:  # noqa: ANN003
+            submitted["start_task"] = kwargs
+
+    async def fake_task_runner(*args, **kwargs):  # noqa: ANN001, ANN003
+        submitted["runner"] = (args, kwargs)
+
+    def fake_create_task(coro):  # noqa: ANN001
+        task_ids.append("scheduled")
+        submitted["coroutine"] = coro
+        coro.close()
+        return object()
+
+    monkeypatch.setattr(
+        providers_router,
+        "AsyncTaskStore",
+        FakeStore,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        providers_router.asyncio,
+        "create_task",
+        fake_create_task,
+    )
+    monkeypatch.setattr(
+        providers_router,
+        "_run_active_model_distribution_task",
+        fake_task_runner,
+        raising=False,
+    )
+
+    result = asyncio.run(
+        providers_router.distribute_active_model(
+            _request(
+                headers={
+                    "X-User-Id": "operator-1",
+                    "X-User-Name": "%E5%BC%A0%E4%B8%89",
+                },
+                app=SimpleNamespace(
+                    state=SimpleNamespace(
+                        db_connection=DisconnectedAsyncTaskDb(),
+                    ),
+                ),
+            ),
+            providers_router.ActiveModelDistributionRequest(
+                target_tenant_ids=["tenant-a"],
+                overwrite=True,
+            ),
+            manager=source_manager,
+        ),
+    )
+
+    assert result.status == "queued"
+    assert result.reused is False
+    assert result.task_id
+    assert task_ids == ["scheduled"]
+    assert isinstance(submitted["db"], DisconnectedAsyncTaskDb)
+    assert submitted["start_task"]["task_id"] == result.task_id
+    assert (
+        submitted["start_task"]["task_type"]
+        == "provider.active_model.distribute"
+    )
+    assert (
+        submitted["start_task"]["summary"]
+        == "分发模型「openai/gpt-5.4」，目标 1 个用户"
+    )
+    assert submitted["start_task"]["actor_user_id"] == "operator-1"
+    assert submitted["start_task"]["actor_user_name"] == "张三"
+    assert submitted["start_task"]["target_names"] == {
+        "tenant-a": "用户A",
+    }
+
+
+def test_distribute_active_model_http_response_includes_task_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """活跃模型分发的 HTTP 响应必须显式返回任务 ID。"""
+    source_manager = FakeManager(
+        active_model=ModelSlotConfig(provider_id="openai", model="gpt-5.4"),
+        providers={
+            "openai": FakeProvider(
+                id="openai",
+                models=[{"id": "gpt-5.4", "name": "GPT-5.4"}],
+            ),
+        },
+    )
+    _patch_resolve_identity(monkeypatch)
+
+    class FakeStore:
+        def __init__(self, _db) -> None:  # noqa: ANN001
+            pass
+
+        async def start_task(self, **_kwargs) -> None:  # noqa: ANN003
+            return None
+
+    async def fake_manager():
+        return source_manager
+
+    async def fake_task_runner(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        return None
+
+    app = FastAPI()
+    app.state.db_connection = DisconnectedAsyncTaskDb()
+    app.state.tenant_workspace_pool = FakeTenantWorkspacePool()
+    app.include_router(providers_router.router)
+    app.dependency_overrides[providers_router.get_provider_manager] = (
+        fake_manager
+    )
+    monkeypatch.setattr(
+        providers_router,
+        "AsyncTaskStore",
+        FakeStore,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        providers_router,
+        "_run_active_model_distribution_task",
+        fake_task_runner,
+        raising=False,
+    )
+
+    response = TestClient(app).post(
+        "/models/distribution/active-llm",
+        json={"target_tenant_ids": ["tenant-a"], "overwrite": True},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["task_id"]
+    assert payload["taskId"] == payload["task_id"]
+
+
+def test_active_model_distribution_lazy_loads_missing_app_db(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """app state 缺少数据库对象时应按配置懒加载任务库。"""
+    source_manager = FakeManager(
+        active_model=ModelSlotConfig(provider_id="openai", model="gpt-5.4"),
+        providers={
+            "openai": FakeProvider(
+                id="openai",
+                models=[{"id": "gpt-5.4", "name": "GPT-5.4"}],
+            ),
+        },
+    )
+    submitted: dict[str, Any] = {}
+    _patch_resolve_identity(monkeypatch)
+
+    class FakeStore:
+        def __init__(self, db) -> None:  # noqa: ANN001
+            submitted["db"] = db
+
+        async def start_task(self, **kwargs) -> None:  # noqa: ANN003
+            submitted["start_task"] = kwargs
+
+    async def fake_task_runner(*args, **kwargs):  # noqa: ANN001, ANN003
+        submitted["runner"] = (args, kwargs)
+
+    def fake_create_task(coro):  # noqa: ANN001
+        submitted["coroutine"] = coro
+        coro.close()
+        return object()
+
+    async def fake_get_db(request):  # noqa: ANN001
+        db = LazyAsyncTaskDb()
+        await db.connect()
+        request.app.state.db_connection = db
+        return db
+
+    monkeypatch.setattr(
+        providers_router,
+        "get_or_create_async_task_db",
+        fake_get_db,
+    )
+    monkeypatch.setattr(
+        providers_router,
+        "AsyncTaskStore",
+        FakeStore,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        providers_router.asyncio,
+        "create_task",
+        fake_create_task,
+    )
+    monkeypatch.setattr(
+        providers_router,
+        "_run_active_model_distribution_task",
+        fake_task_runner,
+        raising=False,
+    )
+
+    app = SimpleNamespace(state=SimpleNamespace())
+    result = asyncio.run(
+        providers_router.distribute_active_model(
+            _request(app=app),
+            providers_router.ActiveModelDistributionRequest(
+                target_tenant_ids=["tenant-a"],
+                overwrite=True,
+            ),
+            manager=source_manager,
+        ),
+    )
+
+    assert result.status == "queued"
+    assert result.task_id
+    assert submitted["db"].connected is True
+    assert app.state.db_connection is submitted["db"]
+    assert submitted["start_task"]["task_id"] == result.task_id
+    assert submitted["start_task"]["target_names"] == {
+        "tenant-a": "用户A",
+    }
+
+
+def test_active_model_distribution_requires_async_task_db(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """模型分发必须提交异步任务，缺少任务库时返回明确错误。"""
+    source_manager = FakeManager(
+        active_model=ModelSlotConfig(provider_id="openai", model="gpt-5.4"),
+        providers={
+            "openai": FakeProvider(
+                id="openai",
+                models=[{"id": "gpt-5.4", "name": "GPT-5.4"}],
+            ),
+        },
+    )
+
+    async def no_db(_request):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(providers_router, "get_or_create_async_task_db", no_db)
+
+    with pytest.raises(providers_router.HTTPException) as exc_info:
+        asyncio.run(
+            providers_router.distribute_active_model(
+                _request(app=SimpleNamespace(state=SimpleNamespace())),
+                providers_router.ActiveModelDistributionRequest(
+                    target_tenant_ids=["tenant-a"],
+                    overwrite=True,
+                ),
+                manager=source_manager,
+            ),
+        )
+
+    assert exc_info.value.status_code == 503
+    assert (
+        exc_info.value.detail
+        == "Async task database connection is not available"
+    )
+
+
+def test_active_model_distribution_marks_failed_when_mark_running_fails() -> (
+    None
+):
+    """后台任务启动阶段异常不应泄漏到事件循环外，并应尽力落失败状态。"""
+
+    class FailingStore:
+        def __init__(self) -> None:
+            self.item_results: list[dict] = []
+            self.finished: dict | None = None
+
+        async def mark_running(self, task_id: str) -> None:
+            raise RuntimeError("db down")
+
+        async def record_item_result(self, **kwargs) -> None:  # noqa: ANN003
+            self.item_results.append(kwargs)
+
+        async def finish_task(self, **kwargs) -> None:  # noqa: ANN003
+            self.finished = kwargs
+
+    store = FailingStore()
+
+    asyncio.run(
+        providers_router._run_active_model_distribution_task(  # noqa: SLF001
+            task_id="task-1",
+            store=store,
+            source_working_dir=Path("/unused"),
+            target_tenant_ids=["tenant-a", "tenant-b"],
+            provider_payload={},
+            source_active_model=ModelSlotConfig(
+                provider_id="openai",
+                model="gpt-5.4",
+            ),
+            source_id="src1",
+            tenant_workspace_pool=FakeTenantWorkspacePool(),
+        ),
+    )
+
+    assert len(store.item_results) == 2
+    assert store.finished is not None
+    assert store.finished["status"] == "failed"
+    assert store.finished["failed_count"] == 2

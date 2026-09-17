@@ -5,11 +5,13 @@ import {
   Button,
   Collapse,
   Empty,
+  Input,
   Modal,
   Pagination,
   Popover,
   Progress,
   Segmented,
+  Select,
   Space,
   Spin,
   Table,
@@ -72,6 +74,8 @@ const DEFAULT_OWNER_SUMMARY = {
   lookup_failed_users: 0,
   failure_summary: null,
 };
+const DEFAULT_OWNER_TABLE_PAGE_SIZE = 5;
+const OWNER_TABLE_PAGE_SIZE_OPTIONS = [5, 10, 20, 50];
 
 function formatDateTime(value: string | null | undefined): string {
   if (!value) return "-";
@@ -118,9 +122,45 @@ function renderUpdateTag(value: boolean | null | undefined): ReactNode {
   if (value === null || value === undefined) return "-";
   return (
     <Tag color={value ? "orange" : "blue"}>
-      {value ? "可更新" : "已同步"}
+      {value ? "版本不同" : "已一致"}
     </Tag>
   );
+}
+
+function normalizeSearchKeyword(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function normalizeBbkId(value?: string | null): string {
+  return String(value || "").trim();
+}
+
+function buildBbkIdOptions<T extends { bbk_id?: string | null }>(
+  items: T[],
+): { label: string; value: string }[] {
+  return Array.from(
+    new Set(items.map((item) => normalizeBbkId(item.bbk_id)).filter(Boolean)),
+  )
+    .sort((a, b) => a.localeCompare(b, "zh-CN", { numeric: true }))
+    .map((value) => ({ label: value, value }));
+}
+
+function matchesUserSearch(
+  user: { user_id: string; user_name?: string | null },
+  keyword: string,
+): boolean {
+  if (!keyword) return true;
+  return [user.user_name, user.user_id].some((value) =>
+    String(value || "").toLowerCase().includes(keyword),
+  );
+}
+
+function matchesBbkId(
+  user: { bbk_id?: string | null },
+  selectedBbkId: string,
+): boolean {
+  if (!selectedBbkId) return true;
+  return normalizeBbkId(user.bbk_id) === selectedBbkId;
 }
 
 function renderJsonBlock(value: unknown): ReactNode {
@@ -376,6 +416,16 @@ export function SkillReadinessModal({
   );
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  const [ownerTablePage, setOwnerTablePage] = useState(1);
+  const [ownerTablePageSize, setOwnerTablePageSize] = useState(
+    DEFAULT_OWNER_TABLE_PAGE_SIZE,
+  );
+  const [ownerSearchInputText, setOwnerSearchInputText] = useState("");
+  const [ownerAppliedSearchText, setOwnerAppliedSearchText] = useState("");
+  const [ownerSelectedBbkId, setOwnerSelectedBbkId] = useState("");
+  const [resultSearchInputText, setResultSearchInputText] = useState("");
+  const [resultAppliedSearchText, setResultAppliedSearchText] = useState("");
+  const [resultSelectedBbkId, setResultSelectedBbkId] = useState("");
   const [resultsRefreshToken, setResultsRefreshToken] = useState(0);
   const overviewRequestSeq = useRef(0);
   const activeSkillRef = useRef("");
@@ -420,6 +470,14 @@ export function SkillReadinessModal({
       setSelectedCheckName(null);
       setPage(1);
       setPageSize(20);
+      setOwnerTablePage(1);
+      setOwnerTablePageSize(DEFAULT_OWNER_TABLE_PAGE_SIZE);
+      setOwnerSearchInputText("");
+      setOwnerAppliedSearchText("");
+      setOwnerSelectedBbkId("");
+      setResultSearchInputText("");
+      setResultAppliedSearchText("");
+      setResultSelectedBbkId("");
       setResultsRefreshToken(0);
       return;
     }
@@ -430,9 +488,36 @@ export function SkillReadinessModal({
     setSelectedCheckName(null);
     setPage(1);
     setPageSize(20);
+    setOwnerTablePage(1);
+    setOwnerTablePageSize(DEFAULT_OWNER_TABLE_PAGE_SIZE);
+    setOwnerSearchInputText("");
+    setOwnerAppliedSearchText("");
+    setOwnerSelectedBbkId("");
+    setResultSearchInputText("");
+    setResultAppliedSearchText("");
+    setResultSelectedBbkId("");
     setResultsRefreshToken(0);
     void loadOverview();
   }, [open, loadOverview, target.skillId, target.valid]);
+
+  useEffect(() => {
+    const keyword = normalizeSearchKeyword(ownerAppliedSearchText);
+    const ownerCount = (overview?.owners ?? []).filter(
+      (owner) =>
+        matchesUserSearch(owner, keyword) &&
+        matchesBbkId(owner, ownerSelectedBbkId),
+    ).length;
+    const maxPage = Math.max(
+      1,
+      Math.ceil(ownerCount / ownerTablePageSize),
+    );
+    setOwnerTablePage((current) => Math.min(current, maxPage));
+  }, [
+    overview?.owners,
+    ownerAppliedSearchText,
+    ownerSelectedBbkId,
+    ownerTablePageSize,
+  ]);
 
   useEffect(() => {
     const runId = overview?.latest_run?.run_id;
@@ -488,7 +573,7 @@ export function SkillReadinessModal({
   }, [loadOverview]);
 
   const startRun = useCallback(async () => {
-    if (!target.valid || !overview?.startable) {
+    if (!target.valid || !overview) {
       return;
     }
 
@@ -500,7 +585,28 @@ export function SkillReadinessModal({
       if (activeSkillRef.current !== target.skillId) {
         return;
       }
-      message.success(response.reused ? "已有检查正在运行" : "已开始检查");
+      if (response.owner_lookup_only) {
+        message.success(
+          response.owner_lookup_scheduled
+            ? "已开始查询用户"
+            : "已有用户查询正在运行",
+        );
+        setOverview((current) =>
+          current && current.skill_id === target.skillId
+            ? {
+                ...current,
+                owner_lookup_status: "running",
+              }
+            : current,
+        );
+        setResults(null);
+        return;
+      }
+      if (!response.run) {
+        await loadOverview();
+        return;
+      }
+      message.success(response.reused ? "已有检查正在运行" : "已开始查询用户并检查");
       setOverview((current) =>
         current && current.skill_id === target.skillId
           ? {
@@ -521,12 +627,65 @@ export function SkillReadinessModal({
     } finally {
       setStarting(false);
     }
-  }, [loadOverview, overview?.startable, target.skillId, target.valid]);
+  }, [loadOverview, overview, target.skillId, target.valid]);
 
   const activeRun = results?.run || overview?.latest_run || null;
   const ownerSummary = overview?.owner_summary ?? DEFAULT_OWNER_SUMMARY;
   const configChecks = overview?.config_checks ?? [];
   const ownerRows = overview?.owners ?? [];
+  const marketVersion =
+    skill?.version ||
+    ownerRows.find((owner) => owner.market_version)?.market_version ||
+    null;
+  const filteredOwnerRows = useMemo(() => {
+    const keyword = normalizeSearchKeyword(ownerAppliedSearchText);
+    return ownerRows.filter(
+      (owner) =>
+        matchesUserSearch(owner, keyword) &&
+        matchesBbkId(owner, ownerSelectedBbkId),
+    );
+  }, [ownerRows, ownerAppliedSearchText, ownerSelectedBbkId]);
+  const ownerBbkIdOptions = useMemo(
+    () => buildBbkIdOptions(ownerRows),
+    [ownerRows],
+  );
+  const filteredResultItems = useMemo(() => {
+    const keyword = normalizeSearchKeyword(resultAppliedSearchText);
+    return (results?.items ?? []).filter(
+      (user) =>
+        matchesUserSearch(user, keyword) &&
+        matchesBbkId(user, resultSelectedBbkId),
+    );
+  }, [results?.items, resultAppliedSearchText, resultSelectedBbkId]);
+  const resultBbkIdOptions = useMemo(
+    () => buildBbkIdOptions(results?.items ?? []),
+    [results?.items],
+  );
+  const resultFilterActive = Boolean(
+    resultAppliedSearchText.trim() || resultSelectedBbkId,
+  );
+  const ownerLookupRunning = overview?.owner_lookup_status === "running";
+  const ownerLookupIdle = overview?.owner_lookup_status === "idle";
+  const startButtonText = overview?.startable ? "查询用户并检查" : "查询用户";
+  let ownerLookupDataTime = "-";
+  if (ownerLookupRunning) {
+    ownerLookupDataTime = "正在生成中";
+  } else if (ownerLookupIdle) {
+    ownerLookupDataTime = "查询用户后生成";
+  }
+  if (overview?.owner_lookup_updated_at) {
+    ownerLookupDataTime = `${formatDateTime(overview.owner_lookup_updated_at)}${
+      ownerLookupRunning ? "（检查中）" : ""
+    }`;
+  }
+  let ownerEmptyText = "当前没有查询到分配用户";
+  if (ownerLookupRunning) {
+    ownerEmptyText = "正在生成中";
+  } else if (ownerLookupIdle) {
+    ownerEmptyText = "查询用户后生成拥有用户";
+  } else if (ownerAppliedSearchText.trim() || ownerSelectedBbkId) {
+    ownerEmptyText = "当前搜索条件下没有用户";
+  }
 
   const ownerColumns = [
     {
@@ -555,12 +714,6 @@ export function SkillReadinessModal({
       render: renderNullableText,
     },
     {
-      title: "市场版本",
-      dataIndex: "market_version",
-      key: "market_version",
-      render: renderNullableText,
-    },
-    {
       title: "用户版本",
       dataIndex: "installed_version",
       key: "installed_version",
@@ -573,7 +726,7 @@ export function SkillReadinessModal({
       render: renderEnabledTag,
     },
     {
-      title: "版本",
+      title: "版本差异",
       dataIndex: "has_update",
       key: "has_update",
       render: renderUpdateTag,
@@ -680,34 +833,72 @@ export function SkillReadinessModal({
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
       <div
         style={{
-          display: "flex",
-          justifyContent: "space-between",
-          gap: 12,
-          flexWrap: "wrap",
-          alignItems: "center",
+          display: "grid",
+          gap: 8,
         }}
       >
-        <Space direction="vertical" size={4}>
-          <Text strong>检查结果</Text>
-          {activeRun && selectedCheckName && (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              当前仅展示该检查项失败的用户。
-            </Text>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            gap: 12,
+            flexWrap: "wrap",
+            alignItems: "center",
+          }}
+        >
+          <Space direction="vertical" size={4}>
+            <Text strong>检查结果</Text>
+            {activeRun && selectedCheckName && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                当前仅展示该检查项失败的用户。
+              </Text>
+            )}
+          </Space>
+          {activeRun && !selectedCheckName && (
+            <Segmented
+              value={statusFilter}
+              options={[
+                { label: "全部", value: "all" },
+                { label: "异常", value: "abnormal" },
+                { label: "正常", value: "normal" },
+              ]}
+              onChange={(value) => {
+                setStatusFilter(value as UserStatusFilter);
+                setPage(1);
+              }}
+            />
           )}
-        </Space>
-        {activeRun && !selectedCheckName && (
-          <Segmented
-            value={statusFilter}
-            options={[
-              { label: "全部", value: "all" },
-              { label: "异常", value: "abnormal" },
-              { label: "正常", value: "normal" },
-            ]}
-            onChange={(value) => {
-              setStatusFilter(value as UserStatusFilter);
-              setPage(1);
-            }}
-          />
+        </div>
+        {activeRun && (
+          <Space wrap>
+            <Input.Search
+              allowClear
+              enterButton="搜索"
+              placeholder="搜索用户姓名或 ID"
+              value={resultSearchInputText}
+              onChange={(event) => {
+                setResultSearchInputText(event.target.value);
+              }}
+              onSearch={(value) => {
+                setResultAppliedSearchText(value);
+                setPage(1);
+              }}
+              style={{ width: 320, maxWidth: "100%" }}
+            />
+            <Select
+              allowClear
+              placeholder="筛选机构"
+              options={resultBbkIdOptions}
+              value={resultSelectedBbkId || undefined}
+              onChange={(value) => {
+                setResultSelectedBbkId(value || "");
+                setPage(1);
+              }}
+              showSearch
+              optionFilterProp="label"
+              style={{ width: 180, maxWidth: "100%" }}
+            />
+          </Space>
         )}
       </div>
 
@@ -718,7 +909,7 @@ export function SkillReadinessModal({
           <div>{checkSummary}</div>
 
           <Spin spinning={resultsLoading}>
-            {!results || results.items.length === 0 ? (
+            {!results || filteredResultItems.length === 0 ? (
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
                 description="当前筛选条件下没有结果"
@@ -726,13 +917,13 @@ export function SkillReadinessModal({
             ) : (
               <Space direction="vertical" size={10} style={{ width: "100%" }}>
                 {selectedCheckName ? (
-                  results.items.map((user) =>
+                  filteredResultItems.map((user) =>
                     renderSelectedCheckUserResult(user, selectedCheckName),
                   )
                 ) : (
                   <Collapse
                     size="small"
-                    items={results.items.map((user) => ({
+                    items={filteredResultItems.map((user) => ({
                       key: user.user_id,
                       label: renderUserOverviewLabel(user),
                       children: (
@@ -774,7 +965,11 @@ export function SkillReadinessModal({
                   pageSize={pageSize}
                   total={results.total}
                   showSizeChanger
-                  showTotal={(total) => `共 ${total} 条`}
+                  showTotal={(total) =>
+                    resultFilterActive
+                      ? `当前页匹配 ${filteredResultItems.length} 条 / 共 ${total} 条`
+                      : `共 ${total} 条`
+                  }
                   onChange={(nextPage, nextPageSize) => {
                     setPage(nextPage);
                     setPageSize(nextPageSize);
@@ -796,11 +991,16 @@ export function SkillReadinessModal({
           <SafetyCertificateOutlined />
           <span>用户可执行性</span>
           {target.displayName && <Text type="secondary">{target.displayName}</Text>}
+          {marketVersion && (
+            <Tag color="blue" title={`市场版本 v${marketVersion}`}>
+              市场版本 v{marketVersion}
+            </Tag>
+          )}
         </Space>
       }
       width={1040}
       onCancel={overviewLoading || starting ? undefined : onClose}
-      destroyOnClose
+      destroyOnHidden
       footer={[
         <Button
           key="refresh"
@@ -816,10 +1016,10 @@ export function SkillReadinessModal({
           type="primary"
           icon={<PlayCircleOutlined />}
           loading={starting}
-          disabled={!target.valid || !overview?.startable}
+          disabled={!target.valid || !overview}
           onClick={startRun}
         >
-          开始检查
+          {startButtonText}
         </Button>,
         <Button
           key="close"
@@ -927,21 +1127,72 @@ export function SkillReadinessModal({
               {configPanel}
 
               <div>
-                <Text strong>拥有用户</Text>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 8,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <Text strong>拥有用户</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    数据时间：{ownerLookupDataTime}
+                  </Text>
+                </div>
+                <Space wrap style={{ marginTop: 8 }}>
+                  <Input.Search
+                    allowClear
+                    enterButton="搜索"
+                    placeholder="搜索用户姓名或 ID"
+                    value={ownerSearchInputText}
+                    onChange={(event) => {
+                      setOwnerSearchInputText(event.target.value);
+                    }}
+                    onSearch={(value) => {
+                      setOwnerAppliedSearchText(value);
+                      setOwnerTablePage(1);
+                    }}
+                    style={{ width: 320, maxWidth: "100%" }}
+                  />
+                  <Select
+                    allowClear
+                    placeholder="筛选机构"
+                    options={ownerBbkIdOptions}
+                    value={ownerSelectedBbkId || undefined}
+                    onChange={(value) => {
+                      setOwnerSelectedBbkId(value || "");
+                      setOwnerTablePage(1);
+                    }}
+                    showSearch
+                    optionFilterProp="label"
+                    style={{ width: 180, maxWidth: "100%" }}
+                  />
+                </Space>
                 <Table
                   rowKey="user_id"
                   size="small"
                   style={{ marginTop: 8 }}
-                  dataSource={ownerRows}
+                  dataSource={filteredOwnerRows}
                   pagination={{
-                    pageSize: 5,
+                    current: ownerTablePage,
+                    pageSize: ownerTablePageSize,
                     showSizeChanger: true,
-                    pageSizeOptions: [5, 10, 20, 50],
+                    pageSizeOptions: OWNER_TABLE_PAGE_SIZE_OPTIONS,
                     showTotal: (total) => `共 ${total} 个用户`,
+                    onChange: (nextPage, nextPageSize) => {
+                      setOwnerTablePage(nextPage);
+                      setOwnerTablePageSize(
+                        nextPageSize || DEFAULT_OWNER_TABLE_PAGE_SIZE,
+                      );
+                    },
                   }}
                   columns={ownerColumns}
-                  locale={{ emptyText: "当前没有查询到分配用户" }}
-                  scroll={{ x: 900 }}
+                  locale={{
+                    emptyText: ownerEmptyText,
+                  }}
+                  scroll={{ x: 760 }}
                 />
               </div>
 

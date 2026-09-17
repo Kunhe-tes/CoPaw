@@ -8,6 +8,7 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Optional, Tuple
 import uuid
@@ -561,18 +562,59 @@ def load_config(config_path: Optional[Path] = None) -> Config:
 
 
 def save_config(config: Config, config_path: Optional[Path] = None) -> None:
-    """Save the config to the file."""
+    """Save the config using an atomic same-directory replacement."""
     if config_path is None:
         config_path = get_config_path()
     config_path = Path(config_path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(config_path, "w", encoding="utf-8") as file:
-        json.dump(
-            config.model_dump(mode="json", by_alias=True, exclude_none=True),
-            file,
-            indent=2,
-            ensure_ascii=False,
+    mode = None
+    try:
+        mode = config_path.stat().st_mode & 0o777
+    except FileNotFoundError:
+        pass
+
+    temp_path: Path | None = None
+    try:
+        fd, temp_name = tempfile.mkstemp(
+            dir=config_path.parent,
+            prefix=f".{config_path.name}.",
+            suffix=".tmp",
         )
+        temp_path = Path(temp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            json.dump(
+                config.model_dump(
+                    mode="json",
+                    by_alias=True,
+                    exclude_none=True,
+                ),
+                file,
+                indent=2,
+                ensure_ascii=False,
+            )
+            file.flush()
+            os.fsync(file.fileno())
+
+        if mode is not None:
+            os.chmod(temp_path, mode)
+        os.replace(temp_path, config_path)
+        temp_path = None
+
+        try:
+            dir_fd = os.open(config_path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            # Directory fsync is not available on every supported platform.
+            pass
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def get_heartbeat_config(
@@ -974,8 +1016,21 @@ def get_tenant_request_working_dir(tenant_id: str | None = None) -> Path:
     ``default`` 用户在存在 ``source_id`` 时固定走 ``default_{source}``，
     非 ``default`` 用户维持 runtime scope 目录语义。
     """
+    explicit_tenant_id = tenant_id
+    if explicit_tenant_id is not None and explicit_tenant_id.startswith(
+        "default_",
+    ):
+        return migrate_legacy_scope_dir_if_needed(
+            WORKING_DIR,
+            explicit_tenant_id,
+        )
+
     resolved_tenant_id = resolve_request_effective_tenant_id(
-        tenant_id if tenant_id is not None else get_current_tenant_id(),
+        (
+            explicit_tenant_id
+            if explicit_tenant_id is not None
+            else get_current_tenant_id()
+        ),
         get_current_source_id(),
         get_current_scope_id(),
     )

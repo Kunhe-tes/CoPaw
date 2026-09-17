@@ -22,6 +22,7 @@
 | 用 CLI 管固定文本任务 | [cli-text-weekly](cli-text-weekly/README.md) | `swe cron create/list/update/run` |
 | 模拟外部调度平台回调 | [callback-jobparam](callback-jobparam/README.md) | `POST /api/internal/cron/callback` |
 | 广播任务到多个租户 | [broadcast-to-tenants](broadcast-to-tenants/README.md) | `POST /api/cron/jobs/{job_id}/broadcast` |
+| 切换和观察批调度 | [batch-dispatch](batch-dispatch/README.md) | `/batch-dispatch/*`、`/monitor/cron/dispatch/*` |
 | 配置 cron 授权状态 | [cron-auth](cron-auth/README.md) | `POST /api/auth/cron-auth` |
 | 排查 Monitor 和通知 | [monitor-notification-debug](monitor-notification-debug/README.md) | `/monitor/cron/*` |
 
@@ -32,6 +33,7 @@
 - 创建任务时 `id` 字段仍需要出现在请求体里，但 `POST /api/cron/jobs` 会忽略客户端传入值并生成新的 UUID。
 - `task_type=agent` 必须有 `request`；`task_type=text` 必须有 `text`。
 - 如果指定 `model_slot`，provider 和 model 必须在当前 tenant 可用，否则 API 会返回 400。
+- 广播是异步任务，POST 返回后要继续查询 task 状态；批调度还要求 SWE 与 Scheduler 同时启用 dispatch intents。
 - 示例不要直接提交真实 cookie、access token、客户 ID 或生产 tenant。
 
 返回 [Cron 定时任务模块索引](../README.md)。

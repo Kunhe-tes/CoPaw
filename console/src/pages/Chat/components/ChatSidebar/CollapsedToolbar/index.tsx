@@ -2,7 +2,6 @@ import React from "react";
 import { Tooltip } from "antd";
 import { NewChatIcon, TasksIcon, HistoryIcon } from "./icons";
 import Style from "./style";
-import { DESIGN_TOKENS } from "@/config/designTokens";
 
 export type PanelType = "tasks" | "history" | null;
 

@@ -1,6 +1,6 @@
 # Cron 广播与系统任务
 
-本文说明 cron 广播任务、heartbeat / dream 系统任务，以及当前代码中 Redis coordination 原语与实际装配状态之间的边界。
+本文说明 cron 异步广播、批调度模式同步、source 级会话清理与归档维护、heartbeat / dream，以及 Redis coordination 原语与实际装配状态之间的边界。
 
 返回 [Cron 定时任务模块索引](README.md)。
 
@@ -36,6 +36,29 @@ POST /api/cron/jobs/{job_id}/broadcast
 
 `targets` 是当前推荐格式，用于把目标租户展示身份一起传给 SWE；`target_tenant_ids` 仍保留兼容旧调用方。如果两者都传，后端以 `targets` 为准。`enable_offset` 控制是否启用广播错峰，默认开启；`offset_window_hours` 控制错峰窗口小时数，默认 4，取值范围 1-24。
 
+广播接口现在返回异步任务，而不是等待所有租户完成后直接返回最终 `results`：
+
+```json
+{
+  "task_id": "<broadcast-task-id>",
+  "status": "running",
+  "tenant_count": 2,
+  "completed_count": 0,
+  "failed_count": 0,
+  "results": [],
+  "reused": false
+}
+```
+
+查询入口：
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET /api/cron/jobs/{job_id}/broadcast/tasks/current` | 查询当前运行中任务；响应把任务放在 `task` 字段，没有任务时为 null |
+| `GET /api/cron/jobs/{job_id}/broadcast/tasks/{task_id}` | 按 task ID 查询状态、进度、结果与 warning |
+
+同一源任务已有广播任务运行时，新广播请求会返回已有任务并标记 `reused=true`；独立模式切换接口则会用 409 阻止并发。调用方不能把首次 POST 的空 `results` 当成广播完成。
+
 广播会做这些事：
 
 1. 校验目标租户 ID，去重。
@@ -60,9 +83,19 @@ POST /api/cron/jobs/{job_id}/broadcast
 | `broadcast_original_model_slot` | 目标租户模型不可用时保存源模型 |
 | `broadcast_model_slot_fallback_reason` | 模型回退原因 |
 
-当前 `v1.0.0` 基线已包含 `0732cdea fix(cron): reduce broadcast API complexity`、`f24ad72a fix(cron): skip duplicate broadcast child jobs` 和 `51febe0a fix(cron): persist broadcast target identity`。如果排查广播子任务展示身份丢失，优先看 `CronBroadcastTarget`、`_normalize_broadcast_targets()` 和 `_build_broadcast_job()`。
+重新分发到已有子任务时，后端会覆盖执行内容、执行类型、cron、时区、runtime、model slot、通知延迟和广播 meta 等用户无关配置，同时保留子任务 ID、目标用户身份、任务卡片绑定和暂停/启停状态。分发后的子任务可以在定时任务菜单中用“查看分发用户”反查、批量删除或批量重跑，详细见 [Cron 分发子任务管理](cron-distribution-management.md)。
 
-当前本地修改改变了重复分发语义：重新分发到已有子任务时，后端会覆盖执行内容、执行类型、cron、时区、runtime、model slot、通知延迟和广播 meta 等用户无关配置，同时保留子任务 ID、目标用户身份、任务卡片绑定和暂停/启停状态。分发后的子任务可以在定时任务菜单中用“查看分发用户”反查、批量删除或批量重跑，详细见 [Cron 分发子任务管理](cron-distribution-management.md)。
+## 广播与批调度模式
+
+广播弹窗还可以把源任务切换为“正常调度”或“批调度”。切换批调度并不只改父任务：后台任务会同步已知、请求中和可发现的广播子任务，暂停或恢复各子任务的普通外部 timer。
+
+子任务发现分三类处理：
+
+- 请求明确给出的租户和历史快照已知租户属于严格范围，失败会进入任务结果。
+- 额外发现的潜在租户属于尽力而为范围，失败会形成部分 warning，不阻断已知目标。
+- 当前没有启动时全量扫描所有广播父任务的兜底链路；模式切换和后续广播任务才是同步入口。
+
+批调度开启后，子任务仍保留自己的任务定义和 Monitor job，但自动触发所有权转移给独立 Scheduler intents。完整链路见 [Cron 批调度与独立 Scheduler](cron-batch-dispatch.md)。
 
 ## Source 级会话历史清理系统任务
 
@@ -131,6 +164,34 @@ POST /api/internal/cron/callback
 - `CronManager.initialize()` 不再负责注册任务会话历史清理；它仍然负责 heartbeat / dream 等 tenant workspace 系统任务。
 - 如果环境曾经创建过带 `scheduler_scope_id` 的旧 binding 表结构，执行 `scripts/sql/migrate_source_system_task_binding_drop_scope.sql` 删除不再使用的列。
 
+## Source 级归档维护系统任务
+
+`archive_maintenance` 和 task session cleanup 使用同一个 `SourceSystemTaskScheduler` 与 `swe_source_system_task_binding`，但两者是不同的 `task_type`，每个 source 各自只有一条外部任务绑定。
+
+有效配置位于 source 系统特性配置的 `archive_maintenance`：
+
+| 字段 | 默认值 | 含义 |
+| --- | --- | --- |
+| `enabled` | `true` | 是否启用归档维护 |
+| `cron` | `0 3 * * *` | 每日维护 cron |
+| `old_orphan_days` | `3` | 多久未关联的文件视为旧 orphan |
+| `max_workspaces_per_run` | `200` | 单次最多处理 workspace 数 |
+| `max_files_per_workspace` | `100` | 每个 workspace 最多处理文件数 |
+| `max_files_per_run` | `5000` | 单次全局文件数上限 |
+| `timeout_seconds` | `900` | 单次执行超时 |
+
+刷新入口 `SourceSystemTaskScheduler.refresh_archive_maintenance()` 会创建、更新、恢复或暂停 job ID 为 `_source_archive_maintenance` 的 source 级外部任务，binding 的 `task_type` 为 `archive_maintenance`。
+
+回调仍进入：
+
+```http
+POST /api/internal/cron/callback
+```
+
+`internal_cron_callback()` 对 source 级 maintenance 不解析单个 `CronManager`，而是调用 source scheduler。执行器查询当前 source 下非模板 tenant/scope，逐个调用 workspace 的 orphan 归档逻辑，并同时执行 workspace 数、单 workspace 文件数、全局文件数和总超时限制。结果汇总处理 workspace/文件数、错误和 `timed_out`，便于从系统任务日志判断是正常限额退出还是失败。
+
+不要把它和 task session cleanup 混为同一任务：前者维护 workspace 归档文件，后者清理 cron task session 历史；它们只共享 source 级注册和回调框架。
+
 ## Heartbeat 与 Dream
 
 CronManager 还会注册两个系统任务：
@@ -161,11 +222,13 @@ self._runner.memory_manager.dream_memory(
 
 当前代码里有 `src/swe/app/crons/coordination.py`，它提供 Redis lease、definition lock、reload pub/sub 和 scheduler preflight 等原语。
 
-但按当前 `v1.0.0` 代码检索，`CronCoordination` 没有接入 `Workspace` 的 `CronManager` 构造路径。当前主运行合同仍然是：
+但按当前 `v1.0.0` 代码检索，`CronCoordination` 没有接入 `Workspace` 的 `CronManager` 构造路径。普通任务的运行合同仍然是：
 
 ```text
 外部调度平台到点回调 -> /api/internal/cron/callback -> runtime tenant workspace -> CronManager
 ```
+
+批调度里的数据库 scope lease 已经接入独立 Scheduler 的实际派发链路，但它只协调 dispatch intents，不等于 `CronCoordination` 已经接管普通 `jobs.json` 或 `CronManager` 生命周期。
 
 因此，多实例部署时实际要重点保证：
 

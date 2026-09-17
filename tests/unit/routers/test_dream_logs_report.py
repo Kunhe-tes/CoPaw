@@ -55,6 +55,7 @@ class _FakeContinuousGovernanceStore:
         self.health = health or []
         self.is_available = available
         self.report_calls: list[dict[str, Any]] = []
+        self.archive_page_calls: list[dict[str, Any]] = []
 
     async def list_governance_records(self, source_id: str, **filters):
         """按 service 传入的筛选条件返回治理记录。"""
@@ -87,6 +88,30 @@ class _FakeContinuousGovernanceStore:
             [row for row in self.archive_items if row.source_id == source_id],
             filters,
         )
+
+    async def list_archive_items_page(
+        self,
+        source_id: str,
+        *,
+        limit: int,
+        offset: int,
+        expired: bool | None = None,
+        **filters,
+    ):
+        """模拟数据库分页并记录路由传入的窗口。"""
+        self.archive_page_calls.append(
+            {
+                "source_id": source_id,
+                "limit": limit,
+                "offset": offset,
+                "expired": expired,
+                **filters,
+            },
+        )
+        rows = await self.list_archive_items(source_id, **filters)
+        if expired is not None:
+            rows = [row for row in rows if row.expired == expired]
+        return rows[offset : offset + limit], len(rows)
 
     async def list_protected_files(self, source_id: str, **filters):
         """返回保护状态读模型。"""
@@ -809,6 +834,51 @@ def test_archive_lists_read_database_state_and_user_filters(
     assert archive_payload["items"][0]["id"] == "archive-a"
     assert protected_payload["total"] == 1
     assert protected_payload["items"][0]["path"] == "memory/protected.md"
+
+
+def test_archive_items_route_uses_store_pagination(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """归档列表把页码转换为数据库 limit 和 offset。"""
+    archive_items = [
+        ArchiveItemRecord(
+            source_id="source-a",
+            target_user_id="alice",
+            target_agent_id="default",
+            archive_item_id=f"archive-{index}",
+            original_path=f"memory/{index}.md",
+            archive_path=f"governance/archive/files/archive-{index}",
+            size_bytes=index,
+            mtime="2026-05-24T09:00:00Z",
+            archived_at=f"2026-05-24T10:00:0{index}Z",
+            archived_by="admin",
+            archive_reason="manual",
+            expired=False,
+        )
+        for index in range(3)
+    ]
+    client, _, governance_store = _client(
+        tmp_path,
+        monkeypatch,
+        [{"tenant_id": "alice", "source_id": "source-a"}],
+        archive_items=archive_items,
+    )
+
+    response = client.get(
+        "/dream-logs/archive/items",
+        params={"page": 2, "page_size": 2},
+        headers={"X-Source-Id": "source-a", "X-User-Role": "manager"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 3
+    assert payload["page"] == 2
+    assert payload["page_size"] == 2
+    assert [item["id"] for item in payload["items"]] == ["archive-2"]
+    assert governance_store.archive_page_calls[-1]["limit"] == 2
+    assert governance_store.archive_page_calls[-1]["offset"] == 2
 
 
 def test_archive_report_applies_user_filter(tmp_path, monkeypatch) -> None:

@@ -10,8 +10,6 @@ import { MinusCircleOutlined, PlusOutlined } from "@ant-design/icons";
 import { useEffect } from "react";
 import type { FormInstance } from "antd";
 import type { FeaturedCase, CaseStep } from "@/api/types/featuredCases";
-import { useIframeStore } from "@/stores/iframeStore";
-import { DEFAULT_BBK_ID } from "@/constants/identity";
 import { BBK_ID_MAP } from "@/constants/bbk";
 
 interface CaseDrawerProps {
@@ -19,6 +17,7 @@ interface CaseDrawerProps {
   editingCase: FeaturedCase | null;
   form: FormInstance<FeaturedCase>;
   saving: boolean;
+  bbkId: string;
   onClose: () => void;
   onSubmit: (values: FeaturedCase) => void;
 }
@@ -36,17 +35,15 @@ export function CaseDrawer({
   editingCase,
   form,
   saving,
+  bbkId,
   onClose,
   onSubmit,
 }: CaseDrawerProps) {
-  // 设置默认值从 iframeStore
   useEffect(() => {
-    if(open && !editingCase){
-      const { bbk } = useIframeStore.getState();
-      console.log('store----bbk', bbk)
-      form.setFieldsValue({ bbk_id: bbk || DEFAULT_BBK_ID });
+    if (open && !editingCase) {
+      form.setFieldsValue({ bbk_id: bbkId });
     }
-  }, [open, editingCase, form]);
+  }, [bbkId, open, editingCase, form]);
 
   return (
     <Drawer
@@ -74,10 +71,7 @@ export function CaseDrawer({
         {/* source_id NOT displayed - comes from X-Source-Id header */}
 
         <Form.Item name="bbk_id" label="机构">
-          <Select
-            disabled
-            options={BBK_ID_MAP}
-          />
+          <Select disabled options={BBK_ID_MAP} />
         </Form.Item>
 
         <Form.Item

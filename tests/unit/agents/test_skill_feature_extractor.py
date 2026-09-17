@@ -5,13 +5,13 @@
 
 import pytest
 
-from src.swe.agents.skill_feature_extractor import (
+from swe.agents.skill_feature_extractor import (
     ExtractedSkillFeatures,
     SkillFeatureExtractor,
     get_skill_feature_extractor,
     reset_skill_feature_extractor,
 )
-from src.swe.agents.skill_feature_inferencer import (
+from swe.agents.skill_feature_inferencer import (
     SkillFeature,
     reset_skill_feature_inferencer,
 )
@@ -63,6 +63,269 @@ class TestExtractedSkillFeatures:
 
 class TestSkillFeatureExtractor:
     """Tests for SkillFeatureExtractor class."""
+
+    def test_directory_listing_extensions_should_not_be_input_features(
+        self,
+        extractor,
+    ):
+        """目录结构和脚本文件名不应被当作技能输入文件特征。"""
+        content = """---
+name: fill-metadata
+description: 补全Excel文件中缺失的表元数据和字段元数据的中文名。
+---
+
+## 目录结构
+
+```text
+fill-metadata/
+├── scripts/
+│   ├── fill.py
+│   ├── verify.py
+│   └── ex_index.json
+└── steps/
+    └── step0.md
+```
+
+## 输入文件格式要求
+
+Excel文件应包含表名和字段中文名列。
+"""
+        features = extractor.extract_from_content(content, "fill-metadata")
+
+        assert ".py" not in features.file_extensions
+        assert ".json" not in features.file_extensions
+        assert ".md" not in features.file_extensions
+
+    def test_code_block_script_paths_should_not_be_input_features(
+        self,
+        extractor,
+    ):
+        """命令示例中的脚本路径不应被当作输入文件特征。"""
+        content = """---
+name: fill-metadata
+description: 补全Excel文件中的字段中文名。
+---
+
+## 使用方法
+
+```bash
+python scripts/fill.py --input demo.xlsx --index scripts/ex_index.json
+python scripts/verify.py --input demo.xlsx
+```
+"""
+        features = extractor.extract_from_content(content, "fill-metadata")
+
+        assert ".py" not in features.file_extensions
+        assert ".json" not in features.file_extensions
+        assert ".xlsx" in features.file_extensions
+
+    def test_natural_language_file_extensions_are_still_extracted(
+        self,
+        extractor,
+    ):
+        """正文里明确声明的输入文件扩展名仍应保留。"""
+        content = """---
+name: document-skill
+description: 处理办公文档。
+---
+
+该技能处理 .xlsx 文件和 .pdf 文档，并输出汇总结果。
+"""
+        features = extractor.extract_from_content(content, "document-skill")
+
+        assert ".xlsx" in features.file_extensions
+        assert ".pdf" in features.file_extensions
+
+    def test_english_reads_prose_keeps_input_extensions(
+        self,
+        extractor,
+    ):
+        """普通英文描述中的 reads/handles 不应被误判为实现说明。"""
+        content = """---
+name: pdf-reader
+description: Read uploaded documents.
+---
+
+This skill reads .pdf files and handles .docx inputs from users.
+"""
+        features = extractor.extract_from_content(content, "pdf-reader")
+
+        assert ".pdf" in features.file_extensions
+        assert ".docx" in features.file_extensions
+
+    def test_script_explanation_section_should_not_treat_impl_files_as_input(
+        self,
+        extractor,
+    ):
+        """脚本说明区中的实现文件不应污染输入文件特征。"""
+        content = """---
+name: fill-metadata
+description: 补全Excel文件中的字段中文名。
+---
+
+## 脚本说明
+
+### scripts/fill.py
+
+填充脚本，用于读取 Excel 文件。
+
+### scripts/ex_index.json
+
+索引配置文件，供脚本执行时使用。
+
+## 输入文件格式要求
+
+输入为 .xlsx 文件。
+"""
+        features = extractor.extract_from_content(content, "fill-metadata")
+
+        assert ".py" not in features.file_extensions
+        assert ".json" not in features.file_extensions
+        assert ".xlsx" in features.file_extensions
+
+    def test_actual_fill_metadata_skill_keeps_python_as_observed_only(
+        self,
+        extractor,
+    ):
+        """真实 fill-metadata 文案中的实现脚本不应进入输入扩展名。"""
+        content = """---
+name: fill-metadata
+description: 补全Excel文件中缺失的表元数据和字段元数据的中文名。当用户需要处理包含元数据缺失的Excel文件、补全中文名称、修复表字段信息时使用此技能。触发词：补全元数据、填充中文名、修复Excel元数据、表字段缺失、字段中文名补全。
+---
+
+## 目录结构
+
+```text
+fill-metadata/
+├── scripts/
+│   ├── ex_index.json
+│   ├── fill.py
+│   ├── merge.py
+│   ├── validata.py
+│   └── verify.py
+└── steps/
+    ├── step0.md
+    ├── step1.md
+    └── step2.md
+```
+
+## 使用步骤
+
+### Step 1: 执行填充
+
+阅读 `steps/step1.md` 了解如何使用填充脚本补全元数据。
+
+## 脚本说明
+
+### scripts/fill.py
+
+填充脚本，用于读取Excel文件并根据索引配置补全缺失的中文名。
+
+**使用方法：**
+
+```bash
+python scripts/fill.py --input <excel_file> --index scripts/ex_index.json --output <output_file>
+```
+
+**参数说明：**
+- `--input`: 输入的Excel文件路径
+- `--index`: 索引配置文件路径
+- `--output`: 输出的Excel文件路径（可选，默认覆盖原文件）
+"""
+        features = extractor.extract_from_content(content, "fill-metadata")
+
+        assert ".py" not in features.file_extensions
+        assert ".json" not in features.file_extensions
+        assert ".md" not in features.file_extensions
+        assert ".py" in features.observed_file_extensions
+        assert ".json" in features.observed_file_extensions
+        assert ".md" in features.observed_file_extensions
+
+    def test_ip_address_should_not_produce_fake_extensions(
+        self,
+        extractor,
+    ):
+        """IP 地址和端口片段不应生成 .0/.1 这类伪扩展名。"""
+        content = """---
+name: hook-http-demo
+description: hook demo
+---
+
+回调地址为 http://127.0.0.1:9000/hooks/mcp-posttool
+"""
+        features = extractor.extract_from_content(content, "hook-http-demo")
+
+        assert ".0" not in features.file_extensions
+        assert ".1" not in features.file_extensions
+        assert ".0" not in features.observed_file_extensions
+        assert ".1" not in features.observed_file_extensions
+
+    def test_reference_urls_and_repo_suffixes_should_not_be_input_features(
+        self,
+        extractor,
+    ):
+        """安装链接和仓库后缀不应被识别成输入文件特征。"""
+        content = """---
+name: self-improvement
+description: 记录经验
+---
+
+## Installation
+
+```bash
+git clone https://github.com/example/project.git ~/.skills/project
+```
+
+Follow the spec at https://agentskills.io/specification .
+"""
+        features = extractor.extract_from_content(content, "self-improvement")
+
+        assert ".com" not in features.file_extensions
+        assert ".git" not in features.file_extensions
+        assert ".io" not in features.file_extensions
+
+    def test_placeholder_and_example_extensions_should_not_be_input_features(
+        self,
+        extractor,
+    ):
+        """占位示例和缩写片段不应被识别成输入文件特征。"""
+        content = """---
+name: self-improvement
+description: 记录经验
+---
+
+## Metadata
+
+- Related Files: path/to/file.ext
+- Example IDs: e.g. `001`, `A7B`
+- Lock file is `pnpm-lock.yaml`
+"""
+        features = extractor.extract_from_content(content, "self-improvement")
+
+        assert ".ext" not in features.file_extensions
+        assert ".g" not in features.file_extensions
+        assert ".yaml" not in features.file_extensions
+
+    def test_internal_log_file_listings_should_not_be_input_features(
+        self,
+        extractor,
+    ):
+        """内部工作文件清单不应被识别成用户输入文件特征。"""
+        content = """---
+name: self-improvement
+description: 记录经验
+---
+
+## Create learning files
+
+- `LEARNINGS.md` - corrections and best practices
+- `ERRORS.md` - command failures
+- `FEATURE_REQUESTS.md` - capability requests
+"""
+        features = extractor.extract_from_content(content, "self-improvement")
+
+        assert ".md" not in features.file_extensions
+        assert ".md" in features.observed_file_extensions
 
     def test_extract_trigger_keywords_explicit(self, extractor):
         """Test extraction of explicit trigger keywords from section."""

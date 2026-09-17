@@ -3,14 +3,21 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from starlette.types import Message, Receive, Scope, Send
 
+from swe.app.middleware.provider_models_timing import (
+    is_provider_models_scope,
+)
 from swe.app.runtime_diagnostic import RuntimeDiagnosticManager
 
 ASGIApp = Callable[[Scope, Receive, Send], Awaitable[None]]
+
+logger = logging.getLogger(__name__)
 
 
 class SSEDiagnosticMiddleware:
@@ -34,6 +41,8 @@ class SSEDiagnosticMiddleware:
             await self.app(scope, receive, send)
             return
 
+        is_timing = is_provider_models_scope(scope)
+        started_at = time.perf_counter()
         opened = False
 
         async def send_wrapper(message: Message) -> None:
@@ -44,7 +53,35 @@ class SSEDiagnosticMiddleware:
             await send(message)
 
         try:
+            if is_timing:
+                logger.info(
+                    "provider_models_asgi_middleware_before_next "
+                    "name=SSEDiagnosticMiddleware path=%s pre_ms=%d",
+                    scope.get("path"),
+                    0,
+                )
             await self.app(scope, receive, send_wrapper)
+            if is_timing:
+                logger.info(
+                    "provider_models_asgi_middleware_done "
+                    "name=SSEDiagnosticMiddleware path=%s total_ms=%d "
+                    "downstream_ms=%d sse_opened=%s",
+                    scope.get("path"),
+                    int((time.perf_counter() - started_at) * 1000),
+                    int((time.perf_counter() - started_at) * 1000),
+                    opened,
+                )
+        except Exception:
+            if is_timing:
+                logger.exception(
+                    "provider_models_asgi_middleware_error "
+                    "name=SSEDiagnosticMiddleware path=%s total_ms=%d "
+                    "sse_opened=%s",
+                    scope.get("path"),
+                    int((time.perf_counter() - started_at) * 1000),
+                    opened,
+                )
+            raise
         finally:
             if opened:
                 self.manager.record_sse_closed()

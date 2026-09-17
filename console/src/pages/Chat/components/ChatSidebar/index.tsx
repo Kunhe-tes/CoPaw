@@ -1,7 +1,8 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from "react";
 import { flushSync } from "react-dom";
 import { useNavigate, useLocation } from "react-router-dom";
-import { Image, Modal } from "antd";
+import { Image, Modal, Tooltip } from "antd";
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { useContextSelector } from "use-context-selector";
 import useChatAnywhereEventEmitter from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/useChatAnywhereEventEmitter";
 import Style from "./style";
@@ -14,12 +15,13 @@ import type { HistorySession } from "./historySessions";
 import { isHistorySessionActive } from "./historySessions";
 import sendIcon from "../../../../assets/icons/new_chat.svg";
 import operateIcon from "../../../../assets/icons/operate.svg";
-import guideImage from "@/assets/others/note.png";
+import shGuideImage from "@/assets/others/sh_note.png";
 import {
   ChatAnywhereSessionsContext,
   type IAgentScopeRuntimeWebUISession,
 } from "@/components/agentscope-chat";
 import { useAgentStore } from "@/stores/agentStore";
+import { useIframeStore } from "@/stores/iframeStore";
 import sessionApi from "../../sessionApi";
 import { getSessionAgentId } from "../../sessionApi/sessionAgent";
 import { resolveRequestedSessionId } from "../../sessionApi/resolvedSessionMapping";
@@ -27,6 +29,12 @@ import { HistorySessionRow } from "./HistorySessionRow";
 import { HistorySkeleton } from "./HistorySkeleton";
 import { HistoryInfiniteScrollTrigger } from "./HistoryInfiniteScrollTrigger";
 import { mergeConcurrentSessions } from "./mergeConcurrentSessions";
+
+const OPERATION_GUIDE_BBK = "121";
+const OPERATION_GUIDE_SOURCE = "RMASSIST";
+// 临时占位链接，待操作指南正式地址确认后替换。
+const OPERATION_GUIDE_URL = "https://example.com";
+const SPECIAL_SOURCE = "ruice";
 
 /** Extended session type with additional backend fields */
 interface ExtendedHistorySession extends HistorySession {
@@ -89,6 +97,7 @@ export interface ChatSidebarProps {
   onTaskRun?: (task: CronJobSpecOutput) => void;
   onTaskResume?: (task: CronJobSpecOutput) => void;
   onTaskDelete?: (task: CronJobSpecOutput) => void;
+  onTaskEdit?: (task: CronJobSpecOutput) => void;
 }
 
 export default function ChatSidebar(props: ChatSidebarProps) {
@@ -101,6 +110,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
     onTaskRun,
     onTaskResume,
     onTaskDelete,
+    onTaskEdit,
   } = props;
   const navigate = useNavigate();
   const location = useLocation();
@@ -135,6 +145,12 @@ export default function ChatSidebar(props: ChatSidebarProps) {
     (value) => value.isSessionsListLoading,
   );
   const { selectedAgent, setSelectedAgent } = useAgentStore();
+  const bbk = useIframeStore((state) => state.bbk);
+  const source = useIframeStore((state) => state.source);
+  const isOriginY = useIframeStore((state) => state.isOriginY);
+  const isOperationGuideContext =
+    bbk === OPERATION_GUIDE_BBK && source === OPERATION_GUIDE_SOURCE;
+  const isHeaderHidden = source === SPECIAL_SOURCE;
 
   const currentChatId = location.pathname.match(/^\/chat\/(.+)$/)?.[1] || null;
   const currentChatIdRef = useRef<string | null>(currentChatId);
@@ -215,7 +231,10 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   }, [sharedSessions]);
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
-  const historyTotal = Math.max(sessionApi.getSessionTotal(), sessions.length);
+  const historyTotal = Math.max(
+    sessionApi.getSessionTotal() - tasks.length,
+    sessions.length,
+  );
 
   const handleToggleHistory = useCallback(() => {
     setHistoryCollapsed((prev) => !prev);
@@ -284,8 +303,13 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   );
 
   const handleOpenGuide = useCallback(() => {
-    setGuidePreviewVisible(true);
-  }, []);
+    if (isOperationGuideContext) {
+      setGuidePreviewVisible(true);
+      return;
+    }
+
+    window.open(OPERATION_GUIDE_URL, "_blank", "noopener,noreferrer");
+  }, [isOperationGuideContext]);
 
   const handleDeleteSession = useCallback(
     (
@@ -355,6 +379,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
             onTaskRun={onTaskRun}
             onTaskResume={onTaskResume}
             onTaskDelete={onTaskDelete}
+            onTaskEdit={onTaskEdit}
             toolbarRef={toolbarRef}
           />
           <ExpandablePanel
@@ -371,22 +396,16 @@ export default function ChatSidebar(props: ChatSidebarProps) {
             loadMoreSessionsFailed={loadMoreHistoryFailed}
             onLoadMoreSessions={() => void loadMoreSessions()}
           />
-          <button
-            className="chat-sidebar-collapse-toggle"
-            onClick={handleToggleCollapse}
-            type="button"
-            aria-label="展开侧栏"
-          >
-            <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-              <path
-                d="M4 2L7 5L4 8"
-                stroke="rgba(0,0,0,0.35)"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </button>
+          <Tooltip title="展开导航" placement="right">
+            <button
+              className="chat-sidebar-collapse-toggle"
+              onClick={handleToggleCollapse}
+              type="button"
+              aria-label="展开导航"
+            >
+              <PanelLeftOpen aria-hidden="true" size={18} strokeWidth={1.8} />
+            </button>
+          </Tooltip>
         </div>
       </>
     );
@@ -407,9 +426,27 @@ export default function ChatSidebar(props: ChatSidebarProps) {
                 <img src={sendIcon} alt="+" width="16" height="16" />
                 新建会话
               </button>
+              <Tooltip title="收起导航" placement="right">
+                <button
+                  className="chat-sidebar-collapse-toggle chat-sidebar-collapse-toggle--expanded"
+                  onClick={handleToggleCollapse}
+                  type="button"
+                  aria-label="收起导航"
+                >
+                  <PanelLeftClose
+                    aria-hidden="true"
+                    size={18}
+                    strokeWidth={1.8}
+                  />
+                </button>
+              </Tooltip>
             </div>
             <div
-              className="chat-sidebar-content-record-list"
+              className={`chat-sidebar-content-record-list${
+                isHeaderHidden
+                  ? " chat-sidebar-content-record-list--without-header"
+                  : ""
+              }`}
               ref={historyScrollContainerRef}
             >
               <ChatTaskList
@@ -420,6 +457,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
                 onTaskRun={onTaskRun}
                 onTaskResume={onTaskResume}
                 onTaskDelete={onTaskDelete}
+                onTaskEdit={onTaskEdit}
               />
               <div className="chat-sidebar-history">
                 <div
@@ -474,52 +512,41 @@ export default function ChatSidebar(props: ChatSidebarProps) {
             </div>
           </div>
 
-          <div className="chat-sidebar-footer">
-            {/* 暂时隐藏，后续需要时再开放
-            <div className="chat-sidebar-footer-item">
-              <img src={skillMarketIcon} alt="发送" width="24" height="24" />
-              skill市场
+          {isOriginY && (
+            <div className="chat-sidebar-footer">
+              {/* 暂时隐藏，后续需要时再开放
+              <div className="chat-sidebar-footer-item">
+                <img src={skillMarketIcon} alt="发送" width="24" height="24" />
+                skill市场
+              </div>
+              <div className="chat-sidebar-footer-divider" /> */}
+              <div
+                className="chat-sidebar-footer-item"
+                onClick={handleOpenGuide}
+                role="button"
+                tabIndex={0}
+              >
+                <img src={operateIcon} alt="note" width="20" height="20" />
+                操作指南
+              </div>
             </div>
-            <div className="chat-sidebar-footer-divider" /> */}
-            <div
-              className="chat-sidebar-footer-item"
-              onClick={handleOpenGuide}
-              role="button"
-              tabIndex={0}
-            >
-              <img src={operateIcon} alt="note" width="20" height="20" />
-              操作指南
-            </div>
-          </div>
+          )}
         </div>
-        <button
-          className="chat-sidebar-collapse-toggle"
-          onClick={handleToggleCollapse}
-          type="button"
-          aria-label="收起侧栏"
-        >
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-            <path
-              d="M6 2L3 5L6 8"
-              stroke="rgba(0,0,0,0.35)"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </button>
       </div>
       {/* Guide Image Preview */}
-      <div style={{ display: "none" }}>
-        <Image.PreviewGroup
-          preview={{
-            visible: guidePreviewVisible,
-            onVisibleChange: (vis) => setGuidePreviewVisible(vis),
-          }}
-        >
-          <Image src={guideImage} />
-        </Image.PreviewGroup>
-      </div>
+      {isOriginY && isOperationGuideContext && (
+        <div style={{ display: "none" }}>
+          <Image.PreviewGroup
+            preview={{
+              visible: guidePreviewVisible,
+              rootClassName: "chat-sidebar-guide-preview",
+              onVisibleChange: (vis) => setGuidePreviewVisible(vis),
+            }}
+          >
+            <Image src={shGuideImage} />
+          </Image.PreviewGroup>
+        </div>
+      )}
     </>
   );
 }

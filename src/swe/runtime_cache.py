@@ -56,10 +56,15 @@ def dispose_cached_model(model: Any) -> None:
     loop.create_task(dispose_cached_model_async(model))
 
 
-def reset_scope_bound_model_caches() -> None:
-    """清空与请求/trace 绑定的轻量模型缓存。"""
+def reset_scope_bound_model_caches(scope_id: str | None = None) -> None:
+    """清空与请求/trace 绑定的轻量模型缓存。
+
+    ``scope_id`` is accepted for targeted invalidation.  The underlying
+    caches are currently process-local, so they still reset as a whole while
+    callers can make the affected tenant explicit for future scoped stores.
+    """
     from swe.agents.utils import tool_summary
     from swe.app.suggestions.service import SuggestionService
 
-    SuggestionService.reset_model()
-    tool_summary.reset_summary_caches()
+    SuggestionService.reset_model(scope_id)
+    tool_summary.reset_summary_caches(scope_id)

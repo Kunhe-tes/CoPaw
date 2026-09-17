@@ -27,14 +27,13 @@
 - MCP stdio 会把当前 scope 的环境变量注入到 MCP Server 进程环境中。
 - MCP HTTP 不会自动把所有环境变量加入 header。只有在 MCP header 配置中显式写 `${ENV:变量名}` 时，才会解析当前 scope 的变量值。
 - 已经启动的 MCP stdio 进程不会自动收到后续修改的环境变量，需要重启或重新加载 MCP 客户端后生效。
-- 普通查询接口不会返回明文密钥，只会返回掩码值。
+- 当前 scope 的常规 CRUD 接口会返回明文值，供控制台编辑使用；管理端目标 scope 写入接口仍返回掩码值。避免将明文响应写入日志。CLI 查询默认会掩码显示。
 
 ## 通用请求头
 
 外部调用 tenant scoped API 时通常需要携带：
 
 ```http
-Authorization: Bearer <token>
 X-Tenant-Id: <tenant_id>
 X-Source-Id: <source_id>
 Content-Type: application/json
@@ -45,6 +44,38 @@ Content-Type: application/json
 - `X-Tenant-Id` 表示用户或租户身份。
 - `X-Source-Id` 表示来源、渠道或业务系统。
 - 两者共同决定环境变量保存和读取的 scope。
+
+## 使用 CLI 管理当前 scope
+
+`swe env` 通过本机 Swe HTTP 服务管理环境变量，不会直接读写本地 `envs.json`。每个命令都必须显式提供 `--tenant-id` 和 `--source-id`，避免误操作默认 scope。
+
+```bash
+# 查询：默认掩码非空值
+swe env list --tenant-id tenant-a --source-id source-a
+
+# 需要查看明文时显式开启
+swe env list --show-values --tenant-id tenant-a --source-id source-a
+
+# 新增或更新单个变量；成功时不会回显 VALUE
+swe env set MCP_TOKEN tenant-secret --tenant-id tenant-a --source-id source-a
+
+# 删除单个变量
+swe env delete MCP_TOKEN --tenant-id tenant-a --source-id source-a
+```
+
+CLI 默认请求 `http://127.0.0.1:8088`。如本机服务使用其他端口，可使用全局选项：
+
+```bash
+swe --port 8099 env list --tenant-id tenant-a --source-id source-a
+```
+
+命令与接口的对应关系如下：
+
+- `list` 调用 `GET /api/envs`；默认掩码非空值，`--show-values` 才显示明文。
+- `set` 调用 `PATCH /api/envs`，以单键增量新增或更新变量。
+- `delete` 调用 `DELETE /api/envs/{key}`。
+
+服务端拒绝请求（例如变量不存在、变量名非法或认证失败）时，CLI 会显示错误并以非零退出码结束。CLI 不提供全量替换、命令级 `--base-url` 或 stdin 密钥输入。
 
 ## 设置当前 scope 环境变量
 
@@ -69,11 +100,11 @@ PUT /api/envs
 [
   {
     "key": "MCP_TOKEN",
-    "value": "********"
+    "value": "tenant-secret"
   },
   {
     "key": "OPENAI_API_KEY",
-    "value": "********"
+    "value": "sk-xxx"
   }
 ]
 ```
@@ -117,17 +148,17 @@ PATCH /api/envs
 - `preserve`：保留已有值的变量。
 - `delete`：删除的变量。
 
-响应仍只返回掩码值：
+响应返回当前 scope 的明文值：
 
 ```json
 [
   {
     "key": "MCP_TOKEN",
-    "value": "********"
+    "value": "tenant-secret"
   },
   {
     "key": "NEW_TOKEN",
-    "value": "********"
+    "value": "new-secret"
   }
 ]
 ```
@@ -146,12 +177,12 @@ GET /api/envs
 [
   {
     "key": "MCP_TOKEN",
-    "value": "********"
+    "value": "tenant-secret"
   }
 ]
 ```
 
-查询接口不会返回明文值。看到 `********` 表示该变量已有非空值。
+查询接口会返回明文值。不要将响应输出到不受信任的日志或终端记录中；如使用 CLI，默认输出会掩码非空值。
 
 ## 删除单个环境变量
 
@@ -161,7 +192,7 @@ GET /api/envs
 DELETE /api/envs/MCP_TOKEN
 ```
 
-删除成功后返回剩余变量的掩码列表。变量不存在时返回 `404`。
+删除成功后返回剩余变量的明文列表。变量不存在时返回 `404`。
 
 ## 为指定用户和来源写入环境变量
 
@@ -288,9 +319,9 @@ HTTP 类型 MCP 不会自动携带全部环境变量。需要在 MCP client 的 
 
 ## 常见问题
 
-### 为什么查询接口看不到明文值？
+### 为什么 CLI 查询看不到明文值？
 
-这是预期行为。环境变量通常包含密钥，查询接口只返回掩码值，避免普通页面或日志暴露明文。
+这是预期行为。`swe env list` 默认掩码非空值，避免终端和 CI 日志泄露密钥；传入 `--show-values` 才显示明文。HTTP 查询接口为控制台编辑返回明文，因此调用方应避免记录其响应。
 
 ### 修改环境变量后 MCP 没生效怎么办？
 

@@ -174,4 +174,3 @@ scope-aware traffic after cutover.
 - **WHEN** a stale tenant-only runtime cache entry exists for a logical tenant
 - **THEN** scoped traffic for the same logical tenant but a different source
   SHALL NOT reuse that entry
-

@@ -11,7 +11,7 @@ Defines models for:
 import json
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, Generic, List, Optional, TypeVar
+from typing import Any, Dict, Generic, List, Literal, Optional, TypeVar
 
 from pydantic import BaseModel, Field
 
@@ -101,6 +101,10 @@ class CronJobModel(BaseModel):
     job_origin: str = Field(default="manual", description="任务来源")
     subscription_key: str = Field(default="", description="订阅任务稳定分组ID")
     skill_ids: str = Field(default="", description="绑定技能ID，逗号分隔")
+    broadcast_source_job_id: str = Field(
+        default="",
+        description="分发源定时任务ID (从meta中提取)",
+    )
     meta: str = Field(default="", description="扩展元数据 (JSON字符串)")
 
     # 状态追踪
@@ -184,6 +188,12 @@ class ExecutionModel(BaseModel):
         default=None,
         description="异步任务执行状态: success/error",
     )
+    need_notification: int = Field(
+        default=0,
+        ge=0,
+        le=1,
+        description="是否需要通知: 0-否, 1-是",
+    )
     error_message: str = Field(default="", description="错误信息")
 
     # 执行上下文
@@ -204,6 +214,15 @@ class ExecutionModel(BaseModel):
 
     # 执行元数据
     meta: str = Field(default="", description="执行元数据 (JSON字符串)")
+    dispatch_intent_id: Optional[int] = Field(
+        default=None,
+        description="批调度派发意图ID",
+    )
+    dispatch_batch_id: str = Field(default="", description="批调度批次ID")
+    dispatch_attempt: Optional[int] = Field(
+        default=None,
+        description="批调度派发尝试次数",
+    )
 
     # 已读状态
     notification_status: str = Field(
@@ -264,6 +283,25 @@ class ExecutionModel(BaseModel):
 # ============================================================
 # Sync Request Models (供 SWE 双写调用)
 # ============================================================
+
+
+class LatestExecutionSubtaskCountResponse(BaseModel):
+    """Latest execution identity and its subtask count for a cron job."""
+
+    job_id: str = Field(..., description="Cron job ID")
+    execution_id: Optional[int] = Field(
+        default=None,
+        description="Latest execution record ID",
+    )
+    trace_id: Optional[str] = Field(
+        default=None,
+        description="Latest execution trace ID",
+    )
+    subtask_count: int = Field(
+        default=0,
+        ge=0,
+        description="Number of subtasks associated with the latest trace",
+    )
 
 
 class CronJobSyncRequest(BaseModel):
@@ -338,6 +376,7 @@ class ExecutionSyncRequest(BaseModel):
     job_id: str = Field(..., description="任务ID")
     job_name: str = Field(default="", description="任务名称")
     tenant_id: str = Field(default="", description="租户ID")
+    source_id: str = Field(default="", description="source ID")
 
     # 执行时间
     scheduled_time: Optional[datetime] = Field(
@@ -370,6 +409,15 @@ class ExecutionSyncRequest(BaseModel):
 
     # 执行元数据
     meta: str = Field(default="", description="执行元数据 (JSON字符串)")
+    dispatch_intent_id: Optional[int] = Field(
+        default=None,
+        description="批调度派发意图ID",
+    )
+    dispatch_batch_id: str = Field(default="", description="批调度批次ID")
+    dispatch_attempt: Optional[int] = Field(
+        default=None,
+        description="批调度派发尝试次数",
+    )
 
     # 已读状态（手动执行且成功的任务默认已读）
     notification_status: str = Field(
@@ -431,6 +479,18 @@ class ExecutionQueryParams(BaseModel):
     page_size: int = Field(default=10, ge=1, le=100, description="每页数量")
 
 
+class BroadcastSourceJobQueryParams(BaseModel):
+    """Query parameters for listing jobs by broadcast source."""
+
+    tenant_id: Optional[str] = Field(default=None, description="租户ID筛选")
+    bbk_id: Optional[str] = Field(
+        default=None,
+        description="分行号筛选（二级分行号）",
+    )
+    source_id: Optional[str] = Field(default=None, description="来源标识筛选")
+    broadcast_source_job_id: str = Field(..., description="分发源定时任务ID")
+
+
 class ExportQueryParams(BaseModel):
     """Query parameters for exporting data."""
 
@@ -452,6 +512,7 @@ class ExportQueryParams(BaseModel):
 
 
 T = TypeVar("T")
+CronScheduleBucketMinutes = Literal[5, 10, 15, 30, 60]
 
 
 class PaginatedResponse(BaseModel, Generic[T]):
@@ -461,6 +522,122 @@ class PaginatedResponse(BaseModel, Generic[T]):
     total: int = Field(default=0, description="总数量")
     page: int = Field(default=1, description="当前页码")
     page_size: int = Field(default=10, description="每页数量")
+
+
+class CronScheduleDistributionDiagnostics(BaseModel):
+    """Bounded definition diagnostics for a schedule calculation."""
+
+    invalid_cron_jobs: int = Field(default=0, ge=0, description="无效 Cron 任务数")
+    invalid_timezone_jobs: int = Field(
+        default=0,
+        ge=0,
+        description="使用 UTC 回退的无效时区任务数",
+    )
+    unsupported_task_type_jobs: int = Field(
+        default=0,
+        ge=0,
+        description="被排除的不支持任务类型数",
+    )
+    invalid_metadata_jobs: int = Field(
+        default=0,
+        ge=0,
+        description="元数据无法解析的任务数",
+    )
+    managed_child_jobs: int = Field(
+        default=0,
+        ge=0,
+        description="被批调度托管并排除的子任务数",
+    )
+
+
+class CronScheduleDistributionBucket(BaseModel):
+    """One start-aligned, half-open planned firing bucket."""
+
+    start_time: datetime = Field(..., description="区间开始时间（UTC，含）")
+    end_time: datetime = Field(..., description="区间结束时间（UTC，不含）")
+    text_count: int = Field(default=0, ge=0, description="Text 计划触发次数")
+    agent_count: int = Field(default=0, ge=0, description="Agent 计划触发次数")
+    total_count: int = Field(default=0, ge=0, description="计划触发总次数")
+
+
+class CronScheduleDistributionResponse(BaseModel):
+    """Planned firing distribution for the selected range."""
+
+    start_time: datetime = Field(..., description="统计开始时间（UTC，含）")
+    end_time: datetime = Field(..., description="统计结束时间（UTC，不含）")
+    bucket_minutes: CronScheduleBucketMinutes = Field(
+        ...,
+        description="桶间隔分钟数",
+    )
+    calculated_at: datetime = Field(..., description="计算完成时间（UTC）")
+    definition_revision: str = Field(..., description="任务定义确定性版本")
+    eligible_job_count: int = Field(
+        default=0,
+        ge=0,
+        description="通过定义校验并参与计划计算的任务数",
+    )
+    text_count: int = Field(default=0, ge=0, description="Text 计划触发次数")
+    agent_count: int = Field(default=0, ge=0, description="Agent 计划触发次数")
+    total_count: int = Field(default=0, ge=0, description="计划触发总次数")
+    buckets: List[CronScheduleDistributionBucket] = Field(
+        default_factory=list,
+        description="按时间顺序排列的统计桶",
+    )
+    diagnostics: CronScheduleDistributionDiagnostics = Field(
+        default_factory=CronScheduleDistributionDiagnostics,
+        description="被排除或回退的任务定义诊断",
+    )
+
+
+class CronScheduleOccurrenceItem(BaseModel):
+    """Whitelisted planned firing detail row."""
+
+    scheduled_at: datetime = Field(..., description="计划触发时间（UTC）")
+    job_id: str = Field(..., description="任务 ID")
+    job_name: str = Field(..., description="任务名称")
+    user_name: str = Field(..., description="用户姓名")
+    user_id: str = Field(..., description="用户账号 ID")
+    task_type: TaskType = Field(..., description="任务类型")
+    cron_expr: str = Field(..., description="Cron 表达式")
+    timezone: str = Field(..., description="任务配置时区")
+
+
+class CronScheduleDistributionDetailsResponse(BaseModel):
+    """Paginated planned firing occurrences for one selected bucket."""
+
+    start_time: datetime = Field(..., description="区间开始时间（UTC，含）")
+    end_time: datetime = Field(..., description="区间结束时间（UTC，不含）")
+    task_type: Optional[TaskType] = Field(default=None, description="任务类型筛选")
+    calculated_at: datetime = Field(..., description="计算完成时间（UTC）")
+    definition_revision: str = Field(..., description="任务定义确定性版本")
+    items: List[CronScheduleOccurrenceItem] = Field(
+        default_factory=list,
+        description="计划触发明细",
+    )
+    total: int = Field(default=0, ge=0, description="明细总数")
+    page: int = Field(default=1, ge=1, description="当前页码")
+    page_size: int = Field(default=20, ge=1, le=100, description="每页数量")
+    diagnostics: CronScheduleDistributionDiagnostics = Field(
+        default_factory=CronScheduleDistributionDiagnostics,
+        description="被排除或回退的任务定义诊断",
+    )
+
+
+class CronScheduleDistributionErrorDetail(BaseModel):
+    """Stable error detail returned only by schedule distribution routes."""
+
+    code: str = Field(..., description="稳定错误码")
+    message: str = Field(..., description="可读错误信息")
+    actual_revision: Optional[str] = Field(
+        default=None,
+        description="定义变更冲突时的当前版本",
+    )
+
+
+class CronScheduleDistributionErrorResponse(BaseModel):
+    """Stable HTTP error envelope for schedule distribution routes."""
+
+    detail: CronScheduleDistributionErrorDetail
 
 
 class SyncJobResponse(BaseModel):
@@ -588,6 +765,228 @@ class CronOverviewResponse(BaseModel):
     branch_read: List[CronOverviewBranchReadItem] = Field(default_factory=list)
 
 
+class CronDispatchBatchStats(BaseModel):
+    """Aggregated batch-dispatch counts for the selected source and range."""
+
+    total_batches: int = Field(default=0, description="批次数")
+    running_batches: int = Field(default=0, description="运行中批次数")
+    completed_batches: int = Field(default=0, description="已完成批次数")
+    failed_batches: int = Field(default=0, description="失败批次数")
+    total_intents: int = Field(default=0, description="Intent 总数")
+    completed_intents: int = Field(default=0, description="已完成 Intent 数")
+    failed_intents: int = Field(default=0, description="失败 Intent 数")
+    skipped_intents: int = Field(default=0, description="跳过／取消 Intent 数")
+    pending_intents: int = Field(default=0, description="未完成 Intent 数")
+
+
+class CronDispatchDetailQueryParams(BaseModel):
+    """Pagination and filtering for one batch-dispatch detail view."""
+
+    intent_page: int = Field(default=1, ge=1)
+    intent_limit: int = Field(default=100, ge=1, le=500)
+    intent_query: Optional[str] = Field(default=None, max_length=256)
+    intent_role: Optional[str] = Field(default=None, max_length=16)
+    intent_status: Optional[str] = Field(default=None, max_length=16)
+    event_page: int = Field(default=1, ge=1)
+    event_limit: int = Field(default=100, ge=1, le=500)
+
+
+class CronDispatchBatchItem(BaseModel):
+    """One batch-dispatch batch row."""
+
+    batch_id: str = Field(..., description="批调度批次 ID")
+    parent_job_id: str = Field(default="", description="父任务 ID")
+    parent_job_name: str = Field(default="", description="定时任务名称")
+    parent_external_job_id: str = Field(
+        default="",
+        description="调度平台任务 ID",
+    )
+    tenant_id: str = Field(default="", description="父任务租户 ID")
+    source_id: str = Field(default="", description="渠道 ID")
+    provider_id: str = Field(default="", description="Provider ID")
+    model_id: str = Field(default="", description="模型 ID")
+    agent_id: str = Field(default="", description="Agent ID")
+    scheduled_fire_at: Optional[datetime] = Field(
+        default=None,
+        description="父任务计划执行时间",
+    )
+    callback_received_at: Optional[datetime] = Field(
+        default=None,
+        description="调度平台回调到达时间",
+    )
+    status: str = Field(default="", description="批次状态")
+    lock_owner: str = Field(default="", description="批次 owner")
+    locked_at: Optional[datetime] = Field(default=None, description="锁定时间")
+    total_count: int = Field(default=0, description="Intent 总数")
+    completed_count: int = Field(default=0, description="完成数")
+    failed_count: int = Field(default=0, description="失败数")
+    skipped_count: int = Field(default=0, description="跳过／取消数")
+    dispatch_paused: Optional[bool] = Field(
+        default=None, description="独立批调度暂停状态；空表示未知"
+    )
+    error_message: str = Field(default="", description="错误摘要")
+    completed_at: Optional[datetime] = Field(
+        default=None,
+        description="完成时间",
+    )
+    created_at: Optional[datetime] = Field(
+        default=None,
+        description="创建时间",
+    )
+    updated_at: Optional[datetime] = Field(
+        default=None,
+        description="更新时间",
+    )
+
+
+class CronDispatchPriority(BaseModel):
+    basis: str = "default"
+    user_rank: Optional[int] = None
+    branch_rank: Optional[int] = None
+    branch_id: str = ""
+
+
+class CronDispatchIntentItem(BaseModel):
+    """One batch-dispatch intent row."""
+
+    id: int = Field(..., description="Intent ID")
+    batch_id: str = Field(default="", description="批次 ID")
+    intent_role: str = Field(default="", description="parent/child")
+    status: str = Field(default="", description="Intent 状态")
+    source_id: str = Field(default="", description="渠道 ID")
+    provider_id: str = Field(default="", description="Provider ID")
+    model_id: str = Field(default="", description="模型 ID")
+    tenant_id: str = Field(default="", description="租户 ID")
+    agent_id: str = Field(default="", description="Agent ID")
+    job_id: str = Field(default="", description="任务 ID")
+    parent_job_id: str = Field(default="", description="父任务 ID")
+    scheduled_fire_at: Optional[datetime] = Field(default=None)
+    due_at: Optional[datetime] = Field(default=None, description="可领取时间")
+    dispatch_order: int = Field(default=0, description="批内分发顺序")
+    viewer_heat_score: float = Field(default=0.0, description="热度分")
+    priority: Optional[CronDispatchPriority] = None
+    attempt_count: int = Field(default=0, description="尝试次数")
+    max_attempts: int = Field(default=0, description="最大尝试次数")
+    lock_owner: str = Field(default="", description="worker owner")
+    locked_at: Optional[datetime] = Field(default=None)
+    acked_at: Optional[datetime] = Field(default=None)
+    completed_at: Optional[datetime] = Field(default=None)
+    error_message: str = Field(default="", description="错误信息")
+    created_at: Optional[datetime] = Field(default=None)
+    updated_at: Optional[datetime] = Field(default=None)
+
+
+class CronDispatchEventItem(BaseModel):
+    """One batch-dispatch event row."""
+
+    id: int = Field(..., description="事件 ID")
+    batch_id: str = Field(default="", description="批次 ID")
+    intent_id: Optional[int] = Field(default=None, description="Intent ID")
+    event_type: str = Field(default="", description="事件类型")
+    worker_id: str = Field(default="", description="worker ID")
+    job_id: str = Field(default="", description="任务 ID")
+    tenant_id: str = Field(default="", description="租户 ID")
+    source_id: str = Field(default="", description="渠道 ID")
+    details: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="事件详情",
+    )
+    created_at: Optional[datetime] = Field(
+        default=None,
+        description="创建时间",
+    )
+
+
+class CronDispatchBatchesResponse(BaseModel):
+    """Paginated batch-dispatch batch response."""
+
+    source_id: str = Field(default="", description="当前渠道 ID")
+    start_time: Optional[datetime] = Field(
+        default=None,
+        description="开始时间",
+    )
+    end_time: Optional[datetime] = Field(default=None, description="结束时间")
+    stats: CronDispatchBatchStats = Field(
+        default_factory=CronDispatchBatchStats,
+    )
+    items: List[CronDispatchBatchItem] = Field(default_factory=list)
+    total: int = Field(default=0, description="总数")
+    page: int = Field(default=1, description="页码")
+    page_size: int = Field(default=10, description="每页数量")
+
+
+class CronDispatchBatchDetailResponse(BaseModel):
+    """Batch-dispatch detail response for one batch."""
+
+    batch: CronDispatchBatchItem
+    intents: List[CronDispatchIntentItem] = Field(default_factory=list)
+    intent_total: int = Field(default=0, description="Intent 总数")
+    intent_filtered_total: int = Field(default=0, description="筛选后 Intent 数")
+    intent_page: int = Field(default=1, description="Intent 页码")
+    intent_page_size: int = Field(default=100, description="Intent 每页数量")
+    events: List[CronDispatchEventItem] = Field(default_factory=list)
+    event_total: int = Field(default=0, description="事件总数")
+    event_page: int = Field(default=1, description="事件页码")
+    event_page_size: int = Field(default=100, description="事件每页数量")
+
+
+class CronDispatchPolicyItem(BaseModel):
+    """Source/provider/model worker policy row."""
+
+    source_id: str = Field(default="", description="渠道 ID")
+    provider_id: str = Field(default="", description="Provider ID")
+    model_id: str = Field(default="", description="模型 ID")
+    default_strategy_id: str = Field(default="", description="默认策略 ID")
+    strategy_schedule: Any = Field(default=None)
+    enabled: bool = Field(default=True, description="是否启用")
+    strategy: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="策略详情",
+    )
+    created_at: Optional[datetime] = Field(default=None)
+    updated_at: Optional[datetime] = Field(default=None)
+
+
+class CronDispatchCapacityItem(BaseModel):
+    """Worker capacity snapshot row."""
+
+    id: int = Field(..., description="快照 ID")
+    worker_id: str = Field(default="", description="Worker ID")
+    source_id: str = Field(default="", description="渠道 ID")
+    provider_id: str = Field(default="", description="Provider ID")
+    model_id: str = Field(default="", description="模型 ID")
+    strategy_id: str = Field(default="", description="策略 ID")
+    previous_workers: int = Field(default=0)
+    baseline_workers: int = Field(default=0)
+    min_workers: int = Field(default=0)
+    max_workers: int = Field(default=0)
+    effective_workers: int = Field(default=0)
+    pending_count: int = Field(default=0)
+    claimed_count: int = Field(default=0)
+    running_count: int = Field(default=0)
+    success_count: int = Field(default=0)
+    failure_count: int = Field(default=0)
+    error_rate: float = Field(default=0.0)
+    matched_rule: Optional[Dict[str, Any]] = Field(default=None)
+    avg_latency_ms: int = Field(default=0)
+    decision_reason: str = Field(default="", description="调整原因")
+    created_at: Optional[datetime] = Field(default=None)
+
+
+class CronDispatchWorkersResponse(BaseModel):
+    """Source-level policy and worker-capacity response."""
+
+    source_id: str = Field(default="", description="当前渠道 ID")
+    capacity_events_next_cursor: Optional[str] = None
+    policies: List[CronDispatchPolicyItem] = Field(default_factory=list)
+    current_capacity: List[CronDispatchCapacityItem] = Field(
+        default_factory=list,
+    )
+    capacity_events: List[CronDispatchCapacityItem] = Field(
+        default_factory=list,
+    )
+
+
 class SubscriptionOverviewItem(BaseModel):
     """订阅任务概览聚合项。"""
 
@@ -632,22 +1031,79 @@ class CronOverviewStatsResponse(BaseModel):
         default=0,
         description="定时任务总数（不包含已删除）",
     )
+    new_cron_tasks: int = Field(
+        default=0,
+        description="新增定时任务数（时间范围内创建的任务）",
+    )
     total_executions: int = Field(default=0, description="总执行次数")
     branch_count: int = Field(default=0, description="分行数量")
     tenant_count: int = Field(default=0, description="租户数量")
     success_rate: float = Field(default=0.0, description="执行成功率")
-    success_count: int = Field(default=0, description="执行成功数")
+    success_count: int = Field(
+        default=0,
+        description="执行成功数（status='success' AND async_status='success'）",
+    )
+    running_count: int = Field(
+        default=0,
+        description="运行中数（status='success' AND async_status IS NULL）",
+    )
     read_tasks: int = Field(
         default=0,
         description="已读任务数（按job_id去重）",
     )
     read_rate: float = Field(default=0.0, description="已读率")
-    error_count: int = Field(default=0, description="报错数量")
-    error_rate: float = Field(default=0.0, description="报错率")
+    report_rate: float = Field(default=0.0, description="查看报告任务率")
+    report_count: int = Field(default=0, description="查看报告任务数")
+    insight_count: int = Field(default=0, description="点击去洞察任务数")
+    phone_count: int = Field(default=0, description="点击去电访任务数")
+    error_count: int = Field(
+        default=0,
+        description="执行失败数（综合判断）",
+    )
+    error_rate: float = Field(default=0.0, description="执行失败率")
 
 
 class CronBranchRankingItem(BaseModel):
     """分行综合排行单项。"""
+
+    bbk_id: str = Field(..., description="分行ID")
+    bbk_name: str = Field(..., description="分行名称")
+    skill_count: int = Field(default=0, description="技能数（白名单内）")
+    total_tasks: int = Field(default=0, description="任务总数（生效中）")
+    success_count: int = Field(default=0, description="成功执行数")
+    read_tasks: int = Field(default=0, description="已读任务数")
+    involved_managers: int = Field(default=0, description="涉及客户经理数")
+    result_view_managers: int = Field(
+        default=0,
+        description="查看结果的客户经理数",
+    )
+    plan_managers: int = Field(default=0, description="查看经营方案客户经理数")
+    insight_managers: int = Field(default=0, description="去洞察的客户经理数")
+    phone_managers: int = Field(default=0, description="去电访的客户经理数")
+    recommended_customers: int = Field(default=0, description="推荐的客户数")
+    viewed_customers: int = Field(
+        default=0,
+        description="被客户经理查看的客户数",
+    )
+    contacted_customers: int = Field(default=0, description="接触客户数")
+    contact_rate: float = Field(default=0.0, description="客户接触率")
+    insight_customers: int = Field(default=0, description="去洞察客户数")
+    phone_customers: int = Field(default=0, description="去电访客户数")
+
+
+class CronBranchRankingResponse(BaseModel):
+    """分行综合排行响应。"""
+
+    start_date: str = Field(..., description="开始日期")
+    end_date: str = Field(..., description="结束日期")
+    items: List[CronBranchRankingItem] = Field(
+        default_factory=list,
+        description="分行综合排行列表",
+    )
+
+
+class CronBranchTaskRankingItem(BaseModel):
+    """分行任务视角排行单项。"""
 
     bbk_id: str = Field(..., description="分行ID")
     bbk_name: str = Field(..., description="分行名称")
@@ -659,20 +1115,20 @@ class CronBranchRankingItem(BaseModel):
     plan_count: int = Field(default=0, description="查看方案任务数")
     insight_count: int = Field(default=0, description="点击去洞察任务数")
     phone_count: int = Field(default=0, description="点击去电访任务数")
-    plan_clicks: int = Field(default=0, description="查看方案点击数")
-    insight_clicks: int = Field(default=0, description="点击去洞察点击数")
-    phone_clicks: int = Field(default=0, description="点击去电访点击数")
+    plan_clicks: int = Field(default=0, description="方案点击数")
+    insight_clicks: int = Field(default=0, description="洞察点击数")
+    phone_clicks: int = Field(default=0, description="电访点击数")
     error_count: int = Field(default=0, description="报错执行次数")
 
 
-class CronBranchRankingResponse(BaseModel):
-    """分行综合排行响应。"""
+class CronBranchTaskRankingResponse(BaseModel):
+    """分行任务视角排行响应。"""
 
     start_date: str = Field(..., description="开始日期")
     end_date: str = Field(..., description="结束日期")
-    items: List[CronBranchRankingItem] = Field(
+    items: List[CronBranchTaskRankingItem] = Field(
         default_factory=list,
-        description="分行综合排行列表",
+        description="分行任务视角排行列表",
     )
 
 
@@ -747,6 +1203,39 @@ class BranchSkillResponse(BaseModel):
     )
 
 
+class BranchManagerSummaryItem(BaseModel):
+    """分行客户经理汇总单项。"""
+
+    user_id: str = Field(..., description="客户经理ID")
+    user_name: str = Field(default="", description="客户经理姓名")
+    skill_count: int = Field(default=0, description="技能数量（使用的技能数）")
+    total_tasks: int = Field(default=0, description="任务总数（生效中的任务）")
+    success_count: int = Field(default=0, description="成功执行数")
+    read_tasks: int = Field(default=0, description="已读任务数")
+    recommended_customers: int = Field(default=0, description="推荐的客户数")
+    viewed_customers: int = Field(
+        default=0,
+        description="被客户经理查看的客户数",
+    )
+    contacted_customers: int = Field(default=0, description="接触客户数")
+    contact_rate: float = Field(default=0.0, description="客户接触率")
+    insight_customers: int = Field(default=0, description="去洞察客户数")
+    phone_customers: int = Field(default=0, description="去电访客户数")
+
+
+class BranchManagerSummaryResponse(BaseModel):
+    """分行客户经理汇总响应。"""
+
+    start_date: str = Field(..., description="开始日期")
+    end_date: str = Field(..., description="结束日期")
+    bbk_id: str = Field(..., description="分行ID")
+    bbk_name: str = Field(..., description="分行名称")
+    items: List[BranchManagerSummaryItem] = Field(
+        default_factory=list,
+        description="客户经理汇总列表",
+    )
+
+
 class BranchSkillManagerItem(BaseModel):
     """分行+技能的客户经理维度单项。"""
 
@@ -798,6 +1287,59 @@ class BranchSkillManagerCustomerResponse(BaseModel):
     skill_name: str = Field(..., description="技能名称")
     user_id: str = Field(..., description="客户经理ID")
     items: List[BranchSkillManagerCustomerItem] = Field(
+        default_factory=list,
+        description="客户维度列表",
+    )
+
+
+class ManagerSkillItem(BaseModel):
+    """客户经理技能维度单项。"""
+
+    skill_name: str = Field(..., description="技能名称")
+    cron_task_count: int = Field(default=0, description="定时任务数")
+    success_count: int = Field(default=0, description="成功执行数")
+    success_rate: float = Field(default=0.0, description="成功率")
+    read_count: int = Field(default=0, description="已读任务数")
+    error_count: int = Field(default=0, description="报错次数")
+
+
+class ManagerSkillResponse(BaseModel):
+    """客户经理技能维度响应。"""
+
+    start_date: str = Field(..., description="开始日期")
+    end_date: str = Field(..., description="结束日期")
+    bbk_id: str = Field(..., description="分行ID")
+    user_id: str = Field(..., description="客户经理ID")
+    user_name: str = Field(..., description="客户经理姓名")
+    items: List[ManagerSkillItem] = Field(
+        default_factory=list,
+        description="技能维度列表",
+    )
+
+
+class ManagerCustomerItem(BaseModel):
+    """客户经理客户维度单项。"""
+
+    customer_id: str = Field(default="", description="客户ID")
+    customer_name: str = Field(default="", description="客户名称")
+    clicked_plan: bool = Field(default=False, description="是否点击方案")
+    clicked_insight: bool = Field(default=False, description="是否点击洞察")
+    clicked_phone: bool = Field(default=False, description="是否点击电访")
+    click_time: Optional[str] = Field(
+        default=None,
+        description="点击客户的时间",
+    )
+
+
+class ManagerCustomerResponse(BaseModel):
+    """客户经理客户维度响应。"""
+
+    start_date: str = Field(..., description="开始日期")
+    end_date: str = Field(..., description="结束日期")
+    bbk_id: str = Field(..., description="分行ID")
+    user_id: str = Field(..., description="客户经理ID")
+    user_name: str = Field(..., description="客户经理姓名")
+    items: List[ManagerCustomerItem] = Field(
         default_factory=list,
         description="客户维度列表",
     )

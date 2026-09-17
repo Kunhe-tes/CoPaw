@@ -5,6 +5,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from swe.app.crons import auth_state
 from swe.app.routers import auth as auth_router
@@ -312,6 +313,43 @@ def test_resolve_auth_token_for_execution_includes_cookie_header(
     )
 
 
+def test_sync_identity_envs_from_cookie_updates_present_values_only(
+    tmp_path,
+    monkeypatch,
+):
+    secret_dir = tmp_path / "tenant-secret"
+    secret_dir.mkdir()
+    envs_path = secret_dir / "envs.json"
+    envs_path.write_text(
+        '{"bbkOrgId":"old-bbk","brnOrgId":"old-brn",'
+        '"sapId":"old-sap","rtlPstId":"old-position",'
+        '"custom":"keep"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        auth_state,
+        "get_tenant_secrets_dir",
+        lambda _tenant: secret_dir,
+    )
+
+    updated_keys = auth_state.sync_identity_envs_from_cookie(
+        "com.cmb.dw.rtl.sso.vbbk=new-bbk; "
+        "com.cmb.dw.rtl.sso.vorgcode=; "
+        "userid=new-sap; "
+        "positionID=new-position",
+        tenant_id="tenant-a",
+    )
+
+    assert updated_keys == ["bbkOrgId", "rtlPstId", "sapId"]
+    assert auth_state.load_envs(envs_path) == {
+        "bbkOrgId": "new-bbk",
+        "brnOrgId": "old-brn",
+        "sapId": "new-sap",
+        "rtlPstId": "new-position",
+        "custom": "keep",
+    }
+
+
 @pytest.mark.asyncio
 async def test_configure_cron_auth_always_refreshes_user_info(monkeypatch):
     async def fake_get_agent_for_request(_request):
@@ -395,6 +433,11 @@ async def test_configure_cron_auth_returns_refreshed_status(monkeypatch):
             has_auth_token=False,
         ),
     )
+    monkeypatch.setattr(
+        auth_router,
+        "sync_identity_envs_from_cookie",
+        lambda *args, **kwargs: ["bbkOrgId", "sapId"],
+    )
 
     response = await auth_router.configure_cron_auth(
         auth_router.CronAuthConfigureRequest(
@@ -404,6 +447,121 @@ async def test_configure_cron_auth_returns_refreshed_status(monkeypatch):
     )
 
     assert response["user_info_status"] == "refreshed"
+    assert response["env_synced_keys"] == ["bbkOrgId", "sapId"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_cron_auth_token_returns_latest_credentials(monkeypatch):
+    async def fake_get_agent_for_request(_request):
+        return SimpleNamespace(tenant_id="tenant-a", workspace_dir="/tmp/ws")
+
+    expires_at = auth_state.utc_now() + timedelta(hours=2)
+    captured = {}
+    monkeypatch.setattr(
+        auth_router,
+        "get_agent_for_request",
+        fake_get_agent_for_request,
+    )
+
+    def fake_resolve_auth_token_for_execution(**kwargs):
+        captured.update(kwargs)
+        return auth_state.ResolvedAuthToken(
+            token="latest-token",
+            expires_at=expires_at,
+            reused=False,
+            cookie_header=(
+                "foo=bar; com.cmb.dw.rtl.sso.token=latest-token"
+            ),
+        )
+
+    monkeypatch.setattr(
+        auth_router,
+        "resolve_auth_token_for_execution",
+        fake_resolve_auth_token_for_execution,
+    )
+    response_headers = {}
+    raw_response = SimpleNamespace(headers=response_headers)
+
+    result = await auth_router.refresh_cron_auth_token(
+        request=SimpleNamespace(),
+        response=raw_response,
+    )
+
+    assert captured == {
+        "tenant_id": "tenant-a",
+        "workspace_dir": "/tmp/ws",
+    }
+    assert result == auth_router.CronAuthTokenResponse(
+        token="latest-token",
+        cookie="foo=bar; com.cmb.dw.rtl.sso.token=latest-token",
+        expires_at=expires_at,
+        reused=False,
+    )
+    assert response_headers == {
+        "Cache-Control": "no-store",
+        "Pragma": "no-cache",
+    }
+
+
+@pytest.mark.asyncio
+async def test_refresh_cron_auth_token_rejects_unconfigured_state(monkeypatch):
+    async def fake_get_agent_for_request(_request):
+        return SimpleNamespace(tenant_id="tenant-a", workspace_dir="/tmp/ws")
+
+    monkeypatch.setattr(
+        auth_router,
+        "get_agent_for_request",
+        fake_get_agent_for_request,
+    )
+    monkeypatch.setattr(
+        auth_router,
+        "resolve_auth_token_for_execution",
+        lambda **_kwargs: auth_state.ResolvedAuthToken(
+            token=None,
+            expires_at=None,
+            reused=False,
+            cookie_header=None,
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth_router.refresh_cron_auth_token(
+            request=SimpleNamespace(),
+            response=SimpleNamespace(headers={}),
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "cron auth is not configured"
+
+
+@pytest.mark.asyncio
+async def test_refresh_cron_auth_token_rejects_expired_user_info(monkeypatch):
+    async def fake_get_agent_for_request(_request):
+        return SimpleNamespace(tenant_id="tenant-a", workspace_dir="/tmp/ws")
+
+    monkeypatch.setattr(
+        auth_router,
+        "get_agent_for_request",
+        fake_get_agent_for_request,
+    )
+
+    def fake_resolve_auth_token_for_execution(**_kwargs):
+        raise ValueError("cron auth user_info is expired")
+
+    monkeypatch.setattr(
+        auth_router,
+        "resolve_auth_token_for_execution",
+        fake_resolve_auth_token_for_execution,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth_router.refresh_cron_auth_token(
+            request=SimpleNamespace(),
+            response=SimpleNamespace(headers={}),
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "cron auth user_info is expired"
 
 
 @pytest.mark.asyncio

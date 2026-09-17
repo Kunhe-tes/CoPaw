@@ -5,12 +5,19 @@ import {
   IAgentScopeRuntimeWebUIOptions,
   type IAgentScopeRuntimeWebUISenderOptions,
   type IAgentScopeRuntimeWebUIRef,
+  type IChatInputProps,
+  useChatAnywhereSessions,
   useChatAnywhereSessionsState,
 } from "@/components/agentscope-chat";
 import AgentScopeRuntimeRequestCard from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Request/Card";
 import AgentScopeRuntimeResponseCard from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Response/Card";
+import ConversationCompactionBoundary from "./components/ConversationCompactionBoundary";
+import ContextUsageIndicator from "./components/ContextUsageIndicator";
+import { useContextUsageController } from "./components/ContextUsageIndicator/useContextUsageController";
 // ==================== 组件引入方式变更结束 ====================
 import {
+  Children,
+  cloneElement,
   useCallback,
   useEffect,
   useMemo,
@@ -19,10 +26,15 @@ import {
   useTransition,
 } from "react";
 import { flushSync } from "react-dom";
-import { Button, Modal, Result, Tooltip } from "antd";
+import { Button, Modal, Result, Switch } from "antd";
 import { useAppMessage } from "../../hooks/useAppMessage";
-import { ExclamationCircleOutlined, SettingOutlined } from "@ant-design/icons";
-import { SparkCopyLine, SparkAttachmentLine } from "@agentscope-ai/icons";
+import {
+  ControlOutlined,
+  ExclamationCircleOutlined,
+  SettingOutlined,
+  TeamOutlined,
+} from "@ant-design/icons";
+import { SparkCopyLine } from "@agentscope-ai/icons";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate } from "react-router-dom";
 import sessionApi from "./sessionApi";
@@ -30,6 +42,9 @@ import defaultConfig, { getDefaultConfig } from "./OptionsPanel/defaultConfig";
 import { chatApi } from "../../api/modules/chat";
 import { cronJobApi } from "../../api/modules/cronjob";
 import { feedbackApi } from "../../api/modules/feedback";
+import { expertsApi, type Expert } from "../../api/modules/experts";
+import { contextReferencesApi } from "../../api/modules/contextReferences";
+import type { SkillMentionItem } from "../../components/agentscope-chat/SkillMentions/useSkillMentions";
 import { getApiUrl } from "../../api/config";
 import { buildAuthHeaders } from "../../api/authHeaders";
 import type {
@@ -39,6 +54,12 @@ import type {
 } from "../../api/types";
 import type { FeedbackRecord } from "../../api/types/feedback";
 import ModelSelector from "./ModelSelector";
+import ExpertSelector from "./ExpertSelector";
+import {
+  normalizeSelectableExperts,
+  resolveExpertLabel,
+  type SelectableExpert,
+} from "./expertSelection";
 import { useTheme } from "../../contexts/ThemeContext";
 import { useAgentStore } from "../../stores/agentStore";
 import { useSourceSystemConfigStore } from "../../stores/sourceSystemConfigStore";
@@ -50,22 +71,40 @@ import DragUploadOverlay from "@/components/agentscope-chat/DragUploadOverlay";
 // ==================== userId 统一整改 (Kun He) ====================
 // 使用统一的 getUserId/getChannel helper
 import { getUserId, getChannel } from "../../utils/identity";
+import {
+  HtmlAnnotationProvider,
+  useHtmlAnnotations,
+} from "@/components/agentscope-chat/HtmlAnnotations/context";
+import HtmlAnnotationComposerSummary from "@/components/agentscope-chat/HtmlAnnotations/ComposerSummary";
+import { isAnnotationForNewChat } from "@/components/agentscope-chat/HtmlAnnotations/sessionMigration";
+import {
+  discardStaleHtmlAnnotationSubmission,
+  prepareHtmlAnnotationExecutionMode,
+  prepareHtmlAnnotationSubmit,
+} from "@/components/agentscope-chat/HtmlAnnotations/submission";
 // ==================== userId 统一整改结束 ====================
 // ==================== 品牌主题 (Kun He) ====================
 import { useBrandTheme } from "../../contexts/BrandThemeContext";
 // ==================== 品牌主题结束 ====================
 // ==================== URL 导航参数 (Kun He, 2026-04-15) ====================
 import { useIframeStore } from "../../stores/iframeStore";
+import { useChatPresentationStore } from "../../stores/chatPresentationStore";
 // ==================== URL 导航参数结束 ====================
 import styles from "./index.module.less";
-import { IconButton } from "@agentscope-ai/design";
+import { Form } from "@agentscope-ai/design";
 // import ChatActionGroup from "./components/ChatActionGroup";
 import ChatHeaderTitle from "./components/ChatHeaderTitle";
+import ChatActionGroup from "./components/ChatActionGroup";
+import { ChatShareSelectionProvider } from "./chatShareContext";
 import ChatSessionInitializer from "./components/ChatSessionInitializer";
+import SubAgentRunMonitor from "./components/SubAgentRunMonitor";
+import GoalMonitor from "./components/GoalMonitor";
 import ConversationQuickNav from "@/components/ConversationQuickNav";
 // ==================== 首页改版 (Kun He) ====================
 import WelcomeCenterLayout from "@/components/agentscope-chat/WelcomeCenterLayout";
 import ChatSidebar from "./components/ChatSidebar";
+import { createWelcomeSkillMentions } from "./welcomeSkillMentions";
+import { selectContextReferences } from "./contextReferenceDefaults";
 // ==================== 首页改版结束 ====================
 // ==================== 自定义工具渲染器 (customToolRenderConfig) ====================
 import CopyFileToStatic from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/customToolRenders/CopyFileToStatic";
@@ -85,30 +124,70 @@ import {
   getTaskOpenTarget,
   shouldMarkTaskReadOnOpen,
 } from "./taskJobs";
-import { shouldRefreshCurrentTaskMessages } from "./taskMessageRefresh";
+import { DEFAULT_FORM_VALUES } from "../Control/CronJobs/components";
+import { buildCronJobFormValues } from "../Control/CronJobs/helpers";
+import {
+  extractTaskContentText,
+  submitCronTaskEdit,
+  type CronTaskEditFormValues,
+} from "./taskEditSubmit";
+import ChatTaskEditFormBody from "./components/ChatTaskEditFormBody";
+import {
+  refreshTaskSessionWithRetry,
+  TASK_SESSION_REFRESH_RECOVERY_DELAY_MS,
+  shouldRefreshCurrentTaskMessages,
+} from "./taskMessageRefresh";
 import { resolveCurrentFileUrlNetwork } from "./fileUrlNetwork";
+import { shouldClearPendingScenarioPreset } from "./scenarioPresetRequest";
 import { matchesResolvedChatId } from "./sessionApi/resolvedSessionMapping";
+import {
+  CHAT_ATTACHMENT_ACCEPT_HINT,
+  uploadChatAttachment,
+} from "./attachmentUploadPolicy";
+import {
+  ComposerQuickMenuItem,
+  ComposerQuickMenuSubmenu,
+} from "@/components/agentscope-chat/ComposerQuickMenu";
+import { emit } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/useChatAnywhereEventEmitter";
 
 import RuntimeRequestCard from "./components/RuntimeRequestCard";
 import { FOLLOW_UP_SUBMIT_FAILED_EVENT } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Chat/hooks/followUpSubmit";
-import {
-  createChatStreamAbortReason,
-  shouldStopBackendForFetchAbort,
-} from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Chat/hooks/abortReasons";
-import RuntimeResponseCard from "./components/RuntimeResponseCard";
+import { createChatStreamAbortReason } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Chat/hooks/abortReasons";
+import RuntimeResponseCard, {
+  RuntimeResponseFeedbackCard,
+} from "./components/RuntimeResponseCard";
 import { isResponseFeedbackUserAllowed } from "./components/ResponseFeedbackCard/whitelist";
 import ApprovalActionCard from "./components/ApprovalActionCard";
+import WPlusSopActiveBar from "./components/WPlusSopActiveBar";
+import WPlusSopEntryCard from "./components/WPlusSopEntryCard";
+import { ActivePlanInteractionComposer } from "./components/PlanInteractionCards";
 import TaskRunGroupCard from "./components/TaskRunGroupCard";
 import TaskProgressFloatingCard from "./components/TaskProgressFloatingCard";
-import GeneratedFilesDrawer from "./components/GeneratedFilesDrawer";
-import { AutoPreviewHtmlProvider } from "@/components/agentscope-chat/AutoPreviewHtmlContext";
+import {
+  ActivePlanModeButton,
+  PlanModeMenuItem,
+  getPlanModeEnabled,
+  getPlanModeForRequest,
+  getScopedPlanModeEnabled,
+  persistPlanModeState,
+  preparePlanModeSubmit,
+  resolveActivePlanModeSession,
+  isPlanModeSubmitCancelled,
+  type PlanModeLocalState,
+  type PlanModeSessionLike,
+} from "./planMode";
+import FileManager from "./components/FileManager";
+import { ChatAutoPreviewHtmlProvider as AutoPreviewHtmlProvider } from "@/components/agentscope-chat/ChatAutoPreviewHtmlProvider";
 import { HtmlPreviewTrackingProvider } from "@/components/agentscope-chat/HtmlPreviewTrackingContext";
+import { ChatContentOnlyProvider } from "@/components/agentscope-chat/ChatContentOnlyContext";
 import type {
   ChatApprovalActionCardData,
+  ChatPlanReviewCardData,
   ChatRuntimeRequestCardData,
   ChatRuntimeResponseCardData,
   ChatTaskRunGroupCardData,
 } from "./messageMeta";
+import type { WPlusSopEntryProposal } from "@/api/types/wplusSop";
 import {
   buildFeedbackLookup,
   collectFeedbackResponsesFromMessages,
@@ -121,6 +200,10 @@ import {
   type ChatFeedbackRenderContextValue,
 } from "./feedbackRenderContext";
 import {
+  ChatPlanReviewRenderProvider,
+  type ChatPlanReviewRenderContextValue,
+} from "./planReviewRenderContext";
+import {
   CHAT_TASK_PROGRESS_UPDATE_EVENT,
   isTaskProgressUpdateForActiveSession,
   normalizeTaskProgressUpdateEventDetail,
@@ -128,21 +211,34 @@ import {
   type ChatTaskProgressUpdateDetail,
 } from "./taskProgressEvents";
 import { isChatTaskProgressEnabled } from "./taskProgressConfig";
+import GlobalVoiceRecorder from "@/components/GlobalVoiceRecorder";
+import { shouldShowGlobalVoiceRecorder } from "@/components/GlobalVoiceRecorder/presentation";
+import { shouldRouteGoalRequestAsSteering } from "./goalSteeringRouting";
+import { FilePreviewPresentationProvider } from "@/components/agentscope-chat/FilePreviewPresentationContext";
 
 const CHAT_ATTACHMENT_MAX_MB = 10;
 const TASK_RUNNING_POLL_MS = 30_000;
 
+function useExternalApprovalResolvedRefresh() {
+  const { refreshSession } = useChatAnywhereSessions();
+  return useCallback(() => {
+    void refreshSession();
+  }, [refreshSession]);
+}
+
 const chatCardRenderers = {
+  ConversationCompactionBoundary,
   AgentScopeRuntimeRequestCard: (props: {
     data: ChatRuntimeRequestCardData;
   }) => <RuntimeRequestCard {...props} />,
   AgentScopeRuntimeResponseCard: (props: {
     data: ChatRuntimeResponseCardData;
     isLast?: boolean;
-  }) => {
+  }) => <RuntimeResponseCard {...props} />,
+  ResponseFeedback: (props: { data: ChatRuntimeResponseCardData }) => {
     const feedback = useChatFeedbackRenderContext();
     return (
-      <RuntimeResponseCard
+      <RuntimeResponseFeedbackCard
         {...props}
         chatId={feedback.feedbackChatId}
         existingFeedback={
@@ -157,11 +253,22 @@ const chatCardRenderers = {
       />
     );
   },
-  ApprovalAction: (props: { data: ChatApprovalActionCardData }) => (
-    <ApprovalActionCard {...props} />
+  ApprovalAction: (props: { data: ChatApprovalActionCardData }) => {
+    const onExternalApprovalResolved = useExternalApprovalResolvedRefresh();
+    return (
+      <ApprovalActionCard
+        {...props}
+        onExternalApprovalResolved={onExternalApprovalResolved}
+      />
+    );
+  },
+  WPlusSopEntryProposal: (props: { data: WPlusSopEntryProposal }) => (
+    <WPlusSopEntryCard {...props} />
   ),
+  PlanInteraction: () => null,
   TaskRunGroupCard: (props: { data: ChatTaskRunGroupCardData }) => {
     const feedback = useChatFeedbackRenderContext();
+    const onExternalApprovalResolved = useExternalApprovalResolvedRefresh();
     return (
       <TaskRunGroupCard
         {...props}
@@ -169,6 +276,7 @@ const chatCardRenderers = {
         feedbackLookup={feedback.feedbackLookup}
         loadingFeedback={feedback.feedbackLookupPending}
         onFeedbackSaved={feedback.onFeedbackSaved}
+        onExternalApprovalResolved={onExternalApprovalResolved}
         sessionId={feedback.feedbackSessionId}
         task={feedback.feedbackTask}
       />
@@ -243,6 +351,16 @@ interface ChatRequestTarget {
   chat_id?: string | null;
 }
 
+interface PlanModeSession extends PlanModeSessionLike {
+  id?: string;
+  realId?: string;
+  sessionId?: string;
+  session_id?: string;
+  userId?: string;
+  channel?: string;
+  name?: string;
+}
+
 interface CustomWindow extends Window {
   currentSessionId?: string;
   currentUserId?: string;
@@ -262,8 +380,8 @@ type InputMessage = {
   content?: unknown;
 };
 
-type AttachmentTriggerProps = {
-  disabled?: boolean;
+type PendingPlanRevision = {
+  planId: string;
 };
 
 function renderSuggestionLabel(command: string, description: string) {
@@ -310,7 +428,11 @@ function useIMEComposition(isChatActive: () => boolean) {
     const suppressImeEnter = (e: KeyboardEvent) => {
       if (!isChatActive()) return;
       const target = e.target as HTMLElement;
-      if (target?.tagName === "TEXTAREA" && e.key === "Enter" && !e.shiftKey) {
+      if (
+        (target?.tagName === "TEXTAREA" || target?.isContentEditable) &&
+        e.key === "Enter" &&
+        !e.shiftKey
+      ) {
         // e.isComposing is the standard flag; isComposingRef covers the
         // post-compositionend grace period needed by Safari.
         if (isComposingRef.current || e.isComposing) {
@@ -463,15 +585,104 @@ function RuntimeLoadingBridge({
   return null;
 }
 
-export default function ChatPage() {
+function ActivePlanModeControl({
+  enabled,
+  label,
+  displayLabel,
+  onDisable,
+}: {
+  enabled: boolean;
+  label: string;
+  displayLabel?: string;
+  onDisable: () => void;
+}) {
+  const inputState = useChatAnywhereInput((value) => ({
+    disabled: Boolean(value.disabled),
+  }));
+  const disabled = Boolean(inputState.disabled);
+
+  return (
+    <ActivePlanModeButton
+      enabled={enabled}
+      disabled={disabled}
+      label={label}
+      displayLabel={displayLabel}
+      onDisable={onDisable}
+    />
+  );
+}
+
+function ActiveGoalModeControl({
+  enabled,
+  onDisable,
+}: {
+  enabled: boolean;
+  onDisable: () => void;
+}) {
+  const inputState = useChatAnywhereInput((value) => ({
+    disabled: Boolean(value.disabled),
+  }));
+
+  return (
+    <ActivePlanModeButton
+      enabled={enabled}
+      disabled={Boolean(inputState.disabled)}
+      label="目标"
+      showIcon={false}
+      onDisable={onDisable}
+    />
+  );
+}
+
+function ActiveExpertControl({
+  expert,
+  onDisable,
+}: {
+  expert: SelectableExpert | null;
+  onDisable: () => void;
+}) {
+  const inputState = useChatAnywhereInput((value) => ({
+    disabled: Boolean(value.disabled),
+  }));
+
+  return (
+    <ActivePlanModeButton
+      enabled={Boolean(expert)}
+      disabled={Boolean(inputState.disabled)}
+      label={expert ? resolveExpertLabel(expert) : "专家"}
+      showIcon={false}
+      onDisable={onDisable}
+    />
+  );
+}
+
+const addPlanModeScopeAlias = (
+  state: PlanModeLocalState,
+  alias: string | null | undefined,
+): PlanModeLocalState => {
+  if (!alias || alias === state.scopeKey || state.aliases?.includes(alias)) {
+    return state;
+  }
+
+  return {
+    ...state,
+    aliases: [...(state.aliases || []), alias],
+  };
+};
+
+function ChatPageContent() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
   const { isDark } = useTheme();
+  const showContentOnly = useChatPresentationStore(
+    (state) => state.showContentOnly,
+  );
   // ==================== 品牌主题 (Kun He) ====================
   // 获取动态品牌配置，用于 welcome avatar
   const { theme: brandTheme } = useBrandTheme();
   // ==================== 品牌主题结束 ====================
+  const isContentOnly = showContentOnly;
   const chatId = useMemo(() => {
     const match = location.pathname.match(/^\/chat\/(.+)$/);
     return match?.[1];
@@ -481,19 +692,110 @@ export default function ChatPage() {
   const [taskProgress, setTaskProgress] = useState<ChatTaskProgressData | null>(
     null,
   );
+  const [subAgentMonitorResetKey, setSubAgentMonitorResetKey] = useState(0);
   const { selectedAgent } = useAgentStore();
+  const [selectedExpertId, setSelectedExpertId] = useState<string | null>(null);
+  const [experts, setExperts] = useState<SelectableExpert[]>([]);
+  const [expertsLoading, setExpertsLoading] = useState(true);
   const [modelRefreshKey, setModelRefreshKey] = useState(0);
   const [feedbackRefreshKey, setFeedbackRefreshKey] = useState(0);
   const [autoPreviewTriggerKey, setAutoPreviewTriggerKey] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
+  const [wPlusSopLocksChatInput, setWPlusSopLocksChatInput] = useState(false);
+  const [selectedContextReferences, setSelectedContextReferences] = useState<
+    SkillMentionItem[]
+  >([]);
+  const [contextReferences, setContextReferences] = useState<
+    SkillMentionItem[]
+  >([]);
+  const [contextReferencesLoading, setContextReferencesLoading] =
+    useState(false);
+  const [contextReferencesError, setContextReferencesError] = useState(false);
+  const pendingContextReferencesRef = useRef<SkillMentionItem[]>([]);
+  const pendingScenarioPresetIdRef = useRef<string | null>(null);
+  const contextReferencesRequestIdRef = useRef(0);
   const dragCounterRef = useRef(0);
   const runtimeLoadingBridgeRef = useRef<RuntimeLoadingBridgeApi | null>(null);
   const { message } = useAppMessage();
+  const messageRef = useRef(message);
+  messageRef.current = message;
+  const composerInputState = useChatAnywhereInput((value) => ({
+    disabled: Boolean(value.disabled),
+    loading: Boolean(value.loading),
+  }));
+  const composerDisabled = Boolean(composerInputState.disabled);
+  const composerLoading = Boolean(composerInputState.loading);
+  const {
+    pendingBundle: pendingHtmlAnnotationBundle,
+    consumeBundle: consumeHtmlAnnotationBundle,
+    migrateBundle: migrateHtmlAnnotationBundle,
+  } = useHtmlAnnotations();
+  const pendingHtmlAnnotationBundleRef = useRef(
+    pendingHtmlAnnotationBundle,
+  );
+  pendingHtmlAnnotationBundleRef.current = pendingHtmlAnnotationBundle;
+  const annotationSessionMigrationRef = useRef(
+    new Map<string, { fromChatKey: string; token: string }>(),
+  );
+  const [taskEditForm] = Form.useForm<CronJobSpecOutput>();
+  const [editingTask, setEditingTask] = useState<CronJobSpecOutput | null>(
+    null,
+  );
+  const [taskEditSaving, setTaskEditSaving] = useState(false);
   const {
     sessions,
+    setSessions,
     setSessionLoading,
     currentSessionId: activeSessionId,
   } = useChatAnywhereSessionsState();
+  const contextUsageChatId = chatId
+    ? sessionApi.getChatIdForSession(chatId)
+    : activeSessionId
+    ? sessionApi.getChatIdForSession(activeSessionId)
+    : null;
+  const contextUsage = useContextUsageController(
+    contextUsageChatId,
+    composerLoading,
+  );
+
+  useEffect(() => {
+    setSelectedContextReferences([]);
+    pendingContextReferencesRef.current = [];
+  }, [activeSessionId, chatId]);
+
+  useEffect(() => {
+    setSelectedExpertId(null);
+  }, [selectedAgent]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadExperts = async () => {
+      setExpertsLoading(true);
+      try {
+        const records = await expertsApi.listExperts();
+        if (!cancelled) {
+          setExperts(normalizeSelectableExperts(records as Expert[]));
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setExperts([]);
+          messageRef.current.error(
+            error instanceof Error ? error.message : "加载专家失败",
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setExpertsLoading(false);
+        }
+      }
+    };
+
+    void loadExperts();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const sourceSystemConfig = useSourceSystemConfigStore(
     (state) => state.config,
   );
@@ -501,6 +803,32 @@ export default function ChatPage() {
     (state) => state.loadActiveModelData,
   );
   const taskProgressEnabled = isChatTaskProgressEnabled(sourceSystemConfig);
+
+  const loadContextReferences = useCallback((query: string) => {
+    const requestId = ++contextReferencesRequestIdRef.current;
+    setContextReferencesLoading(true);
+    setContextReferencesError(false);
+    void contextReferencesApi
+      .discover(query)
+      .then((response) => {
+        if (requestId !== contextReferencesRequestIdRef.current) return;
+        setContextReferences(
+          selectContextReferences(
+            [...response.skills, ...response.mcp_tools, ...response.files],
+            query,
+          ),
+        );
+      })
+      .catch(() => {
+        if (requestId !== contextReferencesRequestIdRef.current) return;
+        setContextReferences([]);
+        setContextReferencesError(true);
+      })
+      .finally(() => {
+        if (requestId === contextReferencesRequestIdRef.current)
+          setContextReferencesLoading(false);
+      });
+  }, []);
 
   // useTransition for non-urgent state updates (badge clearing)
   const [, startTransition] = useTransition();
@@ -606,8 +934,34 @@ export default function ChatPage() {
   // Register session API event callbacks for URL synchronization
 
   useEffect(() => {
-    sessionApi.onSessionIdResolved = (_tempId, realId) => {
+    const annotationSessionMigrations =
+      annotationSessionMigrationRef.current;
+    sessionApi.onSessionIdResolved = (tempId, realId) => {
       if (!isChatActiveRef.current) return;
+      migrateHtmlAnnotationBundle(tempId, realId);
+      const annotationMigration = annotationSessionMigrations.get(tempId);
+      if (annotationMigration) {
+        migrateHtmlAnnotationBundle(
+          annotationMigration.fromChatKey,
+          realId,
+          annotationMigration.token,
+        );
+        annotationSessionMigrations.delete(tempId);
+      }
+      if (pendingPlanModePersistScopesRef.current.delete(tempId)) {
+        pendingPlanModePersistScopesRef.current.add(realId);
+        resolvedPlanModePersistScopesRef.current.set(tempId, realId);
+      }
+      setPlanModeLocalState((current) => {
+        const isResolvedPlanModeScope =
+          current.scopeKey === tempId || current.aliases?.includes(tempId);
+
+        if (!current.enabled && !isResolvedPlanModeScope) {
+          return current;
+        }
+
+        return addPlanModeScopeAlias(current, realId);
+      });
       // Update URL when realId is resolved, regardless of current chatId
       // (chatId may be undefined if URL was cleared in onSessionCreated)
       lastSessionIdRef.current = realId;
@@ -683,8 +1037,21 @@ export default function ChatPage() {
       }
     };
 
-    sessionApi.onSessionCreated = () => {
+    sessionApi.onSessionCreated = (sessionId) => {
       if (!isChatActiveRef.current) return;
+      const pendingAnnotation = pendingHtmlAnnotationBundleRef.current;
+      if (isAnnotationForNewChat(pendingAnnotation)) {
+        annotationSessionMigrations.set(sessionId, {
+          fromChatKey: pendingAnnotation.chatKey,
+          token: pendingAnnotation.token,
+        });
+      }
+      setPlanModeLocalState((current) =>
+        current.enabled ||
+        pendingPlanModePersistScopesRef.current.has(current.scopeKey)
+          ? addPlanModeScopeAlias(current, sessionId)
+          : current,
+      );
       // Clear URL when creating new session, wait for realId resolution to update
       lastSessionIdRef.current = null;
       navigateRef.current("/chat", { replace: true });
@@ -695,8 +1062,9 @@ export default function ChatPage() {
       sessionApi.onSessionRemoved = null;
       sessionApi.onSessionSelected = null;
       sessionApi.onSessionCreated = null;
+      annotationSessionMigrations.clear();
     };
-  }, []);
+  }, [migrateHtmlAnnotationBundle]);
 
   useEffect(() => {
     setTaskProgress(null);
@@ -788,6 +1156,15 @@ export default function ChatPage() {
   const [feedbackItems, setFeedbackItems] = useState<FeedbackRecord[]>([]);
   const [feedbackLoading, setFeedbackLoading] = useState(false);
   const feedbackUserId = useIframeStore((state) => state.userId);
+  const isOriginY = useIframeStore((state) => state.isOriginY);
+  const voiceRecorderEnabled = shouldShowGlobalVoiceRecorder(
+    feedbackUserId,
+    showContentOnly,
+    isOriginY,
+  );
+  const skipPreviewTracking = useIframeStore(
+    (state) => state.skipPreviewTracking,
+  );
   const feedbackAllowed = useMemo(
     () => isResponseFeedbackUserAllowed(feedbackUserId),
     [feedbackUserId],
@@ -843,6 +1220,287 @@ export default function ChatPage() {
       feedbackSessionId &&
       (feedbackLoading ||
         feedbackSessionId !== lastFeedbackSessionIdRef.current),
+  );
+  const activePlanModeSessionIds = useMemo(
+    () => (chatId ? [chatId] : [activeSessionId]),
+    [activeSessionId, chatId],
+  );
+  const activePlanModeSession = useMemo<PlanModeSession | null>(() => {
+    return resolveActivePlanModeSession(
+      sessions,
+      activePlanModeSessionIds,
+    ) as PlanModeSession | null;
+  }, [activePlanModeSessionIds, sessions]);
+  const activePlanModeMetadataEnabled = getPlanModeEnabled(
+    activePlanModeSession,
+  );
+  const activePlanModeScopeKey = chatId || activeSessionId || "";
+  const [planModeLocalState, setPlanModeLocalState] =
+    useState<PlanModeLocalState>({
+      scopeKey: activePlanModeScopeKey,
+      enabled: activePlanModeMetadataEnabled,
+    });
+  const activePlanModeSessionRef = useRef<PlanModeSession | null>(null);
+  const activePlanModeScopeKeyRef = useRef(activePlanModeScopeKey);
+  const pendingPlanModePersistScopesRef = useRef(new Set<string>());
+  const resolvedPlanModePersistScopesRef = useRef(new Map<string, string>());
+  const planModeLocalStateForActiveScope =
+    planModeLocalState.scopeKey === "" &&
+    activePlanModeScopeKey &&
+    planModeLocalState.enabled &&
+    pendingPlanModePersistScopesRef.current.has("")
+      ? addPlanModeScopeAlias(planModeLocalState, activePlanModeScopeKey)
+      : planModeLocalState;
+  const planModeEnabled = getScopedPlanModeEnabled({
+    metadataEnabled: activePlanModeMetadataEnabled,
+    localState: planModeLocalStateForActiveScope,
+    scopeKey: activePlanModeScopeKey,
+  });
+  const [pendingPlanRevision, setPendingPlanRevision] =
+    useState<PendingPlanRevision | null>(null);
+  const [goalModeEnabled, setGoalModeEnabled] = useState(false);
+  activePlanModeSessionRef.current = activePlanModeSession;
+  activePlanModeScopeKeyRef.current = activePlanModeScopeKey;
+
+  useEffect(() => {
+    setPlanModeLocalState((current) => {
+      if (
+        current.scopeKey === activePlanModeScopeKey &&
+        pendingPlanModePersistScopesRef.current.has(activePlanModeScopeKey)
+      ) {
+        return current;
+      }
+      if (
+        current.enabled &&
+        current.aliases?.includes(activePlanModeScopeKey)
+      ) {
+        return {
+          ...current,
+          scopeKey: activePlanModeScopeKey,
+        };
+      }
+      if (
+        current.scopeKey === "" &&
+        activePlanModeScopeKey &&
+        pendingPlanModePersistScopesRef.current.has(current.scopeKey)
+      ) {
+        pendingPlanModePersistScopesRef.current.delete(current.scopeKey);
+        pendingPlanModePersistScopesRef.current.add(activePlanModeScopeKey);
+        resolvedPlanModePersistScopesRef.current.set(
+          current.scopeKey,
+          activePlanModeScopeKey,
+        );
+        return {
+          scopeKey: activePlanModeScopeKey,
+          enabled: current.enabled,
+          aliases: current.aliases,
+        };
+      }
+      return {
+        scopeKey: activePlanModeScopeKey,
+        enabled: activePlanModeMetadataEnabled,
+      };
+    });
+  }, [activePlanModeMetadataEnabled, activePlanModeScopeKey]);
+
+  const setPlanModeEnabledForScope = useCallback(
+    (scopeKey: string, enabled: boolean) => {
+      setPlanModeLocalState((current) => {
+        const resolvedScopeKey =
+          resolvedPlanModePersistScopesRef.current.get(scopeKey) || scopeKey;
+        if (activePlanModeScopeKeyRef.current !== resolvedScopeKey) {
+          return current;
+        }
+        return { scopeKey: resolvedScopeKey, enabled };
+      });
+    },
+    [],
+  );
+
+  const setPlanModeEnabledForActiveScope = useCallback(
+    (enabled: boolean) => {
+      setPlanModeEnabledForScope(activePlanModeScopeKeyRef.current, enabled);
+    },
+    [setPlanModeEnabledForScope],
+  );
+
+  const activePlanRevisionScopeKey =
+    activePlanModeSession?.id ||
+    chatId ||
+    activeSessionId ||
+    window.currentSessionId ||
+    "";
+
+  useEffect(() => {
+    setPendingPlanRevision(null);
+  }, [activePlanRevisionScopeKey]);
+
+  const ensurePlanModeChatId = useCallback(
+    async (
+      session: PlanModeSession | null,
+      meta: Record<string, unknown>,
+    ): Promise<string | null> => {
+      const candidateSessionId =
+        chatId ||
+        session?.id ||
+        activeSessionId ||
+        window.currentSessionId ||
+        "";
+      const existingChatId =
+        (chatId ? sessionApi.getChatIdForSession(chatId) : null) ||
+        (chatId && !/^\d+$/.test(chatId) ? chatId : null) ||
+        sessionApi.getChatIdForSession(candidateSessionId) ||
+        session?.realId ||
+        (session?.id && !/^\d+$/.test(session.id) ? session.id : null);
+
+      if (existingChatId) {
+        return existingChatId;
+      }
+
+      const logicalSessionId =
+        session?.sessionId ||
+        session?.session_id ||
+        sessionApi.getLogicalSessionId(candidateSessionId) ||
+        candidateSessionId ||
+        `${getChannel()}:${getUserId()}`;
+      const created = await chatApi.createChat({
+        session_id: logicalSessionId,
+        user_id: getUserId(session?.userId),
+        channel: getChannel(session?.channel),
+        name: session?.name || "新会话",
+        meta,
+      });
+      await sessionApi.getSessionList();
+      return created.id;
+    },
+    [activeSessionId, chatId],
+  );
+
+  const persistPlanMode = useCallback(
+    async (enabled: boolean) => {
+      const previousSelectedExpertId = selectedExpertId;
+      if (enabled) {
+        setSelectedExpertId(null);
+      }
+      const scopeKey = activePlanModeScopeKeyRef.current;
+      const retainBlankScope =
+        enabled && scopeKey === "" && !activePlanModeMetadataEnabled;
+      pendingPlanModePersistScopesRef.current.add(scopeKey);
+      let persistSucceeded = false;
+      try {
+        await persistPlanModeState({
+          enabled,
+          session: activePlanModeSessionRef.current,
+          ensureChatId: ensurePlanModeChatId,
+          updateChat: chatApi.updateChat,
+          updateSession: async (session) => {
+            const nextSessions = await sessionApi.updateSession(
+              session as Parameters<typeof sessionApi.updateSession>[0] & {
+                meta: Record<string, unknown>;
+              },
+              { refreshList: false },
+            );
+            setSessions(nextSessions);
+          },
+          setPlanModeEnabled: (nextEnabled) => {
+            setPlanModeEnabledForScope(scopeKey, nextEnabled);
+          },
+          onPersistError: () => {
+            message.error(
+              t("chat.planMode.persistFailed", "Plan Mode 保存失败"),
+            );
+          },
+        });
+        persistSucceeded = true;
+      } catch (error) {
+        if (enabled) {
+          setSelectedExpertId(previousSelectedExpertId);
+        }
+        throw error;
+      } finally {
+        const resolvedScopeKey =
+          resolvedPlanModePersistScopesRef.current.get(scopeKey);
+        if (!(persistSucceeded && retainBlankScope)) {
+          pendingPlanModePersistScopesRef.current.delete(scopeKey);
+        }
+        if (resolvedScopeKey) {
+          pendingPlanModePersistScopesRef.current.delete(resolvedScopeKey);
+          resolvedPlanModePersistScopesRef.current.delete(scopeKey);
+        }
+      }
+    },
+    [
+      activePlanModeMetadataEnabled,
+      ensurePlanModeChatId,
+      message,
+      selectedExpertId,
+      setPlanModeEnabledForScope,
+      setSelectedExpertId,
+      setSessions,
+      t,
+    ],
+  );
+
+  const handleContinueModifyingPlan = useCallback(
+    (data: ChatPlanReviewCardData) => {
+      setPendingPlanRevision({
+        planId: data.plan_id,
+      });
+      setPlanModeEnabledForActiveScope(true);
+      if (!planModeEnabled) {
+        void persistPlanMode(true);
+      }
+    },
+    [persistPlanMode, planModeEnabled, setPlanModeEnabledForActiveScope],
+  );
+
+  const handlePlanModeDecision = useCallback(
+    (enabled: boolean) => {
+      setPendingPlanRevision(null);
+      setPlanModeEnabledForActiveScope(enabled);
+      void persistPlanMode(enabled);
+    },
+    [persistPlanMode, setPlanModeEnabledForActiveScope],
+  );
+
+  const activePlanModeControl = useMemo(
+    () => (
+      <ActivePlanModeControl
+        enabled={planModeEnabled}
+        label={t("chat.planMode.label", "计划模式")}
+        displayLabel={t("chat.planMode.shortLabel", "计划")}
+        onDisable={() => {
+          setPendingPlanRevision(null);
+          void persistPlanMode(false);
+        }}
+      />
+    ),
+    [persistPlanMode, planModeEnabled, t],
+  );
+
+  const activeGoalModeControl = useMemo(
+    () => (
+      <ActiveGoalModeControl
+        enabled={goalModeEnabled}
+        onDisable={() => setGoalModeEnabled(false)}
+      />
+    ),
+    [goalModeEnabled],
+  );
+
+  const selectedExpert = useMemo(
+    () => experts.find((expert) => expert.id === selectedExpertId) || null,
+    [experts, selectedExpertId],
+  );
+
+  const activeExpertControl = useMemo(
+    () => (
+      <ActiveExpertControl
+        expert={selectedExpert}
+        onDisable={() => setSelectedExpertId(null)}
+      />
+    ),
+    [selectedExpert],
   );
 
   useEffect(() => {
@@ -941,7 +1599,6 @@ export default function ChatPage() {
   useEffect(() => {
     const hadResult = Boolean(currentTask?.task?.has_scheduled_result);
     if (hadResult && !taskHadResultRef.current) {
-      void chatRef.current?.refreshSession?.();
       setFeedbackRefreshKey((prev) => prev + 1);
     }
     taskHadResultRef.current = hadResult;
@@ -975,7 +1632,7 @@ export default function ChatPage() {
     });
 
     void cronJobApi
-      .markTaskRead(currentTask.id)
+      .markTaskRead(currentTask.id, false)
       .catch(() => {})
       .finally(() => {
         markTaskReadPendingRef.current = false;
@@ -1131,25 +1788,82 @@ export default function ChatPage() {
     [message, navigate, refreshJobs],
   );
 
+  const handleTaskEdit = useCallback(
+    (task: CronJobSpecOutput) => {
+      const formValues = buildCronJobFormValues(task);
+      setEditingTask(task);
+      taskEditForm.setFieldsValue({
+        ...formValues,
+        taskContentText:
+          task.task_type === "text"
+            ? formValues.text || ""
+            : extractTaskContentText(formValues.request?.input),
+      } as Parameters<typeof taskEditForm.setFieldsValue>[0]);
+    },
+    [taskEditForm],
+  );
+
+  const handleTaskEditClose = useCallback(() => {
+    if (taskEditSaving) return;
+    setEditingTask(null);
+    taskEditForm.resetFields();
+  }, [taskEditForm, taskEditSaving]);
+
+  const handleTaskEditSubmit = useCallback(
+    async (values: CronTaskEditFormValues) => {
+      if (!editingTask) return;
+
+      setTaskEditSaving(true);
+      try {
+        await submitCronTaskEdit(
+          editingTask,
+          values,
+          cronJobApi.replaceCronJob,
+        );
+        message.success("任务已更新");
+        setEditingTask(null);
+        taskEditForm.resetFields();
+        void refreshJobs();
+      } catch (error) {
+        console.error("Failed to update cron task from chat sidebar:", error);
+        message.error(
+          error instanceof SyntaxError ? "任务配置格式不正确" : "保存失败",
+        );
+      } finally {
+        setTaskEditSaving(false);
+      }
+    },
+    [editingTask, message, refreshJobs, taskEditForm],
+  );
+
   useEffect(() => {
     const previousTask = previousCurrentTaskRef.current;
     previousCurrentTaskRef.current = currentTask;
 
-    if (
-      !shouldRefreshCurrentTaskMessages({
-        previousTask,
-        currentTask,
-      })
-    ) {
-      return;
-    }
+    const shouldRefresh = shouldRefreshCurrentTaskMessages({
+      previousTask,
+      currentTask,
+    });
+    if (!shouldRefresh || !chatId) return;
 
-    void chatRef.current?.refreshSession?.();
+    let cancelled = false;
+    void refreshTaskSessionWithRetry(
+      (sessionId) =>
+        chatRef.current?.refreshSession?.(sessionId) ?? Promise.resolve(false),
+      {
+        sessionId: chatId,
+        retryAfterExhaustionMs: TASK_SESSION_REFRESH_RECOVERY_DELAY_MS,
+        shouldContinue: () => !cancelled,
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
   }, [
     currentTask?.id,
     currentTask?.task?.has_scheduled_result,
     currentTask?.task?.last_scheduled_run_at,
-    currentTask?.task?.unread_execution_count,
+    chatId,
   ]);
 
   // Show toast when task has no scheduled result yet
@@ -1256,6 +1970,12 @@ export default function ChatPage() {
               },
             ]
           : lastInput;
+      const userText = rewrittenInput
+        .filter((m: InputMessage) => m.role === "user")
+        .map(extractUserMessageText)
+        .join("\n")
+        .trim();
+      const submittedDocumentAnnotations = biz_params?.document_annotations;
 
       const resolvedLogicalSessionId = resolveLogicalRequestSessionId(
         {
@@ -1275,9 +1995,19 @@ export default function ChatPage() {
         channel: getChannel(session?.channel),
         // ==================== userId 统一整改结束 ====================
         stream: true,
+        mode: getPlanModeForRequest(planModeEnabled),
+        goal_mode_enabled: goalModeEnabled,
         ...biz_params,
+        context_references:
+          userText.startsWith("/") &&
+          pendingContextReferencesRef.current.length === 0
+            ? []
+            : pendingContextReferencesRef.current,
+        scenario_preset_id: pendingScenarioPresetIdRef.current || undefined,
         file_url_network: resolveCurrentFileUrlNetwork(),
+        selected_expert_id: selectedExpertId || undefined,
       };
+      pendingContextReferencesRef.current = [];
 
       const backendChatId = resolveRequestChatId(
         {
@@ -1287,18 +2017,54 @@ export default function ChatPage() {
         },
         requestBody.session_id,
       );
+      let routedAsSteering = false;
+      if (backendChatId && userText && !submittedDocumentAnnotations) {
+        try {
+          const activeGoal = await chatApi.getRecentGoal(backendChatId);
+          if (
+            activeGoal &&
+            shouldRouteGoalRequestAsSteering({
+              goalState: activeGoal.state,
+              hasExplicitGoalId: Object.prototype.hasOwnProperty.call(
+                biz_params ?? {},
+                "goal_id",
+              ),
+            })
+          ) {
+            await chatApi.enqueueGoalSteering(
+              activeGoal.goal_id,
+              backendChatId,
+              userText,
+            );
+            routedAsSteering = true;
+          }
+        } catch (error) {
+          console.warn("Unable to route input to active Goal:", error);
+        }
+      }
       if (backendChatId) {
-        const userText = rewrittenInput
-          .filter((m: InputMessage) => m.role === "user")
-          .map(extractUserMessageText)
-          .join("\n")
-          .trim();
         if (userText) {
           sessionApi.setLastUserMessage(backendChatId, userText);
         }
       }
+      if (routedAsSteering) {
+        return new Response(
+          `data: ${JSON.stringify({
+            object: "response",
+            status: "completed",
+            output: [],
+            id: `goal-steering-${Date.now()}`,
+          })}\n\n`,
+          { headers: { "Content-Type": "text/event-stream" } },
+        );
+      }
 
       const timeoutSignal = createTimedAbortSignal(data.signal);
+      // The expert is a one-turn selection. Clear it as soon as the request
+      // has been submitted so aborts/network failures cannot leave stale UI
+      // state for the next turn.
+      setSelectedExpertId(null);
+      setSubAgentMonitorResetKey((value) => value + 1);
       try {
         const response = await fetch(getApiUrl("/console/chat"), {
           method: "POST",
@@ -1307,29 +2073,33 @@ export default function ChatPage() {
           signal: timeoutSignal.signal,
         });
 
-        return response;
-      } catch (error) {
-        if (shouldStopBackendForFetchAbort(error, timeoutSignal.signal)) {
-          const backendChatId = resolveRequestChatId(
-            {
-              session_id: data.session_id,
-              logical_session_id: data.logical_session_id,
-              chat_id: data.chat_id,
-            },
-            requestBody.session_id,
-          );
-          if (backendChatId) {
-            chatApi.stopChat(backendChatId).catch((err) => {
-              console.error("Failed to stop chat after timeout:", err);
-            });
-          }
+        if (
+          response.ok &&
+          submittedDocumentAnnotations &&
+          pendingHtmlAnnotationBundle
+        ) {
+          consumeHtmlAnnotationBundle(pendingHtmlAnnotationBundle.token);
         }
-        throw error;
+        if (shouldClearPendingScenarioPreset(response.status)) {
+          pendingScenarioPresetIdRef.current = null;
+        }
+
+        return response;
       } finally {
         timeoutSignal.cleanup();
       }
     },
-    [loadActiveModelData, resolveLogicalRequestSessionId, resolveRequestChatId],
+    [
+      loadActiveModelData,
+      planModeEnabled,
+      goalModeEnabled,
+      resolveLogicalRequestSessionId,
+      resolveRequestChatId,
+      selectedAgent,
+      selectedExpertId,
+      pendingHtmlAnnotationBundle,
+      consumeHtmlAnnotationBundle,
+    ],
   );
 
   const handleFileUpload = useCallback(
@@ -1339,41 +2109,17 @@ export default function ChatPage() {
       onError?: (e: Error) => void;
       onProgress?: (e: { percent?: number }) => void;
     }) => {
-      const { file, onSuccess, onError, onProgress } = options;
-      try {
-        // Warn when model has no multimodal support
-        if (!multimodalCaps.supportsMultimodal) {
-          message.warning(t("chat.attachments.multimodalWarning"));
-        } else if (
-          multimodalCaps.supportsImage &&
-          !multimodalCaps.supportsVideo &&
-          !file.type.startsWith("image/")
-        ) {
-          // Warn (not block) when only image is supported
-          message.warning(t("chat.attachments.imageOnlyWarning"));
-        }
-        const sizeMb = file.size / 1024 / 1024;
-        const isWithinLimit = sizeMb < CHAT_ATTACHMENT_MAX_MB;
-
-        if (!isWithinLimit) {
-          message.error(
-            t("chat.attachments.fileSizeExceeded", {
-              limit: CHAT_ATTACHMENT_MAX_MB,
-              size: sizeMb.toFixed(2),
-            }),
-          );
-          onError?.(new Error(`File size exceeds ${CHAT_ATTACHMENT_MAX_MB}MB`));
-          return;
-        }
-
-        const res = await chatApi.uploadFile(file);
-        onProgress?.({ percent: 100 });
-        onSuccess({ url: chatApi.filePreviewUrl(res.url) });
-      } catch (e) {
-        onError?.(e instanceof Error ? e : new Error(String(e)));
-      }
+      await uploadChatAttachment({
+        ...options,
+        message,
+        t,
+        multimodalCaps,
+        maxUploadMb: CHAT_ATTACHMENT_MAX_MB,
+        uploadFile: chatApi.uploadFile,
+        filePreviewUrl: chatApi.filePreviewUrl,
+      });
     },
-    [multimodalCaps, t],
+    [message, multimodalCaps, t],
   );
 
   // ==================== Drag & drop file upload (Kun He) ====================
@@ -1442,12 +2188,42 @@ export default function ChatPage() {
       handleFeedbackSaved,
     ],
   );
+  const planReviewRenderContextValue =
+    useMemo<ChatPlanReviewRenderContextValue>(
+      () => ({
+        onContinueModifying: handleContinueModifyingPlan,
+        onPlanModeDecision: handlePlanModeDecision,
+        onConfirmGoalProposal: async (proposal) => {
+          if (!feedbackChatId) {
+            throw new Error("当前会话尚未创建，无法确认 Goal");
+          }
+          return chatApi.createGoal(feedbackChatId, {
+            objective: proposal.objective,
+            completion_criteria: proposal.completion_criteria,
+            constraints: proposal.constraints,
+            autonomy_boundary: proposal.autonomy_boundary,
+          });
+        },
+      }),
+      [feedbackChatId, handleContinueModifyingPlan, handlePlanModeDecision],
+    );
+  const handleGoalResume = useCallback((goalId: string) => {
+    emit({
+      type: "handleSubmit",
+      data: {
+        query: "继续已恢复的 Goal",
+        fileList: [],
+        biz_params: { mode: "normal", goal_id: goalId },
+      },
+    });
+  }, []);
   const htmlPreviewTrackingContextValue = useMemo(
     () => ({
       cronTaskId: feedbackTask?.cronTaskId || null,
       cronTaskName: feedbackTask?.cronTaskName || null,
+      disableEventRecording: skipPreviewTracking,
     }),
-    [feedbackTask],
+    [feedbackTask, skipPreviewTracking],
   );
 
   const options = useMemo(() => {
@@ -1475,16 +2251,190 @@ export default function ChatPage() {
         value: "deny",
         description: t("chat.commands.deny.description"),
       },
+      {
+        command: "/plan",
+        value: "plan",
+        description: t("chat.commands.plan.description", "进入计划模式"),
+      },
     ];
 
     const senderConfig = i18nConfig.sender as
       | IAgentScopeRuntimeWebUISenderOptions
       | undefined;
+    const contextUsageIndicator = <ContextUsageIndicator {...contextUsage} />;
+    const senderPrefixNodes = Children.toArray([
+      activePlanModeControl,
+      activeGoalModeControl,
+      activeExpertControl,
+      senderConfig?.prefix,
+    ]).filter(Boolean);
 
-    const handleBeforeSubmit = async () => {
+    const { beforeSubmit: handleSkillMentionsBeforeSubmit, skillMentions } =
+      createWelcomeSkillMentions({
+        contextReferences,
+        contextReferencesError,
+        contextReferencesLoading,
+        isComposingRef,
+        loadContextReferences,
+        pendingContextReferencesRef,
+        selectedContextReferences,
+        setSelectedContextReferences,
+      });
+
+    const handleBeforeSubmit: NonNullable<
+      IAgentScopeRuntimeWebUISenderOptions["beforeSubmit"]
+    > = async (data) => {
       if (isComposingRef.current) return false;
-      return true;
+      let annotationPrepared = discardStaleHtmlAnnotationSubmission(data);
+      if (pendingHtmlAnnotationBundle) {
+        try {
+          annotationPrepared = await prepareHtmlAnnotationExecutionMode(
+            annotationPrepared,
+            {
+              planModeEnabled,
+              persistPlanMode,
+              goalModeEnabled,
+              setGoalModeEnabled,
+            },
+          );
+        } catch {
+          return false;
+        }
+        setPendingPlanRevision(null);
+        try {
+          annotationPrepared = await prepareHtmlAnnotationSubmit(
+            annotationPrepared,
+            pendingHtmlAnnotationBundle,
+            {
+              uploadFile: chatApi.uploadFile,
+              filePreviewUrl: chatApi.filePreviewUrl,
+            },
+          );
+        } catch (error) {
+          messageRef.current.error(
+            error instanceof Error ? error.message : "页面批注源文件上传失败",
+          );
+          return false;
+        }
+      }
+      const skillPrepared = await handleSkillMentionsBeforeSubmit(
+        annotationPrepared,
+      );
+      if (skillPrepared === false) return false;
+      if (pendingHtmlAnnotationBundle) {
+        return skillPrepared;
+      }
+      const prepared = await preparePlanModeSubmit(skillPrepared, {
+        planModeEnabled,
+        persistPlanMode,
+        setPlanModeEnabled: setPlanModeEnabledForActiveScope,
+      });
+      if (isPlanModeSubmitCancelled(prepared)) {
+        return prepared;
+      }
+      const hasExplicitPlanInteractionResponse = Boolean(
+        prepared.biz_params &&
+          Object.prototype.hasOwnProperty.call(
+            prepared.biz_params,
+            "plan_interaction_response",
+          ),
+      );
+      if (hasExplicitPlanInteractionResponse) {
+        setPendingPlanRevision(null);
+        return prepared;
+      }
+      if (!pendingPlanRevision) {
+        return prepared;
+      }
+
+      const feedback = prepared.query.trim();
+      if (!feedback) {
+        return false;
+      }
+
+      setPendingPlanRevision(null);
+      return {
+        ...prepared,
+        biz_params: {
+          ...(prepared.biz_params || {}),
+          mode: "plan",
+          plan_interaction_response: {
+            card_type: "plan_review",
+            plan_id: pendingPlanRevision.planId,
+            decision: "revise",
+            feedback,
+          },
+        },
+      };
     };
+
+    const planModeQuickMenuItems = [
+      <ComposerQuickMenuSubmenu
+        key="mode"
+        icon={<ControlOutlined />}
+        label={t("chat.quickMenu.mode", "模式")}
+        disabled={composerDisabled}
+      >
+        <PlanModeMenuItem
+          key="plan-mode"
+          ariaLabel={t("chat.planMode.label", "计划模式")}
+          enabled={planModeEnabled}
+          disabled={composerDisabled}
+          label={t("chat.planMode.shortLabel", "计划")}
+          showIcon={false}
+          tooltip={t("chat.planMode.tooltip", "计划模式使用只读工具先产出计划")}
+          onChange={(enabled) => {
+            if (enabled) setGoalModeEnabled(false);
+            void persistPlanMode(enabled);
+          }}
+        />
+        <ComposerQuickMenuItem
+          key="goal-mode"
+          interactive
+          label="目标"
+          extra={
+            <Switch
+              size="small"
+              checked={goalModeEnabled}
+              disabled={composerDisabled}
+              aria-label="目标模式"
+              onChange={(enabled) => {
+                setGoalModeEnabled(enabled);
+                if (enabled) {
+                  setSelectedExpertId(null);
+                  if (planModeEnabled) void persistPlanMode(false);
+                }
+              }}
+            />
+          }
+        />
+      </ComposerQuickMenuSubmenu>,
+      ...(expertsLoading || experts.length > 0
+        ? [
+            <ComposerQuickMenuSubmenu
+              key="expert"
+              icon={<TeamOutlined />}
+              label="专家"
+              disabled={composerDisabled || goalModeEnabled || expertsLoading}
+              panelWidth="min(240px, calc(100vw - 32px))"
+            >
+              <ExpertSelector
+                experts={experts}
+                loading={expertsLoading}
+                planModeEnabled={planModeEnabled}
+                goalModeEnabled={goalModeEnabled}
+                selectedExpertId={selectedExpertId}
+                onChange={setSelectedExpertId}
+                onDisablePlanMode={() => {
+                  void persistPlanMode(false);
+                }}
+                disabled={composerDisabled}
+                inline
+              />
+            </ComposerQuickMenuSubmenu>,
+          ]
+        : []),
+    ];
 
     return {
       ...i18nConfig,
@@ -1500,9 +2450,13 @@ export default function ChatPage() {
             <RuntimeLoadingBridge bridgeRef={runtimeLoadingBridgeRef} />
             <ChatHeaderTitle />
             <span style={{ flex: 1 }} />
-            <GeneratedFilesDrawer />
-            <ModelSelector />
-            {/* <ChatActionGroup /> */}
+            {!isContentOnly && (
+              <FileManager
+                enableSessionAnnotations={!feedbackTask?.cronTaskId}
+              />
+            )}
+            {!isContentOnly && <ChatActionGroup chatId={chatId} />}
+            {!isContentOnly && <ModelSelector />}
           </>
         ),
       },
@@ -1518,40 +2472,65 @@ export default function ChatPage() {
         // ==================== 首页改版 (Kun He) ====================
         // 使用自定义欢迎页渲染，替代默认 WelcomePrompts
         render: ({ greeting, onSubmit }) => (
-          <WelcomeCenterLayout
-            greeting={
-              typeof greeting === "string" ? greeting : "你好，有什么可以帮您？"
-            }
-            onSubmit={(data) => onSubmit(data)}
-          />
+          <>
+            <HtmlAnnotationComposerSummary />
+            <WelcomeCenterLayout
+              greeting={
+                typeof greeting === "string"
+                  ? greeting
+                  : "你好，有什么可以帮您？"
+              }
+              placeholder={t("chat.inputPlaceholder")}
+              beforeSubmit={handleBeforeSubmit}
+              quickMenuItems={planModeQuickMenuItems}
+              prefixItems={
+                <>
+                  {activePlanModeControl}
+                  {activeGoalModeControl}
+                  {contextUsageIndicator}
+                </>
+              }
+              onSubmit={(data) => onSubmit(data)}
+              onScenarioPresetSubmit={(scenarioPresetId) => {
+                pendingScenarioPresetIdRef.current = scenarioPresetId;
+              }}
+              skillMentions={skillMentions}
+            />
+          </>
         ),
         // ==================== 首页改版结束 ====================
       },
       sender: {
         ...senderConfig,
         beforeSubmit: handleBeforeSubmit,
-        beforeUI: taskProgressEnabled ? (
-          <TaskProgressFloatingCard progress={taskProgress} />
-        ) : null,
-        allowSpeech: false,
+        beforeUI: (
+          <>
+            <HtmlAnnotationComposerSummary />
+            {taskProgressEnabled ? (
+              <TaskProgressFloatingCard progress={taskProgress} />
+            ) : null}
+          </>
+        ),
+        renderComposer: (defaultComposer) => (
+          <ActivePlanInteractionComposer
+            defaultComposer={cloneElement<IChatInputProps>(defaultComposer, {
+              actions: (defaultActions) => (
+                <div className={styles.composerActions}>
+                  {contextUsageIndicator}
+                  {defaultActions}
+                </div>
+              ),
+            })}
+            onContinueModifying={handleContinueModifyingPlan}
+            onPlanModeDecision={handlePlanModeDecision}
+          />
+        ),
+        quickMenuItems: planModeQuickMenuItems,
+        prefix:
+          senderPrefixNodes.length > 0 ? <>{senderPrefixNodes}</> : undefined,
+        allowSpeech: true,
         attachments: {
-          trigger: function AttachmentTrigger(props: AttachmentTriggerProps) {
-            const tooltipKey = multimodalCaps.supportsMultimodal
-              ? multimodalCaps.supportsImage && !multimodalCaps.supportsVideo
-                ? "chat.attachments.tooltipImageOnly"
-                : "chat.attachments.tooltip"
-              : "chat.attachments.tooltipNoMultimodal";
-            return (
-              <Tooltip title={t(tooltipKey, { limit: CHAT_ATTACHMENT_MAX_MB })}>
-                <IconButton
-                  disabled={props?.disabled}
-                  icon={<SparkAttachmentLine />}
-                  bordered={false}
-                />
-              </Tooltip>
-            );
-          },
-          accept: "*/*",
+          accept: CHAT_ATTACHMENT_ACCEPT_HINT,
           customRequest: handleFileUpload,
         },
         placeholder: t("chat.inputPlaceholder"),
@@ -1559,6 +2538,7 @@ export default function ChatPage() {
           label: renderSuggestionLabel(item.command, item.description),
           value: item.value,
         })),
+        skillMentions,
       },
       session: {
         multiple: true,
@@ -1576,13 +2556,16 @@ export default function ChatPage() {
           session_id: string;
           logical_session_id?: string;
           chat_id?: string | null;
+          msgid?: string | null;
         }) {
           const logicalSessionId = resolveLogicalRequestSessionId(data);
           const chatId = resolveRequestChatId(data, logicalSessionId);
           if (chatId) {
-            return chatApi.stopChat(chatId).catch((err) => {
-              console.error("Failed to stop chat:", err);
-            });
+            return chatApi
+              .stopChat(chatId, data.msgid, logicalSessionId)
+              .catch((err) => {
+                console.error("Failed to stop chat:", err);
+              });
           }
           return Promise.resolve();
         },
@@ -1609,12 +2592,15 @@ export default function ChatPage() {
               headers,
               body: JSON.stringify({
                 reconnect: true,
+                reconnect_mode: "current",
                 session_id: reconnectSessionId,
+                chat_id: data.chat_id || undefined,
                 // ==================== userId 统一整改 (Kun He) ====================
                 // 使用 getUserId()/getChannel() 获取
                 user_id: getUserId(),
                 channel: getChannel(),
                 // ==================== userId 统一整改结束 ====================
+                mode: getPlanModeForRequest(planModeEnabled),
               }),
               signal: timeoutSignal.signal,
             });
@@ -1645,19 +2631,47 @@ export default function ChatPage() {
       },
     } as unknown as IAgentScopeRuntimeWebUIOptions;
   }, [
+    activeGoalModeControl,
+    activeExpertControl,
+    activePlanModeControl,
     brandTheme.avatar,
     brandTheme.brandName,
     customFetch,
     copyResponse,
     chatId,
     activeSessionId,
+    feedbackChatId,
+    feedbackTask?.cronTaskId,
+    goalModeEnabled,
     handleFileUpload,
+    handleContinueModifyingPlan,
+    handlePlanModeDecision,
     isComposingRef,
+    isContentOnly,
     isDark,
+    experts,
+    expertsLoading,
     multimodalCaps,
+    composerDisabled,
+    composerLoading,
+    contextUsageChatId,
+    contextUsage,
+    pendingPlanRevision,
+    pendingHtmlAnnotationBundle,
+    persistPlanMode,
+    planModeEnabled,
     resolveLogicalRequestSessionId,
     resolveRequestChatId,
+    setPlanModeEnabledForActiveScope,
+    selectedExpertId,
+    selectedContextReferences,
+    contextReferences,
+    contextReferencesError,
+    contextReferencesLoading,
+    loadContextReferences,
     taskProgress,
+    taskProgressEnabled,
+    subAgentMonitorResetKey,
     t,
   ]);
 
@@ -1683,102 +2697,207 @@ export default function ChatPage() {
   }, [options.cards]);
 
   return (
-    <AgentScopeRuntimeWebUIComposedProvider options={options} cards={cards}>
-      <ChatFeedbackRenderProvider value={feedbackRenderContextValue}>
-        <HtmlPreviewTrackingProvider value={htmlPreviewTrackingContextValue}>
-          <AutoPreviewHtmlProvider
-            triggerKey={autoPreviewTriggerKey}
-            onConsumed={() => setAutoPreviewTriggerKey(0)}
-          >
-            <div
-              style={{
-                height: "100%",
-                width: "100%",
-                display: "flex",
-                flexDirection: "row",
-              }}
+    <ChatShareSelectionProvider>
+      <AgentScopeRuntimeWebUIComposedProvider options={options} cards={cards}>
+        <ChatFeedbackRenderProvider value={feedbackRenderContextValue}>
+          <HtmlPreviewTrackingProvider value={htmlPreviewTrackingContextValue}>
+            <AutoPreviewHtmlProvider
+              triggerKey={autoPreviewTriggerKey}
+              onConsumed={() => setAutoPreviewTriggerKey(0)}
             >
-              {/* ==================== 首页改版 (Kun He) ==================== */}
-              {/* 聊天专用侧栏：支持折叠为64px工具条 */}
-              <ChatSidebar
-                tasks={tasks}
-                selectedTaskId={currentTask?.id}
-                onCreateSession={handleCreateSessionFromSidebar}
-                onTaskClick={handleTaskOpen}
-                onTaskPause={handleTaskPause}
-                onTaskRun={handleTaskRun}
-                onTaskResume={handleTaskResume}
-                onTaskDelete={handleTaskDelete}
-              />
-              {/* ==================== 首页改版结束 ==================== */}
               <div
-                className={styles.chatMessagesArea}
-                style={{ flex: 1, minWidth: 0, position: "relative" }}
-                onDragEnter={handleDragEnter}
-                onDragLeave={handleDragLeave}
-                onDragOver={handleDragOver}
-                onDrop={handleDrop}
+                data-chat-shell
+                style={{
+                  height: "100%",
+                  width: "100%",
+                  display: "flex",
+                  flexDirection: "row",
+                }}
               >
-                <AgentScopeRuntimeWebUILayout ref={chatRef} />
-                <DragUploadOverlay
-                  visible={isDragging}
-                  onClose={handleDragOverlayClose}
-                />
-                <ConversationQuickNav />
+                {/* ==================== 首页改版 (Kun He) ==================== */}
+                {/* 聊天专用侧栏：支持折叠为64px工具条 */}
+                {!isContentOnly && (
+                  <ChatSidebar
+                    tasks={tasks}
+                    selectedTaskId={currentTask?.id}
+                    onCreateSession={handleCreateSessionFromSidebar}
+                    onTaskClick={handleTaskOpen}
+                    onTaskPause={handleTaskPause}
+                    onTaskRun={handleTaskRun}
+                    onTaskResume={handleTaskResume}
+                    onTaskDelete={handleTaskDelete}
+                    onTaskEdit={handleTaskEdit}
+                  />
+                )}
+                {/* ==================== 首页改版结束 ==================== */}
+                <div
+                  className={styles.chatMessagesArea}
+                  data-chat-messages-area
+                  style={{ flex: 1, minWidth: 0, position: "relative" }}
+                  onDragEnter={isContentOnly ? undefined : handleDragEnter}
+                  onDragLeave={isContentOnly ? undefined : handleDragLeave}
+                  onDragOver={isContentOnly ? undefined : handleDragOver}
+                  onDrop={isContentOnly ? undefined : handleDrop}
+                >
+                  <ChatContentOnlyProvider enabled={isContentOnly}>
+                    <ChatPlanReviewRenderProvider
+                      value={planReviewRenderContextValue}
+                    >
+                      <GlobalVoiceRecorder enabled={voiceRecorderEnabled}>
+                        <WPlusSopActiveBar
+                          chatId={feedbackChatId || chatId}
+                          logicalSessionId={feedbackSessionId || undefined}
+                          onLocksChatInputChange={setWPlusSopLocksChatInput}
+                        />
+                        <div
+                          className={
+                            wPlusSopLocksChatInput
+                              ? styles.chatDisabledOverlay
+                              : undefined
+                          }
+                          style={{ height: "100%", width: "100%" }}
+                        >
+                          <FilePreviewPresentationProvider
+                            value={
+                              feedbackTask?.cronTaskId ? "modal" : "workspace"
+                            }
+                          >
+                            <AgentScopeRuntimeWebUILayout ref={chatRef} />
+                          </FilePreviewPresentationProvider>
+                        </div>
+                      </GlobalVoiceRecorder>
+                    </ChatPlanReviewRenderProvider>
+                  </ChatContentOnlyProvider>
+                  <SubAgentRunMonitor
+                    chatId={feedbackChatId}
+                    resetKey={subAgentMonitorResetKey}
+                  />
+                  <GoalMonitor
+                    chatId={feedbackChatId}
+                    onResume={handleGoalResume}
+                  />
+                  {!isContentOnly && (
+                    <DragUploadOverlay
+                      visible={isDragging}
+                      onClose={handleDragOverlayClose}
+                    />
+                  )}
+                  <ConversationQuickNav />
+                </div>
               </div>
-            </div>
-          </AutoPreviewHtmlProvider>
-        </HtmlPreviewTrackingProvider>
-      </ChatFeedbackRenderProvider>
+            </AutoPreviewHtmlProvider>
+          </HtmlPreviewTrackingProvider>
+        </ChatFeedbackRenderProvider>
 
-      <Modal
-        open={showModelPrompt}
-        closable={false}
-        footer={null}
-        width={480}
-        styles={{
-          content: isDark
-            ? {
-                background: "#1f1f1f",
-                boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
-              }
-            : undefined,
-        }}
-      >
-        <Result
-          icon={<ExclamationCircleOutlined style={{ color: "#faad14" }} />}
-          title={
-            <span
-              style={{ color: isDark ? "rgba(255,255,255,0.88)" : undefined }}
-            >
-              {t("modelConfig.promptTitle")}
-            </span>
+        <Modal
+          open={Boolean(editingTask)}
+          title="编辑任务"
+          width="min(760px, calc(100vw - 32px))"
+          className={styles.taskEditModal}
+          centered
+          destroyOnClose
+          maskClosable={!taskEditSaving}
+          keyboard={!taskEditSaving}
+          onCancel={handleTaskEditClose}
+          footer={
+            <div className={styles.taskEditModalFooter}>
+              <Button onClick={handleTaskEditClose} disabled={taskEditSaving}>
+                取消
+              </Button>
+              <Button
+                type="primary"
+                loading={taskEditSaving}
+                onClick={() => taskEditForm.submit()}
+              >
+                保存
+              </Button>
+            </div>
           }
-          subTitle={
-            <span
-              style={{ color: isDark ? "rgba(255,255,255,0.55)" : undefined }}
-            >
-              {t("modelConfig.promptMessage")}
-            </span>
-          }
-          extra={[
-            <Button key="skip" onClick={() => setShowModelPrompt(false)}>
-              {t("modelConfig.skipButton")}
-            </Button>,
-            <Button
-              key="configure"
-              type="primary"
-              icon={<SettingOutlined />}
-              onClick={() => {
-                setShowModelPrompt(false);
-                navigate("/models");
-              }}
-            >
-              {t("modelConfig.configureButton")}
-            </Button>,
-          ]}
-        />
-      </Modal>
-    </AgentScopeRuntimeWebUIComposedProvider>
+        >
+          <Form
+            form={taskEditForm}
+            layout="vertical"
+            onFinish={() =>
+              handleTaskEditSubmit(
+                taskEditForm.getFieldsValue(true) as CronTaskEditFormValues,
+              )
+            }
+            initialValues={DEFAULT_FORM_VALUES}
+            className={styles.taskEditForm}
+          >
+            <ChatTaskEditFormBody />
+          </Form>
+        </Modal>
+
+        <Modal
+          open={showModelPrompt}
+          closable={false}
+          footer={null}
+          width={480}
+          styles={{
+            content: isDark
+              ? {
+                  background: "#1f1f1f",
+                  boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
+                }
+              : undefined,
+          }}
+        >
+          <Result
+            icon={<ExclamationCircleOutlined style={{ color: "#faad14" }} />}
+            title={
+              <span
+                style={{ color: isDark ? "rgba(255,255,255,0.88)" : undefined }}
+              >
+                {t("modelConfig.promptTitle")}
+              </span>
+            }
+            subTitle={
+              <span
+                style={{ color: isDark ? "rgba(255,255,255,0.55)" : undefined }}
+              >
+                {t("modelConfig.promptMessage")}
+              </span>
+            }
+            extra={[
+              <Button key="skip" onClick={() => setShowModelPrompt(false)}>
+                {t("modelConfig.skipButton")}
+              </Button>,
+              <Button
+                key="configure"
+                type="primary"
+                icon={<SettingOutlined />}
+                onClick={() => {
+                  setShowModelPrompt(false);
+                  navigate("/models");
+                }}
+              >
+                {t("modelConfig.configureButton")}
+              </Button>,
+            ]}
+          />
+        </Modal>
+      </AgentScopeRuntimeWebUIComposedProvider>
+    </ChatShareSelectionProvider>
+  );
+}
+
+export default function ChatPage() {
+  const location = useLocation();
+  const showContentOnly = useChatPresentationStore(
+    (state) => state.showContentOnly,
+  );
+  const activeChatKey = useMemo(() => {
+    const match = location.pathname.match(/^\/chat\/(.+)$/);
+    return match?.[1] || "new-chat";
+  }, [location.pathname]);
+
+  return (
+    <HtmlAnnotationProvider
+      activeChatKey={activeChatKey}
+      composerAvailable={!showContentOnly}
+    >
+      <ChatPageContent />
+    </HtmlAnnotationProvider>
   );
 }

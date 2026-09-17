@@ -10,6 +10,7 @@ Each Workspace represents a standalone agent workspace with its own:
 All existing single-agent components are reused without modification.
 """
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -23,6 +24,7 @@ from .service_factories import (
 )
 from ..runner import AgentRunner
 from ..runner.task_tracker import TaskTracker
+from ..answer_turn import AnswerTurnCoordinator, TurnIdentity
 from ..crons.manager import CronManager
 from ..crons.scheduler_adapter import (
     NoopSchedulerAdapter,
@@ -35,6 +37,69 @@ from ...agents.memory.reme_light_memory_manager import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _WorkspaceGoalPort:
+    def __init__(self, workspace: "Workspace") -> None:
+        self._workspace = workspace
+
+    async def interrupt_if_matches(
+        self,
+        identity: TurnIdentity,
+        reason: str,
+    ) -> None:
+        from ..goals.registry import get_goal_service
+
+        service = get_goal_service()
+        if service is None:
+            return
+        goal = await service.recent_for_chat(identity.chat_id)
+        if goal is not None:
+            await service.interrupt_turn_if_matches(
+                goal.goal_id,
+                identity.msgid,
+                reason,
+            )
+
+
+class _WorkspaceApprovalPort:
+    async def supersede_for_turn(self, identity: TurnIdentity) -> None:
+        from ..approvals import get_approval_service
+
+        await get_approval_service().supersede_pending_for_turn(
+            identity.chat_id,
+            identity.msgid,
+        )
+
+
+class _WorkspaceSubAgentPort:
+    def __init__(self, workspace: "Workspace") -> None:
+        self._workspace = workspace
+
+    async def cancel_for_turn(self, identity: TurnIdentity) -> None:
+        from ...agents.tools.subagent_background import (
+            build_background_subagent_scope,
+            get_default_background_subagent_supervisor,
+        )
+
+        workspace = self._workspace
+        supervisor = getattr(workspace, "subagent_supervisor", None)
+        if supervisor is None:
+            supervisor = get_default_background_subagent_supervisor()
+        scope = build_background_subagent_scope(
+            parent_agent_config=workspace.config,
+            request_context={
+                "tenant_id": workspace.tenant_id,
+                "agent_id": workspace.agent_id,
+                "chat_id": identity.chat_id,
+                "msgid": identity.msgid,
+            },
+        )
+        await supervisor.cancel_turn_runs(
+            scope,
+            chat_id=identity.chat_id,
+            msgid=identity.msgid,
+        )
 
 
 def _build_scheduler_adapter():
@@ -109,8 +174,10 @@ class Workspace:
         # Non-service state
         self._config = None  # Loaded before start()
         self._started = False
+        self._starting = False
         self._manager = None  # Reference to MultiAgentManager
         self._task_tracker = TaskTracker()
+        self._answer_turn_coordinator: AnswerTurnCoordinator | None = None
 
         # Register all services
         self._register_services()
@@ -152,6 +219,11 @@ class Workspace:
         return self._task_tracker
 
     @property
+    def answer_turn_coordinator(self) -> AnswerTurnCoordinator | None:
+        """Get the workspace-owned answer-turn state machine."""
+        return self._answer_turn_coordinator
+
+    @property
     def config(self):
         """Get agent configuration."""
         if self._config is None:
@@ -186,6 +258,22 @@ class Workspace:
         except Exception:
             return "UTC"
 
+    def _create_answer_turn_coordinator(self) -> AnswerTurnCoordinator:
+        """Wire the per-workspace answer-turn ports around its Runner."""
+        runner = self._service_manager.services["runner"]
+        coordinator = AnswerTurnCoordinator(
+            stream=self._task_tracker,
+            execution=runner,
+            session=runner,
+            goal=_WorkspaceGoalPort(self),
+            subagent=_WorkspaceSubAgentPort(self),
+            approval=_WorkspaceApprovalPort(),
+        )
+        runner.set_answer_turn_coordinator(coordinator)
+        self._answer_turn_coordinator = coordinator
+        self._service_manager.services["answer_turn_coordinator"] = coordinator
+        return coordinator
+
     def _register_services(  # pylint: disable=too-many-statements
         self,
     ) -> None:
@@ -210,6 +298,17 @@ class Workspace:
                 },
                 stop_method="stop",
                 priority=10,
+                concurrent_init=False,
+            ),
+        )
+
+        # Priority 15: Answer-turn ownership after its Runner exists.
+        sm.register(
+            ServiceDescriptor(
+                name="answer_turn_coordinator",
+                service_class=None,
+                post_init=lambda ws, _: ws._create_answer_turn_coordinator(),
+                priority=15,
                 concurrent_init=False,
             ),
         )
@@ -364,6 +463,7 @@ class Workspace:
         logger.info(f"Starting workspace: {self.agent_id}")
 
         try:
+            self._starting = True
             # 1. Load agent configuration
             self._config = load_agent_config(
                 self.agent_id,
@@ -375,36 +475,83 @@ class Workspace:
             await self._service_manager.start_all()
 
             self._started = True
+            self._starting = False
             logger.info(f"Workspace started successfully: {self.agent_id}")
 
+        except asyncio.CancelledError:
+            logger.info(f"Workspace start cancelled: {self.agent_id}")
+            await self.stop(final=True, stop_reused=False)
+            raise
         except Exception as e:
             logger.error(
                 f"Failed to start agent instance {self.agent_id}: {e}",
             )
             # Clean up partially started components
-            await self.stop()
+            await self.stop(final=True, stop_reused=False)
             raise
 
-    async def stop(self, final: bool = True):
+    async def stop(self, final: bool = True, *, stop_reused: bool = True):
         """Stop agent instance and clean up all resources.
 
         Args:
             final: If True (default), stop ALL services including reusable.
                    If False, skip reusable services (for reload scenario).
+            stop_reused: If False, skip services borrowed from another
+                workspace even during final cleanup.
         """
-        if not self._started:
+        if not self._started and not self._starting:
             logger.debug(f"Workspace not started: {self.agent_id}")
             return
 
         logger.info(
-            f"Stopping agent instance: {self.agent_id} (final={final})",
+            f"Stopping agent instance: {self.agent_id} "
+            f"(final={final}, stop_reused={stop_reused})",
+        )
+
+        service_refs = (
+            dict(getattr(self._service_manager, "services", {}))
+            if final
+            else {}
         )
 
         # Stop all services via ServiceManager (handles reuse automatically)
-        await self._service_manager.stop_all(final=final)
+        await self._service_manager.stop_all(
+            final=final,
+            stop_reused=stop_reused,
+        )
+
+        if final:
+            self._release_final_service_references(service_refs)
 
         self._started = False
+        self._starting = False
         logger.info(f"Workspace stopped: {self.agent_id}")
+
+    def _release_final_service_references(self, services: dict) -> None:
+        """Drop reverse references held by services after final shutdown."""
+        runner = services.get("runner")
+        if runner is not None:
+            if hasattr(runner, "set_workspace"):
+                runner.set_workspace(None)
+            if hasattr(runner, "set_chat_manager"):
+                runner.set_chat_manager(None)
+            if hasattr(runner, "memory_manager"):
+                runner.memory_manager = None
+            if hasattr(runner, "_manager"):
+                runner._manager = None  # pylint: disable=protected-access
+            if hasattr(runner, "set_answer_turn_coordinator"):
+                runner.set_answer_turn_coordinator(None)
+
+        channel_manager = services.get("channel_manager")
+        if channel_manager is not None and hasattr(
+            channel_manager,
+            "set_workspace",
+        ):
+            channel_manager.set_workspace(None)
+
+        self._manager = None
+        self._config = None
+        self._answer_turn_coordinator = None
 
     def __repr__(self) -> str:
         """String representation of workspace."""

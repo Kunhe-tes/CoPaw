@@ -89,6 +89,25 @@ class BaseChatRepository(ABC):
         logger.debug("get_chat_by_id: No match found")
         return None
 
+    async def create_chat_if_absent_by_session(
+        self,
+        spec: ChatSpec,
+    ) -> tuple[ChatSpec, bool]:
+        """Create a Chat only when its logical session has no record yet.
+
+        Storage implementations with cross-process coordination override this
+        compare-and-set operation. The default supports in-memory repositories.
+        """
+        existing = await self.get_chat_by_id(
+            spec.session_id,
+            spec.user_id,
+            spec.channel,
+        )
+        if existing is not None:
+            return existing, False
+        await self.upsert_chat(spec)
+        return spec, True
+
     async def upsert_chat(self, spec: ChatSpec) -> None:
         """Insert or update a chat spec.
 
@@ -149,6 +168,18 @@ class BaseChatRepository(ABC):
 
         return results
 
+    async def get_chat_id_by_session(
+        self,
+        session_id: str,
+        channel: str,
+    ) -> str | None:
+        """Return the most recently updated chat for a session and channel."""
+        chats = await self.filter_chats(channel=channel)
+        matching = [chat for chat in chats if chat.session_id == session_id]
+        if not matching:
+            return None
+        return max(matching, key=lambda chat: chat.updated_at).id
+
     async def paginate_chats(
         self,
         *,
@@ -160,13 +191,7 @@ class BaseChatRepository(ABC):
         """Return one filtered chat page in stable newest-first order."""
         chats = await self.filter_chats(user_id=user_id, channel=channel)
 
-        def _sort_key(chat: ChatSpec) -> tuple[float, str]:
-            updated_at = chat.updated_at
-            if updated_at.tzinfo is None:
-                updated_at = updated_at.replace(tzinfo=timezone.utc)
-            return updated_at.timestamp(), chat.id
-
-        ordered = sorted(chats, key=_sort_key, reverse=True)
+        ordered = self.sort_chats_by_recency(chats)
         total = len(ordered)
         offset = (page - 1) * page_size
         items = ordered[offset : offset + page_size]
@@ -179,33 +204,52 @@ class BaseChatRepository(ABC):
         )
 
     @staticmethod
-    def _cursor_sort_key(chat: ChatSpec) -> tuple[datetime, str]:
+    def _recency_sort_key(chat: ChatSpec) -> tuple[datetime, str]:
+        updated_at = chat.updated_at
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        return updated_at, chat.id
+
+    @staticmethod
+    def _creation_sort_key(chat: ChatSpec) -> tuple[datetime, str]:
         created_at = chat.created_at
         if created_at.tzinfo is None:
             created_at = created_at.replace(tzinfo=timezone.utc)
         return created_at, chat.id
 
+    @classmethod
+    def sort_chats_by_recency(cls, chats: list[ChatSpec]) -> list[ChatSpec]:
+        """Return chats ordered by latest update, then identifier."""
+        return sorted(chats, key=cls._recency_sort_key, reverse=True)
+
     @staticmethod
-    def _encode_cursor(key: tuple[datetime, str]) -> str:
-        created_at, chat_id = key
+    def _encode_cursor(
+        key: tuple[datetime, str],
+        *,
+        version: str = "v2",
+    ) -> str:
+        timestamp, chat_id = key
+        cursor_payload = (
+            [timestamp.astimezone(timezone.utc).isoformat(), chat_id]
+            if version == "v1"
+            else [
+                "v2",
+                timestamp.astimezone(timezone.utc).isoformat(),
+                chat_id,
+            ]
+        )
         payload = json.dumps(
-            [created_at.astimezone(timezone.utc).isoformat(), chat_id],
+            cursor_payload,
             separators=(",", ":"),
         ).encode("utf-8")
         return base64.urlsafe_b64encode(payload).decode("ascii")
 
     @staticmethod
-    def _decode_cursor(cursor: str) -> tuple[datetime, str]:
+    def _decode_cursor(cursor: str) -> tuple[str, tuple[datetime, str]]:
         try:
-            created_at_raw, chat_id = json.loads(
+            payload = json.loads(
                 base64.urlsafe_b64decode(cursor.encode("ascii")),
             )
-            created_at = datetime.fromisoformat(created_at_raw)
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=timezone.utc)
-            if not isinstance(chat_id, str) or not chat_id:
-                raise ValueError
-            return created_at, chat_id
         except (
             ValueError,
             TypeError,
@@ -215,6 +259,26 @@ class BaseChatRepository(ABC):
         ) as exc:
             raise ValueError("Invalid chat pagination cursor") from exc
 
+        if not isinstance(payload, list):
+            raise ValueError("Invalid chat pagination cursor")
+        if len(payload) == 2:
+            version = "v1"
+            timestamp_raw, chat_id = payload
+        elif len(payload) == 3 and payload[0] == "v2":
+            version, timestamp_raw, chat_id = payload
+        else:
+            raise ValueError("Invalid chat pagination cursor")
+
+        try:
+            timestamp = datetime.fromisoformat(timestamp_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Invalid chat pagination cursor") from exc
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        if not isinstance(chat_id, str) or not chat_id:
+            raise ValueError("Invalid chat pagination cursor")
+        return version, (timestamp, chat_id)
+
     async def paginate_chats_cursor(
         self,
         *,
@@ -223,22 +287,25 @@ class BaseChatRepository(ABC):
         user_id: Optional[str] = None,
         channel: Optional[str] = None,
     ) -> ChatPage:
-        """Return a stable page ordered by immutable creation identity."""
+        """Return a latest-update page or continue a legacy creation-time page."""
         chats = await self.filter_chats(user_id=user_id, channel=channel)
-        ordered = sorted(chats, key=self._cursor_sort_key, reverse=True)
+        cursor_version = "v2"
+        sort_key = self._recency_sort_key
+        boundary: tuple[datetime, str] | None = None
         if cursor:
-            boundary = self._decode_cursor(cursor)
-            ordered = [
-                chat
-                for chat in ordered
-                if self._cursor_sort_key(chat) < boundary
-            ]
+            cursor_version, boundary = self._decode_cursor(cursor)
+            if cursor_version == "v1":
+                sort_key = self._creation_sort_key
+
+        ordered = sorted(chats, key=sort_key, reverse=True)
+        if boundary:
+            ordered = [chat for chat in ordered if sort_key(chat) < boundary]
 
         total = len(chats)
         items = ordered[:page_size]
         has_more = len(ordered) > len(items)
         next_cursor = (
-            self._encode_cursor(self._cursor_sort_key(items[-1]))
+            self._encode_cursor(sort_key(items[-1]), version=cursor_version)
             if has_more and items
             else None
         )

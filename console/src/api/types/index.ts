@@ -13,6 +13,7 @@ export * from "./myMcp";
 export * from "./marketMcp";
 export * from "./tokenUsage";
 export * from "./feedback";
+export * from "./approval";
 export * from "./htmlPreviewEvents";
 export * from "./systemCheck";
 export * from "./claw";

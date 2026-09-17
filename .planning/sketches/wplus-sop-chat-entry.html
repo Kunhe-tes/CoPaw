@@ -1,0 +1,621 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CoPaw Chat · 进入 W+ SOP 工作台</title>
+  <link rel="icon" href="data:," />
+  <style>
+    :root {
+      --primary: #3769fc;
+      --primary-hover: #2f5de5;
+      --primary-soft: #eef4ff;
+      --canvas: #f7f9fc;
+      --surface: #ffffff;
+      --surface-subtle: #f5f7fa;
+      --ink: #182033;
+      --ink-secondary: #46536a;
+      --ink-muted: #7b879b;
+      --border: #e5e7eb;
+      --border-strong: #ccd3df;
+      --success: #1f8a56;
+      --success-soft: #eaf7f0;
+      --font: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+      --mono: "Cascadia Code", Consolas, monospace;
+      --shadow: 0 8px 24px rgba(20, 32, 58, 0.06);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      min-height: 100%;
+      margin: 0;
+      color: var(--ink);
+      font-family: var(--font);
+      background: var(--canvas);
+    }
+
+    button, textarea { font: inherit; }
+
+    button {
+      min-height: 40px;
+      border: 0;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 160ms ease;
+    }
+
+    button:active { transform: translateY(1px); }
+    button:focus-visible, textarea:focus-visible { outline: 3px solid rgba(55, 105, 252, 0.24); outline-offset: 2px; }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      height: 56px;
+      padding: 0 22px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .brand, .top-actions, .chat-title, .message-meta, .entry-kicker, .entry-actions, .session-line {
+      display: flex;
+      align-items: center;
+    }
+
+    .brand { gap: 12px; }
+
+    .brand-mark {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      font-weight: 700;
+      background: var(--primary);
+      border-radius: 9px;
+      box-shadow: 0 7px 16px rgba(55, 105, 252, 0.22);
+    }
+
+    .brand strong { font-size: 15px; }
+    .brand small { display: block; margin-top: 1px; color: var(--ink-muted); font-size: 11px; }
+    .top-actions { gap: 8px; }
+
+    .ghost, .outline, .primary {
+      padding: 0 14px;
+      color: var(--ink-secondary);
+      background: transparent;
+      border: 1px solid transparent;
+    }
+
+    .ghost:hover { color: var(--ink); background: var(--surface-subtle); }
+    .outline { background: var(--surface); border-color: var(--border-strong); }
+    .outline:hover { color: var(--ink); border-color: #9eabc0; }
+
+    .primary {
+      color: #fff;
+      font-weight: 650;
+      background: var(--primary);
+      border-color: var(--primary);
+      box-shadow: 0 8px 18px rgba(55, 105, 252, 0.18);
+    }
+
+    .primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
+    button:disabled { cursor: wait; opacity: 0.65; }
+
+    .shell {
+      min-height: calc(100vh - 56px);
+      display: grid;
+      grid-template-columns: 68px minmax(0, 1fr);
+    }
+
+    .global-rail {
+      padding: 14px 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      background: #111827;
+    }
+
+    .rail-button {
+      width: 42px;
+      min-height: 42px;
+      display: grid;
+      place-items: center;
+      color: #9aa6ba;
+      background: transparent;
+    }
+
+    .rail-button.active { color: #fff; background: rgba(255, 255, 255, 0.12); }
+    .rail-button svg { width: 20px; height: 20px; }
+    .rail-spacer { flex: 1; }
+
+    .chat-shell {
+      min-width: 0;
+      display: grid;
+      grid-template-rows: 72px minmax(0, 1fr);
+    }
+
+    .chat-header {
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .chat-title { gap: 12px; }
+    .chat-title h1 { margin: 0; font-size: 17px; font-weight: 650; }
+    .chat-title p { margin: 4px 0 0; color: var(--ink-muted); font-size: 11px; }
+
+    .demo-switcher {
+      padding: 4px;
+      display: flex;
+      gap: 3px;
+      background: var(--surface-subtle);
+      border: 1px solid var(--border);
+      border-radius: 9px;
+    }
+
+    .demo-switcher button { min-height: 32px; padding: 0 11px; color: var(--ink-muted); font-size: 12px; background: transparent; }
+    .demo-switcher button.active { color: var(--primary); background: #fff; box-shadow: 0 1px 4px rgba(20, 32, 58, 0.08); }
+
+    .chat-body {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 310px;
+    }
+
+    .conversation {
+      position: relative;
+      min-width: 0;
+      overflow-y: auto;
+      padding: 28px 24px 124px;
+    }
+
+    .thread { width: min(820px, 100%); margin: 0 auto; }
+
+    .day-divider {
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: var(--ink-muted);
+      font-size: 11px;
+    }
+
+    .day-divider::before, .day-divider::after { height: 1px; flex: 1; content: ""; background: var(--border); }
+
+    .message { margin-top: 15px; }
+    .message.user { width: min(680px, 88%); margin-left: auto; }
+    .message.agent { width: min(720px, 94%); }
+
+    .message-bubble {
+      padding: 15px 17px;
+      color: var(--ink-secondary);
+      font-size: 13px;
+      line-height: 1.65;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+    }
+
+    .message.user .message-bubble { background: var(--primary-soft); border-color: rgba(55, 105, 252, 0.16); }
+    .message-meta { margin-bottom: 7px; justify-content: space-between; color: var(--ink-muted); font-size: 10px; }
+    .message-meta strong { color: var(--primary); font-weight: 650; }
+
+    .entry-card, .resume-card {
+      margin-top: 14px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: 0 14px 34px rgba(20, 32, 58, 0.09);
+      overflow: hidden;
+    }
+
+    .entry-card::before, .resume-card::before { display: block; height: 3px; content: ""; background: var(--primary); }
+    .entry-content { padding: 20px; }
+    .entry-kicker { gap: 8px; color: var(--primary); font-size: 11px; font-weight: 700; letter-spacing: 0.02em; }
+
+    .skill-mark {
+      width: 24px;
+      height: 24px;
+      display: grid;
+      place-items: center;
+      color: var(--primary);
+      background: var(--primary-soft);
+      border-radius: 7px;
+    }
+
+    .entry-card h2, .resume-card h2 { margin: 12px 0 0; font-size: 20px; line-height: 1.35; }
+    .entry-copy { margin: 8px 0 0; color: var(--ink-secondary); font-size: 13px; line-height: 1.65; }
+
+    .entry-facts {
+      margin-top: 16px;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    .entry-fact {
+      min-height: 74px;
+      padding: 11px;
+      color: var(--ink-secondary);
+      font-size: 11px;
+      line-height: 1.5;
+      background: var(--surface-subtle);
+      border-radius: 8px;
+    }
+
+    .entry-fact strong { display: block; margin-bottom: 3px; color: var(--ink); font-size: 12px; }
+
+    .boundary {
+      margin-top: 12px;
+      padding: 10px 12px;
+      color: #3157b7;
+      font-size: 11px;
+      line-height: 1.55;
+      background: var(--primary-soft);
+      border: 1px solid rgba(55, 105, 252, 0.14);
+      border-radius: 8px;
+    }
+
+    .entry-actions {
+      margin-top: 18px;
+      justify-content: flex-end;
+      gap: 9px;
+    }
+
+    .entry-actions button { min-height: 42px; }
+
+    .session-line {
+      margin-top: 16px;
+      padding: 12px;
+      justify-content: space-between;
+      gap: 14px;
+      background: var(--surface-subtle);
+      border-radius: 8px;
+    }
+
+    .session-line strong { display: block; font-size: 12px; }
+    .session-line span { display: block; margin-top: 4px; color: var(--ink-muted); font-size: 11px; }
+
+    .session-status {
+      flex: 0 0 auto;
+      padding: 5px 8px;
+      color: var(--success);
+      font-size: 10px;
+      font-weight: 700;
+      background: var(--success-soft);
+      border-radius: 999px;
+    }
+
+    .plain-followup { display: none; }
+    .plain-followup.show { display: block; }
+    [hidden] { display: none !important; }
+
+    .composer {
+      position: fixed;
+      right: 310px;
+      bottom: 0;
+      left: 68px;
+      z-index: 10;
+      padding: 14px 24px;
+      background: linear-gradient(180deg, rgba(247, 249, 252, 0), rgba(247, 249, 252, 0.96) 22%, #f7f9fc 45%);
+    }
+
+    .composer-inner {
+      width: min(820px, 100%);
+      margin: 0 auto;
+      padding: 8px 9px 8px 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: #fff;
+      border: 1px solid var(--border-strong);
+      border-radius: 12px;
+      box-shadow: 0 12px 32px rgba(20, 32, 58, 0.1);
+    }
+
+    .composer textarea { min-height: 42px; flex: 1; resize: none; border: 0; outline: 0; color: var(--ink); }
+    .composer textarea:disabled { color: var(--ink-muted); background: #fff; }
+    .send { width: 42px; min-height: 42px; padding: 0; }
+
+    .flow-panel {
+      padding: 22px 18px;
+      background: var(--surface);
+      border-left: 1px solid var(--border);
+    }
+
+    .flow-panel h2 { margin: 0; font-size: 14px; }
+    .flow-panel > p { margin: 7px 0 0; color: var(--ink-muted); font-size: 11px; line-height: 1.55; }
+    .flow-list { margin-top: 20px; display: grid; gap: 0; }
+
+    .flow-step {
+      position: relative;
+      min-height: 76px;
+      padding-left: 40px;
+    }
+
+    .flow-step::after {
+      position: absolute;
+      top: 28px;
+      bottom: -4px;
+      left: 14px;
+      width: 1px;
+      content: "";
+      background: var(--border);
+    }
+
+    .flow-step:last-child::after { display: none; }
+
+    .flow-number {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 28px;
+      height: 28px;
+      display: grid;
+      place-items: center;
+      color: var(--primary);
+      font: 700 11px var(--mono);
+      background: var(--primary-soft);
+      border-radius: 8px;
+    }
+
+    .flow-step strong { display: block; font-size: 12px; }
+    .flow-step span { display: block; margin-top: 4px; color: var(--ink-muted); font-size: 11px; line-height: 1.5; }
+
+    .toast {
+      position: fixed;
+      right: 330px;
+      bottom: 92px;
+      z-index: 40;
+      padding: 11px 14px;
+      color: #fff;
+      font-size: 12px;
+      background: #1f2937;
+      border-radius: 9px;
+      box-shadow: var(--shadow);
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(8px);
+      transition: opacity 160ms ease, transform 160ms ease;
+    }
+
+    .toast.show { opacity: 1; transform: translateY(0); }
+
+    @media (max-width: 980px) {
+      .chat-body { grid-template-columns: 1fr; }
+      .flow-panel { display: none; }
+      .composer { right: 0; }
+    }
+
+    @media (max-width: 720px) {
+      .topbar { padding: 0 14px; }
+      .brand small, .top-actions .ghost { display: none; }
+      .shell { grid-template-columns: 1fr; }
+      .global-rail { display: none; }
+      .chat-header { padding: 10px 14px; align-items: flex-start; }
+      .chat-title h1 { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .demo-switcher button { padding: 0 8px; }
+      .conversation { padding: 20px 14px 132px; }
+      .message.user, .message.agent { width: 100%; }
+      .entry-content { padding: 17px; }
+      .entry-facts { grid-template-columns: 1fr; }
+      .entry-fact { min-height: 0; }
+      .entry-actions { align-items: stretch; flex-direction: column-reverse; }
+      .entry-actions button { width: 100%; min-height: 44px; }
+      .composer { left: 0; padding: 12px 14px; }
+      .toast { right: 14px; bottom: 94px; left: 14px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { transition-duration: 0.01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">C</div>
+      <div><strong>CoPaw</strong><small>企业智能工作台</small></div>
+    </div>
+    <div class="top-actions">
+      <button class="ghost">新建对话</button>
+      <button class="outline">会话设置</button>
+    </div>
+  </header>
+
+  <main class="shell">
+    <nav class="global-rail" aria-label="CoPaw 主导航">
+      <button class="rail-button active" aria-label="Chat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 5.5h14v10H9l-4 3v-13Z"/></svg>
+      </button>
+      <button class="rail-button" aria-label="技能">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3 4.5 7.2v9.6L12 21l7.5-4.2V7.2z"/><path d="m4.8 7.4 7.2 4.1 7.2-4.1M12 11.5V21"/></svg>
+      </button>
+      <div class="rail-spacer"></div>
+      <button class="rail-button" aria-label="帮助">?</button>
+    </nav>
+
+    <section class="chat-shell">
+      <header class="chat-header">
+        <div class="chat-title">
+          <div>
+            <h1>产品到期筛选</h1>
+            <p>Chat-20260728-118 · 与 W+ SOP 会话共享审计历史</p>
+          </div>
+        </div>
+        <div class="demo-switcher" aria-label="入口演示状态">
+          <button class="active" data-mode="entry">首次进入</button>
+          <button data-mode="resume">进行中返回</button>
+        </div>
+      </header>
+
+      <div class="chat-body">
+        <section class="conversation">
+          <div class="thread">
+            <div class="day-divider">今天 16:08</div>
+
+            <article class="message user">
+              <div class="message-bubble">
+                <div class="message-meta"><strong>你</strong><span>16:08</span></div>
+                帮我把产品到期客户筛选、资产变化复核和后续跟进梳理成一套可以反复使用的 SOP。
+              </div>
+            </article>
+
+            <article class="message agent" id="entry-message">
+              <div class="message-bubble">
+                <div class="message-meta"><strong>CoPaw</strong><span>16:08</span></div>
+                我识别到这是一个多环节 SOP 梳理请求，建议进入 W+ SOP 专用工作台继续。
+              </div>
+
+              <section class="entry-card" aria-label="进入 W+ SOP 工作台">
+                <div class="entry-content">
+                  <div class="entry-kicker"><span class="skill-mark">W+</span><span>建议使用 · wplus-sop-miner</span></div>
+                  <h2>在专用工作台中梳理这套流程</h2>
+                  <p class="entry-copy">进入后会先提议 2–4 个环节并等待你确认，再逐环节澄清。每个环节的完整预跑由 CoPaw 代你执行，你只需要检查脱敏结果并反馈。</p>
+                  <div class="entry-facts">
+                    <div class="entry-fact"><strong>先确认环节</strong>不会在进入时同时抛出一组问题。</div>
+                    <div class="entry-fact"><strong>系统完成预跑</strong>无需复制 OpenCLI 命令或切换环境。</div>
+                    <div class="entry-fact"><strong>绑定当前 Chat</strong>进度、审计和恢复入口仍留在这里。</div>
+                  </div>
+                  <div class="boundary">进入只会创建一个绑定当前 Chat 的持久化 SOP 会话。真正调用能力前仍遵守现有工具授权；写入和不可逆动作不会绕过确认。</div>
+                  <div class="entry-actions">
+                    <button class="outline" id="continue-chat">继续在 Chat 中处理</button>
+                    <button class="primary" id="enter-workspace">进入 W+ SOP 工作台</button>
+                  </div>
+                </div>
+              </section>
+            </article>
+
+            <article class="message agent" id="resume-message" hidden>
+              <div class="message-bubble">
+                <div class="message-meta"><strong>CoPaw</strong><span>16:12</span></div>
+                当前 Chat 已绑定一个进行中的 W+ SOP 会话。Chat 只展示状态与审计，回答和反馈仍在工作台完成。
+              </div>
+              <section class="resume-card" aria-label="继续 W+ SOP 工作台">
+                <div class="entry-content">
+                  <div class="entry-kicker"><span class="skill-mark">W+</span><span>进行中 · SOP-0728-04</span></div>
+                  <h2>产品到期客户筛选与跟进 SOP</h2>
+                  <div class="session-line">
+                    <div><strong>环节 1 / 4 · 产品到期名单</strong><span>预跑已完成，等待你反馈或确认</span></div>
+                    <span class="session-status">AwaitingTrialFeedback</span>
+                  </div>
+                  <div class="entry-actions">
+                    <button class="outline" id="pause-session">保存并退出</button>
+                    <button class="primary" id="resume-workspace">继续工作台</button>
+                  </div>
+                </div>
+              </section>
+            </article>
+
+            <article class="message agent plain-followup" id="plain-followup">
+              <div class="message-bubble">
+                <div class="message-meta"><strong>CoPaw</strong><span>16:09</span></div>
+                好的，本轮继续作为普通 Chat 处理，并且不会再次询问是否进入 W+ SOP 工作台。
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <aside class="flow-panel">
+          <h2>从 Chat 进入工作台</h2>
+          <p>入口和恢复都留在所属 Chat；工作台不是第二条对话。</p>
+          <div class="flow-list">
+            <div class="flow-step"><span class="flow-number">01</span><strong>识别 SOP 请求</strong><span>显式调用或隐式识别后生成入口卡。</span></div>
+            <div class="flow-step"><span class="flow-number">02</span><strong>用户确认进入</strong><span>拒绝则继续普通 Chat，本轮不重复提醒。</span></div>
+            <div class="flow-step"><span class="flow-number">03</span><strong>创建持久化会话</strong><span>后端先写入 session_id，再返回工作台路由。</span></div>
+            <div class="flow-step"><span class="flow-number">04</span><strong>工作台成为写入口</strong><span>Chat 保留只读审计、进度和继续入口。</span></div>
+          </div>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <div class="composer">
+    <div class="composer-inner">
+      <textarea id="composer-input" aria-label="Chat 输入" disabled>W+ SOP 进行期间，请在工作台回答；保存退出后恢复 Chat 输入。</textarea>
+      <button class="primary send" aria-label="发送" disabled>↑</button>
+    </div>
+  </div>
+
+  <div class="toast" id="toast">状态已更新</div>
+
+  <script>
+    const entryMessage = document.getElementById("entry-message");
+    const resumeMessage = document.getElementById("resume-message");
+    const plainFollowup = document.getElementById("plain-followup");
+    const composerInput = document.getElementById("composer-input");
+    const toast = document.getElementById("toast");
+    const modeButtons = [...document.querySelectorAll("[data-mode]")];
+
+    function showToast(message) {
+      toast.textContent = message;
+      toast.classList.add("show");
+      window.clearTimeout(showToast.timer);
+      showToast.timer = window.setTimeout(() => toast.classList.remove("show"), 2200);
+    }
+
+    function setMode(mode) {
+      const resume = mode === "resume";
+      entryMessage.hidden = resume;
+      resumeMessage.hidden = !resume;
+      plainFollowup.classList.remove("show");
+      composerInput.disabled = resume;
+      composerInput.value = resume
+        ? "W+ SOP 进行期间，请在工作台回答；保存退出后恢复 Chat 输入。"
+        : "输入消息…";
+      modeButtons.forEach((button) => button.classList.toggle("active", button.dataset.mode === mode));
+      const url = new URL(window.location.href);
+      if (resume) url.searchParams.set("resume", "1");
+      else url.searchParams.delete("resume");
+      window.history.replaceState({}, "", url);
+    }
+
+    modeButtons.forEach((button) => button.addEventListener("click", () => setMode(button.dataset.mode)));
+
+    document.getElementById("enter-workspace").addEventListener("click", (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      button.textContent = "正在创建会话…";
+      localStorage.setItem("wplus-prototype-screen", "queue");
+      localStorage.removeItem("wplus-prototype-trial-status");
+      showToast("会话已持久化，正在进入专用工作台");
+      window.setTimeout(() => {
+        window.location.href = "wplus-sop-focus-workspace.html?from=chat";
+      }, window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 80 : 700);
+    });
+
+    document.getElementById("continue-chat").addEventListener("click", () => {
+      entryMessage.querySelector(".entry-card").hidden = true;
+      plainFollowup.classList.add("show");
+      composerInput.disabled = false;
+      composerInput.value = "";
+      composerInput.placeholder = "继续在当前 Chat 中提问…";
+      showToast("已继续普通 Chat，本轮不再重复识别");
+    });
+
+    document.getElementById("resume-workspace").addEventListener("click", () => {
+      window.location.href = "wplus-sop-focus-workspace.html";
+    });
+
+    document.getElementById("pause-session").addEventListener("click", () => {
+      composerInput.disabled = false;
+      composerInput.value = "";
+      composerInput.placeholder = "会话已暂停，可以继续普通 Chat…";
+      showToast("SOP 会话已保存为 Paused，Chat 输入已恢复");
+    });
+
+    setMode(new URLSearchParams(window.location.search).has("resume") ? "resume" : "entry");
+  </script>
+</body>
+</html>

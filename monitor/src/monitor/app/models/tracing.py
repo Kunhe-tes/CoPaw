@@ -79,9 +79,9 @@ class Span(BaseModel):
         default=None,
         description="Skill name for skill events",
     )
-    skill_description: Optional[str] = Field(
+    skill_id: Optional[str] = Field(
         default=None,
-        description="Skill description from SKILL.md",
+        description="Skill unique identifier",
     )
     mcp_server: Optional[str] = Field(
         default=None,
@@ -111,6 +111,10 @@ class Trace(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
 
     trace_id: str = Field(description="Unique trace identifier")
+    b3_trace_id: Optional[str] = Field(
+        default=None,
+        description="External B3 trace identifier for distributed correlation",
+    )
     source_id: str = Field(description="Source identifier for data isolation")
     user_id: str = Field(description="User identifier")
     user_name: Optional[str] = Field(default=None, description="User name")
@@ -194,6 +198,14 @@ class SkillUsage(BaseModel):
     """Skill usage statistics with weighted attribution."""
 
     skill_name: str
+    skill_id: Optional[str] = Field(
+        default=None,
+        description="技能唯一标识符",
+    )
+    cn_name: Optional[str] = Field(
+        default=None,
+        description="技能中文名（来自 swe_skills，由前端决定如何回退展示）",
+    )
     skill_description: Optional[str] = Field(
         default=None,
         description="技能描述",
@@ -266,12 +278,17 @@ class OverviewStats(BaseModel):
     total_sessions: int = 0
     total_conversations: int = 0
     total_skill_calls: int = 0  # 技能调用总次数
+    # 客户点击统计
+    plan_customers: int = 0  # 查看方案客户数
+    insight_customers: int = 0  # 去洞察客户数
+    phone_customers: int = 0  # 去电访客户数
     avg_duration_ms: int = 0
     top_tools: list[ToolUsage] = Field(default_factory=list)
     top_skills: list[SkillUsage] = Field(default_factory=list)
     top_mcp_tools: list[MCPToolUsage] = Field(default_factory=list)
     mcp_servers: list[MCPServerUsage] = Field(default_factory=list)
     daily_trend: list[DailyStats] = Field(default_factory=list)
+    growth_stats: dict[str, float | None] = Field(default_factory=dict)
     branch_breakdown: "OverviewBranchBreakdown" = Field(
         default_factory=lambda: OverviewBranchBreakdown(),  # pylint: disable=unnecessary-lambda
     )
@@ -295,6 +312,7 @@ class OverviewBranchBreakdown(BaseModel):
     tokens: list[BranchMetricItem] = Field(default_factory=list)
     skills: list[BranchMetricItem] = Field(default_factory=list)
     cron_tasks: list[BranchMetricItem] = Field(default_factory=list)
+    customers: list[BranchMetricItem] = Field(default_factory=list)
 
 
 class TaskStatusBreakdown(BaseModel):
@@ -309,11 +327,18 @@ class TaskStatusSummary(BaseModel):
     """定时任务执行汇总统计."""
 
     total_tasks: int = 0  # 总执行次数
-    success: int = 0  # 成功次数
-    failed: int = 0  # 失败次数
+    success: int = 0  # 成功次数（status='success' AND async_status='success'）
+    running: int = 0  # 运行中次数（status='success' AND async_status IS NULL）
+    failed: int = 0  # 失败次数（综合判断）
     cancelled: int = 0  # 已取消/跳过次数
     read_count: int = 0  # 已读次数
-    new_cron_tasks: int = 0  # 新增定时任务数（本时间段内创建的）
+
+
+class ModelErrorCodeCount(BaseModel):
+    """模型报错错误码计数."""
+
+    code: str = Field(description="错误码")
+    count: int = Field(description="数量")
 
 
 class ErrorSummary(BaseModel):
@@ -322,6 +347,10 @@ class ErrorSummary(BaseModel):
     total_errors: int = 0  # 报错总数
     model_errors: int = 0  # 模型报错（llm_input）
     tool_errors: int = 0  # 工具报错（tool_call_end）
+    model_error_codes: list[ModelErrorCodeCount] = Field(
+        default_factory=list,
+        description="模型报错错误码 Top 10",
+    )
 
 
 class ErrorItem(BaseModel):
@@ -367,15 +396,6 @@ class ErrorListResponse(BaseModel):
     total: int = Field(default=0, description="总数")
     page: int = Field(default=1, description="当前页码")
     page_size: int = Field(default=10, description="每页数量")
-
-
-class DepthSummary(BaseModel):
-    """使用深度汇总统计."""
-
-    avg_rounds: float = 0.0  # 单次会话平均轮数
-    multi_round_ratio: float = 0.0  # 多轮会话占比(>3轮)百分比
-    avg_duration_seconds: int = 0  # 平均对话时长（秒）
-    avg_sessions_per_user: float = 0.0  # 人均会话数
 
 
 class UserStats(BaseModel):
@@ -742,3 +762,49 @@ class InputTokensFixItem(BaseModel):
     old_input_tokens: int = Field(description="修复前的输入 token")
     new_input_tokens: int = Field(description="修复后的输入 token")
     span_input_sum: int = Field(description="span 汇总值（作为修复依据）")
+
+
+class InitSpanSkillIdRequest(BaseModel):
+    """历史 span skill_id 初始化请求."""
+
+    source_id: Optional[str] = Field(
+        default=None,
+        description="限定数据源；为空表示全部",
+    )
+    batch_size: int = Field(
+        default=1000,
+        ge=1,
+        le=10000,
+        description="每批处理 span 数量",
+    )
+    dry_run: bool = Field(
+        default=True,
+        description="仅匹配，不写库",
+    )
+
+
+class InitSpanSkillIdResponse(BaseModel):
+    """历史 span skill_id 初始化响应."""
+
+    dry_run: bool
+    scanned: int = Field(default=0, description="扫描的待初始化 span 数量")
+    matched: int = Field(default=0, description="唯一匹配并回填的数量")
+    updated: int = Field(default=0, description="实际写入数据库的数量")
+    unmatched: int = Field(default=0, description="无技能表匹配的数量")
+    skipped: int = Field(default=0, description="未写入的 span 数量")
+    ambiguous: int = Field(
+        default=0,
+        description="同一 source_id+skill_name 存在多个候选的数量",
+    )
+    selected_from_ambiguous: int = Field(
+        default=0,
+        description="歧义时按稳定规则选一个并写入的数量",
+    )
+    samples: list[dict] = Field(
+        default_factory=list,
+        description="未匹配和歧义样本（最多 20 条）",
+    )
+    errors: list[dict] = Field(
+        default_factory=list,
+        description="处理过程中的异常",
+    )

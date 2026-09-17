@@ -49,4 +49,3 @@ partially updated target files behind.
   begun but before target replacement completes
 - **THEN** the original target file SHALL remain unchanged
 - **AND** any temp file created for the cancelled append SHALL be cleaned up
-

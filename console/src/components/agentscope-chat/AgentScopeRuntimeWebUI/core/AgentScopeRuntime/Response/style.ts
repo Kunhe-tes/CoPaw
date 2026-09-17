@@ -81,7 +81,7 @@ export default createGlobalStyle`
     padding: 6px 10px;
     border: 1px solid transparent;
     border-radius: 10px;
-    background: transparent;
+    background: ${({ theme }) => theme.colorFillAlter};
     color: ${({ theme }) => theme.colorTextSecondary};
     cursor: pointer;
     font: inherit;
@@ -94,13 +94,13 @@ export default createGlobalStyle`
       color 0.18s ease;
 
     &:hover {
-      background: ${({ theme }) => theme.colorFillQuaternary};
+      background: ${({ theme }) => theme.colorFillTertiary};
       border-color: ${({ theme }) => theme.colorBorderSecondary};
       color: ${({ theme }) => theme.colorText};
     }
 
     &[aria-expanded="true"] {
-      background: ${({ theme }) => theme.colorFillQuaternary};
+      background: ${({ theme }) => theme.colorFillTertiary};
     }
 
     &:focus-visible {
@@ -208,7 +208,7 @@ export default createGlobalStyle`
 
   &-action {
     flex: 0 0 auto;
-    color: ${({ theme }) => theme.colorTextSecondary};
+    color: ${({ theme }) => theme.colorTextTertiary};
     font-weight: 500;
     white-space: nowrap;
     transition: color 0.18s ease;
@@ -240,6 +240,155 @@ export default createGlobalStyle`
 
 @media (prefers-reduced-motion: reduce) {
   .${(p) => p.theme.prefixCls}-response-process-disclosure {
+    &-trigger {
+      transition: none;
+    }
+
+    &-chevron {
+      transition: none;
+    }
+
+    &-body {
+      animation: none;
+    }
+  }
+}
+
+.${(p) => p.theme.prefixCls}-response-operation-group {
+  width: 100%;
+  margin: 0 0 4px;
+
+  &-trigger {
+    display: flex;
+    align-items: center;
+    position: relative;
+    width: 100%;
+    min-height: 32px;
+    gap: 10px;
+    padding: 6px 10px;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    background: ${({ theme }) => theme.colorFillAlter};
+    color: ${({ theme }) => theme.colorTextSecondary};
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    line-height: 20px;
+    text-align: left;
+    transition:
+      background-color 0.18s ease,
+      border-color 0.18s ease,
+      color 0.18s ease;
+
+    &:hover {
+      background: ${({ theme }) => theme.colorFillTertiary};
+      border-color: ${({ theme }) => theme.colorBorderSecondary};
+      color: ${({ theme }) => theme.colorText};
+    }
+
+    &[aria-expanded="true"] {
+      background: ${({ theme }) => theme.colorFillTertiary};
+    }
+
+    &:focus-visible {
+      outline: 2px solid ${({ theme }) => theme.colorPrimaryBorder};
+      outline-offset: 2px;
+    }
+  }
+
+  &-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    flex: 0 0 16px;
+    color: ${({ theme }) => theme.colorTextTertiary};
+
+    svg {
+      width: 14px;
+      height: 14px;
+    }
+
+    &[data-status="running"] {
+      color: ${({ theme }) => theme.colorPrimary};
+    }
+
+    &[data-status="pending"],
+    &[data-status="warning"] {
+      color: ${({ theme }) => theme.colorWarning};
+    }
+
+    &[data-status="failed"] {
+      color: ${({ theme }) => theme.colorError};
+    }
+
+    &[data-status="success"] {
+      color: ${({ theme }) => theme.colorSuccess};
+    }
+
+    &[data-status="canceled"] {
+      color: ${({ theme }) => theme.colorTextTertiary};
+    }
+  }
+
+  &-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    color: ${({ theme }) => theme.colorTextSecondary};
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &-chevron {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    flex: 0 0 16px;
+    color: ${({ theme }) => theme.colorTextTertiary};
+
+    svg {
+      width: 12px;
+      height: 12px;
+    }
+  }
+
+  &-body {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 4px;
+    animation: ${(p) =>
+      p.theme.prefixCls}-response-operation-group-open 0.18s ease-out;
+  }
+
+  &-body[hidden] {
+    display: none;
+  }
+
+  &-tool,
+  &-reasoning {
+    min-width: 0;
+  }
+
+}
+
+@keyframes ${(p) => p.theme.prefixCls}-response-operation-group-open {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .${(p) => p.theme.prefixCls}-response-operation-group {
     &-trigger {
       transition: none;
     }

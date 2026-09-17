@@ -17,9 +17,20 @@ vi.mock(
 vi.mock(
   "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Response/Card",
   () => ({
-    default: () => <div data-testid="response-card-body">response-body</div>,
+    default: ({ beforeActions }: { beforeActions?: React.ReactNode }) => (
+      <div data-testid="response-card-body">
+        response-body
+        {beforeActions}
+      </div>
+    ),
   }),
 );
+
+vi.mock("./PlanInteractionCards", () => ({
+  PlanReviewMessageCard: ({ data }: { data: { title: string } }) => (
+    <div data-testid="plan-review">{data.title}</div>
+  ),
+}));
 
 afterEach(() => {
   cleanup();
@@ -64,6 +75,31 @@ describe("runtime message header cards", () => {
     expect(screen.getByTestId("response-card-body")).toBeInTheDocument();
     expect(container.firstElementChild?.className).toContain(
       "messageBlockStart",
+    );
+  });
+
+  it("places the plan review before response actions", () => {
+    render(
+      <RuntimeResponseCard
+        data={
+          {
+            output: [],
+            planReviewCard: {
+              card_type: "plan_review",
+              plan_id: "plan-1",
+              title: "Implementation plan",
+              summary: "Review before execution",
+              steps: [],
+              risks: [],
+              verification: [],
+            },
+          } as never
+        }
+      />,
+    );
+
+    expect(screen.getByTestId("response-card-body")).toHaveTextContent(
+      "response-bodyImplementation plan",
     );
   });
 

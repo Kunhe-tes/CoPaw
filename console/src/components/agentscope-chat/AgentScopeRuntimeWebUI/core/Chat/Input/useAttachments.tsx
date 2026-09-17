@@ -1,10 +1,12 @@
 import { IAgentScopeRuntimeWebUISenderAttachmentsOptions } from "@/components/agentscope-chat";
 import { Upload } from "antd";
 import type { UploadFile } from "antd";
-import { IconButton } from "@agentscope-ai/design";
 import { SparkAttachmentLine } from "@agentscope-ai/icons";
 import { Sender, Attachments } from "@/components/agentscope-chat";
 import React, { useCallback, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { ComposerQuickMenuItem } from "@/components/agentscope-chat/ComposerQuickMenu";
+import quickMenuStyles from "@/components/agentscope-chat/ComposerQuickMenu/index.module.less";
 
 export default function useAttachments(
   attachments: IAgentScopeRuntimeWebUISenderAttachmentsOptions,
@@ -12,44 +14,25 @@ export default function useAttachments(
     disabled?: boolean;
   },
 ) {
+  const { t } = useTranslation();
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const fileListRef = useRef<UploadFile[]>([]);
   fileListRef.current = fileList;
 
   const getFileList = useCallback(() => fileListRef.current, []);
 
-  const { trigger, ...rest } = attachments || {};
+  const { trigger, customRequest, maxCount, ...rest } = attachments || {};
   const uidCounter = useRef(0);
 
   const handlePasteFile = useCallback(
     (file: File) => {
-      if (!rest?.customRequest) return;
+      if (options?.disabled) return;
+      if (!customRequest) return;
 
       const fileType = file.type || "";
       const fileName = file.name || "";
 
-      if (rest.accept) {
-        const matched = rest.accept.split(",").some((pattern) => {
-          const trimmed = pattern.trim();
-          if (!trimmed) return false;
-          if (trimmed.startsWith("."))
-            return fileName.toLowerCase().endsWith(trimmed.toLowerCase());
-          if (trimmed === "*/*") return true;
-          if (trimmed.includes("*")) {
-            const [acceptMain] = trimmed.split("/");
-            const [fileMain] = fileType.split("/");
-            return acceptMain === fileMain;
-          }
-          return fileType === trimmed;
-        });
-        if (!matched) return;
-      }
-
-      if (
-        (rest as any).maxCount &&
-        fileListRef.current.length >= (rest as any).maxCount
-      )
-        return;
+      if (maxCount && fileListRef.current.length >= maxCount) return;
 
       const getExtension = () => {
         const nameMatch = fileName.match(/\.([^.]+)$/);
@@ -66,7 +49,7 @@ export default function useAttachments(
         type: fileType,
         status: "uploading",
         percent: 0,
-        originFileObj: file as any,
+        originFileObj: file as UploadFile["originFileObj"],
       };
 
       setFileList((prev) => [...prev, uploadFile]);
@@ -86,13 +69,13 @@ export default function useAttachments(
         reader.readAsDataURL(file);
       }
 
-      rest.customRequest(
+      customRequest(
         {
           file,
           filename: "file",
           action: "",
           method: "POST",
-          onSuccess: (response: any) => {
+          onSuccess: (response) => {
             setFileList((prev) =>
               prev.map((f) =>
                 f.uid === uid
@@ -101,14 +84,14 @@ export default function useAttachments(
               ),
             );
           },
-          onError: (error: any) => {
+          onError: (error) => {
             setFileList((prev) =>
               prev.map((f) =>
                 f.uid === uid ? { ...f, status: "error" as const, error } : f,
               ),
             );
           },
-          onProgress: (event: any) => {
+          onProgress: (event) => {
             setFileList((prev) =>
               prev.map((f) =>
                 f.uid === uid ? { ...f, percent: event?.percent } : f,
@@ -119,35 +102,43 @@ export default function useAttachments(
         { defaultRequest: () => undefined },
       );
     },
-    [rest?.customRequest, rest?.accept],
+    [customRequest, maxCount, options?.disabled],
   );
 
-  if (rest?.customRequest) {
-    const uploadIconButton = (
-      <Upload
-        fileList={fileList}
-        showUploadList={false}
-        onChange={(info) => {
-          setFileList(info.fileList);
-        }}
-        {...rest}
-        disabled={options?.disabled}
+  if (customRequest) {
+    const uploadQuickMenuItem = (
+      <div
+        className={quickMenuStyles.uploadTrigger}
+        onClick={(event) => event.stopPropagation()}
       >
-        {trigger ? (
-          React.createElement(trigger, { disabled: options?.disabled })
-        ) : (
-          <IconButton
-            disabled={options?.disabled}
-            icon={<SparkAttachmentLine />}
-            bordered={false}
-          />
-        )}
-      </Upload>
+        <Upload
+          fileList={fileList}
+          showUploadList={false}
+          onChange={(info) => {
+            setFileList(info.fileList);
+          }}
+          {...rest}
+          customRequest={customRequest}
+          maxCount={maxCount}
+          disabled={options?.disabled}
+        >
+          {trigger ? (
+            React.createElement(trigger, { disabled: options?.disabled })
+          ) : (
+            <ComposerQuickMenuItem
+              icon={<SparkAttachmentLine />}
+              interactive
+              label={t("chat.quickMenu.upload", "上传文件")}
+            />
+          )}
+        </Upload>
+      </div>
     );
 
     const uploadFileListHeader = (
       <Sender.Header closable={false} open={fileList?.length > 0}>
         <Attachments
+          disabled={options?.disabled}
           items={fileList}
           onChange={(info) => setFileList(info.fileList)}
         />
@@ -159,13 +150,14 @@ export default function useAttachments(
       getFileList,
       setFileList,
       handlePasteFile,
-      uploadIconButton,
+      uploadQuickMenuItem,
       uploadFileListHeader,
     };
   } else {
     return {
       enabled: false,
       handlePasteFile: undefined,
+      uploadQuickMenuItem: undefined,
     };
   }
 }

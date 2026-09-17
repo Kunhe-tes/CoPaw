@@ -1,160 +1,266 @@
 # -*- coding: utf-8 -*-
+"""Transport contract for answer-turn stream delivery."""
+
 from __future__ import annotations
 
 import asyncio
 import json
+import threading
 
 import pytest
 
-from swe.app.runner.task_tracker import TaskTracker, _RunState
+from swe.app.answer_turn.models import TurnIdentity
+from swe.app.runner.task_tracker import TaskTracker
 from swe.app.runner.tool_output_frames import (
     emit_tool_output_text,
     tool_output_invocation,
 )
 
 
+def _identity(
+    chat_id: str = "chat-1",
+    turn_id: str = "turn-1",
+) -> TurnIdentity:
+    return TurnIdentity(chat_id=chat_id, msgid="message-1", turn_id=turn_id)
+
+
 @pytest.mark.asyncio
-async def test_request_stop_marks_status_stopping_while_producer_is_cleaning_up():
+async def test_attach_or_start_binds_identity_and_replays_one_producer_stream():
     tracker = TaskTracker()
-    stream_started = asyncio.Event()
-    cleanup_started = asyncio.Event()
-    release_cleanup = asyncio.Event()
+    release = asyncio.Event()
+    received: list[tuple[TurnIdentity, object]] = []
+    identity = _identity()
 
-    async def _stream_fn(_payload):
-        stream_started.set()
-        yield 'data: {"started": true}\n\n'
-        try:
-            while True:
-                await asyncio.sleep(1)
-                yield 'data: {"tick": true}\n\n'
-        finally:
-            cleanup_started.set()
-            await release_cleanup.wait()
+    async def producer(bound_identity, payload):
+        received.append((bound_identity, payload))
+        yield 'data: {"first": true}\n\n'
+        await release.wait()
 
-    _queue, is_new = await tracker.attach_or_start(
-        "chat-1",
-        {},
-        _stream_fn,
+    first, is_new = await tracker.attach_or_start(
+        identity,
+        {"query": "hi"},
+        producer,
     )
     assert is_new is True
-    await asyncio.wait_for(stream_started.wait(), timeout=1)
-    assert await tracker.get_status("chat-1") == "running"
+    assert (
+        await asyncio.wait_for(first.get(), timeout=1)
+        == 'data: {"first": true}\n\n'
+    )
 
-    assert await tracker.request_stop("chat-1") is True
-    await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+    second, is_new = await tracker.attach_or_start(
+        identity,
+        {"ignored": True},
+        producer,
+    )
+    assert is_new is False
+    assert (
+        await asyncio.wait_for(second.get(), timeout=1)
+        == 'data: {"first": true}\n\n'
+    )
+    assert received == [(identity, {"query": "hi"})]
 
-    assert await tracker.get_status("chat-1") == "stopping"
-
-    release_cleanup.set()
+    release.set()
     await asyncio.wait_for(tracker.wait_all_done(timeout=1), timeout=2)
-    assert await tracker.get_status("chat-1") == "idle"
 
 
 @pytest.mark.asyncio
-async def test_mark_stopping_marks_status_without_cancelling_producer():
+async def test_attach_replays_buffer_and_stream_detaches_on_consumer_close():
     tracker = TaskTracker()
-    release_stream = asyncio.Event()
+    release = asyncio.Event()
+    identity = _identity()
 
-    async def _stream_fn(_payload):
-        yield 'data: {"started": true}\n\n'
-        await release_stream.wait()
+    async def producer(_identity, _payload):
+        yield 'data: {"first": true}\n\n'
+        await release.wait()
 
-    _queue, is_new = await tracker.attach_or_start(
-        "chat-1",
-        {},
-        _stream_fn,
-    )
-    assert is_new is True
-    await asyncio.sleep(0)
-    assert await tracker.get_status("chat-1") == "running"
+    queue, _ = await tracker.attach_or_start(identity, {}, producer)
+    assert await asyncio.wait_for(queue.get(), timeout=1)
+    replay = await tracker.attach(identity)
+    assert replay is not None
+    stream = tracker.stream(identity, replay)
+    assert await anext(stream) == 'data: {"first": true}\n\n'
+    await stream.aclose()
+    assert replay not in tracker._runs[identity.chat_id].queues
 
-    await tracker.mark_stopping("chat-1")
-
-    assert await tracker.get_status("chat-1") == "stopping"
-
-    release_stream.set()
+    release.set()
     await asyncio.wait_for(tracker.wait_all_done(timeout=1), timeout=2)
-    assert await tracker.get_status("chat-1") == "idle"
 
 
 @pytest.mark.asyncio
-async def test_old_run_cleanup_does_not_remove_new_run_state():
+async def test_producer_exception_is_delivered_then_ends_stream():
     tracker = TaskTracker()
-    first_cleanup_started = asyncio.Event()
-    release_first_cleanup = asyncio.Event()
+    identity = _identity()
 
-    async def _first_stream(_payload):
-        yield 'data: {"run": 1}\n\n'
-        try:
-            while True:
-                await asyncio.sleep(1)
-        finally:
-            first_cleanup_started.set()
-            await release_first_cleanup.wait()
+    async def producer(_identity, _payload):
+        if _payload is not None:
+            raise RuntimeError("boom")
+        yield "data: {}\n\n"
 
-    _queue, is_new = await tracker.attach_or_start(
-        "chat-1",
-        {},
-        _first_stream,
+    queue, _ = await tracker.attach_or_start(identity, {}, producer)
+    events = [event async for event in tracker.stream(identity, queue)]
+    assert events == ['data: {"error": "internal server error"}\n\n']
+    assert await tracker.has_active_tasks() is False
+
+
+@pytest.mark.asyncio
+async def test_close_unblocks_subscribers_without_cancelling_producer():
+    tracker = TaskTracker()
+    release = asyncio.Event()
+    identity = _identity()
+
+    async def producer(_identity, _payload):
+        yield 'data: {"first": true}\n\n'
+        await release.wait()
+
+    queue, _ = await tracker.attach_or_start(identity, {}, producer)
+    assert await asyncio.wait_for(queue.get(), timeout=1)
+    await tracker.close(identity)
+    assert [event async for event in tracker.stream(identity, queue)] == []
+    assert await tracker.has_active_tasks() is True
+    with pytest.raises(
+        RuntimeError,
+        match="live stream belongs to another turn",
+    ):
+        await tracker.attach_or_start(
+            _identity(turn_id="turn-2"),
+            {},
+            producer,
+        )
+
+    release.set()
+    await asyncio.wait_for(tracker.wait_all_done(timeout=1), timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_before_start_is_atomic_with_call_if_idle_for_one_chat():
+    tracker = TaskTracker()
+    identity = _identity("chat-serialized")
+    callback_started = threading.Event()
+    release_callback = threading.Event()
+    durable_state = {"active": True}
+
+    def recover():
+        durable_state["active"] = False
+        callback_started.set()
+        assert release_callback.wait(timeout=2)
+        return "recovered"
+
+    recovery = asyncio.create_task(tracker.call_if_idle(identity, recover))
+    assert await asyncio.to_thread(callback_started.wait, 1)
+
+    async def producer(_identity, _payload):
+        yield 'data: {"done": true}\n\n'
+
+    def validate_claim():
+        if not durable_state["active"]:
+            raise RuntimeError("claim is no longer active")
+
+    start = asyncio.create_task(
+        tracker.attach_or_start(
+            identity,
+            {},
+            producer,
+            before_start=validate_claim,
+        ),
     )
-    assert is_new is True
     await asyncio.sleep(0)
-    assert await tracker.request_stop("chat-1") is True
-    await asyncio.wait_for(first_cleanup_started.wait(), timeout=1)
-    assert await tracker.get_status("chat-1") == "stopping"
-
-    second_task = asyncio.Future()
-    async with tracker.lock:
-        tracker._runs["chat-1"] = _RunState(task=second_task)
-
-    assert await tracker.get_status("chat-1") == "running"
-
-    release_first_cleanup.set()
-    await asyncio.sleep(0)
-    assert await tracker.get_status("chat-1") == "running"
-
-    second_task.set_result(None)
-    async with tracker.lock:
-        tracker._runs.pop("chat-1", None)
-    assert await tracker.get_status("chat-1") == "idle"
+    assert start.done() is False
+    release_callback.set()
+    assert await recovery == (True, "recovered")
+    with pytest.raises(RuntimeError, match="claim is no longer active"):
+        await start
 
 
 @pytest.mark.asyncio
-async def test_tool_output_frames_are_buffered_for_active_replay():
+async def test_active_task_helpers_and_progress_are_transport_support():
     tracker = TaskTracker()
-    release_stream = asyncio.Event()
+    release = asyncio.Event()
+    identity = _identity("chat-active")
 
-    async def _stream_fn(_payload):
+    async def producer(_identity, _payload):
+        yield 'data: {"started": true}\n\n'
+        await release.wait()
+
+    await tracker.attach_or_start(identity, {}, producer)
+    await asyncio.sleep(0)
+    assert await tracker.has_active_tasks() is True
+    assert await tracker.list_active_tasks() == [identity.chat_id]
+
+    payload = {"status": "running", "steps": [{"title": "work"}]}
+    stored = await tracker.update_task_progress(identity.chat_id, payload)
+    stored["steps"][0]["title"] = "changed"
+    assert (await tracker.get_task_progress(identity.chat_id))["steps"][0][
+        "title"
+    ] == "work"
+
+    release.set()
+    assert await tracker.wait_all_done(timeout=1) is True
+    assert await tracker.get_task_progress(identity.chat_id) is None
+
+
+@pytest.mark.asyncio
+async def test_tool_output_frames_are_broadcast_and_buffered_for_reconnect():
+    tracker = TaskTracker()
+    release = asyncio.Event()
+    identity = _identity()
+
+    async def producer(_identity, _payload):
         with tool_output_invocation(
             tool_call_id="call-1",
             tool_name="execute_shell_command",
         ):
             await emit_tool_output_text("stdout", "live output\n")
-        yield 'data: {"normal": true}\n\n'
-        await release_stream.wait()
+        await release.wait()
+        yield "data: {}\n\n"
 
-    queue, is_new = await tracker.attach_or_start("chat-1", {}, _stream_fn)
-    assert is_new is True
-
+    queue, _ = await tracker.attach_or_start(identity, {}, producer)
     live_sse = await asyncio.wait_for(queue.get(), timeout=1)
-    assert live_sse.startswith("data: ")
-    live_payload = json.loads(live_sse.removeprefix("data: ").strip())
-    assert live_payload == {
-        "object": "tool_output_frame",
-        "tool_call_id": "call-1",
-        "tool_name": "execute_shell_command",
-        "sequence": 1,
-        "source": "stdout",
-        "text": "live output\n",
-        "truncated": False,
-    }
+    assert (
+        json.loads(live_sse.removeprefix("data: ").strip())["text"]
+        == "live output\n"
+    )
+    replay = await tracker.attach(identity)
+    assert replay is not None
+    replay_sse = await asyncio.wait_for(replay.get(), timeout=1)
+    assert (
+        json.loads(replay_sse.removeprefix("data: ").strip())["text"]
+        == "live output\n"
+    )
 
-    replay_queue = await tracker.attach("chat-1")
-    assert replay_queue is not None
-    replay_sse = await asyncio.wait_for(replay_queue.get(), timeout=1)
-    replay_payload = json.loads(replay_sse.removeprefix("data: ").strip())
-    assert replay_payload["object"] == "tool_output_frame"
-    assert replay_payload["text"] == "live output\n"
-
-    release_stream.set()
+    release.set()
     await asyncio.wait_for(tracker.wait_all_done(timeout=1), timeout=2)
+
+
+def test_tracker_has_no_answer_turn_stop_or_status_api():
+    tracker = TaskTracker()
+    for name in (
+        "claim_stop",
+        "request_stop",
+        "mark_stopping",
+        "get_status",
+        "get_run_identity",
+        "is_turn_stopping",
+    ):
+        assert not hasattr(tracker, name)
+
+
+@pytest.mark.asyncio
+async def test_different_identity_same_chat_cannot_start_second_producer():
+    tracker = TaskTracker()
+    release = asyncio.Event()
+
+    async def producer(_identity, _payload):
+        await release.wait()
+        yield "data: {}\n\n"
+
+    first = _identity(turn_id="turn-1")
+    second = _identity(turn_id="turn-2")
+    _, is_new = await tracker.attach_or_start(first, {}, producer)
+    with pytest.raises(
+        RuntimeError,
+        match="live stream belongs to another turn",
+    ):
+        await tracker.attach_or_start(second, {}, producer)
+    assert is_new is True
+    release.set()
+    await tracker.wait_all_done(timeout=1)

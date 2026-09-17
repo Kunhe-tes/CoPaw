@@ -13,8 +13,11 @@ from pathlib import Path
 from typing import Optional
 
 from swe.config.context import (
-    get_current_effective_tenant_id,
+    get_current_scope_id,
+    get_current_source_id,
+    get_current_tenant_id,
     get_current_workspace_dir,
+    resolve_request_effective_tenant_id,
 )
 from swe.constant import WORKING_DIR
 
@@ -54,7 +57,11 @@ def get_current_tenant_root() -> Path:
     Raises:
         TenantContextMissingError: If tenant ID is not set in context.
     """
-    tenant_id = get_current_effective_tenant_id()
+    tenant_id = resolve_request_effective_tenant_id(
+        get_current_tenant_id(),
+        get_current_source_id(),
+        get_current_scope_id(),
+    )
     if tenant_id is None:
         raise TenantContextMissingError(
             "Tenant context is not available. "

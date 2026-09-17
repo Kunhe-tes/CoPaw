@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -34,6 +34,7 @@ import type {
 import styles from "../index.module.less";
 
 const { Text } = Typography;
+const DEFAULT_ARCHIVE_PAGE_SIZE = 10;
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`;
@@ -51,33 +52,51 @@ export default function ArchiveGovernance({
   const [loading, setLoading] = useState(false);
   const [report, setReport] = useState<ArchiveReportResponse | null>(null);
   const [archiveItems, setArchiveItems] = useState<ArchiveItem[]>([]);
+  const [archivePage, setArchivePage] = useState(1);
+  const [archivePageSize, setArchivePageSize] = useState(
+    DEFAULT_ARCHIVE_PAGE_SIZE,
+  );
+  const [archiveTotal, setArchiveTotal] = useState(0);
   const [protectedFiles, setProtectedFiles] = useState<ProtectedFileInfo[]>([]);
   const [audits, setAudits] = useState<ArchiveAdminAuditRecord[]>([]);
+  const fetchRequestIdRef = useRef(0);
 
-  const fetchData = async () => {
+  const fetchData = useCallback(async (page: number, pageSize: number) => {
+    const requestId = ++fetchRequestIdRef.current;
     setLoading(true);
     try {
       const [reportData, itemsData, protectedData, auditsData] =
         await Promise.all([
           dreamLogsApi.archiveReport(),
-          dreamLogsApi.listArchiveItems({ page_size: 100 }),
+          dreamLogsApi.listArchiveItems({ page, page_size: pageSize }),
           dreamLogsApi.listProtectedFiles({ page_size: 100 }),
           dreamLogsApi.listArchiveAdminAudits({ page_size: 100 }),
         ]);
+      if (requestId !== fetchRequestIdRef.current) return;
       setReport(reportData);
       setArchiveItems(itemsData.items);
+      setArchivePage(itemsData.page);
+      setArchivePageSize(itemsData.page_size);
+      setArchiveTotal(itemsData.total);
       setProtectedFiles(protectedData.items);
       setAudits(auditsData.items);
-    } catch (error) {
-      message.error("归档治理数据加载失败");
+    } catch {
+      if (requestId === fetchRequestIdRef.current) {
+        message.error("归档治理数据加载失败");
+      }
     } finally {
-      setLoading(false);
+      if (requestId === fetchRequestIdRef.current) {
+        setLoading(false);
+      }
     }
-  };
+  }, []);
 
   useEffect(() => {
-    fetchData();
-  }, [refreshKey]);
+    void fetchData(archivePage, archivePageSize);
+    return () => {
+      fetchRequestIdRef.current += 1;
+    };
+  }, [archivePage, archivePageSize, fetchData, refreshKey]);
 
   const handleRestore = async (record: ArchiveItem, protect: boolean) => {
     if (!record.target_user_id || !record.target_agent_id) return;
@@ -89,8 +108,8 @@ export default function ArchiveGovernance({
         protect_after_restore: protect,
       });
       message.success(protect ? "已恢复并加入保护名单" : "已恢复");
-      fetchData();
-    } catch (error) {
+      void fetchData(archivePage, archivePageSize);
+    } catch {
       message.error("恢复失败");
     }
   };
@@ -105,8 +124,8 @@ export default function ArchiveGovernance({
         reason: "manual_clear",
       });
       message.success("归档文件已清理");
-      fetchData();
-    } catch (error) {
+      void fetchData(archivePage, archivePageSize);
+    } catch {
       message.error("清理失败");
     }
   };
@@ -115,8 +134,8 @@ export default function ArchiveGovernance({
     try {
       const result = await dreamLogsApi.purgeExpiredArchiveItems();
       message.success(`已清理 ${result.files_count} 个过期归档文件`);
-      fetchData();
-    } catch (error) {
+      void fetchData(archivePage, archivePageSize);
+    } catch {
       message.error("过期归档清理失败");
     }
   };
@@ -129,8 +148,8 @@ export default function ArchiveGovernance({
         path: record.path,
       });
       message.success("已取消保护");
-      fetchData();
-    } catch (error) {
+      void fetchData(archivePage, archivePageSize);
+    } catch {
       message.error("取消保护失败");
     }
   };
@@ -168,7 +187,11 @@ export default function ArchiveGovernance({
       dataIndex: "expired",
       width: 100,
       render: (expired: boolean) =>
-        expired ? <Tag color="red">待清理</Tag> : <Tag color="green">可恢复</Tag>,
+        expired ? (
+          <Tag color="red">待清理</Tag>
+        ) : (
+          <Tag color="green">可恢复</Tag>
+        ),
     },
     {
       title: "操作",
@@ -364,16 +387,16 @@ export default function ArchiveGovernance({
               title="确认清理超过 10 天的归档文件？"
               onConfirm={handlePurgeExpired}
             >
-            <Button danger icon={<DeleteOutlined />}>
-              清理超过 10 天
-            </Button>
-          </Popconfirm>
+              <Button danger icon={<DeleteOutlined />}>
+                清理超过 10 天
+              </Button>
+            </Popconfirm>
           </Space>
         }
       >
         <Tabs
           onChange={() => {
-            void fetchData();
+            void fetchData(archivePage, archivePageSize);
           }}
           items={[
             {
@@ -389,6 +412,17 @@ export default function ArchiveGovernance({
                     dataSource={archiveItems}
                     rowKey="id"
                     scroll={{ x: 1100 }}
+                    pagination={{
+                      current: archivePage,
+                      pageSize: archivePageSize,
+                      total: archiveTotal,
+                      showSizeChanger: true,
+                      showTotal: (total) => `共 ${total} 条`,
+                      onChange: (page, pageSize) => {
+                        setArchivePage(pageSize === archivePageSize ? page : 1);
+                        setArchivePageSize(pageSize);
+                      },
+                    }}
                   />
                 ),
             },

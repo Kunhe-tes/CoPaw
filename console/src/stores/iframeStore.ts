@@ -17,6 +17,7 @@
  * - hideMenu: 是否隐藏菜单
  * - isSuperManager: 是否为超级管理员
  * - manager: 是否为普通管理员
+ * - skipPreviewTracking: 是否跳过 HTML preview 埋点
  * - authHeaders: 自定义 headers 数组
  * - parentOrigin: 父窗口来源 origin
  * - subBranchId: 支行 ID
@@ -49,6 +50,9 @@ interface IframeStore extends IframeContext {
    */
   clearContext: () => void;
 
+  /** 记录当前页面是否通过 origin=Y 入口访问 */
+  setOriginY: (isOriginY: boolean) => void;
+
   /**
    * 设置自定义 headers
    * @param authHeaders - 自定义 header 数组
@@ -78,8 +82,10 @@ const initialState: IframeContext = {
   space: null,
   source: null,
   hideMenu: false,
+  isOriginY: false,
   isSuperManager: false,
   manager: false,
+  skipPreviewTracking: false,
   authHeaders: [],
   parentOrigin: null,
   receivedAt: null,
@@ -93,6 +99,9 @@ const initialState: IframeContext = {
   userChange: false,
   sessionId: null,
   taskId: null,
+  hideChat: false,
+  pageSource: null,
+  platformSource: null,
 };
 
 export const useIframeStore = create<IframeStore>()(
@@ -110,6 +119,8 @@ export const useIframeStore = create<IframeStore>()(
       markInitialized: () => set({ initialized: true }),
 
       clearContext: () => set(initialState),
+
+      setOriginY: (isOriginY) => set({ isOriginY }),
 
       setAuthHeaders: (authHeaders) => set({ authHeaders }),
 
@@ -130,6 +141,7 @@ export const useIframeStore = create<IframeStore>()(
         hideMenu: state.hideMenu,
         isSuperManager: state.isSuperManager,
         manager: state.manager,
+        skipPreviewTracking: state.skipPreviewTracking,
         authHeaders: state.authHeaders,
         parentOrigin: state.parentOrigin,
         sysId: state.sysId,
@@ -140,6 +152,10 @@ export const useIframeStore = create<IframeStore>()(
         orgLvl: state.orgLvl,
         positionId: state.positionId,
         userChange: state.userChange,
+        hideChat: state.hideChat,
+        pageSource: state.pageSource,
+        platformSource: state.platformSource,
+        // isOriginY 仅描述本次页面入口，不持久化到后续访问。
         // 导航参数不需要持久化，只在首次加载时使用
       }),
       storage: {

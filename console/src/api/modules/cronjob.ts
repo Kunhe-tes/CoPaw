@@ -2,10 +2,13 @@ import { request } from "../request";
 import type {
   CronBroadcastChildRef,
   CronBroadcastChildrenBatchResponse,
+  CronBroadcastChildrenRefreshResponse,
   CronBroadcastChildrenResponse,
+  CronBroadcastCurrentTaskResponse,
   CronBroadcastOptions,
-  CronBroadcastResponse,
+  CronBroadcastTaskResponse,
   CronBroadcastTarget,
+  CronBatchDispatchOptions,
   CronJobSpecInput,
   CronJobSpecOutput,
   CronJobView,
@@ -54,11 +57,12 @@ export const cronJobApi = {
       method: "POST",
     }),
 
-  markTaskRead: (jobId: string) =>
+  markTaskRead: (jobId: string, marked_read?: boolean) =>
     request<{ marked_read: boolean }>(
       `/cron/jobs/${encodeURIComponent(jobId)}/task/mark-read`,
       {
         method: "POST",
+        body: JSON.stringify({ marked_read }),
       },
     ),
 
@@ -73,7 +77,7 @@ export const cronJobApi = {
     targets: CronBroadcastTarget[],
     options: CronBroadcastOptions = {},
   ) =>
-    request<CronBroadcastResponse>(
+    request<CronBroadcastTaskResponse>(
       `/cron/jobs/${encodeURIComponent(jobId)}/broadcast`,
       {
         method: "POST",
@@ -81,14 +85,57 @@ export const cronJobApi = {
           target_tenant_ids: targets.map((target) => target.tenant_id),
           targets,
           enable_offset: options.enable_offset ?? true,
+          enable_batch_dispatch: options.enable_batch_dispatch,
           offset_window_hours: options.offset_window_hours ?? 4,
         }),
       },
     ),
 
+  enableCronBatchDispatch: (
+    jobId: string,
+    options: CronBatchDispatchOptions = {},
+  ) =>
+    request<CronJobSpecOutput>(
+      `/cron/jobs/${encodeURIComponent(jobId)}/batch-dispatch/enable`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          offset_window_hours: options.offset_window_hours ?? 4,
+        }),
+      },
+    ),
+
+  disableCronBatchDispatch: (jobId: string) =>
+    request<CronJobSpecOutput>(
+      `/cron/jobs/${encodeURIComponent(jobId)}/batch-dispatch/disable`,
+      {
+        method: "POST",
+      },
+    ),
+
+  getCronBroadcastTask: (jobId: string, taskId: string) =>
+    request<CronBroadcastTaskResponse>(
+      `/cron/jobs/${encodeURIComponent(
+        jobId,
+      )}/broadcast/tasks/${encodeURIComponent(taskId)}`,
+    ),
+
+  getCurrentCronBroadcastTask: (jobId: string) =>
+    request<CronBroadcastCurrentTaskResponse>(
+      `/cron/jobs/${encodeURIComponent(jobId)}/broadcast/tasks/current`,
+    ),
+
   listCronBroadcastChildren: (jobId: string) =>
     request<CronBroadcastChildrenResponse>(
       `/cron/jobs/${encodeURIComponent(jobId)}/broadcast/children`,
+    ),
+
+  refreshCronBroadcastChildren: (jobId: string) =>
+    request<CronBroadcastChildrenRefreshResponse>(
+      `/cron/jobs/${encodeURIComponent(jobId)}/broadcast/children/refresh`,
+      {
+        method: "POST",
+      },
     ),
 
   deleteCronBroadcastChildren: (

@@ -98,4 +98,3 @@ The backend SHALL treat Tool Call Status as a presentation contract and SHALL NO
 #### Scenario: Stream terminates without a tool output message
 - **WHEN** the stream terminates with a run-level error before a user-visible tool output message exists
 - **THEN** the backend does not fabricate a terminal Tool Call Status for that individual tool invocation
-

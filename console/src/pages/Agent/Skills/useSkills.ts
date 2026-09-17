@@ -11,6 +11,7 @@ import { useAgentStore } from "../../../stores/agentStore";
 import { parseErrorDetail } from "../../../utils/error";
 import {
   handleScanError,
+  captureScanWarningCursor,
   checkScanWarnings as checkScanWarningsShared,
   showScanErrorModal,
 } from "../../../utils/scanError";
@@ -52,10 +53,11 @@ export function useSkills() {
   );
 
   const checkScanWarnings = useCallback(
-    (skillName: string) =>
+    (skillName: string, since: string | null) =>
       checkScanWarningsShared(
         skillName,
-        api.getBlockedHistory,
+        since,
+        api.getLatestScanWarning,
         api.getSkillScanner,
         t,
       ),
@@ -102,11 +104,14 @@ export function useSkills() {
     enable?: boolean,
   ): Promise<SkillActionResult> => {
     try {
+      const warningCursor = await captureScanWarningCursor(
+        api.getScanWarningCursor,
+      );
       const result = await api.createSkill(name, content, config, enable);
       message.success("Created successfully");
       invalidateSkillCache({ agentId: selectedAgent }); // Clear cache after mutation
       await fetchSkills();
-      await checkScanWarnings(result.name);
+      await checkScanWarnings(result.name, warningCursor);
       return { success: true, name: result.name };
     } catch (error) {
       const detail = parseErrorDetail(error);
@@ -125,6 +130,9 @@ export function useSkills() {
   ): Promise<SkillActionResult> => {
     try {
       setUploading(true);
+      const warningCursor = await captureScanWarningCursor(
+        api.getScanWarningCursor,
+      );
       const result = await api.uploadSkill(file, {
         enable: true,
         overwrite: false,
@@ -138,7 +146,7 @@ export function useSkills() {
         invalidateSkillCache({ agentId: selectedAgent }); // Clear cache after mutation
         await fetchSkills();
         for (const name of result.imported) {
-          await checkScanWarnings(name);
+          await checkScanWarnings(name, warningCursor);
         }
       }
       if (!result?.count) {
@@ -179,6 +187,9 @@ export function useSkills() {
     try {
       setImporting(true);
       importCancelReasonRef.current = null;
+      const warningCursor = await captureScanWarningCursor(
+        api.getScanWarningCursor,
+      );
       const payload = {
         bundle_url: text,
         enable: true,
@@ -196,7 +207,7 @@ export function useSkills() {
           invalidateSkillCache({ agentId: selectedAgent }); // Clear cache after mutation
           await fetchSkills();
           if (status.result.name) {
-            await checkScanWarnings(status.result.name);
+            await checkScanWarnings(status.result.name, warningCursor);
           }
           return { success: true, name: String(status.result.name || "") };
         }
@@ -272,6 +283,9 @@ export function useSkills() {
         );
         message.success("Disabled successfully");
       } else {
+        const warningCursor = await captureScanWarningCursor(
+          api.getScanWarningCursor,
+        );
         await skillApi.enableSkill(skill.name);
         setSkills((prev) =>
           prev.map((s) =>
@@ -279,7 +293,7 @@ export function useSkills() {
           ),
         );
         message.success("Enabled successfully");
-        await checkScanWarnings(skill.name);
+        await checkScanWarnings(skill.name, warningCursor);
       }
       invalidateSkillCache({ agentId: selectedAgent });
       return true;

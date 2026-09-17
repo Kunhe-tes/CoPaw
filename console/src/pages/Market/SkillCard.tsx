@@ -1,6 +1,7 @@
-import { Card, Tag, Typography, Button, Space, Popconfirm, Dropdown, type MenuProps } from "antd";
+import { Card, Tag, Typography, Button, Space, Popconfirm, Dropdown, Popover, type MenuProps } from "antd";
 import { MarketSkill } from "../../api/modules/market";
-import { Users, PhoneCall, Calendar, GitBranch, CheckCircle, Sparkles, Tag as TagIcon, Eye, Trash2, Send, MoreVertical, Archive } from "lucide-react";
+import { BBK_ID_TO_NAME_MAP } from "../../constants/bbk";
+import { Users, PhoneCall, Calendar, GitBranch, CheckCircle, Sparkles, Tag as TagIcon, Eye, Trash2, Send, MoreVertical, Archive, Building2, BarChart3 } from "lucide-react";
 
 const { Text } = Typography;
 
@@ -89,6 +90,8 @@ export function SkillCard({ skill, onClick, onDistribute, onLookupOwners, onUnpu
         backgroundColor: "#fff",
         cursor: "pointer",
         transition: "all 0.2s ease",
+        display: "flex",
+        flexDirection: "column",
       }}
       onClick={onClick}
       onMouseEnter={(e) => {
@@ -103,7 +106,7 @@ export function SkillCard({ skill, onClick, onDistribute, onLookupOwners, onUnpu
       }}
     >
       {/* Header: name + badges */}
-      <div style={{ marginBottom: 12 }}>
+      <div style={{ marginBottom: 12, flex: 1 }}>
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 4 }}>
@@ -156,6 +159,62 @@ export function SkillCard({ skill, onClick, onDistribute, onLookupOwners, onUnpu
                   {categoryName}
                 </Tag>
               )}
+              {skill.bbk_ids?.length > 0 && (
+                <>
+                  {/* 分行 Tag：单个分行直接显示，多个分行显示首个+N，hover展开全部 */}
+                  {skill.bbk_ids.length === 1 ? (
+                    <Tag
+                      style={{
+                        fontSize: 11,
+                        color: "#5e5d59",
+                        backgroundColor: "#f5f4ed",
+                        border: "1px solid #e8e6dc",
+                        borderRadius: 999,
+                        padding: "0 8px",
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 4,
+                      }}
+                    >
+                      <Building2 size={12} style={{ color: "#87867f" }} />
+                      {BBK_ID_TO_NAME_MAP[skill.bbk_ids[0]] || skill.bbk_ids[0]}
+                    </Tag>
+                  ) : (
+                    <Popover
+                      trigger="hover"
+                      placement="bottom"
+                      content={
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          {skill.bbk_ids.map((bbkId) => (
+                            <span key={bbkId} style={{ fontSize: 12 }}>
+                              {BBK_ID_TO_NAME_MAP[bbkId] || bbkId}
+                            </span>
+                          ))}
+                        </div>
+                      }
+                    >
+                      <Tag
+                        style={{
+                          fontSize: 11,
+                          color: "#5e5d59",
+                          backgroundColor: "#f5f4ed",
+                          border: "1px solid #e8e6dc",
+                          borderRadius: 999,
+                          padding: "0 8px",
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 4,
+                          cursor: "pointer",
+                        }}
+                      >
+                        <Building2 size={12} style={{ color: "#87867f" }} />
+                        {BBK_ID_TO_NAME_MAP[skill.bbk_ids[0]] || skill.bbk_ids[0]}
+                        <span style={{ color: "#87867f" }}>+{skill.bbk_ids.length - 1}</span>
+                      </Tag>
+                    </Popover>
+                  )}
+                </>
+              )}
               {isInstalled && (
                 <Tag
                   style={{
@@ -173,6 +232,26 @@ export function SkillCard({ skill, onClick, onDistribute, onLookupOwners, onUnpu
                 >
                   <CheckCircle size={12} />
                   已安装
+                </Tag>
+              )}
+              {/* 统计徽章：仅管理员可见，且技能已纳入统计时显示 */}
+              {isManager && skill.include_in_statistics && (
+                <Tag
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 500,
+                    backgroundColor: "#e6f4ff",
+                    color: "#1677ff",
+                    border: "1px solid #91caff",
+                    borderRadius: 999,
+                    padding: "0 8px",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 4,
+                  }}
+                >
+                  <BarChart3 size={12} />
+                  纳入统计
                 </Tag>
               )}
             </div>

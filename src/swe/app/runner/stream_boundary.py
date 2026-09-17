@@ -3,10 +3,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import copy
-import logging
-from typing import AsyncGenerator, AsyncIterator, Iterable
+from typing import Any, AsyncGenerator, AsyncIterator, Iterable
 
 from agentscope_runtime.engine.schemas.agent_schemas import (
     ContentType,
@@ -17,16 +15,19 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
 )
 
 from ...agents.utils.tool_summary import (
-    async_generate_tool_call_summary,
-    async_generate_tool_output_summary,
     generate_tool_call_summary,
     generate_tool_output_summary,
 )
-from .tool_status import apply_running_tool_status, apply_terminal_tool_status
-
-logger = logging.getLogger(__name__)
-
-_STREAM_SUMMARY_TIMEOUT_SECONDS = 0.15
+from ...agents.tool_failure import (
+    TOOL_GOVERNANCE_BLOCK_FIELD,
+    TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD,
+)
+from .operation_group import attach_operation_group
+from .tool_status import (
+    apply_governance_tool_status,
+    apply_running_tool_status,
+    apply_terminal_tool_status,
+)
 
 # 不在聊天流中展示进度的工具名称集合
 _SILENT_TOOL_NAMES: frozenset[str] = frozenset({"update_task_progress"})
@@ -52,61 +53,6 @@ def _is_silent_tool_event(event: Event) -> bool:
     return False
 
 
-def _consume_summary_task_result(task: asyncio.Task[str]) -> None:
-    """Drain background summary task result after timeout cancellation."""
-    try:
-        task.result()
-    except asyncio.CancelledError:
-        return
-    except Exception as exc:
-        logger.debug("Background tool summary task failed: %s", exc)
-
-
-async def _resolve_summary_with_timeout(
-    coro,
-    *,
-    fallback: str,
-    summary_kind: str,
-    tool_name: str,
-) -> str:
-    """Return async summary quickly, or fallback without blocking the stream.
-
-    The summary model runs off the critical path with a hard timeout. If it
-    does not finish in time, the event stream falls back immediately instead of
-    waiting for cancellation cleanup, which may itself stall on buggy model
-    clients.
-    """
-    task = asyncio.create_task(coro)
-    try:
-        done, _pending = await asyncio.wait(
-            {task},
-            timeout=_STREAM_SUMMARY_TIMEOUT_SECONDS,
-        )
-        if not done:
-            task.cancel()
-            task.add_done_callback(_consume_summary_task_result)
-            logger.debug(
-                "Timed out generating %s summary for tool %s; using fallback",
-                summary_kind,
-                tool_name,
-            )
-            return fallback
-
-        summary = task.result()
-        return summary or fallback
-    except Exception as exc:
-        if not task.done():
-            task.cancel()
-            task.add_done_callback(_consume_summary_task_result)
-        logger.debug(
-            "Failed to generate %s summary for tool %s: %s",
-            summary_kind,
-            tool_name,
-            exc,
-        )
-        return fallback
-
-
 def _is_empty_reasoning_boundary_message(event: Event) -> bool:
     """Return True when *event* is the empty assistant-message boundary."""
     if not isinstance(event, Message):
@@ -116,6 +62,29 @@ def _is_empty_reasoning_boundary_message(event: Event) -> bool:
     if event.status != RunStatus.InProgress:
         return False
     return not event.content
+
+
+def _consume_tool_governance_metadata(
+    event: Message,
+    data: dict,
+) -> Any:
+    """Read trusted governance metadata and strip it from the UI event."""
+    governance_status = data.get(TOOL_GOVERNANCE_BLOCK_FIELD)
+    metadata = getattr(event, "metadata", None)
+    if governance_status is None and isinstance(metadata, dict):
+        by_call = metadata.get(TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD)
+        call_id = data.get("call_id")
+        if isinstance(by_call, dict) and isinstance(call_id, str):
+            governance_status = by_call.get(call_id)
+    if isinstance(metadata, dict) and (
+        TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD in metadata
+    ):
+        event.metadata = {
+            key: value
+            for key, value in metadata.items()
+            if key != TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD
+        }
+    return governance_status
 
 
 def _normalize_reasoning_boundary_events(
@@ -179,21 +148,15 @@ async def _enrich_tool_message(event: Message) -> None:
             tool_name = data.get("name", "")
             arguments = data.get("arguments", "{}")
             server_label = data.get("server_label")
+            # Strip the display-only operation_group key before summary
+            # generation and before the payload reaches the console.
+            attach_operation_group(data, arguments)
             fallback = generate_tool_call_summary(
                 tool_name=tool_name,
-                arguments=arguments,
+                arguments=data.get("arguments", "{}"),
                 server_label=server_label,
             )
-            data["summary"] = await _resolve_summary_with_timeout(
-                async_generate_tool_call_summary(
-                    tool_name=tool_name,
-                    arguments=arguments,
-                    server_label=server_label,
-                ),
-                fallback=fallback,
-                summary_kind="call",
-                tool_name=tool_name,
-            )
+            data["summary"] = fallback
             apply_running_tool_status(data)
 
     elif event.type in (
@@ -211,21 +174,19 @@ async def _enrich_tool_message(event: Message) -> None:
             tool_name = data.get("name", "")
             output = data.get("output", "")
             arguments = data.get("arguments")
+            governance_status = _consume_tool_governance_metadata(event, data)
             fallback = generate_tool_output_summary(
                 tool_name=tool_name,
                 output=output,
+                governance_status=governance_status,
             )
-            data["output_summary"] = await _resolve_summary_with_timeout(
-                async_generate_tool_output_summary(
-                    tool_name=tool_name,
-                    output=output,
-                    arguments=arguments,
-                ),
-                fallback=fallback,
-                summary_kind="output",
-                tool_name=tool_name,
-            )
+            data["output_summary"] = fallback
             apply_terminal_tool_status(data)
+            apply_governance_tool_status(
+                data,
+                governance_status,
+            )
+            data.pop(TOOL_GOVERNANCE_BLOCK_FIELD, None)
 
 
 async def normalize_reasoning_boundary_stream(

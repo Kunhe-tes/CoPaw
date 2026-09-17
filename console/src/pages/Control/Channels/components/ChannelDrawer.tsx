@@ -15,6 +15,7 @@ import type { FormInstance } from "antd";
 import { useCallback, useRef, useState } from "react";
 import { getChannelLabel, type ChannelKey } from "./constants";
 import { getUserId } from "../../../../utils/identity";
+import { useIframeStore } from "../../../../stores/iframeStore";
 import { TenantSelector } from "../../../../components/TenantSelector";
 import styles from "../index.module.less";
 import { useTheme } from "../../../../contexts/ThemeContext";
@@ -156,6 +157,10 @@ export function ChannelDrawer({
   const weixinPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const weixinConfirmedRef = useRef(false);
 
+  // 仅管理员（或 default）可见分发入口，与应用市场保持一致
+  const manager = useIframeStore((state) => state.manager);
+  const canManage = manager || getUserId() === "default";
+
   // 通道配置分发状态
   const [distributeOpen, setDistributeOpen] = useState(false);
   const [distributeSubmitting, setDistributeSubmitting] = useState(false);
@@ -282,7 +287,7 @@ export function ChannelDrawer({
     try {
       const result = await api.distributeChannelConfig(activeKey, {
         target_tenant_ids: selectedDistributeTenantIds,
-        fields: ["enabled", "bot_prefix", "filter_tool_messages", "filter_thinking", "robot_open_id", "client_id", "client_secret", "session_end_push_enabled"],
+        fields: ["enabled", "bot_prefix", "filter_tool_messages", "filter_thinking", "robot_open_id", "client_id", "client_secret", "session_end_push_enabled", "session_end_push_link_prefix", "session_end_push_link_id_type"],
         overwrite: distributeOverwrite,
       });
       const items = result.results || [];
@@ -1084,7 +1089,7 @@ export function ChannelDrawer({
 
   const drawerFooter = (
     <div className={styles.formActions}>
-      {activeKey === "zhaohu" && (
+      {activeKey === "zhaohu" && canManage && (
         <Button onClick={handleOpenDistribute}>
           {t("channels.distributeToTenants")}
         </Button>
@@ -1152,6 +1157,23 @@ export function ChannelDrawer({
               valuePropName="checked"
             >
               <Switch />
+            </Form.Item>
+                        <Form.Item
+              name="session_end_push_link_prefix"
+              label={t("channels.sessionEndPushLinkPrefix")}
+              tooltip={t("channels.sessionEndPushLinkPrefixTooltip")}
+            >
+              <Input placeholder="https://example.com/push" />
+            </Form.Item>
+            <Form.Item
+              name="session_end_push_link_id_type"
+              label={t("channels.sessionEndPushLinkIdType")}
+              initialValue="session_id"
+            >
+              <Select>
+                <Select.Option value="chat_id">Chat ID</Select.Option>
+                <Select.Option value="session_id">Session ID</Select.Option>
+              </Select>
             </Form.Item>
             </>
           )}

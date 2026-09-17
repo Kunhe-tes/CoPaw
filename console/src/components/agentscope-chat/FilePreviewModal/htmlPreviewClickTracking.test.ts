@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { HtmlPreviewClickEventPayload } from "@/api/types/htmlPreviewEvents";
+import type { HtmlTrackerPayloadType } from "@/api/types/htmlPreviewEvents";
 import {
   attachHtmlPreviewClickTracker,
   buildHtmlPreviewClickPayload,
@@ -253,7 +253,7 @@ describe("htmlPreviewClickTracking", () => {
     const doc = iframe.contentDocument!;
     doc.body.innerHTML =
       '<div><button id="follow"><span>立即跟进</span></button></div>';
-    const reporter = vi.fn((_: HtmlPreviewClickEventPayload) =>
+    const reporter = vi.fn((_: HtmlTrackerPayloadType) =>
       Promise.reject(new Error("network error")),
     );
 

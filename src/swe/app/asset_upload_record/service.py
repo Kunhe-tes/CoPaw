@@ -11,6 +11,8 @@ from .models import (
     AssetUploadRecord,
     AssetUploadFileNameList,
     PaginatedAssetUploadRecords,
+    QueryIdKeyData,
+    QueryIdKeyResponse,
     TemplateItem,
     TemplateResultRequest,
     TemplateResultResponse,
@@ -39,6 +41,7 @@ class AssetUploadRecordService:
         file_size: int,
         asset_path: str,
         source_id: Optional[str] = None,
+        template_flag: Optional[str] = None,
     ) -> Optional[int]:
         """创建上传记录，写库失败时记录警告但不抛异常。"""
         try:
@@ -47,6 +50,7 @@ class AssetUploadRecordService:
                 file_size=file_size,
                 asset_path=asset_path,
                 source_id=source_id,
+                template_flag=template_flag,
             )
         except Exception:
             logger.warning(
@@ -81,7 +85,11 @@ class AssetUploadRecordService:
         """查询所有上传文件名。"""
         rows = await self._store.list_all_file_names()
         data = [
-            TemplateItem(templateId=row["id"], templateName=row["file_name"])
+            TemplateItem(
+                templateId=row["id"],
+                templateName=row["file_name"],
+                templateFlag=row.get("template_flag"),
+            )
             for row in rows
         ]
         return AssetUploadFileNameList(data=data)
@@ -99,6 +107,12 @@ class AssetUploadRecordService:
                 data=None,
             )
         return TemplateSearchResponse(data=template_id)
+
+    async def delete_record(self, record_id: int) -> None:
+        """根据ID删除上传记录，不存在时抛出 ValueError。"""
+        deleted = await self._store.delete_record(record_id)
+        if not deleted:
+            raise ValueError("记录不存在")
 
     async def query_template_result(
         self,
@@ -138,3 +152,60 @@ class AssetUploadRecordService:
                 result=False,
                 data=None,
             )
+
+    async def query_id_key(
+        self,
+        *,
+        template_name: str,
+        user_id: str,
+        bbk_org_id: str,
+        id_key: str,
+    ) -> QueryIdKeyResponse:
+        """调用第三方接口查询ID Key，并查库获取templateId。"""
+        base_url = os.environ.get(
+            "SWE_LLM_EVALUATE_API_URL",
+            _LLM_EVALUATE_API_URL,
+        )
+        url = f"{base_url.rstrip('/')}/answer/query-id-key"
+        payload = {
+            "userId": user_id,
+            "idKey": id_key,
+            "bbkOrgId": bbk_org_id,
+            "days": 31,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(url, json=payload)
+                resp.raise_for_status()
+                body: dict[str, Any] = resp.json()
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "Failed to query id-key: %s",
+                exc,
+                exc_info=True,
+            )
+            return QueryIdKeyResponse(
+                code=500,
+                error=f"External API error: {exc}",
+                data=None,
+            )
+
+        data = body.get("data") or {}
+        result_id = data.get("idKey", "")
+        file_name = data.get("fileName", "")
+
+        template_id = await self._store.get_template_id_by_name(template_name)
+        if template_id is None:
+            return QueryIdKeyResponse(
+                code=404,
+                error="Template not found",
+                data=None,
+            )
+
+        return QueryIdKeyResponse(
+            data=QueryIdKeyData(
+                templateId=template_id,
+                resultId=result_id,
+                fileName=file_name,
+            ),
+        )

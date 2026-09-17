@@ -1,23 +1,52 @@
 import { useEffect, useCallback, useRef, useMemo, useState } from "react";
-import { Dropdown, Spin, Tooltip } from "antd";
+import { Button, Dropdown, Spin, Switch, Tooltip } from "antd";
 import { useAppMessage } from "../../../hooks/useAppMessage";
 import {
   CheckOutlined,
   LoadingOutlined,
-  RightOutlined,
 } from "@ant-design/icons";
 import { SparkDownLine } from "@agentscope-ai/icons";
 import { useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { providerApi } from "../../../api/modules/provider";
 import { useProviderModelStore } from "../../../stores/providerModelStore";
+import { providerIcon } from "../../Settings/Models/components/providerIcon";
+import type {
+  ModelRuntimeConfig,
+  ProviderInfo,
+  ReasoningEffort,
+} from "../../../api/types";
 import styles from "./index.module.less";
 
-interface EligibleProvider {
-  id: string;
-  name: string;
-  models: Array<{ id: string; name: string }>;
+interface EligibleModel {
+  providerId: string;
+  providerName: string;
+  model: ProviderInfo["models"][number];
 }
+
+const REASONING_EFFORT_LABELS: Record<ReasoningEffort, string> = {
+  low: "低",
+  high: "高",
+  max: "极高",
+};
+
+const REASONING_EFFORT_HINTS: Record<ReasoningEffort, string> = {
+  low: "更快响应",
+  high: "平衡推理效果与速度",
+  max: "优先推理质量",
+};
+
+const REASONING_EFFORT_LABEL_KEYS: Record<ReasoningEffort, string> = {
+  low: "modelSelector.reasoningLow",
+  high: "modelSelector.reasoningHigh",
+  max: "modelSelector.reasoningMax",
+};
+
+const REASONING_EFFORT_HINT_KEYS: Record<ReasoningEffort, string> = {
+  low: "modelSelector.reasoningLowHint",
+  high: "modelSelector.reasoningHighHint",
+  max: "modelSelector.reasoningMaxHint",
+};
 
 export default function ModelSelector() {
   const { t } = useTranslation();
@@ -25,8 +54,14 @@ export default function ModelSelector() {
   const activeModels = useProviderModelStore((state) => state.activeModels);
   const loading = useProviderModelStore((state) => state.loading);
   const loadModelData = useProviderModelStore((state) => state.loadModelData);
+  const setModelRuntimeConfig = useProviderModelStore(
+    (state) => state.setModelRuntimeConfig,
+  );
   const [saving, setSaving] = useState(false);
   const [open, setOpen] = useState(false);
+  const [runtimeConfig, setRuntimeConfig] = useState<ModelRuntimeConfig | null>(
+    null,
+  );
   const savingRef = useRef(false);
   const location = useLocation();
   const { message } = useAppMessage();
@@ -57,8 +92,7 @@ export default function ModelSelector() {
     }
   }, [loadModelData, location.pathname]);
 
-  // Eligible providers: configured + has models
-  const eligibleProviders: EligibleProvider[] = useMemo(
+  const eligibleModels: EligibleModel[] = useMemo(
     () =>
       providers
         .filter((p) => {
@@ -70,27 +104,77 @@ export default function ModelSelector() {
           if (p.require_api_key ?? true) return !!p.api_key;
           return true;
         })
-        .map((p) => ({
-          id: p.id,
-          name: p.name,
-          models: [...(p.models ?? []), ...(p.extra_models ?? [])],
-        })),
+        .flatMap((provider) =>
+          [...(provider.models ?? []), ...(provider.extra_models ?? [])].map(
+            (model) => ({
+              providerId: provider.id,
+              providerName: provider.name,
+              model,
+            }),
+          ),
+        ),
     [providers],
   );
 
   const activeProviderId = activeModels?.active_llm?.provider_id;
   const activeModelId = activeModels?.active_llm?.model;
 
+  useEffect(() => {
+    const provider = providers.find((item) => item.id === activeProviderId);
+    setRuntimeConfig(provider?.model_configs?.[activeModelId || ""] ?? null);
+  }, [providers, activeProviderId, activeModelId]);
+
+  const updateRuntimeConfig = useCallback(
+    async (updates: Partial<ModelRuntimeConfig>) => {
+      if (
+        savingRef.current ||
+        !activeProviderId ||
+        !activeModelId ||
+        !runtimeConfig
+      ) {
+        return;
+      }
+      const previous = runtimeConfig;
+      savingRef.current = true;
+      setSaving(true);
+      setRuntimeConfig({ ...runtimeConfig, ...updates });
+      try {
+        const saved = await providerApi.updateModelRuntimeConfig(
+          activeProviderId,
+          activeModelId,
+          updates,
+        );
+        setModelRuntimeConfig(activeProviderId, activeModelId, saved);
+        setRuntimeConfig(saved);
+      } catch (err) {
+        setRuntimeConfig(previous);
+        message.error(
+          err instanceof Error ? err.message : t("models.failedToSaveConfig"),
+        );
+      } finally {
+        setSaving(false);
+        savingRef.current = false;
+      }
+    },
+    [
+      activeProviderId,
+      activeModelId,
+      message,
+      runtimeConfig,
+      setModelRuntimeConfig,
+      t,
+    ],
+  );
+
   // Display label for trigger button
   const activeModelName = (() => {
     if (!activeProviderId || !activeModelId)
       return t("modelSelector.selectModel");
-    for (const p of eligibleProviders) {
-      if (p.id === activeProviderId) {
-        const m = p.models.find((m) => m.id === activeModelId);
-        if (m) return m.name || m.id;
-      }
-    }
+    const activeModel = eligibleModels.find(
+      (item) =>
+        item.providerId === activeProviderId && item.model.id === activeModelId,
+    );
+    if (activeModel) return activeModel.model.name || activeModel.model.id;
     return activeModelId;
   })();
 
@@ -126,6 +210,12 @@ export default function ModelSelector() {
         model: modelId,
         scope: "global",
       });
+      try {
+        await loadModelData({ scope: "effective" });
+      } catch (err) {
+        // Activation already succeeded; a stale refresh must not report a failed switch.
+        console.error("ModelSelector: failed to refresh model data", err);
+      }
       // Notify ChatPage to refresh multimodal capabilities
       window.dispatchEvent(new CustomEvent("model-switched"));
     } catch (err) {
@@ -138,60 +228,122 @@ export default function ModelSelector() {
     }
   };
 
+  const hasThinkingConfiguration =
+    runtimeConfig !== null &&
+    (runtimeConfig.supports_enable_thinking ||
+      runtimeConfig.supported_reasoning_efforts.length > 0);
+  const reasoningEffortDisabled =
+    saving ||
+    !!(
+      runtimeConfig?.supports_enable_thinking && !runtimeConfig.enable_thinking
+    );
+  const reasoningHint = runtimeConfig?.reasoning_effort
+    ? t(
+        REASONING_EFFORT_HINT_KEYS[runtimeConfig.reasoning_effort],
+        REASONING_EFFORT_HINTS[runtimeConfig.reasoning_effort],
+      )
+    : t("modelSelector.selectThinkingEffort", "请选择思考强度");
+
   const dropdownContent = (
-    <div className={styles.panel}>
+    <div
+      className={`${styles.panel} ${
+        hasThinkingConfiguration ? styles.panelWithConfig : ""
+      }`}
+    >
       {loading ? (
         <div className={styles.spinWrapper}>
           <Spin size="small" />
         </div>
-      ) : eligibleProviders.length === 0 ? (
+      ) : eligibleModels.length === 0 ? (
         <div className={styles.emptyTip}>
           {t("modelSelector.noConfiguredModels")}
         </div>
       ) : (
-        eligibleProviders.map((provider) => {
-          const isProviderActive = provider.id === activeProviderId;
-          return (
-            <div
-              key={provider.id}
-              className={[
-                styles.providerItem,
-                isProviderActive ? styles.providerItemActive : "",
-              ].join(" ")}
-            >
-              <span className={styles.providerName}>{provider.name}</span>
-              <RightOutlined className={styles.providerArrow} />
-
-              {/* Level-2 submenu — shown on parent hover via CSS */}
-              <div className={`${styles.submenu} modelSubmenu`}>
-                {provider.models.map((model) => {
-                  const isActive =
-                    isProviderActive && model.id === activeModelId;
-                  return (
-                    <div
-                      key={model.id}
-                      className={[
-                        styles.modelItem,
-                        isActive ? styles.modelItemActive : "",
-                      ].join(" ")}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleSelect(provider.id, model.id);
-                      }}
-                    >
-                      <span className={styles.modelName}>
-                        {model.name || model.id}
-                      </span>
-                      {isActive && (
-                        <CheckOutlined className={styles.checkIcon} />
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
+        <div className={styles.modelList}>
+          {eligibleModels.map(({ providerId, providerName, model }) => {
+            const isActive =
+              providerId === activeProviderId && model.id === activeModelId;
+            return (
+              <button
+                key={`${providerId}:${model.id}`}
+                type="button"
+                className={`${styles.modelCard} ${
+                  isActive ? styles.modelCardActive : ""
+                }`}
+                aria-pressed={isActive}
+                disabled={saving}
+                onClick={() => handleSelect(providerId, model.id)}
+              >
+                <img
+                  className={styles.modelIcon}
+                  src={providerIcon(providerId)}
+                  alt=""
+                />
+                <span className={styles.modelIdentity}>
+                  <span className={styles.modelId}>{model.id}</span>
+                  <span className={styles.modelMetadata}>
+                    {providerName} · {model.name}
+                  </span>
+                </span>
+                {isActive && <CheckOutlined className={styles.checkIcon} />}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {hasThinkingConfiguration && runtimeConfig && (
+        <div
+          className={styles.runtimeConfig}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <h3 className={styles.runtimeConfigTitle}>
+            {t("modelSelector.settings", "模型配置")}
+          </h3>
+          {runtimeConfig.supports_enable_thinking && (
+            <div className={styles.runtimeConfigRow}>
+              <span>{t("modelSelector.thinkingMode", "思考模式")}</span>
+              <Switch
+                size="small"
+                checked={runtimeConfig.enable_thinking}
+                disabled={saving}
+                onChange={(checked) =>
+                  updateRuntimeConfig({ enable_thinking: checked })
+                }
+              />
             </div>
-          );
-        })
+          )}
+          {runtimeConfig.supported_reasoning_efforts.length > 0 && (
+            <div className={styles.reasoningSection}>
+              <span className={styles.reasoningLabel}>
+                {t("modelSelector.thinkingEffort", "思考强度")}
+              </span>
+              <div className={styles.reasoningOptions}>
+                {runtimeConfig.supported_reasoning_efforts.map((effort) => (
+                  <Button
+                    key={effort}
+                    type={
+                      runtimeConfig.reasoning_effort === effort
+                        ? "primary"
+                        : "default"
+                    }
+                    aria-pressed={runtimeConfig.reasoning_effort === effort}
+                    disabled={reasoningEffortDisabled}
+                    className={styles.reasoningOption}
+                    onClick={() =>
+                      updateRuntimeConfig({ reasoning_effort: effort })
+                    }
+                  >
+                    {t(
+                      REASONING_EFFORT_LABEL_KEYS[effort],
+                      REASONING_EFFORT_LABELS[effort],
+                    )}
+                  </Button>
+                ))}
+              </div>
+              <span className={styles.reasoningHint}>{reasoningHint}</span>
+            </div>
+          )}
+        </div>
       )}
     </div>
   );

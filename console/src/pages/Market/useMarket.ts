@@ -6,6 +6,7 @@ export function useMarket(sourceId: string) {
   const [skills, setSkills] = useState<MarketSkill[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<number | null>(null);
+  const [selectedBbkId, setSelectedBbkId] = useState<string | null>(null);
   const [selectedSkill, setSelectedSkill] = useState<MarketSkillDetail | null>(null);
   const [detailDrawerOpen, setDetailDrawerOpen] = useState(false);
   const [publishModalOpen, setPublishModalOpen] = useState(false);
@@ -22,14 +23,18 @@ export function useMarket(sourceId: string) {
   const refreshSkills = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await marketApi.listMarketSkills(sourceId, selectedCategory ?? undefined);
+      const data = await marketApi.listMarketSkills(
+        sourceId,
+        selectedCategory ?? undefined,
+        selectedBbkId ?? undefined,
+      );
       setSkills(data);
     } catch (err) {
       console.error("Failed to load skills:", err);
     } finally {
       setLoading(false);
     }
-  }, [sourceId, selectedCategory]);
+  }, [sourceId, selectedCategory, selectedBbkId]);
 
   // 刷新当前选中技能的详情
   const refreshSelectedSkill = useCallback(async () => {
@@ -71,6 +76,8 @@ export function useMarket(sourceId: string) {
     loading,
     selectedCategory,
     setSelectedCategory,
+    selectedBbkId,
+    setSelectedBbkId,
     selectedSkill,
     detailDrawerOpen,
     setDetailDrawerOpen,

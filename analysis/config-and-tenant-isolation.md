@@ -49,6 +49,15 @@
 │   └── sessions/
 ```
 
+## 租户引导一致性
+
+- 运行时初始化只能经 `TenantWorkspacePool.ensure_bootstrap()` 进入。每个有效存储租户在 `<tenant-root>/.bootstrap.lock` 上使用 `fcntl.flock`；进程内 `asyncio.Lock` 仅用于减少本进程竞争。
+- 锁等待上限为 30 秒。锁超时、锁 I/O 异常、源模板不可用或恢复后仍未就绪时均失败闭合；HTTP 工作区中间件返回 `503 Tenant bootstrap unavailable` 和 `Retry-After: 2`。
+- “就绪”由真实 `config.json`、默认 Agent、工作区 JSON、技能清单及声明的技能目录严格校验决定；`.bootstrap.ready` 只是诊断标记，不能作为就绪依据。
+- 修复只会将严格校验识别出的引导 JSON 移为带 UUID 的 `.bak`。最终校验成功后立即删除本次生成的 `.bak`；失败时保留，便于排查。
+- `default_<source>` 只能通过内部 `POST /internal/source-templates/ensure`（内部令牌）或 `swe init-source-template --source-id <id>` 显式创建/修复。正常租户流量不会从 `default/` 懒复制模板。
+- `agents/tools/file_io.py` 的临时文件仍在正常完成、失败和取消时即时清理；进程被强制终止时仍可能残留，且本方案刻意不做 TTL 或目录级通用清理。
+
 ```text
 ~/.swe.secret/
 ├── <tenant>/

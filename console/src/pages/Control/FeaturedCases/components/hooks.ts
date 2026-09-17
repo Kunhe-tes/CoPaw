@@ -1,26 +1,72 @@
-import { useState, useCallback } from "react";
+import { useCallback, useRef, useState } from "react";
 import { featuredCasesApi } from "@/api/modules/featuredCases";
-import type { FeaturedCase, FeaturedCaseCreate, FeaturedCaseUpdate } from "@/api/types/featuredCases";
+import type {
+  FeaturedCase,
+  FeaturedCaseCreate,
+  FeaturedCaseUpdate,
+} from "@/api/types/featuredCases";
 
-export function useFeaturedCases() {
-  const [cases, setCases] = useState<FeaturedCase[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [total, setTotal] = useState(0);
+interface ScopeCasesState {
+  cases: FeaturedCase[];
+  loading: boolean;
+  total: number;
+}
+
+const EMPTY_SCOPE_STATE: ScopeCasesState = {
+  cases: [],
+  loading: false,
+  total: 0,
+};
+
+export function useFeaturedCases(activeScopeBbkId: string) {
+  const [scopeStates, setScopeStates] = useState<
+    Record<string, ScopeCasesState>
+  >({});
+  const requestSequenceRef = useRef(0);
+  const latestRequestByScopeRef = useRef<Record<string, number>>({});
+  const activeScopeState = scopeStates[activeScopeBbkId] ?? EMPTY_SCOPE_STATE;
 
   const loadCases = useCallback(
-    async (params?: { bbk_id?: string; page?: number; page_size?: number }) => {
-      setLoading(true);
+    async (params: { bbk_id: string; page?: number; page_size?: number }) => {
+      const scopeBbkId = params.bbk_id;
+      const requestId = ++requestSequenceRef.current;
+      latestRequestByScopeRef.current[scopeBbkId] = requestId;
+      setScopeStates((current) => ({
+        ...current,
+        [scopeBbkId]: {
+          ...(current[scopeBbkId] ?? EMPTY_SCOPE_STATE),
+          loading: true,
+        },
+      }));
       try {
         const data = await featuredCasesApi.adminListCases(params);
-        setCases(data.cases);
-        setTotal(data.total);
+        if (latestRequestByScopeRef.current[scopeBbkId] === requestId) {
+          setScopeStates((current) => ({
+            ...current,
+            [scopeBbkId]: {
+              cases: data.cases,
+              loading: current[scopeBbkId]?.loading ?? true,
+              total: data.total,
+            },
+          }));
+        }
+        return data;
       } catch (error) {
         console.error("Failed to load cases:", error);
+        throw error;
       } finally {
-        setLoading(false);
+        if (latestRequestByScopeRef.current[scopeBbkId] === requestId) {
+          setScopeStates((current) => ({
+            ...current,
+            [scopeBbkId]: {
+              ...(current[scopeBbkId] ?? EMPTY_SCOPE_STATE),
+              loading: false,
+            },
+          }));
+        }
       }
     },
-    []
+    [],
   );
 
   const createCase = useCallback(async (caseItem: FeaturedCaseCreate) => {
@@ -43,7 +89,7 @@ export function useFeaturedCases() {
         throw error;
       }
     },
-    []
+    [],
   );
 
   const deleteCase = useCallback(async (id: number) => {
@@ -55,13 +101,24 @@ export function useFeaturedCases() {
     }
   }, []);
 
+  const reorderCase = useCallback(async (id: number, sortOrder: number) => {
+    try {
+      const result = await featuredCasesApi.adminReorderCase(id, sortOrder);
+      return result.data;
+    } catch (error) {
+      console.error("Failed to reorder case:", error);
+      throw error;
+    }
+  }, []);
+
   return {
-    cases,
-    loading,
-    total,
+    cases: activeScopeState.cases,
+    loading: activeScopeState.loading,
+    total: activeScopeState.total,
     loadCases,
     createCase,
     updateCase,
     deleteCase,
+    reorderCase,
   };
 }

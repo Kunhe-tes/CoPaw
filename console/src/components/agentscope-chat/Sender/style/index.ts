@@ -31,7 +31,7 @@ const IndexStyle = createGlobalStyle`
     box-shadow: 0px 12px 24px -16px rgba(54, 54, 73, 0.04),
       0px 12px 40px 0px rgba(51, 51, 71, 0.08),
       0px 0px 1px 0px rgba(44, 44, 54, 0.02);
-    border-color: ${(p) => p.theme.colorPrimaryHover};
+    border-color: ${(p) => p.theme.colorBorderSecondary};
 
     &:after {
       border-width: ${(p) => p.theme.lineWidth}px;
@@ -63,6 +63,11 @@ const IndexStyle = createGlobalStyle`
     overflow: hidden;
   }
 
+  &-with-skill-editor,
+  &-with-skill-editor .${(p) => p.theme.prefixCls}-sender-content {
+    overflow: visible;
+  }
+
   &-content-bottom {
     margin-top: 4px;
     display: flex;
@@ -81,6 +86,20 @@ const IndexStyle = createGlobalStyle`
     align-self: center;
     font-size: 14px;
     line-height: 22px;
+    max-height: 300px;
+    overflow: auto;
+  }
+
+  &-skill-editor {
+    min-height: 44px;
+    outline: none;
+    white-space: pre-wrap;
+
+    &:empty::before {
+      color: ${(p) => p.theme.colorTextPlaceholder};
+      content: attr(data-placeholder);
+      pointer-events: none;
+    }
   }
 
   &-actions-list {

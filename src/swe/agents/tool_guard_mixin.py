@@ -17,14 +17,17 @@ import json as _json
 import logging
 import os
 from pathlib import Path
+import shlex
 import time
 import uuid as _uuid
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 
 from agentscope.message import Msg, ToolResultBlock
 
 from ..constant import AGENT_WATCHDOG_TIMEOUT, QUERY_TIMEOUT_SECONDS
+from ..tracing.agent_trace_sdk import execute_tool_traced
 from ..app.runner.tool_output_frames import tool_output_invocation
+from .agent_trace_output import ToolTraceOutcome, build_tool_output_arguments
 from .hook_runtime import HookRuntime
 from .hook_runtime.conversation_snapshot import capture_conversation_snapshot
 from .hook_runtime.models import (
@@ -35,7 +38,10 @@ from .hook_runtime.models import (
     HookSessionState,
     MergedHookResult,
 )
-from .tool_failure import build_failed_tool_result_block
+from .tool_failure import (
+    attach_tool_governance_message_metadata,
+    build_failed_tool_result_block,
+)
 from ..security.tool_guard.models import TOOL_GUARD_DENIED_MARK
 from ..tracing import has_trace_manager, get_trace_manager, get_current_trace
 
@@ -48,6 +54,19 @@ def _current_task_label() -> str:
     if task is None:
         return "no-task"
     return f"task-{id(task)}"
+
+
+def _goal_tool_may_write_environment(
+    tool_name: str,
+    tool_input: dict[str, Any],
+) -> bool:
+    """Conservatively track real Goal-turn writes for contract rechecks."""
+    if tool_name in _GOAL_ENVIRONMENT_WRITE_TOOLS:
+        return True
+    if tool_name != "execute_shell_command":
+        return False
+    command = f" {str(tool_input.get('command') or '').lower()} "
+    return any(token in command for token in _GOAL_MUTATING_SHELL_TOKENS)
 
 
 def _trace_field(trace_ctx: Any, field: str, default: Any = "") -> Any:
@@ -81,8 +100,152 @@ _TOOLS_WITH_SPECIFIC_TIMEOUTS = {
     "grep_search",
     "glob_search",
 }
+_PLAN_MODE_ALLOWED_TOOLS = frozenset(
+    {
+        "execute_shell_command",
+        "read_file",
+        "grep_search",
+        "glob_search",
+        "get_current_time",
+        "memory_search",
+        "ask_plan_clarification",
+        "submit_proposed_plan",
+        "start_subagent",
+        "wait_subagent",
+        "get_subagent",
+        "cancel_subagent",
+    },
+)
+_PLAN_INTERACTION_TOOL_NAMES = frozenset(
+    {
+        "ask_plan_clarification",
+        "submit_proposed_plan",
+        "start_subagent",
+        "wait_subagent",
+        "get_subagent",
+        "cancel_subagent",
+    },
+)
+_PLAN_INTERACTION_CARD_METADATA_KEY = "plan_interaction_card"
+PLAN_INTERACTION_SUMMARIZING_SHORT_CIRCUIT_METADATA_KEY = (
+    "_plan_interaction_summarizing_short_circuit"
+)
+_PLAN_INTERACTION_TURN_BOUNDARY_ATTR = (
+    "_plan_interaction_turn_boundary_reached"
+)
+_PLAN_MODE_SHELL_META_CHARS = frozenset((";", "|", ">", "<", "&", "`", "$"))
+_PLAN_MODE_GIT_READONLY_SUBCOMMANDS = frozenset(
+    ("status", "diff", "grep", "log", "show"),
+)
+_PLAN_MODE_DENIED_GIT_OPTIONS = frozenset(
+    ("--output", "--ext-diff", "--textconv", "-O", "--open-files-in-pager"),
+)
+_PLAN_MODE_DENIED_READONLY_OPTIONS = frozenset(("--pre",))
 _APPROVAL_KIND_TOOL_GUARD = "tool_guard"
 _APPROVAL_KIND_HOOK_PRE_TOOL_USE = "hook_pre_tool_use"
+_PENDING_TOOL_SKILL_ATTRIBUTIONS_KEY = "_pending_tool_skill_attributions"
+_SELECTED_EXPERT_EXECUTION_KEY = "selected_expert_execution"
+_SELECTED_EXPERT_RUN_ID_KEY = "selected_expert_run_id"
+_SELECTED_EXPERT_WAIT_TIMEOUT_MS = 3000
+_GOAL_ENVIRONMENT_WRITE_TOOLS = frozenset({"write_file", "edit_file"})
+_GOAL_MUTATING_SHELL_TOKENS = frozenset(
+    {
+        "rm ",
+        "mv ",
+        "cp ",
+        "mkdir",
+        "touch",
+        "tee ",
+        ">",
+        ">>",
+        "sed -i",
+        "git commit",
+        "git reset",
+        "git checkout",
+        "git clean",
+        "pip install",
+        "npm install",
+        "pnpm install",
+    },
+)
+
+
+def _subagent_mcp_server_key(
+    mcp_server: str | None,
+    request_context: dict[str, Any],
+) -> str | None:
+    """Translate a registered MCP client name back to its snapshot key."""
+    if mcp_server is None:
+        return None
+    mapping = request_context.get("subagent_mcp_server_keys")
+    if not isinstance(mapping, dict):
+        return mcp_server
+    return str(mapping.get(mcp_server, mcp_server))
+
+
+def _has_plan_mode_shell_structure(command: str) -> bool:
+    return any(char in command for char in _PLAN_MODE_SHELL_META_CHARS)
+
+
+def _looks_like_env_assignment(token: str) -> bool:
+    name, separator, _value = token.partition("=")
+    return bool(separator and name and name.replace("_", "").isalnum())
+
+
+def _has_denied_option(
+    args: list[str],
+    denied_options: frozenset[str],
+) -> bool:
+    return any(
+        arg in denied_options
+        or any(arg.startswith(f"{option}=") for option in denied_options)
+        for arg in args
+    )
+
+
+def _validate_plan_mode_git(tokens: list[str]) -> str | None:
+    if len(tokens) < 2:
+        return "git command requires a readonly subcommand"
+    subcommand = tokens[1]
+    if subcommand.startswith("-"):
+        return "git global options are unavailable in Plan Mode"
+    if subcommand not in _PLAN_MODE_GIT_READONLY_SUBCOMMANDS:
+        return "git subcommand is unavailable in Plan Mode"
+    if _has_denied_option(tokens[2:], _PLAN_MODE_DENIED_GIT_OPTIONS):
+        return "git command option may write files or execute external helpers"
+    return None
+
+
+def _validate_plan_mode_readonly_shell(command: str) -> str | None:
+    if not command:
+        return "empty shell command"
+    if _has_plan_mode_shell_structure(command):
+        return "shell compound syntax is unavailable in Plan Mode"
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return "shell command could not be parsed safely"
+    if not tokens:
+        return "empty shell command"
+    if _looks_like_env_assignment(tokens[0]):
+        return "environment assignments are unavailable in Plan Mode"
+    if tokens[0] in {"pwd", "ls"}:
+        return None
+    if tokens[0] in {"rg", "grep"}:
+        if _has_denied_option(tokens[1:], _PLAN_MODE_DENIED_READONLY_OPTIONS):
+            return "search command option may execute external helpers"
+        return None
+    if tokens[0] == "git":
+        return _validate_plan_mode_git(tokens)
+    return "shell command is not in the Plan Mode readonly allowlist"
+
+
+class PreToolUseTerminalStop(Exception):
+    """Signal that a PreToolUse hook terminated the current agent turn."""
+
+    def __init__(self, reason: str | None = None) -> None:
+        self.reason = reason or "Hook requested stop"
+        super().__init__(self.reason)
 
 
 class _GuardAction:
@@ -125,10 +288,42 @@ class ToolGuardMixin:
         self._tool_guard_approval_service = get_approval_service()
         self._tool_guard_pending_info: dict | None = None
         self._tool_guard_lock = asyncio.Lock()
+        self._pre_tool_terminal_stop_reason: str | None = None
+        self._active_tool_guard_acting_tasks: set[asyncio.Task[Any]] = set()
 
     def _ensure_tool_guard(self) -> None:
         if not hasattr(self, "_tool_guard_engine"):
             self._init_tool_guard()
+
+    def _ensure_pre_tool_terminal_stop_tracking(self) -> None:
+        if not hasattr(self, "_pre_tool_terminal_stop_reason"):
+            self._pre_tool_terminal_stop_reason = None
+        if not hasattr(self, "_active_tool_guard_acting_tasks"):
+            self._active_tool_guard_acting_tasks = set()
+
+    def consume_pre_tool_terminal_stop(self) -> str | None:
+        """Return and clear the terminal stop state for the completed turn."""
+        self._ensure_pre_tool_terminal_stop_tracking()
+        reason = self._pre_tool_terminal_stop_reason
+        self._pre_tool_terminal_stop_reason = None
+        return reason
+
+    def reset_pre_tool_terminal_stop(self) -> None:
+        """Clear terminal stop state before beginning a new agent turn."""
+        self.consume_pre_tool_terminal_stop()
+
+    def _raise_if_pre_tool_terminal_stop_requested(self) -> None:
+        self._ensure_pre_tool_terminal_stop_tracking()
+        if self._pre_tool_terminal_stop_reason is not None:
+            raise PreToolUseTerminalStop(self._pre_tool_terminal_stop_reason)
+
+    def _request_pre_tool_terminal_stop(self, reason: str) -> None:
+        self._ensure_pre_tool_terminal_stop_tracking()
+        self._pre_tool_terminal_stop_reason = reason
+        stopping_task = asyncio.current_task()
+        for task in tuple(self._active_tool_guard_acting_tasks):
+            if task is not stopping_task and not task.done():
+                task.cancel()
 
     # ------------------------------------------------------------------
     # Helpers
@@ -157,7 +352,49 @@ class ToolGuardMixin:
             return True
         return tool_name in _TOOLS_WITH_SPECIFIC_TIMEOUTS
 
-    async def _run_tool_call_with_hard_timeout(
+    async def _run_plan_interaction_tool_call(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+    ) -> dict | None:
+        """Execute a plan interaction and preserve its card metadata."""
+        tool_res_msg = Msg(
+            "system",
+            [
+                ToolResultBlock(
+                    type="tool_result",
+                    id=tool_call["id"],
+                    name=tool_name,
+                    output=[],
+                ),
+            ],
+            "system",
+        )
+        try:
+            tool_res = await self.toolkit.call_tool_function(tool_call)
+            async for chunk in tool_res:
+                tool_res_msg.content[0]["output"] = chunk.content
+                if chunk.metadata:
+                    tool_res_msg.metadata.update(chunk.metadata)
+                    if isinstance(
+                        chunk.metadata.get(
+                            _PLAN_INTERACTION_CARD_METADATA_KEY,
+                        ),
+                        dict,
+                    ):
+                        setattr(
+                            self,
+                            _PLAN_INTERACTION_TURN_BOUNDARY_ATTR,
+                            True,
+                        )
+                await self.print(tool_res_msg, chunk.is_last)
+                if chunk.is_interrupted:
+                    raise asyncio.CancelledError()
+            return None
+        finally:
+            await self.memory.add(tool_res_msg)
+
+    async def _run_tool_call_with_hard_timeout_impl(
         self,
         tool_call: dict[str, Any],
         tool_name: str,
@@ -180,6 +417,17 @@ class ToolGuardMixin:
 
                 started_at = time.monotonic()
                 try:
+                    if tool_name in _PLAN_INTERACTION_TOOL_NAMES and hasattr(
+                        self,
+                        "toolkit",
+                    ):
+                        return await asyncio.wait_for(
+                            self._run_plan_interaction_tool_call(
+                                tool_call,
+                                tool_name,
+                            ),
+                            timeout=LOCAL_TOOL_EXECUTION_HARD_TIMEOUT,
+                        )
                     return await asyncio.wait_for(
                         super()._acting(tool_call),  # type: ignore[misc]
                         timeout=LOCAL_TOOL_EXECUTION_HARD_TIMEOUT,
@@ -205,6 +453,48 @@ class ToolGuardMixin:
                         timeout_text,
                     )
                     return None
+
+    @execute_tool_traced(
+        tool_name_factory=lambda self, _call, tool_name, _input: tool_name,
+        input_arguments_factory=lambda self, _call, _tool_name, tool_input: tool_input,
+        output_arguments_factory=build_tool_output_arguments,
+    )
+    async def _run_tool_call_with_hard_timeout_traced(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> ToolTraceOutcome:
+        result = await self._run_tool_call_with_hard_timeout_impl(
+            tool_call,
+            tool_name,
+            tool_input,
+        )
+        terminal_output = result
+        if terminal_output is None:
+            terminal_output = self._extract_current_tool_response(
+                str(tool_call.get("id") or ""),
+                include_structured_failure=True,
+            )
+        return ToolTraceOutcome(
+            business_result=result,
+            terminal_output=terminal_output,
+            tool_name=tool_name,
+            mcp_server=self._resolve_mcp_server(tool_name),
+        )
+
+    async def _run_tool_call_with_hard_timeout(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> dict | None:
+        outcome = await self._run_tool_call_with_hard_timeout_traced(
+            tool_call,
+            tool_name,
+            tool_input,
+        )
+        return outcome.business_result
 
     async def _persist_local_tool_timeout_result(
         self,
@@ -430,8 +720,11 @@ class ToolGuardMixin:
         return result
 
     async def _get_pending_info_for_display(self) -> dict[str, Any]:
-        """Return pending tool info aligned with approval queue head."""
+        """Return pending tool info for the current waiting card."""
         fallback = getattr(self, "_tool_guard_pending_info", None) or {}
+        if fallback.get("request_id"):
+            return fallback
+
         session_id = str(self._request_context.get("session_id") or "")
         if not session_id:
             return fallback
@@ -561,12 +854,14 @@ class ToolGuardMixin:
         tool_name: str,
         tool_input: dict[str, Any],
         mcp_server: str | None,
+        tool_call_id: str | None = None,
     ) -> str:
         """Emit tool call start trace event.
 
         Returns span_id or empty string.
         """
         if not has_trace_manager():
+            self._discard_precomputed_tool_skill_attribution(tool_call_id)
             return ""
         try:
             trace_ctx = self._resolve_trace_context_for_tracing()
@@ -583,6 +878,12 @@ class ToolGuardMixin:
                     _current_task_label(),
                 )
                 trace_mgr = get_trace_manager()
+                (
+                    has_precomputed_attribution,
+                    precomputed_attribution,
+                ) = self._consume_precomputed_tool_skill_attribution(
+                    tool_call_id,
+                )
                 return await trace_mgr.emit_tool_call_start(
                     trace_id=_trace_field(trace_ctx, "trace_id", ""),
                     tool_name=tool_name,
@@ -594,7 +895,10 @@ class ToolGuardMixin:
                     mcp_server=mcp_server,
                     user_name=_trace_field(trace_ctx, "user_name", None),
                     bbk_id=_trace_field(trace_ctx, "bbk_id", None),
+                    use_precomputed_attribution=(has_precomputed_attribution),
+                    precomputed_attribution=precomputed_attribution,
                 )
+            self._discard_precomputed_tool_skill_attribution(tool_call_id)
         except Exception as e:
             logger.debug("Failed to emit tool start event: %s", e)
         return ""
@@ -793,7 +1097,8 @@ class ToolGuardMixin:
         return bool(
             tenant_hooks.enabled
             or (agent_hooks is not None and agent_hooks.enabled)
-            or session_state.has_loaded_skill_sources(),
+            or session_state.has_loaded_skill_sources()
+            or session_state.has_monitored_skill_sources(),
         )
 
     def _get_hook_session_state(self) -> HookSessionState:
@@ -907,18 +1212,70 @@ class ToolGuardMixin:
         tool_name: str,
         tool_input: dict[str, Any],
         mcp_server: str | None,
+        tool_call_id: str | None = None,
     ) -> None:
         detector = self._request_context.get("_skill_invocation_detector")
         if detector is None or not hasattr(detector, "on_tool_call"):
             return
         try:
-            await detector.on_tool_call(
+            validate_snapshot = getattr(
+                detector,
+                "validate_tool_call_snapshot",
+                None,
+            )
+            if validate_snapshot is not None and not await validate_snapshot(
+                tool_name,
+                tool_input,
+            ):
+                return
+            primary_skill, _ = await detector.on_tool_call(
                 tool_name=tool_name,
                 tool_input=tool_input,
                 mcp_server=mcp_server,
             )
+            self._store_precomputed_tool_skill_attribution(
+                tool_call_id,
+                {"primary_skill": primary_skill},
+            )
         except Exception as exc:
             logger.debug("Skill detector tool notification failed: %s", exc)
+
+    def _store_precomputed_tool_skill_attribution(
+        self,
+        tool_call_id: str | None,
+        attribution: dict[str, Any],
+    ) -> None:
+        """缓存单次 tool call 的 skill attribution，供 tracing 复用。"""
+        if not tool_call_id:
+            return
+        request_context = getattr(self, "_request_context", {}) or {}
+        pending = request_context.get(_PENDING_TOOL_SKILL_ATTRIBUTIONS_KEY)
+        if not isinstance(pending, dict):
+            pending = {}
+            request_context[_PENDING_TOOL_SKILL_ATTRIBUTIONS_KEY] = pending
+        pending[tool_call_id] = dict(attribution)
+
+    def _consume_precomputed_tool_skill_attribution(
+        self,
+        tool_call_id: str | None,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """取出并消费预先计算的 tool attribution。"""
+        if not tool_call_id:
+            return False, None
+        request_context = getattr(self, "_request_context", {}) or {}
+        pending = request_context.get(_PENDING_TOOL_SKILL_ATTRIBUTIONS_KEY)
+        if not isinstance(pending, dict):
+            return False, None
+        if tool_call_id not in pending:
+            return False, None
+        return True, pending.pop(tool_call_id)
+
+    def _discard_precomputed_tool_skill_attribution(
+        self,
+        tool_call_id: str | None,
+    ) -> None:
+        """丢弃未被 tracing 消费的单次 tool attribution。"""
+        self._consume_precomputed_tool_skill_attribution(tool_call_id)
 
     @staticmethod
     def _hook_ask_handler_ids(result: MergedHookResult) -> list[str]:
@@ -991,6 +1348,76 @@ class ToolGuardMixin:
         await self.memory.add(tool_res_msg)
         return None
 
+    async def _acting_hook_stopped(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        reason: str,
+    ) -> None:
+        stopped_text = (
+            f"Tool `{tool_name}` stopped by hook runtime.\n" f"{reason}"
+        )
+        tool_res_msg = Msg(
+            "system",
+            [
+                ToolResultBlock(
+                    **build_failed_tool_result_block(
+                        tool_call_id=tool_call["id"],
+                        tool_name=tool_name,
+                        error_type="hook_stopped",
+                        detail=stopped_text,
+                    ),
+                ),
+            ],
+            "system",
+        )
+        await self.print(tool_res_msg, True)
+        await self.memory.add(tool_res_msg)
+
+    async def _stop_pre_tool_hook(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        reason: str,
+    ) -> NoReturn:
+        """Record a terminal pre-tool stop and cancel peer tool calls."""
+        await self._acting_hook_stopped(tool_call, tool_name, reason)
+        self._request_pre_tool_terminal_stop(reason)
+        raise PreToolUseTerminalStop(reason)
+
+    async def _stop_post_tool_hook(self, reason: str) -> NoReturn:
+        """End the turn after a post-tool hook without altering its result."""
+        reason = reason or "Hook requested stop"
+        self._discard_forced_tool_replay()
+        self._request_pre_tool_terminal_stop(reason)
+        raise PreToolUseTerminalStop(reason)
+
+    async def _handle_post_tool_use(
+        self,
+        *,
+        span_id: str,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        tool_use_id: str,
+        tool_response: dict | str | None,
+        trace_tool_output: dict | str | None,
+    ) -> None:
+        """Record the post-tool hook, trace its outcome, then stop if asked."""
+        post_hook_result = await self._emit_tool_hook(
+            HookEventName.POST_TOOL_USE,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            tool_use_id=tool_use_id,
+            tool_response=tool_response,
+        )
+        await self._record_tool_hook_result(
+            post_hook_result,
+            event_name=HookEventName.POST_TOOL_USE,
+        )
+        await self._emit_tool_trace_end(span_id, trace_tool_output)
+        if post_hook_result.decision == HookDecision.STOP:
+            await self._stop_post_tool_hook(post_hook_result.reason)
+
     async def _record_tool_hook_result(
         self,
         result: MergedHookResult,
@@ -1042,7 +1469,205 @@ class ToolGuardMixin:
             guardians_used=["unified_hook_runtime"],
         )
 
-    async def _acting(self, tool_call) -> dict | None:  # noqa: C901
+    async def _acting(self, tool_call) -> dict | None:
+        """Track an active tool call and stop peers after a terminal hook."""
+        self._ensure_pre_tool_terminal_stop_tracking()
+        self._raise_if_pre_tool_terminal_stop_requested()
+        task = asyncio.current_task()
+        if task is None:
+            return await self._acting_impl(tool_call)
+        self._active_tool_guard_acting_tasks.add(task)
+        try:
+            return await self._acting_impl(tool_call)
+        finally:
+            self._active_tool_guard_acting_tasks.discard(task)
+
+    async def _acting_policy_denial(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+        *,
+        include_budget: bool,
+    ) -> bool:
+        """Enforce Plan Mode and SubAgent policy before executing a tool."""
+        request_context = getattr(self, "_request_context", {}) or {}
+        agent_role = request_context.get("agent_role", "main")
+        reason: str | None = None
+        if agent_role != "subagent":
+            reason = self._plan_mode_policy_denial(tool_name, tool_input)
+        elif agent_role == "subagent":
+            policy_payload = request_context.get("subagent_policy")
+            if not isinstance(policy_payload, dict):
+                reason = "missing SubAgent effective policy"
+            else:
+                try:
+                    from swe.app.subagents import (
+                        PermissionPolicy,
+                        validate_tool_call,
+                    )
+
+                    decision = validate_tool_call(
+                        PermissionPolicy.model_validate(policy_payload),
+                        tool_name,
+                        tool_input,
+                        mcp_server=_subagent_mcp_server_key(
+                            self._resolve_mcp_server(tool_name),
+                            request_context,
+                        ),
+                        allowed_mcp_servers=set(
+                            request_context.get(
+                                "subagent_allowed_mcp_servers",
+                            )
+                            or [],
+                        ),
+                    )
+                    if not decision.allowed:
+                        reason = decision.reason
+                except Exception as exc:
+                    reason = f"invalid SubAgent effective policy: {exc}"
+            if reason is None and include_budget:
+                budget = request_context.get("subagent_budget")
+                if isinstance(budget, dict):
+                    try:
+                        maximum = int(budget.get("max_tool_calls") or 0)
+                        used = int(
+                            request_context.get("_subagent_tool_calls_used")
+                            or 0,
+                        )
+                    except (TypeError, ValueError):
+                        reason = "invalid SubAgent tool-call budget"
+                    else:
+                        if used >= maximum > 0:
+                            reason = (
+                                "SubAgent tool-call budget exceeded "
+                                f"({used}/{maximum})."
+                            )
+                        elif maximum > 0:
+                            request_context["_subagent_tool_calls_used"] = (
+                                used + 1
+                            )
+        if reason is None:
+            return False
+        denied_text = (
+            f"Tool `{tool_name}` blocked by "
+            f"{'SubAgent' if agent_role == 'subagent' else 'Plan Mode'} policy.\n"
+            f"{reason}"
+        )
+        tool_res_msg = Msg(
+            "system",
+            [
+                ToolResultBlock(
+                    type="tool_result",
+                    id=tool_call["id"],
+                    name=tool_name,
+                    output=[{"type": "text", "text": denied_text}],
+                ),
+            ],
+            "system",
+        )
+        await self.print(tool_res_msg, True)
+        await self.memory.add(tool_res_msg)
+        return True
+
+    def _plan_mode_policy_denial(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> str | None:
+        request_context = getattr(self, "_request_context", {}) or {}
+        if not request_context.get("plan_mode_enabled"):
+            return None
+        if tool_name not in _PLAN_MODE_ALLOWED_TOOLS:
+            return "tool is unavailable while Plan Mode is active"
+        if tool_name != "execute_shell_command":
+            return None
+        return _validate_plan_mode_readonly_shell(
+            str(tool_input.get("command") or "").strip(),
+        )
+
+    async def _apply_pre_tool_hook(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any], bool, dict | None]:
+        """Run the pre-tool hook and return an early response if it decides."""
+        pre_hook_result = await self._emit_tool_hook(
+            HookEventName.PRE_TOOL_USE,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            tool_use_id=str(tool_call.get("id") or ""),
+        )
+        if pre_hook_result.updated_input is not None:
+            tool_call = dict(tool_call)
+            tool_call["input"] = pre_hook_result.updated_input
+            tool_input = pre_hook_result.updated_input
+        if pre_hook_result.decision == HookDecision.STOP:
+            await self._stop_pre_tool_hook(
+                tool_call,
+                tool_name,
+                pre_hook_result.reason or "Hook requested stop",
+            )
+        if pre_hook_result.decision in {
+            HookDecision.BLOCK,
+            HookDecision.DENY,
+        }:
+            result = await self._acting_hook_denied(
+                tool_call,
+                tool_name,
+                pre_hook_result.reason,
+            )
+            return tool_call, tool_input, True, result
+        if (
+            pre_hook_result.decision == HookDecision.ASK
+            and not self._approved_hook_ask_replay_matches(
+                tool_call,
+                tool_name,
+                tool_input,
+                pre_hook_result,
+            )
+        ):
+            if self._request_context.get("agent_role") == "subagent":
+                result = await self._acting_hook_denied(
+                    tool_call,
+                    tool_name,
+                    "Background SubAgent calls cannot await interactive approval.",
+                )
+                return tool_call, tool_input, True, result
+            result = await self._acting_with_approval(
+                tool_call,
+                tool_name,
+                self._hook_guard_result(
+                    tool_name,
+                    tool_input,
+                    pre_hook_result.reason,
+                ),
+                approval_kind=_APPROVAL_KIND_HOOK_PRE_TOOL_USE,
+                hook_ask_handler_ids=self._hook_ask_handler_ids(
+                    pre_hook_result,
+                ),
+            )
+            return tool_call, tool_input, True, result
+        if pre_hook_result.decision == HookDecision.ASK:
+            await self._record_tool_hook_result(
+                pre_hook_result,
+                event_name=HookEventName.PRE_TOOL_USE,
+            )
+        return tool_call, tool_input, False, None
+
+    @staticmethod
+    def _strip_operation_group_arguments(
+        tool_call: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Remove the display-only operation_group key before execution."""
+        from ..app.runner.operation_group import (
+            clean_tool_call_operation_group,
+        )
+
+        return clean_tool_call_operation_group(tool_call)
+
+    async def _acting_impl(self, tool_call) -> dict | None:
         """Intercept sensitive tool calls before execution.
 
         1. If tool is in *denied_tools*, auto-deny unconditionally.
@@ -1061,6 +1686,10 @@ class ToolGuardMixin:
         """
         self._ensure_tool_guard()
 
+        # The operation_group argument is display-only metadata; it must
+        # never reach a tool function, the guard engine or the hooks.
+        tool_call = self._strip_operation_group_arguments(tool_call)
+
         tool_name = str(tool_call.get("name", ""))
         tool_input = tool_call.get("input", {})
 
@@ -1068,65 +1697,46 @@ class ToolGuardMixin:
         # (agentscope ToolUseBlock) does not carry mcp_server.
         mcp_server = self._resolve_mcp_server(tool_name)
 
-        pre_hook_result = await self._emit_tool_hook(
-            HookEventName.PRE_TOOL_USE,
-            tool_name=tool_name,
-            tool_input=tool_input,
-            tool_use_id=str(tool_call.get("id") or ""),
-        )
-        if pre_hook_result.updated_input is not None:
-            tool_call = dict(tool_call)
-            tool_call["input"] = pre_hook_result.updated_input
-            tool_input = pre_hook_result.updated_input
-        if pre_hook_result.decision in {
-            HookDecision.BLOCK,
-            HookDecision.DENY,
-            HookDecision.STOP,
-        }:
-            return await self._acting_hook_denied(
-                tool_call,
-                tool_name,
-                pre_hook_result.reason,
-            )
-        if pre_hook_result.decision == HookDecision.ASK:
-            if self._approved_hook_ask_replay_matches(
-                tool_call,
-                tool_name,
-                tool_input,
-                pre_hook_result,
-            ):
-                await self._record_tool_hook_result(
-                    pre_hook_result,
-                    event_name=HookEventName.PRE_TOOL_USE,
-                )
-            else:
-                return await self._acting_with_approval(
-                    tool_call,
-                    tool_name,
-                    self._hook_guard_result(
-                        tool_name,
-                        tool_input,
-                        pre_hook_result.reason,
-                    ),
-                    approval_kind=_APPROVAL_KIND_HOOK_PRE_TOOL_USE,
-                    hook_ask_handler_ids=self._hook_ask_handler_ids(
-                        pre_hook_result,
-                    ),
-                )
+        if await self._acting_policy_denial(
+            tool_call,
+            tool_name,
+            tool_input,
+            include_budget=True,
+        ):
+            return None
+
+        (
+            tool_call,
+            tool_input,
+            hook_handled,
+            hook_result,
+        ) = await self._apply_pre_tool_hook(tool_call, tool_name, tool_input)
+        if hook_handled:
+            return hook_result
+        if await self._acting_policy_denial(
+            tool_call,
+            tool_name,
+            tool_input,
+            include_budget=False,
+        ):
+            return None
 
         await self._notify_skill_detector_tool_call(
             tool_name,
             tool_input,
             mcp_server,
+            str(tool_call.get("id") or ""),
         )
 
         span_id = await self._emit_tool_trace_start(
             tool_name,
             tool_input,
             mcp_server,
+            str(tool_call.get("id") or ""),
         )
 
         action: _GuardAction | None = None
+        guard_check_failed = False
         with self._agent_phase_context(
             "tool_guard",
             tool_name=tool_name,
@@ -1138,58 +1748,86 @@ class ToolGuardMixin:
                     action = await self._decide_guard_action(tool_call)
                 except Exception as exc:
                     logger.warning(
-                        "Tool guard check error (non-blocking): %s",
+                        "Tool guard check error; denying tool execution: %s",
                         exc,
                         exc_info=True,
                     )
+                    guard_check_failed = True
 
-        if action is not None:
+        if guard_check_failed:
+            result = await self._acting_hook_denied(
+                tool_call,
+                tool_name,
+                "Tool guard check failed; execution was denied.",
+            )
+            await self._emit_tool_trace_end(span_id, result)
+            return result
+
+        if action is not None and action.kind != "preapproved":
             result = await self._execute_guard_action(action, tool_call)
             await self._emit_tool_trace_end(span_id, result)
             return result
 
+        return await self._run_guarded_tool_call(
+            action,
+            tool_call,
+            tool_name,
+            tool_input,
+            span_id,
+        )
+
+    async def _run_guarded_tool_call(
+        self,
+        action: "_GuardAction | None",
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+        span_id: str,
+    ) -> dict | None:
+        """Execute a permitted tool call and emit its terminal hook events."""
         try:
-            result = await self._run_tool_call_with_hard_timeout(
+            self._raise_if_pre_tool_terminal_stop_requested()
+            result = await self._execute_guard_action_or_tool_call(
+                action,
                 tool_call,
                 tool_name,
                 tool_input,
             )
             tool_use_id = str(tool_call.get("id") or "")
             tool_response = self._extract_current_tool_response(tool_use_id)
-            trace_tool_output = result
-            if trace_tool_output is None:
-                # post hook 不应把结构化失败当作正常结果继续消费，
-                # 但 tracing 仍需要读取原始失败 payload 来提取 error。
-                trace_tool_output = self._extract_current_tool_response(
+            # post hook 不应把结构化失败当作正常结果继续消费，
+            # 但 tracing 仍需要读取原始失败 payload 来提取 error。
+            trace_tool_output = (
+                result
+                if result is not None
+                else self._extract_current_tool_response(
                     tool_use_id,
                     include_structured_failure=True,
                 )
-            post_hook_result = await self._emit_tool_hook(
-                HookEventName.POST_TOOL_USE,
+            )
+            await self._handle_post_tool_use(
+                span_id=span_id,
                 tool_name=tool_name,
                 tool_input=tool_input,
                 tool_use_id=tool_use_id,
                 tool_response=tool_response,
+                trace_tool_output=trace_tool_output,
             )
-            await self._record_tool_hook_result(
-                post_hook_result,
-                event_name=HookEventName.POST_TOOL_USE,
-            )
-            await self._emit_tool_trace_end(span_id, trace_tool_output)
 
-            if getattr(self, "_tool_guard_forced_replay_active", False):
-                self._tool_guard_forced_replay_active = False
-                self._tool_guard_replay_done = {
-                    "tool_name": tool_name,
-                    "tool_input": tool_input,
-                    "remaining_queue": getattr(
-                        self,
-                        "_tool_guard_replay_queue",
-                        [],
-                    ),
-                }
+            self._complete_forced_tool_replay(
+                tool_call,
+                tool_name,
+                tool_input,
+            )
+            request_context = getattr(self, "_request_context", {}) or {}
+            if request_context.get(
+                "goal_id",
+            ) and _goal_tool_may_write_environment(tool_name, tool_input):
+                request_context["_goal_turn_environment_changed"] = True
             return result
 
+        except PreToolUseTerminalStop:
+            raise
         except Exception as e:
             failure_hook_result = await self._emit_tool_hook(
                 HookEventName.POST_TOOL_USE_FAILURE,
@@ -1203,6 +1841,8 @@ class ToolGuardMixin:
                 event_name=HookEventName.POST_TOOL_USE_FAILURE,
             )
             await self._emit_tool_trace_end(span_id, None, error=str(e))
+            if failure_hook_result.decision == HookDecision.STOP:
+                await self._stop_post_tool_hook(failure_hook_result.reason)
             raise
 
     async def _decide_guard_action(
@@ -1259,6 +1899,13 @@ class ToolGuardMixin:
                     tool_input,
                     guard_result=guard_result,
                 )
+            if not getattr(guard_result, "is_safe", True):
+                return _GuardAction(
+                    "auto_denied",
+                    tool_name,
+                    tool_input,
+                    guard_result=guard_result,
+                )
         return None
 
     async def _execute_guard_action(
@@ -1280,12 +1927,40 @@ class ToolGuardMixin:
                 action.tool_input,
             )
         if action.kind == "needs_approval":
+            if self._request_context.get("agent_role") == "subagent":
+                return await self._acting_auto_denied(
+                    tool_call,
+                    action.tool_name,
+                    action.guard_result,
+                )
             return await self._acting_with_approval(
                 tool_call,
                 action.tool_name,
                 action.guard_result,
             )
         return None
+
+    async def _execute_guard_action_or_tool_call(
+        self,
+        action: "_GuardAction | None",
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> dict | None:
+        """Execute a preapproved action or the ordinary tool-call path."""
+        from ..app.runner.operation_group import OPERATION_GROUP_INTERNAL_FIELD
+
+        executable_tool_call = dict(tool_call)
+        executable_tool_call.pop(OPERATION_GROUP_INTERNAL_FIELD, None)
+        if action is not None:
+            return await self._execute_guard_action(
+                action, executable_tool_call
+            )
+        return await self._run_tool_call_with_hard_timeout(
+            executable_tool_call,
+            tool_name,
+            tool_input,
+        )
 
     async def _consume_preapproval(
         self,
@@ -1318,24 +1993,35 @@ class ToolGuardMixin:
         tool_name: str,
         tool_input: dict[str, Any],
     ) -> dict | None:
-        """Execute approved call and persist replay state."""
-        result = await self._run_tool_call_with_hard_timeout(
+        """Execute an approved call without advancing a replay queue."""
+        return await self._run_tool_call_with_hard_timeout(
             tool_call,
             tool_name,
             tool_input,
         )
-        if getattr(self, "_tool_guard_forced_replay_active", False):
-            self._tool_guard_forced_replay_active = False
-            self._tool_guard_replay_done = {
-                "tool_name": tool_name,
-                "tool_input": tool_input,
-                "remaining_queue": getattr(
-                    self,
-                    "_tool_guard_replay_queue",
-                    [],
-                ),
-            }
-        return result
+
+    def _complete_forced_tool_replay(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> None:
+        """Record a replay result only after its post-tool hooks finish."""
+        if not getattr(self, "_tool_guard_forced_replay_active", False):
+            return
+        self._tool_guard_forced_replay_active = False
+        self._tool_guard_replay_done = {
+            "tool_name": tool_name,
+            "tool_call_id": str(tool_call.get("id") or ""),
+            "tool_input": tool_input,
+            "remaining_queue": getattr(self, "_tool_guard_replay_queue", []),
+        }
+
+    def _discard_forced_tool_replay(self) -> None:
+        """Prevent a terminal hook decision from resuming queued replays."""
+        self._tool_guard_forced_replay_active = False
+        self._tool_guard_replay_done = None
+        self._tool_guard_replay_queue = []
 
     # ------------------------------------------------------------------
     # Denied / Approval responses
@@ -1381,15 +2067,155 @@ class ToolGuardMixin:
                         tool_name=tool_name,
                         error_type="tool_guard_denied",
                         detail=denied_text,
+                        governance_status="blocked",
                     ),
                 ),
             ],
             "system",
         )
+        attach_tool_governance_message_metadata(
+            tool_res_msg,
+            tool_call_id=tool_call["id"],
+            governance_status="blocked",
+        )
 
         await self.print(tool_res_msg, True)
         await self.memory.add(tool_res_msg)
         return None
+
+    def _mark_approval_source_message(self) -> Any:
+        original_msg = None
+        for msg, marks in reversed(self.memory.content):
+            if msg.role == "assistant":
+                if TOOL_GUARD_DENIED_MARK not in marks:
+                    marks.append(TOOL_GUARD_DENIED_MARK)
+                original_msg = msg
+                break
+        return original_msg
+
+    def _build_approval_extra(
+        self,
+        tool_call: dict[str, Any],
+        approval_kind: str,
+        hook_ask_handler_ids: list[str] | None,
+        original_msg: Any,
+    ) -> dict[str, Any]:
+        from ..app.runner.operation_group import OPERATION_GROUP_INTERNAL_FIELD
+
+        stored_tool_call = dict(tool_call)
+        operation_group = stored_tool_call.pop(
+            OPERATION_GROUP_INTERNAL_FIELD,
+            None,
+        )
+        extra: dict[str, Any] = {
+            "approval_kind": approval_kind,
+            "tool_call": stored_tool_call,
+        }
+        if operation_group is not None:
+            extra["operation_group"] = operation_group
+        extra["agent_id"] = self._request_context.get("agent_id")
+        extra["tenant_id"] = self._request_context.get("tenant_id")
+        extra["source_id"] = self._request_context.get("source_id")
+        goal_id = str(self._request_context.get("goal_id") or "").strip()
+        if goal_id:
+            extra["goal_id"] = goal_id
+        chat_id = str(self._request_context.get("chat_id") or "").strip()
+        msgid = str(self._request_context.get("msgid") or "").strip()
+        if chat_id and msgid:
+            extra["chat_id"] = chat_id
+            extra["msgid"] = msgid
+        if hook_ask_handler_ids:
+            extra["hook_ask_handler_ids"] = list(hook_ask_handler_ids)
+        if original_msg is not None:
+            thinking_blocks = [
+                block
+                for block in original_msg.get_content_blocks()
+                if isinstance(block, dict) and block.get("type") == "thinking"
+            ]
+            if thinking_blocks:
+                extra["thinking_blocks"] = thinking_blocks
+        replay_queue = getattr(self, "_tool_guard_replay_queue", None)
+        if replay_queue is not None:
+            extra["remaining_queue"] = list(replay_queue)
+            self._tool_guard_replay_queue = None
+        else:
+            siblings = self._extract_sibling_tool_calls()
+            if siblings:
+                extra["sibling_tool_calls"] = siblings
+        return extra
+
+    async def _cancel_stale_approval_requests(
+        self,
+        session_id: str,
+        tool_call: dict[str, Any],
+        extra: dict[str, Any],
+    ) -> None:
+        if not session_id:
+            return
+        svc = self._tool_guard_approval_service
+        tool_call_id = tool_call.get("id", "")
+        ids = [tool_call_id] + [
+            queued.get("id", "") for queued in extra.get("remaining_queue", [])
+        ]
+        for call_id in (value for value in ids if value):
+            await svc.cancel_stale_pending_for_tool_call(session_id, call_id)
+
+    async def _notify_approval_pending(self, pending_request: Any) -> None:
+        try:
+            from swe.app.approvals import notify_cron_approval_pending
+
+            await notify_cron_approval_pending(
+                pending_request,
+                channel_manager=self._request_context.get("channel_manager"),
+            )
+        except Exception:
+            logger.exception(
+                "Tool guard: failed to notify cron approval request",
+            )
+
+    async def _emit_approval_required(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        guard_result: Any,
+    ) -> None:
+        from agentscope.message import ToolResultBlock
+        from swe.security.tool_guard.approval import format_findings_summary
+
+        denied_text = (
+            f"⚠️ **Risk Detected / 检测到风险**\n\n"
+            f"- Tool / 工具: `{tool_name}`\n"
+            f"- Severity / 严重性: "
+            f"`{guard_result.max_severity.value}`\n"
+            f"- Findings / 发现: "
+            f"`{guard_result.findings_count}`\n\n"
+            f"{format_findings_summary(guard_result)}\n\n"
+            f"Type `/approve` to approve, "
+            f"`/deny` to deny, or send any message to deny.\n"
+            f"输入 `/approve` 批准执行，或发送任意消息拒绝。"
+        )
+        tool_res_msg = Msg(
+            "system",
+            [
+                ToolResultBlock(
+                    **build_failed_tool_result_block(
+                        tool_call_id=tool_call["id"],
+                        tool_name=tool_name,
+                        error_type="approval_required",
+                        detail=denied_text,
+                        governance_status="pending",
+                    ),
+                ),
+            ],
+            "system",
+        )
+        attach_tool_governance_message_metadata(
+            tool_res_msg,
+            tool_call_id=tool_call["id"],
+            governance_status="pending",
+        )
+        await self.print(tool_res_msg, True)
+        await self.memory.add(tool_res_msg, marks=TOOL_GUARD_DENIED_MARK)
 
     async def _acting_with_approval(
         self,
@@ -1401,67 +2227,23 @@ class ToolGuardMixin:
         hook_ask_handler_ids: list[str] | None = None,
     ) -> dict | None:
         """Deny the tool call and record a pending approval."""
-        from agentscope.message import ToolResultBlock
-        from swe.security.tool_guard.approval import (
-            format_findings_summary,
-        )
-
         channel = str(self._request_context.get("channel") or "")
-
-        # Find the original assistant message and extract thinking blocks
-        original_msg = None
-        for msg, marks in reversed(self.memory.content):
-            if msg.role == "assistant":
-                if TOOL_GUARD_DENIED_MARK not in marks:
-                    marks.append(TOOL_GUARD_DENIED_MARK)
-                original_msg = msg
-                break
-
-        extra: dict[str, Any] = {
-            "approval_kind": approval_kind,
-            "tool_call": tool_call,
-        }
-        if hook_ask_handler_ids:
-            extra["hook_ask_handler_ids"] = list(hook_ask_handler_ids)
-
-        # Preserve thinking blocks from the original message
-        if original_msg is not None:
-            thinking_blocks = [
-                b
-                for b in original_msg.get_content_blocks()
-                if isinstance(b, dict) and b.get("type") == "thinking"
-            ]
-            if thinking_blocks:
-                extra["thinking_blocks"] = thinking_blocks
-
-        replay_queue = getattr(self, "_tool_guard_replay_queue", None)
-        if replay_queue is not None:
-            extra["remaining_queue"] = list(replay_queue)
-            self._tool_guard_replay_queue = None
-        else:
-            siblings = self._extract_sibling_tool_calls()
-            if siblings:
-                extra["sibling_tool_calls"] = siblings
-
+        original_msg = self._mark_approval_source_message()
+        extra = self._build_approval_extra(
+            tool_call,
+            approval_kind,
+            hook_ask_handler_ids,
+            original_msg,
+        )
         session_id = str(
             self._request_context.get("session_id") or "",
         )
-        tool_call_id = tool_call.get("id", "")
         svc = self._tool_guard_approval_service
-        if session_id:
-            if tool_call_id:
-                await svc.cancel_stale_pending_for_tool_call(
-                    session_id,
-                    tool_call_id,
-                )
-            for queued in extra.get("remaining_queue", []):
-                qid = queued.get("id", "")
-                if qid:
-                    await svc.cancel_stale_pending_for_tool_call(
-                        session_id,
-                        qid,
-                    )
-
+        await self._cancel_stale_approval_requests(
+            session_id,
+            tool_call,
+            extra,
+        )
         pending_request = await svc.create_pending(
             session_id=session_id,
             user_id=str(
@@ -1472,6 +2254,7 @@ class ToolGuardMixin:
             result=guard_result,
             extra=extra,
         )
+        await self._notify_approval_pending(pending_request)
 
         guardians = list(
             {f.guardian for f in guard_result.findings if f.guardian},
@@ -1483,40 +2266,7 @@ class ToolGuardMixin:
             "guardians": guardians,
         }
 
-        findings_text = format_findings_summary(guard_result)
-        denied_text = (
-            f"⚠️ **Risk Detected / 检测到风险**\n\n"
-            f"- Tool / 工具: `{tool_name}`\n"
-            f"- Severity / 严重性: "
-            f"`{guard_result.max_severity.value}`\n"
-            f"- Findings / 发现: "
-            f"`{guard_result.findings_count}`\n\n"
-            f"{findings_text}\n\n"
-            f"Type `/approve` to approve, "
-            f"`/deny` to deny, or send any message to deny.\n"
-            f"输入 `/approve` 批准执行，或发送任意消息拒绝。"
-        )
-
-        tool_res_msg = Msg(
-            "system",
-            [
-                ToolResultBlock(
-                    **build_failed_tool_result_block(
-                        tool_call_id=tool_call["id"],
-                        tool_name=tool_name,
-                        error_type="approval_required",
-                        detail=denied_text,
-                    ),
-                ),
-            ],
-            "system",
-        )
-
-        await self.print(tool_res_msg, True)
-        await self.memory.add(
-            tool_res_msg,
-            marks=TOOL_GUARD_DENIED_MARK,
-        )
+        await self._emit_approval_required(tool_call, tool_name, guard_result)
         return None
 
     # ------------------------------------------------------------------
@@ -1535,6 +2285,19 @@ class ToolGuardMixin:
         completion message so the ``ReActAgent.reply`` loop exits
         naturally.
         """
+        if self._consume_plan_interaction_turn_boundary():
+            return Msg(self.name, [], "assistant")
+
+        selected_expert_error = str(
+            self._request_context.pop(
+                "selected_expert_execution_error",
+                "",
+            )
+            or "",
+        ).strip()
+        if selected_expert_error:
+            return await self._emit_assistant_msg(selected_expert_error)
+
         with self._agent_phase_context(
             "approval_replay",
             reason="approval_replay_done",
@@ -1568,6 +2331,26 @@ class ToolGuardMixin:
             tool_choice=tool_choice,
         )
 
+    def _consume_plan_interaction_turn_boundary(self) -> bool:
+        """Consume the plan-card turn boundary marker once."""
+        if not getattr(self, _PLAN_INTERACTION_TURN_BOUNDARY_ATTR, False):
+            return False
+        setattr(self, _PLAN_INTERACTION_TURN_BOUNDARY_ATTR, False)
+        return True
+
+    async def _summarizing(self) -> Msg:
+        """Avoid a synthetic summary turn immediately after a plan card."""
+        if self._consume_plan_interaction_turn_boundary():
+            return Msg(
+                self.name,
+                [],
+                "assistant",
+                metadata={
+                    PLAN_INTERACTION_SUMMARIZING_SHORT_CIRCUIT_METADATA_KEY: True,
+                },
+            )
+        return await super()._summarizing()  # type: ignore[misc]
+
     async def _reason_about_replay_done(self) -> Msg | None:
         """Emit replay continuation or completion message.
 
@@ -1583,12 +2366,173 @@ class ToolGuardMixin:
             return None
 
         self._tool_guard_replay_done = None
+        selected_expert_follow_up = await self._selected_expert_follow_up(
+            replay_info,
+        )
+        if selected_expert_follow_up is not None:
+            return await self._emit_forced_tool_use(selected_expert_follow_up)
+        selected_expert_error = str(
+            self._request_context.pop(
+                "selected_expert_execution_error",
+                "",
+            )
+            or "",
+        ).strip()
+        if selected_expert_error:
+            return await self._emit_assistant_msg(selected_expert_error)
         remaining_queue = self._filter_pending_replay_queue(
             replay_info.get("remaining_queue") or [],
         )
         if not remaining_queue:
             return None
         return await self._emit_next_replay_tool_call(remaining_queue)
+
+    def _selected_expert_start_follow_up(
+        self,
+        context: dict[str, Any],
+        response: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Process the forced ``start_subagent`` replay result."""
+        run_id = str(response.get("run_id") or "").strip()
+        if not response.get("accepted") or not run_id:
+            context[_SELECTED_EXPERT_EXECUTION_KEY] = False
+            context["selected_expert_execution_error"] = (
+                "The selected expert could not be started. "
+                "It was not replaced by the Main Agent."
+            )
+            return None
+        context[_SELECTED_EXPERT_RUN_ID_KEY] = run_id
+        return self._selected_expert_wait_tool_call()
+
+    def _selected_expert_get_follow_up(
+        self,
+        context: dict[str, Any],
+        response: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Process a forced ``get_subagent`` replay result."""
+        if self._selected_expert_record_is_terminal(response):
+            context[_SELECTED_EXPERT_EXECUTION_KEY] = False
+            return None
+        return self._selected_expert_wait_tool_call()
+
+    def _selected_expert_wait_follow_up(
+        self,
+        context: dict[str, Any],
+        response: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Process a forced ``wait_subagent`` replay result."""
+        run_id = str(context.get(_SELECTED_EXPERT_RUN_ID_KEY) or "").strip()
+        if not run_id or self._selected_expert_is_terminal(response, run_id):
+            context[_SELECTED_EXPERT_EXECUTION_KEY] = False
+            return None
+        if not self._selected_expert_is_active(response, run_id):
+            return self._selected_expert_get_tool_call(run_id)
+        return self._selected_expert_wait_tool_call()
+
+    async def _selected_expert_follow_up(
+        self,
+        replay_info: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Keep a selected-expert turn on its one worker until terminal.
+
+        The forced initial ``start_subagent`` call still crosses the normal
+        Tool Guard.  Once accepted, this helper emits ordinary guarded
+        ``wait_subagent`` calls until that exact run reports a terminal
+        result, then lets the Main Agent summarize the recorded result.
+        """
+        context = self._request_context
+        if not context.get(_SELECTED_EXPERT_EXECUTION_KEY):
+            return None
+        if await self._selected_expert_turn_is_stopping(context):
+            context[_SELECTED_EXPERT_EXECUTION_KEY] = False
+            return None
+        tool_name = str(replay_info.get("tool_name") or "")
+        response = self._selected_expert_tool_response(replay_info)
+        if tool_name == "start_subagent":
+            return self._selected_expert_start_follow_up(context, response)
+        if tool_name == "get_subagent":
+            return self._selected_expert_get_follow_up(context, response)
+        if tool_name != "wait_subagent":
+            return None
+        return self._selected_expert_wait_follow_up(context, response)
+
+    @staticmethod
+    async def _selected_expert_turn_is_stopping(
+        context: dict[str, Any],
+    ) -> bool:
+        tracker = context.get("_task_tracker")
+        is_turn_stopping = getattr(tracker, "is_turn_stopping", None)
+        if not callable(is_turn_stopping):
+            return False
+        return await is_turn_stopping(
+            str(context.get("chat_id") or ""),
+            str(context.get("msgid") or ""),
+        )
+
+    def _selected_expert_tool_response(
+        self,
+        replay_info: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Read the current forced-call result without trusting model text."""
+        response = self._extract_current_tool_response(
+            str(replay_info.get("tool_call_id") or ""),
+            include_structured_failure=True,
+        )
+        if isinstance(response, str):
+            try:
+                response = _json.loads(response)
+            except (TypeError, ValueError):
+                return {}
+        return response if isinstance(response, dict) else {}
+
+    @staticmethod
+    def _selected_expert_is_terminal(
+        response: dict[str, Any],
+        run_id: str,
+    ) -> bool:
+        """Return whether the selected run is present in a terminal wait."""
+        for item in response.get("terminal_runs", []):
+            if isinstance(item, dict) and item.get("run_id") == run_id:
+                return True
+        return False
+
+    @staticmethod
+    def _selected_expert_is_active(
+        response: dict[str, Any],
+        run_id: str,
+    ) -> bool:
+        return any(
+            isinstance(item, dict) and item.get("run_id") == run_id
+            for item in response.get("active_runs", [])
+        )
+
+    @staticmethod
+    def _selected_expert_record_is_terminal(
+        response: dict[str, Any],
+    ) -> bool:
+        return str(response.get("status") or "") in {
+            "completed",
+            "partial",
+            "failed",
+            "cancelled",
+            "expired",
+        }
+
+    @staticmethod
+    def _selected_expert_wait_tool_call() -> dict[str, Any]:
+        return {
+            "id": f"selected-expert-wait-{_uuid.uuid4().hex[:12]}",
+            "name": "wait_subagent",
+            "input": {"timeout_ms": _SELECTED_EXPERT_WAIT_TIMEOUT_MS},
+        }
+
+    @staticmethod
+    def _selected_expert_get_tool_call(run_id: str) -> dict[str, Any]:
+        return {
+            "id": f"selected-expert-get-{_uuid.uuid4().hex[:12]}",
+            "name": "get_subagent",
+            "input": {"run_id": run_id},
+        }
 
     def _filter_pending_replay_queue(
         self,

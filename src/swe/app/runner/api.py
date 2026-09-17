@@ -2,28 +2,113 @@
 """Chat management API."""
 
 from __future__ import annotations
+
+import asyncio
+import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict, ValidationError
 from agentscope.memory import InMemoryMemory
 
-from .session import SafeJSONSession
+from .session import (
+    SafeJSONSession,
+    _normalize_state_for_load,
+)
+from .context_usage import (
+    CONTEXT_USAGE_INVALID_STATE_KEY,
+    CONTEXT_USAGE_STATE_KEY,
+    ContextUsageAvailable,
+    ContextUsageResponse,
+    ContextUsageSnapshot,
+    ContextUsageUnavailable,
+)
 from .manager import ChatManager
 from .models import (
+    ChatArchiveMetadata,
+    ChatArchivePage,
+    ChatCompactionBoundary,
     ChatPage,
     ChatSpec,
     ChatHistory,
     ChatMessage,
 )
+from ...agents.memory.conversation_archive import ConversationArchiveStore
+from .model_call_error_detail import MODEL_CALL_FAILED_MESSAGES_STATE_KEY
+from .hidden_context_injection import HIDDEN_CONTEXT_METADATA_KEY
 from .utils import agentscope_msg_to_message
 from ..approvals import get_approval_service
 
 router = APIRouter(prefix="/chats", tags=["chats"])
+logger = logging.getLogger(__name__)
 TASK_MESSAGES_STATE_KEY = "task_messages"
 TASK_RUNS_STATE_KEY = "task_runs"
 TASK_RUN_SECTION_STEP = "step"
 TASK_RUN_SECTION_FINAL = "final"
+_SERVER_OWNED_CHAT_META_KEYS = frozenset(
+    {
+        "scenario_preset_snapshot",
+        "scenario_preset_snapshot_source",
+    },
+)
+
+
+def _reject_server_owned_chat_meta(meta: dict[str, Any] | None) -> None:
+    for key in _SERVER_OWNED_CHAT_META_KEYS:
+        if key in (meta or {}):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{key} is server-owned",
+            )
+
+
+class ChatUpdateRequest(BaseModel):
+    """聊天更新请求，允许调用方只提交本次需要修改的字段。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str | None = None
+    name: str | None = None
+    session_id: str | None = None
+    user_id: str | None = None
+    channel: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    meta: dict[str, Any] | None = None
+    status: str | None = None
+
+
+def _merge_chat_update(
+    existing: ChatSpec,
+    patch: ChatUpdateRequest,
+) -> ChatSpec:
+    """将部分更新合并到已有会话，保留调用方没有提交的字段。"""
+    updates = patch.model_dump(exclude_unset=True)
+    merged = existing.model_dump()
+
+    for field_name in (
+        "name",
+        "session_id",
+        "user_id",
+        "channel",
+        "created_at",
+        "updated_at",
+        "status",
+    ):
+        if field_name in updates and updates[field_name] is not None:
+            merged[field_name] = updates[field_name]
+
+    if "meta" in updates:
+        # Plan Mode 只会提交一个 meta 开关，合并可避免覆盖其他会话元数据。
+        incoming_meta = updates["meta"] or {}
+        _reject_server_owned_chat_meta(incoming_meta)
+        merged["meta"] = {
+            **(existing.meta or {}),
+            **incoming_meta,
+        }
+
+    return ChatSpec.model_validate(merged)
 
 
 async def _annotate_approval_action_statuses(
@@ -31,7 +116,8 @@ async def _annotate_approval_action_statuses(
 ) -> list[ChatMessage]:
     """Attach current approval status to messages carrying approval metadata."""
     approval_service = get_approval_service()
-
+    request_ids: list[str] = []
+    actions: list[dict[str, Any]] = []
     for message in messages:
         metadata = getattr(message, "metadata", None)
         if not isinstance(metadata, dict):
@@ -48,14 +134,68 @@ async def _annotate_approval_action_statuses(
         request_id = approval_action.get("requestId")
         if not isinstance(request_id, str) or not request_id:
             continue
+        request_ids.append(request_id)
+        actions.append(approval_action)
 
-        request = await approval_service.get_request(request_id)
+    batch_get = getattr(approval_service, "get_requests", None)
+    if callable(batch_get):
+        requests = await batch_get(request_ids)
+    else:
+        requests = {
+            request_id: request
+            for request_id in request_ids
+            if (request := await approval_service.get_request(request_id))
+            is not None
+        }
+    for request_id, approval_action in zip(request_ids, actions):
+        request = requests.get(request_id)
         if request is None:
             continue
-
         approval_action["status"] = request.status
 
     return messages
+
+
+def _redact_hidden_context_messages(
+    messages: list[ChatMessage],
+) -> list[ChatMessage]:
+    """Build display-safe chat-history messages without mutating memory."""
+    redacted: list[ChatMessage] = []
+    for message in messages:
+        if message.role != "user" or not isinstance(message.metadata, dict):
+            redacted.append(message)
+            continue
+
+        nested_metadata = message.metadata.get("metadata")
+        marker = message.metadata.get(HIDDEN_CONTEXT_METADATA_KEY)
+        if marker is None and isinstance(nested_metadata, dict):
+            marker = nested_metadata.get(HIDDEN_CONTEXT_METADATA_KEY)
+        if not isinstance(marker, dict):
+            redacted.append(message)
+            continue
+
+        visible_text = marker.get("visible_text")
+        suffix = marker.get("suffix")
+        if not isinstance(visible_text, str) or not isinstance(suffix, str):
+            redacted.append(message)
+            continue
+
+        payload = message.model_dump(mode="json")
+        metadata = {
+            key: value
+            for key, value in message.metadata.items()
+            if key != HIDDEN_CONTEXT_METADATA_KEY
+        }
+        if isinstance(nested_metadata, dict):
+            metadata["metadata"] = {
+                key: value
+                for key, value in nested_metadata.items()
+                if key != HIDDEN_CONTEXT_METADATA_KEY
+            }
+        payload["metadata"] = metadata
+        payload["content"] = [{"type": "text", "text": visible_text}]
+        redacted.append(ChatMessage.model_validate(payload))
+    return redacted
 
 
 def _task_session_messages_from_state(state: dict) -> list[ChatMessage]:
@@ -87,16 +227,190 @@ def _task_session_messages_from_state(state: dict) -> list[ChatMessage]:
     return messages
 
 
+def _model_call_failed_messages_from_state(state: dict) -> list[ChatMessage]:
+    raw_messages = state.get(MODEL_CALL_FAILED_MESSAGES_STATE_KEY, [])
+    if not isinstance(raw_messages, list):
+        return []
+
+    messages: list[ChatMessage] = []
+    for raw in raw_messages:
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("code") != "model_call_failed":
+            continue
+        message = raw.get("message")
+        if not isinstance(message, str) or not message:
+            continue
+        messages.append(
+            ChatMessage.model_validate(
+                {
+                    "id": raw.get("id") or str(uuid4()),
+                    "type": "error",
+                    "role": "assistant",
+                    "status": "failed",
+                    "content": [],
+                    "code": "model_call_failed",
+                    "message": message,
+                    "metadata": raw.get("metadata") or {},
+                    "timestamp": raw.get("timestamp"),
+                },
+            ),
+        )
+    return messages
+
+
 async def _messages_from_memory_state(
     memory_state: dict,
+    *,
+    session_id: str = "",
+    position_offset: int = 0,
 ) -> list[ChatMessage]:
     if not memory_state:
         return []
 
     memory = InMemoryMemory()
-    memory.load_state_dict(memory_state, strict=False)
+    normalized_state = _normalize_state_for_load(memory_state)
+    memory.load_state_dict(normalized_state, strict=False)
     memories = await memory.get_memory(prepend_summary=False)
-    return agentscope_msg_to_message(memories)
+    return agentscope_msg_to_message(
+        memories,
+        session_id=session_id,
+        position_offset=position_offset,
+    )
+
+
+async def _filter_archived_turn_messages(
+    workspace: Any,
+    chat_id: str,
+    messages: list[ChatMessage],
+) -> list[ChatMessage]:
+    """Do not re-add user anchors already present in the compaction archive."""
+    if not messages:
+        return messages
+    store = _archive_store(workspace)
+    if store is None:
+        return messages
+
+    candidate_ids = {
+        _message_original_id(message)
+        for message in messages
+        if _message_original_id(message)
+    }
+    archived_ids: set[str] = set()
+    cursor: str | None = None
+    while candidate_ids - archived_ids:
+        page = await store.read_page(chat_id, before=cursor, limit=50)
+        archived_ids.update(
+            message.id
+            for message in page.messages
+            if isinstance(message.id, str) and message.id in candidate_ids
+        )
+        if not page.has_more or not page.next_cursor:
+            break
+        cursor = page.next_cursor
+
+    return [
+        message
+        for message in messages
+        if _message_original_id(message) not in archived_ids
+    ]
+
+
+def _turn_state_to_message(
+    turn_id: object,
+    turn_state: object,
+    *,
+    chat_id: str | None,
+) -> ChatMessage | None:
+    """Convert one durable turn state into a public user message."""
+    if not isinstance(turn_state, dict):
+        return None
+    stored_chat_id = turn_state.get("chat_id")
+    if (
+        chat_id is not None
+        and isinstance(stored_chat_id, str)
+        and stored_chat_id
+        and stored_chat_id != chat_id
+    ):
+        return None
+    raw = turn_state.get("message")
+    if not isinstance(raw, dict) or raw.get("role") != "user":
+        return None
+    content = raw.get("content")
+    if isinstance(content, str):
+        content = [{"type": "text", "text": content}]
+    if not isinstance(content, list):
+        return None
+    turn_key = str(turn_id)
+    return ChatMessage.model_validate(
+        {
+            "id": raw.get("id") or turn_key,
+            "type": raw.get("type") or "message",
+            "role": "user",
+            "content": content,
+            "metadata": {
+                **(raw.get("metadata") or {}),
+                "original_id": raw.get("id") or turn_key,
+            },
+            "timestamp": raw.get("timestamp"),
+        },
+    )
+
+
+def _turn_state_messages_from_state(
+    state: dict,
+    *,
+    session_id: str,
+    chat_id: str | None = None,
+) -> list[ChatMessage]:
+    """Expose pre-admitted user anchors when Agent memory has no output yet."""
+    turn_states = state.get("turn_states")
+    if not isinstance(turn_states, dict):
+        return []
+    messages: list[ChatMessage] = []
+    for turn_id, turn_state in turn_states.items():
+        message = _turn_state_to_message(
+            turn_id,
+            turn_state,
+            chat_id=chat_id,
+        )
+        if message is not None:
+            messages.append(message)
+    return messages
+
+
+def _turn_status_from_state(state: dict, msgid: str) -> str | None:
+    turn_states = state.get("turn_states")
+    if not isinstance(turn_states, dict):
+        return None
+    turn_state = turn_states.get(msgid)
+    if not isinstance(turn_state, dict):
+        return None
+    status = turn_state.get("status")
+    return status if isinstance(status, str) else None
+
+
+def _turn_state_chat_id(state: dict, msgid: str) -> str | None:
+    turn_states = state.get("turn_states")
+    if not isinstance(turn_states, dict):
+        return None
+    turn_state = turn_states.get(msgid)
+    if not isinstance(turn_state, dict):
+        return None
+    chat_id = turn_state.get("chat_id")
+    return chat_id if isinstance(chat_id, str) and chat_id else None
+
+
+def _message_turn_status(message: ChatMessage) -> str | None:
+    metadata = getattr(message, "metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    for candidate in (metadata, metadata.get("metadata")):
+        if isinstance(candidate, dict):
+            status = candidate.get("turn_status")
+            if isinstance(status, str):
+                return status
+    return None
 
 
 def _slice_memory_state(
@@ -192,12 +506,18 @@ async def _messages_from_memory_range(
     memory_state: dict,
     start: int,
     end: int,
+    *,
+    session_id: str = "",
 ) -> list[ChatMessage] | None:
     """读取一段 memory slice 对应的消息。"""
     sliced_state = _slice_memory_state(memory_state, start, end)
     if sliced_state is None:
         return None
-    return await _messages_from_memory_state(sliced_state)
+    return await _messages_from_memory_state(
+        sliced_state,
+        session_id=session_id,
+        position_offset=start,
+    )
 
 
 def _find_final_text_message_index(
@@ -242,38 +562,57 @@ def _annotate_run_messages(
 async def _annotate_task_run_messages(
     memory_state: dict,
     raw_task_runs: list[dict],
+    *,
+    session_id: str = "",
 ) -> list[ChatMessage]:
     content = memory_state.get("content")
     if not isinstance(content, list):
-        return await _messages_from_memory_state(memory_state)
+        return await _messages_from_memory_state(
+            memory_state,
+            session_id=session_id,
+        )
 
     task_runs = _normalize_task_runs(raw_task_runs, len(content))
     if task_runs is None:
-        return await _messages_from_memory_state(memory_state)
+        return await _messages_from_memory_state(
+            memory_state,
+            session_id=session_id,
+        )
 
     messages: list[ChatMessage] = []
     cursor = 0
     for start, end, run_index, run_id in task_runs:
         if start < cursor:
-            return await _messages_from_memory_state(memory_state)
+            return await _messages_from_memory_state(
+                memory_state,
+                session_id=session_id,
+            )
 
         if cursor < start:
             gap_messages = await _messages_from_memory_range(
                 memory_state,
                 cursor,
                 start,
+                session_id=session_id,
             )
             if gap_messages is None:
-                return await _messages_from_memory_state(memory_state)
+                return await _messages_from_memory_state(
+                    memory_state,
+                    session_id=session_id,
+                )
             messages.extend(gap_messages)
 
         run_messages = await _messages_from_memory_range(
             memory_state,
             start,
             end,
+            session_id=session_id,
         )
         if run_messages is None:
-            return await _messages_from_memory_state(memory_state)
+            return await _messages_from_memory_state(
+                memory_state,
+                session_id=session_id,
+            )
         messages.extend(
             _annotate_run_messages(
                 run_messages,
@@ -289,6 +628,7 @@ async def _annotate_task_run_messages(
             memory_state,
             cursor,
             len(content),
+            session_id=session_id,
         )
         if tail_messages is not None:
             messages.extend(tail_messages)
@@ -339,6 +679,66 @@ async def get_chat_manager(
     return workspace.chat_manager
 
 
+def _request_user_id(request: Request) -> str | None:
+    request_state = getattr(request, "state", None)
+    if request_state is None:
+        return None
+    user_id = getattr(request_state, "user_id", None)
+    return user_id if isinstance(user_id, str) and user_id else None
+
+
+def _request_source_id(request: Request) -> str | None:
+    source_id = getattr(getattr(request, "state", None), "source_id", None)
+    return source_id if isinstance(source_id, str) and source_id else None
+
+
+def _request_agent_id(request: Request, workspace: Any) -> str | None:
+    agent_id = getattr(getattr(request, "state", None), "agent_id", None)
+    if not isinstance(agent_id, str) or not agent_id:
+        agent_id = getattr(workspace, "agent_id", None)
+    return agent_id if isinstance(agent_id, str) and agent_id else None
+
+
+def _authorize_chat(
+    request: Request,
+    chat: ChatSpec,
+    workspace: Any,
+) -> None:
+    """Ensure a Chat record belongs to the request identity and Agent."""
+    request_user_id = _request_user_id(request)
+    if request_user_id is not None and chat.user_id != request_user_id:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    request_source_id = _request_source_id(request)
+    chat_source_id = (chat.meta or {}).get("source_id")
+    if (
+        request_source_id is not None
+        and isinstance(chat_source_id, str)
+        and chat_source_id
+        and chat_source_id != request_source_id
+    ):
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    request_agent_id = _request_agent_id(request, workspace)
+    chat_agent_id = (chat.meta or {}).get("agent_id")
+    if (
+        request_agent_id is not None
+        and isinstance(chat_agent_id, str)
+        and chat_agent_id
+        and chat_agent_id != request_agent_id
+    ):
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+
+def _authorize_requested_user(request: Request, user_id: str) -> None:
+    current_user_id = _request_user_id(request)
+    if current_user_id is not None and user_id != current_user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Cannot access another user's chats",
+        )
+
+
 async def get_session(
     request: Request,
 ) -> SafeJSONSession:
@@ -357,8 +757,215 @@ async def get_session(
     return workspace.runner.session
 
 
+async def _read_history_state(
+    session: SafeJSONSession,
+    session_id: str,
+    user_id: str,
+) -> dict:
+    """Read the durable history snapshot without delaying on an active turn."""
+    read_snapshot = getattr(session, "get_persisted_session_state_dict", None)
+    if read_snapshot is not None:
+        return await read_snapshot(session_id, user_id)
+    return await session.get_session_state_dict(session_id, user_id)
+
+
+async def _cached_history_state(
+    cache: dict[tuple[str, str], dict],
+    session: SafeJSONSession,
+    session_id: str,
+    user_id: str,
+) -> dict:
+    key = (session_id, user_id)
+    state = cache.get(key)
+    if state is None:
+        state = await session.get_session_state_dict(session_id, user_id)
+        cache[key] = state
+    return state
+
+
+async def _build_chat_history(
+    chat_spec: ChatSpec,
+    *,
+    session: SafeJSONSession,
+    workspace,
+    status_override: str | None = None,
+    non_blocking: bool = False,
+    state: dict | None = None,
+) -> ChatHistory:
+    if state is None:
+        state = (
+            await _read_history_state(
+                session,
+                chat_spec.session_id,
+                chat_spec.user_id,
+            )
+            if non_blocking
+            else await session.get_session_state_dict(
+                chat_spec.session_id,
+                chat_spec.user_id,
+            )
+        )
+    if status_override is not None:
+        status = status_override
+    else:
+        coordinator = getattr(workspace, "answer_turn_coordinator", None)
+        turn_status = (
+            await coordinator.status(chat_spec.id)
+            if coordinator is not None
+            else None
+        )
+        status = turn_status.value if turn_status is not None else "idle"
+    task_messages = _task_session_messages_from_state(state)
+    model_call_failed_messages = _model_call_failed_messages_from_state(state)
+    archive = await _archive_metadata(workspace, chat_spec.id)
+    if not state:
+        return ChatHistory(
+            chat=chat_spec,
+            messages=[*task_messages, *model_call_failed_messages],
+            status=status,
+            archive=archive,
+        )
+    memory_state = state.get("agent", {}).get("memory", {})
+    messages: list[ChatMessage] = []
+    if memory_state:
+        if (
+            (chat_spec.meta or {}).get("session_kind") == "task"
+            and isinstance(state.get(TASK_RUNS_STATE_KEY), list)
+            and state.get(TASK_RUNS_STATE_KEY)
+        ):
+            messages = await _annotate_task_run_messages(
+                memory_state,
+                state[TASK_RUNS_STATE_KEY],
+                session_id=chat_spec.session_id,
+            )
+        else:
+            messages = await _messages_from_memory_state(
+                memory_state,
+                session_id=chat_spec.session_id,
+            )
+    messages.extend(task_messages)
+    messages.extend(model_call_failed_messages)
+    known_ids = {
+        _message_original_id(message)
+        for message in messages
+        if _message_original_id(message)
+    }
+    turn_state_messages = _turn_state_messages_from_state(
+        state,
+        session_id=chat_spec.session_id,
+        chat_id=chat_spec.id,
+    )
+    turn_state_messages = await _filter_archived_turn_messages(
+        workspace,
+        chat_spec.id,
+        turn_state_messages,
+    )
+    messages.extend(
+        message
+        for message in turn_state_messages
+        if _message_original_id(message) not in known_ids
+    )
+    messages.sort(key=_message_sort_key)
+    messages = await _annotate_approval_action_statuses(messages)
+    messages = _redact_hidden_context_messages(messages)
+    return ChatHistory(
+        chat=chat_spec,
+        messages=messages,
+        status=status,
+        archive=archive,
+    )
+
+
+def _archive_store(workspace) -> ConversationArchiveStore | None:
+    workspace_dir = getattr(workspace, "workspace_dir", None)
+    if workspace_dir is None:
+        return None
+    return ConversationArchiveStore(workspace_dir / "dialog")
+
+
+def _boundary_model(boundary) -> ChatCompactionBoundary:
+    return ChatCompactionBoundary(
+        id=boundary.id,
+        archived_message_count=boundary.archived_message_count,
+        first_message_id=boundary.first_message_id,
+        last_message_id=boundary.last_message_id,
+        created_at=boundary.created_at,
+        first_timestamp=boundary.first_timestamp,
+        last_timestamp=boundary.last_timestamp,
+    )
+
+
+async def _archive_metadata(workspace, chat_id: str) -> ChatArchiveMetadata:
+    store = _archive_store(workspace)
+    if store is None:
+        return ChatArchiveMetadata()
+    page = await store.read_page(chat_id, limit=1)
+    return ChatArchiveMetadata(
+        has_more=bool(page.messages),
+        boundaries=[_boundary_model(boundary) for boundary in page.boundaries],
+    )
+
+
+async def _archive_page(
+    workspace,
+    chat_id: str,
+    before: str | None,
+    limit: int,
+) -> ChatArchivePage:
+    store = _archive_store(workspace)
+    if store is None:
+        return ChatArchivePage()
+    page = await store.read_page(chat_id, before=before, limit=limit)
+    messages = agentscope_msg_to_message(
+        page.messages,
+        session_id=chat_id,
+    )
+    return ChatArchivePage(
+        messages=_redact_hidden_context_messages(messages),
+        boundaries=[_boundary_model(boundary) for boundary in page.boundaries],
+        has_more=page.has_more,
+        next_cursor=page.next_cursor,
+    )
+
+
+def _message_original_id(message: ChatMessage) -> str | None:
+    metadata = getattr(message, "metadata", None)
+    if isinstance(metadata, dict):
+        original_id = metadata.get("original_id")
+        if isinstance(original_id, str) and original_id:
+            return original_id
+    message_id = getattr(message, "id", None)
+    return message_id if isinstance(message_id, str) and message_id else None
+
+
+def _slice_answer_turn(
+    messages: list[ChatMessage],
+    *,
+    msgid: str,
+) -> list[ChatMessage] | None:
+    anchor_index: int | None = None
+    for index, message in enumerate(messages):
+        if _message_original_id(message) != msgid:
+            continue
+        if getattr(message, "role", None) != "user":
+            return None
+        anchor_index = index
+        break
+
+    if anchor_index is None:
+        return None
+
+    end_index = len(messages)
+    for index in range(anchor_index + 1, len(messages)):
+        if getattr(messages[index], "role", None) == "user":
+            end_index = index
+            break
+    return messages[anchor_index:end_index]
+
+
 @router.get("", response_model=list[ChatSpec] | ChatPage)
 async def list_chats(
+    request: Request,
     user_id: Optional[str] = Query(None, description="Filter by user ID"),
     channel: Optional[str] = Query(None, description="Filter by channel"),
     page: Optional[int] = Query(None, ge=1, description="Page number"),
@@ -369,7 +976,7 @@ async def list_chats(
     ),
     cursor: Optional[str] = Query(
         None,
-        description="Opaque cursor for stable chat pagination",
+        description="Opaque cursor for live best-effort chat pagination",
     ),
     mgr: ChatManager = Depends(get_chat_manager),
     workspace=Depends(get_workspace),
@@ -378,6 +985,8 @@ async def list_chats(
 
     Omitting both pagination parameters preserves the legacy array response.
     Providing both returns a ``ChatPage`` ordered by latest update first.
+    Cursor pages are live and best-effort: updates between requests can move
+    records across the cursor boundary.
 
     Args:
         user_id: Optional user ID to filter chats
@@ -386,6 +995,12 @@ async def list_chats(
         page_size: Optional page size, paired with page
         mgr: Chat manager dependency
     """
+    current_user_id = _request_user_id(request)
+    if current_user_id is not None:
+        if user_id is not None:
+            _authorize_requested_user(request, user_id)
+        user_id = current_user_id
+
     cursor_mode = cursor is not None
     if cursor_mode and page is not None:
         raise HTTPException(
@@ -403,7 +1018,32 @@ async def list_chats(
             detail="page and page_size must be provided together",
         )
 
-    tracker = workspace.task_tracker
+    coordinator = getattr(workspace, "answer_turn_coordinator", None)
+
+    async def runtime_statuses(chat_ids: list[str]) -> dict[str, str]:
+        if coordinator is None:
+            return {chat_id: "idle" for chat_id in chat_ids}
+        batch_status = getattr(coordinator, "statuses", None)
+        if callable(batch_status):
+            statuses = await batch_status(chat_ids)
+        else:
+            statuses = dict(
+                zip(
+                    chat_ids,
+                    await asyncio.gather(
+                        *(coordinator.status(chat_id) for chat_id in chat_ids),
+                    ),
+                ),
+            )
+        return {
+            chat_id: (
+                statuses.get(chat_id).value
+                if statuses.get(chat_id) is not None
+                else "idle"
+            )
+            for chat_id in chat_ids
+        }
+
     if cursor_mode and page_size is not None:
         try:
             chat_page = await mgr.list_chats_cursor(
@@ -414,10 +1054,13 @@ async def list_chats(
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        items = []
-        for spec in chat_page.items:
-            status = await tracker.get_status(spec.id)
-            items.append(spec.model_copy(update={"status": status}))
+        statuses = await runtime_statuses(
+            [spec.id for spec in chat_page.items],
+        )
+        items = [
+            spec.model_copy(update={"status": statuses.get(spec.id, "idle")})
+            for spec in chat_page.items
+        ]
         return chat_page.model_copy(update={"items": items})
 
     if page is not None and page_size is not None:
@@ -427,22 +1070,26 @@ async def list_chats(
             page=page,
             page_size=page_size,
         )
-        items = []
-        for spec in chat_page.items:
-            status = await tracker.get_status(spec.id)
-            items.append(spec.model_copy(update={"status": status}))
+        statuses = await runtime_statuses(
+            [spec.id for spec in chat_page.items],
+        )
+        items = [
+            spec.model_copy(update={"status": statuses.get(spec.id, "idle")})
+            for spec in chat_page.items
+        ]
         return chat_page.model_copy(update={"items": items})
 
     chats = await mgr.list_chats(user_id=user_id, channel=channel)
-    result = []
-    for spec in chats:
-        status = await tracker.get_status(spec.id)
-        result.append(spec.model_copy(update={"status": status}))
-    return result
+    statuses = await runtime_statuses([spec.id for spec in chats])
+    return [
+        spec.model_copy(update={"status": statuses.get(spec.id, "idle")})
+        for spec in chats
+    ]
 
 
 @router.post("", response_model=ChatSpec)
 async def create_chat(
+    request_context: Request,
     request: ChatSpec,
     mgr: ChatManager = Depends(get_chat_manager),
 ):
@@ -457,20 +1104,36 @@ async def create_chat(
     Returns:
         Created chat spec with UUID
     """
+    _reject_server_owned_chat_meta(request.meta)
+    current_user_id = _request_user_id(request_context)
+    if current_user_id is not None:
+        _authorize_requested_user(request_context, request.user_id)
+    current_source_id = _request_source_id(request_context)
+    current_agent_id = getattr(
+        getattr(request_context, "state", None),
+        "agent_id",
+        None,
+    )
     chat_id = str(uuid4())
+    meta = dict(request.meta or {})
+    if current_source_id is not None:
+        meta["source_id"] = current_source_id
+    if isinstance(current_agent_id, str) and current_agent_id:
+        meta["agent_id"] = current_agent_id
     spec = ChatSpec(
         id=chat_id,
         name=request.name,
         session_id=request.session_id,
         user_id=request.user_id,
         channel=request.channel,
-        meta=request.meta,
+        meta=meta,
     )
     return await mgr.create_chat(spec)
 
 
 @router.post("/batch-delete", response_model=dict)
 async def batch_delete_chats(
+    request: Request,
     chat_ids: list[str],
     mgr: ChatManager = Depends(get_chat_manager),
 ):
@@ -483,12 +1146,216 @@ async def batch_delete_chats(
         True if deleted, False if failed
 
     """
-    deleted = await mgr.delete_chats(chat_ids=chat_ids)
+    authorized_ids: list[str] = []
+    for chat_id in chat_ids:
+        chat = await mgr.get_chat(chat_id)
+        if chat is None:
+            continue
+        _authorize_chat(request, chat, None)
+        authorized_ids.append(chat_id)
+    deleted = await mgr.delete_chats(chat_ids=authorized_ids)
     return {"deleted": deleted}
+
+
+@router.get("/answer-turn", response_model=ChatHistory)
+async def get_answer_turn(
+    request: Request,
+    sessionid: str | None = Query(None, description="Logical session id"),
+    msgid: str = Query(..., description="User question message id"),
+    chat_id: str | None = Query(None, description="Chat id"),
+    mgr: ChatManager = Depends(get_chat_manager),
+    session: SafeJSONSession = Depends(get_session),
+    workspace=Depends(get_workspace),
+):
+    """Get one answer turn by logical session id and user question msgid."""
+    user_id = _request_user_id(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Request user identity is required",
+        )
+    chat_spec = None
+    candidate_chats: list[ChatSpec] = []
+    selected_history: ChatHistory | None = None
+    selected_state: dict | None = None
+    state_cache: dict[tuple[str, str], dict] = {}
+    if chat_id:
+        chat_spec = await mgr.get_chat(chat_id)
+        if chat_spec:
+            try:
+                _authorize_chat(request, chat_spec, workspace)
+            except HTTPException:
+                chat_spec = None
+    elif sessionid:
+        candidate_chats = [
+            chat
+            for chat in await mgr.list_chats(
+                user_id=user_id,
+                channel="console",
+            )
+            if chat.session_id == sessionid
+        ]
+        for candidate in candidate_chats:
+            try:
+                _authorize_chat(request, candidate, workspace)
+            except HTTPException:
+                continue
+            state = await _cached_history_state(
+                state_cache,
+                session,
+                candidate.session_id,
+                candidate.user_id,
+            )
+            stored_chat_id = _turn_state_chat_id(state, msgid)
+            if stored_chat_id is not None and stored_chat_id != candidate.id:
+                continue
+            history = await _build_chat_history(
+                candidate,
+                session=session,
+                workspace=workspace,
+                non_blocking=False,
+                state=state,
+            )
+            if _slice_answer_turn(history.messages, msgid=msgid) is not None:
+                chat_spec = candidate
+                selected_history = history
+                selected_state = state
+                break
+    if not chat_spec:
+        raise HTTPException(
+            status_code=404,
+            detail="Answer turn not found",
+        )
+
+    if selected_history is None:
+        selected_state = await _cached_history_state(
+            state_cache,
+            session,
+            chat_spec.session_id,
+            chat_spec.user_id,
+        )
+        selected_history = await _build_chat_history(
+            chat_spec,
+            session=session,
+            workspace=workspace,
+            non_blocking=False,
+            state=selected_state,
+        )
+    history = selected_history
+    messages = _slice_answer_turn(history.messages, msgid=msgid)
+    if messages is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Answer turn not found",
+        )
+    turn_status = _turn_status_from_state(selected_state or {}, msgid)
+    if turn_status is None:
+        turn_status = next(
+            (
+                status
+                for status in (
+                    _message_turn_status(message) for message in messages
+                )
+                if status is not None
+            ),
+            None,
+        )
+    return ChatHistory(
+        chat=chat_spec,
+        messages=messages,
+        status=history.status,
+        turn_status=turn_status,
+    )
+
+
+@router.get("/{chat_id}/history", response_model=ChatArchivePage)
+async def get_chat_history_page(
+    request: Request,
+    chat_id: str,
+    before: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=50),
+    mgr: ChatManager = Depends(get_chat_manager),
+    workspace=Depends(get_workspace),
+):
+    """Load one display-safe page of compacted history for a chat record."""
+    chat_spec = await mgr.get_chat(chat_id)
+    if not chat_spec:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Chat not found: {chat_id}",
+        )
+    _authorize_chat(request, chat_spec, workspace)
+    try:
+        return await _archive_page(workspace, chat_spec.id, before, limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get(
+    "/{chat_id}/context-usage",
+    response_model=ContextUsageResponse,
+)
+async def get_chat_context_usage(
+    request: Request,
+    chat_id: str,
+    mgr: ChatManager = Depends(get_chat_manager),
+    session: SafeJSONSession = Depends(get_session),
+    workspace=Depends(get_workspace),
+) -> ContextUsageResponse:
+    """Return the last committed numeric context-occupancy snapshot."""
+    chat_spec = await mgr.get_chat(chat_id)
+    if not chat_spec:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Chat not found: {chat_id}",
+        )
+    _authorize_chat(request, chat_spec, workspace)
+
+    state = await _read_history_state(
+        session,
+        chat_spec.session_id,
+        chat_spec.user_id,
+    )
+    raw_snapshot = state.get(CONTEXT_USAGE_STATE_KEY)
+    if not isinstance(raw_snapshot, dict):
+        return ContextUsageUnavailable()
+
+    try:
+        snapshot = ContextUsageSnapshot.model_validate(raw_snapshot)
+    except ValidationError:
+        raw_schema_version = raw_snapshot.get("schema_version")
+        schema_metadata = (
+            raw_schema_version
+            if isinstance(raw_schema_version, int)
+            else type(raw_schema_version).__name__
+        )
+        logger.warning(
+            "Ignoring invalid context usage snapshot "
+            "(chat_id=%s session_id=%s schema_version=%s)",
+            chat_spec.id,
+            chat_spec.session_id,
+            schema_metadata,
+        )
+        return ContextUsageUnavailable()
+    coordinator = getattr(workspace, "answer_turn_coordinator", None)
+    turn_status = (
+        await coordinator.status(chat_spec.id)
+        if coordinator is not None
+        else None
+    )
+    status_value = getattr(turn_status, "value", turn_status)
+    return ContextUsageAvailable(
+        **snapshot.model_dump(),
+        stale=(
+            status_value in {"running", "stopping"}
+            or state.get(CONTEXT_USAGE_INVALID_STATE_KEY) is True
+        ),
+    )
 
 
 @router.get("/{chat_id}", response_model=ChatHistory)
 async def get_chat(
+    request: Request,
     chat_id: str,
     mgr: ChatManager = Depends(get_chat_manager),
     session: SafeJSONSession = Depends(get_session),
@@ -515,49 +1382,28 @@ async def get_chat(
             detail=f"Chat not found: {chat_id}",
         )
 
-    state = await session.get_session_state_dict(
-        chat_spec.session_id,
-        chat_spec.user_id,
+    _authorize_chat(request, chat_spec, workspace)
+
+    return await _build_chat_history(
+        chat_spec,
+        session=session,
+        workspace=workspace,
+        non_blocking=True,
     )
-    status = await workspace.task_tracker.get_status(chat_id)
-    task_messages = _task_session_messages_from_state(state)
-    if not state:
-        return ChatHistory(
-            chat=chat_spec,
-            messages=task_messages,
-            status=status,
-        )
-    memory_state = state.get("agent", {}).get("memory", {})
-    messages: list[ChatMessage] = []
-    if memory_state:
-        if (
-            (chat_spec.meta or {}).get("session_kind") == "task"
-            and isinstance(state.get(TASK_RUNS_STATE_KEY), list)
-            and state.get(TASK_RUNS_STATE_KEY)
-        ):
-            messages = await _annotate_task_run_messages(
-                memory_state,
-                state[TASK_RUNS_STATE_KEY],
-            )
-        else:
-            messages = await _messages_from_memory_state(memory_state)
-    messages.extend(task_messages)
-    messages.sort(key=_message_sort_key)
-    messages = await _annotate_approval_action_statuses(messages)
-    return ChatHistory(chat=chat_spec, messages=messages, status=status)
 
 
 @router.put("/{chat_id}", response_model=ChatSpec)
 async def update_chat(
     chat_id: str,
-    spec: ChatSpec,
+    request: Request,
+    patch: ChatUpdateRequest,
     mgr: ChatManager = Depends(get_chat_manager),
 ):
     """Update an existing chat.
 
     Args:
         chat_id: Chat UUID
-        spec: Updated chat specification
+        patch: Updated chat fields
         mgr: Chat manager dependency
 
     Returns:
@@ -566,20 +1412,23 @@ async def update_chat(
     Raises:
         HTTPException: If chat_id mismatch (400) or not found (404)
     """
-    if spec.id != chat_id:
+    if patch.id is not None and patch.id != chat_id:
         raise HTTPException(
             status_code=400,
             detail="chat_id mismatch",
         )
 
-    # Check if exists
     existing = await mgr.get_chat(chat_id)
     if not existing:
         raise HTTPException(
             status_code=404,
             detail=f"Chat not found: {chat_id}",
         )
+    _authorize_chat(request, existing, None)
+    if patch.user_id is not None:
+        _authorize_requested_user(request, patch.user_id)
 
+    spec = _merge_chat_update(existing, patch)
     updated = await mgr.update_chat(spec)
     return updated
 
@@ -587,6 +1436,7 @@ async def update_chat(
 @router.delete("/{chat_id}", response_model=dict)
 async def delete_chat(
     chat_id: str,
+    request: Request,
     mgr: ChatManager = Depends(get_chat_manager),
 ):
     """Delete a chat by UUID.
@@ -604,6 +1454,13 @@ async def delete_chat(
     Raises:
         HTTPException: If chat not found (404)
     """
+    existing = await mgr.get_chat(chat_id)
+    if existing is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Chat not found: {chat_id}",
+        )
+    _authorize_chat(request, existing, None)
     deleted = await mgr.delete_chats(chat_ids=[chat_id])
     if not deleted:
         raise HTTPException(

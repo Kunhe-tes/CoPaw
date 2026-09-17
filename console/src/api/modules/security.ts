@@ -55,15 +55,27 @@ export interface BlockedSkillFinding {
   file_path: string;
   line_number: number | null;
   rule_id: string;
+  analyzer?: string;
 }
 
 export interface BlockedSkillRecord {
+  id: string;
   skill_name: string;
   blocked_at: string;
   max_severity: string;
   findings: BlockedSkillFinding[];
   content_hash: string;
   action: "blocked" | "warned";
+  source_id?: string;
+  user_id?: string;
+  bbk_id?: string;
+}
+
+export interface BlockedSkillHistoryPage {
+  items: BlockedSkillRecord[];
+  total: number;
+  page: number;
+  page_size: number;
 }
 
 export interface SecurityScanErrorResponse {
@@ -109,10 +121,29 @@ export const securityApi = {
       body: JSON.stringify(body),
     }),
 
-  getBlockedHistory: () =>
-    request<BlockedSkillRecord[]>(
-      "/config/security/skill-scanner/blocked-history",
-    ),
+  getBlockedHistory: (page: number = 1, pageSize: number = 20) => {
+    const params = new URLSearchParams({
+      page: String(page),
+      page_size: String(pageSize),
+    });
+    return request<BlockedSkillHistoryPage>(
+      `/config/security/skill-scanner/blocked-history?${params.toString()}`,
+    );
+  },
+
+  getScanWarningCursor: async () => {
+    const result = await request<{ cursor: string }>(
+      "/config/security/skill-scanner/warning-cursor",
+    );
+    return result.cursor;
+  },
+
+  getLatestScanWarning: (skillName: string, since: string) => {
+    const params = new URLSearchParams({ skill_name: skillName, since });
+    return request<BlockedSkillRecord | null>(
+      `/config/security/skill-scanner/blocked-history/latest-warning?${params.toString()}`,
+    );
+  },
 
   clearBlockedHistory: () =>
     request<{ cleared: boolean }>(
@@ -120,9 +151,11 @@ export const securityApi = {
       { method: "DELETE" },
     ),
 
-  removeBlockedEntry: (index: number) =>
+  removeBlockedEntry: (recordId: string) =>
     request<{ removed: boolean }>(
-      `/config/security/skill-scanner/blocked-history/${index}`,
+      `/config/security/skill-scanner/blocked-history/${encodeURIComponent(
+        recordId,
+      )}`,
       { method: "DELETE" },
     ),
 

@@ -10,10 +10,12 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from pydantic import BaseModel, Field
-
+from fastapi import HTTPException
+from ...agents.memory.agent_md_manager import AgentMdManager
 from ...constant import WORKING_DIR
 from ...config.context import decode_scope_id
 from ...config.utils import get_tenant_secrets_dir
+from ...envs.store import load_envs, save_envs
 from ...utils.tools import (
     get_auth_token,
     get_user_info,
@@ -27,6 +29,12 @@ DEFAULT_AUTH_TOKEN_TTL = timedelta(hours=2)
 USER_INFO_REFRESH_MARGIN = timedelta(days=5)
 AUTH_TOKEN_REUSE_MIN_REMAINING = timedelta(minutes=30)
 ACCESS_TOKEN_COOKIE_NAME = "com.cmb.dw.rtl.sso.token"
+IDENTITY_ENV_COOKIE_NAMES = {
+    "bbkOrgId": ("com.cmb.dw.rtl.sso.vbbk", "vbbk"),
+    "brnOrgId": ("com.cmb.dw.rtl.sso.vorgcode", "vorgcode"),
+    "sapId": ("com.cmb.dw.rtl.sso.userid", "userid"),
+    "rtlPstId": ("com.cmb.dw.rtl.sso.positionID", "positionID"),
+}
 
 
 class CronAuthState(BaseModel):
@@ -116,6 +124,73 @@ def extract_access_token_from_cookie(cookie_header: str) -> str:
     raise ValueError(
         f"cron auth cookie missing {ACCESS_TOKEN_COOKIE_NAME}",
     )
+
+
+def sync_identity_envs_from_cookie(
+    cookie_header: str,
+    *,
+    tenant_id: str | None = None,
+) -> list[str]:
+    """Incrementally persist identity fields from a cron-auth cookie."""
+    cookies = dict(_iter_cookie_pairs(cookie_header))
+    updates: dict[str, str] = {}
+    for env_key, cookie_names in IDENTITY_ENV_COOKIE_NAMES.items():
+        for cookie_name in cookie_names:
+            value = cookies.get(cookie_name, "").strip()
+            if value:
+                updates[env_key] = value
+                break
+
+    if not updates:
+        return []
+
+    envs_path = get_tenant_secrets_dir(tenant_id) / "envs.json"
+    envs = load_envs(envs_path)
+    envs.update(updates)
+    save_envs(envs, envs_path)
+    return sorted(updates)
+
+
+def append_user_profile_from_cookie(
+    cookie_header: str,
+    workspace_dir: Path,
+) -> None:
+    """
+    Append user profile from cookie to cron auth state.
+    """
+    try:
+        # 解析cookie为字符串
+        cookies = {}
+        for item in cookie_header.split(";"):
+            item = item.strip()
+            if "=" in item:
+                key, value = item.split("=", 1)
+                cookies[key.strip()] = value.strip()
+        # 提取所需字段，根据cookie名称判断是否需要更新
+        branch_id = cookies.get("com.cmb.dw.rtl.sso.vbbk", "未知")
+        vorgcode = cookies.get("com.cmb.dw.rtl.sso.vorgcode", "未知")
+        position_id = cookies.get("com.cmb.dw.rtl.sso.positionID", "未知")
+        user_id = cookies.get("com.cmb.dw.rtl.sso.userid", "未知")
+        if branch_id == "V00":
+            return
+        # 拼接text
+        text = (
+            f"\n###用户身份信息\n"
+            f"分行号：{branch_id}\n"
+            f"网点机构编号：{vorgcode}\n"
+            f"岗位编号：{position_id}\n"
+            f"客户经理ID：{user_id}\n"
+        )
+
+        # 追加到PROFILE.md
+        workspace_manager = AgentMdManager(str(workspace_dir))
+        workspace_manager.append_working_md("PROFILE.md", text)
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"failed to append user profile from cookie: {str(exc)}",
+        ) from exc
 
 
 def merge_auth_token_into_cookie(
@@ -329,6 +404,20 @@ def _normalize_user_info_payload(
     return {"value": payload}, utc_now() + DEFAULT_USER_INFO_TTL
 
 
+def _normalize_auth_token_payload(auth_token: str) -> str:
+    try:
+        payload = json.loads(auth_token)
+    except (TypeError, ValueError):
+        return auth_token
+    if (
+        isinstance(payload, Mapping)
+        and set(payload.keys()) == {"value"}
+        and isinstance(payload["value"], str)
+    ):
+        return payload["value"]
+    return auth_token
+
+
 def _raise_if_user_info_expired(state: CronAuthState) -> None:
     if not state.user_info:
         return
@@ -460,10 +549,15 @@ def issue_auth_token(
     if not state.user_info:
         raise ValueError("cron auth user_info is not configured")
 
-    auth_token = get_auth_token(state.user_info)
+    auth_token = _normalize_auth_token_payload(get_auth_token(state.user_info))
     expires_at = utc_now() + DEFAULT_AUTH_TOKEN_TTL
+    cookie_header = merge_auth_token_into_cookie(
+        state.cookie_header,
+        auth_token,
+    )
     state.auth_token = auth_token
     state.auth_token_expires_at = expires_at
+    state.cookie_header = cookie_header
     state.last_error = None
     save_cron_auth_state(
         state,
@@ -474,10 +568,7 @@ def issue_auth_token(
         token=auth_token,
         expires_at=expires_at,
         reused=False,
-        cookie_header=merge_auth_token_into_cookie(
-            state.cookie_header,
-            auth_token,
-        ),
+        cookie_header=cookie_header,
     )
 
 

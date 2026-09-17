@@ -4,8 +4,11 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from datetime import datetime, timedelta
+import os
 
 import pytest
+from agentscope.message import Msg
 
 from swe.agents.memory.base_memory_manager import BaseMemoryManager
 from swe.agents.memory.reme_light_memory_manager import ReMeLightMemoryManager
@@ -46,6 +49,27 @@ class _ConcreteMemoryManager(BaseMemoryManager):
         **kwargs,
     ) -> str:  # pragma: no cover - test stub
         return ""
+
+    async def archive_checkpoint_messages(self, **kwargs):  # pragma: no cover
+        return None
+
+    async def schedule_precompaction(
+        self,
+        **kwargs,
+    ) -> bool:  # pragma: no cover
+        return False
+
+    async def install_ready_precompaction(
+        self,
+        **kwargs,
+    ) -> bool:  # pragma: no cover
+        return False
+
+    async def recover_evidence(self, **kwargs):  # pragma: no cover
+        return []
+
+    async def reset_context_epoch(self, **kwargs):  # pragma: no cover
+        return None
 
     async def dream_memory(
         self,
@@ -211,6 +235,30 @@ async def test_workspace_memory_manager_factory_receives_tenant_id(
             **kwargs,
         ) -> str:  # pragma: no cover - test stub
             return ""
+
+        async def archive_checkpoint_messages(
+            self,
+            **kwargs,
+        ):  # pragma: no cover
+            return None
+
+        async def schedule_precompaction(
+            self,
+            **kwargs,
+        ) -> bool:  # pragma: no cover
+            return False
+
+        async def install_ready_precompaction(
+            self,
+            **kwargs,
+        ) -> bool:  # pragma: no cover
+            return False
+
+        async def recover_evidence(self, **kwargs):  # pragma: no cover
+            return []
+
+        async def reset_context_epoch(self, **kwargs):  # pragma: no cover
+            return None
 
         async def dream_memory(
             self,
@@ -404,3 +452,49 @@ def test_get_in_memory_memory_uses_instance_tenant_id(
 
     assert token_counter == "token-counter"
     assert calls == [("default", "tenant-a")]
+
+
+@pytest.mark.asyncio
+async def test_compact_tool_result_uses_native_compaction_and_cleans_artifacts(
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / "workspace"
+    artifact_dir = workspace_dir / "tool_result"
+    artifact_dir.mkdir(parents=True)
+    expired_artifact = artifact_dir / "expired.txt"
+    expired_artifact.write_text("expired", encoding="utf-8")
+    expired_at = (datetime.now() - timedelta(days=2)).timestamp()
+    os.utime(expired_artifact, (expired_at, expired_at))
+    vendor_compactor = AsyncMock()
+    manager = object.__new__(ReMeLightMemoryManager)
+    manager.agent_id = "default"
+    manager.tenant_id = "tenant-a"
+    manager.working_dir = str(workspace_dir)
+    manager._warn_if_version_mismatch = lambda: None
+    manager._reme = SimpleNamespace(compact_tool_result=vendor_compactor)
+    message = Msg(
+        name="assistant",
+        role="assistant",
+        content=[
+            {
+                "type": "tool_result",
+                "id": "tool-call-id",
+                "output": [{"type": "text", "text": "tool output\n" * 80}],
+            },
+        ],
+    )
+
+    result = await manager.compact_tool_result(
+        messages=[message],
+        old_max_bytes=200,
+        recent_max_bytes=200,
+        recent_n=1,
+        retention_days=1,
+    )
+
+    assert result == [message]
+    vendor_compactor.assert_not_awaited()
+    display = message.get_content_blocks("tool_result")[0]["output"][0]["text"]
+    assert "<<<TRUNCATED>>>" in display
+    assert not expired_artifact.exists()
+    assert len(list(artifact_dir.glob("*.txt"))) == 1

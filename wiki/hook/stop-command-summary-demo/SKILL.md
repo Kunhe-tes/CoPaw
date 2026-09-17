@@ -1,6 +1,6 @@
 ---
 name: stop-command-summary-demo
-description: "Use this skill when you need a concrete Stop command hook example that appends final additionalContext or halts the end-of-turn path with continue:false. Trigger when demonstrating end-of-turn cleanup or final-stop annotations."
+description: "Use this skill when you need a concrete Stop command hook example that emits final audit or telemetry records without affecting the end-of-turn path. Trigger when demonstrating end-of-turn observability."
 license: Proprietary. LICENSE.txt has complete terms
 metadata:
   builtin_skill_version: "1.0"
@@ -17,13 +17,13 @@ metadata:
 
 - 事件：`Stop`
 - handler 类型：`command`
-- 目的：在当前轮真正结束前补充收尾上下文，或给出明确停止原因
+- 目的：在当前轮真正结束时发送外部审计或埋点记录，不影响会话主流程
 
 ## 这个 demo 会做什么
 
-- 正常情况下，返回一条 `additionalContext`，把收尾说明写入后续记忆
-- 如果 `assistant_response` 包含 `WAIT_FOR_REVIEW` 这样的哨兵标记，
-  则返回 `continue: false`，要求当前轮以“等待人工复核”为原因停止
+- 从 payload 读取最后一次相关工具和候选回复中的复核标记
+- 将结构化审计记录写到 `stderr`，便于日志采集器或外部观测系统接收
+- 在 `stdout` 返回 `{"decision":"allow","reason":"summary recorded"}`，在记录完成后批准候选回复
 
 ## 目录内容
 
@@ -33,5 +33,6 @@ metadata:
 
 ## 关键说明
 
-- `Stop` 不会像 `BeforeStop` 那样自动续跑
-- 因此这个事件更适合做最终审计、落备注、追加收尾上下文
+- `Stop` 是结束门禁；handler 可先写入审计、埋点或外部通知，再用 `allow` 批准候选回复
+- `block` 会让 Agent 在同一请求内继续尝试；`deny`、`stop`、`continue: false`、`additionalContext` 等输出不受支持
+- `failPolicy: block` 的执行失败会以未完成结束当前请求，不会自动续跑

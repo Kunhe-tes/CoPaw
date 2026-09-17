@@ -5,6 +5,7 @@ Provides methods to sync job definitions and execution records
 from SWE to Monitor database.
 """
 
+import json
 import logging
 import os
 from datetime import datetime
@@ -15,7 +16,11 @@ import httpx
 
 from ...database import get_db_connection
 from ...models.cron import CronJobSyncRequest, ExecutionSyncRequest
-from ....utils.bbk import get_bbk_id_by_name, get_bbk_name_by_id
+from ....utils.bbk import (
+    get_bbk_id_by_name,
+    get_bbk_name_by_id,
+    normalize_bbk_id_to_primary,
+)
 from ....utils.scope_decode import (
     is_encoded_scope_id,
     try_decode_tenant_id,
@@ -83,6 +88,60 @@ def _to_beijing_naive(value: Optional[datetime]) -> Optional[datetime]:
     return value.astimezone(_BEIJING_TZ).replace(tzinfo=None)
 
 
+def _positive_int(
+    value: object,
+    default: Optional[int] = None,
+) -> Optional[int]:
+    try:
+        parsed = int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _extract_dispatch_identity_columns(
+    raw_meta: Optional[str],
+) -> Tuple[Optional[int], str, Optional[int]]:
+    if not raw_meta:
+        return None, "", None
+    try:
+        meta = json.loads(raw_meta)
+    except json.JSONDecodeError:
+        return None, "", None
+    if not isinstance(meta, dict):
+        return None, "", None
+    dispatch_meta = meta.get("cron_dispatch")
+    if not isinstance(dispatch_meta, dict):
+        return None, "", None
+    intent_id = _positive_int(dispatch_meta.get("intent_id"))
+    batch_id = str(dispatch_meta.get("batch_id") or "").strip()
+    dispatch_attempt = _positive_int(
+        dispatch_meta.get("dispatch_attempt"),
+        1,
+    )
+    return intent_id, batch_id, dispatch_attempt
+
+
+def _extract_broadcast_source_job_id(raw_meta: Optional[str]) -> str:
+    """从 meta JSON 中提取 broadcast_source_job_id。
+
+    Args:
+        raw_meta: meta 字段的 JSON 字符串
+
+    Returns:
+        broadcast_source_job_id 字符串，不存在则返回空字符串
+    """
+    if not raw_meta:
+        return ""
+    try:
+        meta = json.loads(raw_meta)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(meta, dict):
+        return ""
+    return str(meta.get("broadcast_source_job_id") or "").strip()
+
+
 def _extract_bbk_id_from_path_name(path_name: Optional[str]) -> Optional[str]:
     """从 pathName 中提取 BBK ID。
 
@@ -103,6 +162,18 @@ def _extract_bbk_id_from_path_name(path_name: Optional[str]) -> Optional[str]:
         return get_bbk_id_by_name(parts[1])
 
     return None
+
+
+def _normalize_request_bbk_id(
+    request: CronJobSyncRequest,
+) -> CronJobSyncRequest:
+    if not str(request.bbk_id or "").strip():
+        return request
+
+    normalized_bbk_id = normalize_bbk_id_to_primary(request.bbk_id)
+    if normalized_bbk_id == request.bbk_id:
+        return request
+    return request.model_copy(update={"bbk_id": normalized_bbk_id or ""})
 
 
 async def _fetch_user_info(
@@ -221,12 +292,12 @@ async def _enrich_sync_request(
                 not request.bbk_id
                 or not get_bbk_name_by_id(str(request.bbk_id).strip())
             ):
-                update_fields["bbk_id"] = bbk_id
+                update_fields["bbk_id"] = normalize_bbk_id_to_primary(bbk_id)
 
             if update_fields:
                 request = request.model_copy(update=update_fields)
 
-        return request
+        return _normalize_request_bbk_id(request)
 
     except Exception as e:
         # 任何异常都返回原始请求，确保数据不丢失
@@ -267,6 +338,11 @@ class SyncService:
 
         now = _get_beijing_now()
 
+        # 从 meta 中提取 broadcast_source_job_id
+        broadcast_source_job_id = _extract_broadcast_source_job_id(
+            request.meta,
+        )
+
         if existing:
             # Update existing job, clear deleted_at if it was deleted
             deleted_at_value = (
@@ -301,6 +377,7 @@ class SyncService:
                     job_origin = %s,
                     subscription_key = %s,
                     skill_ids = %s,
+                    broadcast_source_job_id = %s,
                     meta = %s,
                     status = %s,
                     pause_reason = %s,
@@ -332,6 +409,7 @@ class SyncService:
                     request.job_origin,
                     request.subscription_key,
                     request.skill_ids,
+                    broadcast_source_job_id,
                     request.meta,
                     request.status,
                     request.pause_reason,
@@ -356,10 +434,10 @@ class SyncService:
                     text_content, request_input,
                     creator_user_id, task_chat_id, task_session_id,
                     job_origin, subscription_key, skill_ids,
-                    meta,
+                    broadcast_source_job_id, meta,
                     status, pause_reason, created_at, updated_at
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 """,
                 (
@@ -387,6 +465,7 @@ class SyncService:
                     request.job_origin,
                     request.subscription_key,
                     request.skill_ids,
+                    broadcast_source_job_id,
                     request.meta,
                     request.status,
                     request.pause_reason,
@@ -476,54 +555,65 @@ class SyncService:
             request.output_preview,
             OUTPUT_PREVIEW_MAX_LENGTH,
         )
+        (
+            dispatch_intent_id,
+            dispatch_batch_id,
+            dispatch_attempt,
+        ) = _extract_dispatch_identity_columns(request.meta)
         meta = _truncate_string(request.meta, META_MAX_LENGTH)
 
-        await db.execute(
-            """
-            INSERT INTO swe_cron_executions (
-                job_id, job_name, tenant_id,
-                scheduled_time, actual_time, end_time, duration_ms,
-                status, error_message,
-                instance_id, executor_leader, is_manual,
-                trace_id, session_id,
-                input_snapshot, output_preview, meta,
-                notification_status, notification_due_at, notification_timezone,
-                is_read, read_at,
-                created_at
-            ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-            )
-            """,
-            (
-                request.job_id,
-                request.job_name,
-                request.tenant_id,
-                request.scheduled_time,
-                request.actual_time,
-                request.end_time,
-                request.duration_ms,
-                request.status,
-                error_message,
-                request.instance_id,
-                request.executor_leader,
-                request.is_manual,
-                request.trace_id,
-                request.session_id,
-                input_snapshot,
-                output_preview,
-                meta,
-                request.notification_status,
-                _to_beijing_naive(request.notification_due_at),
-                request.notification_timezone,
-                request.is_read,
-                request.read_at,
-                now,
-            ),
-        )
-
-        # Get the inserted ID
-        result = await db.fetch_one("SELECT LAST_INSERT_ID() as id")
-        execution_id = result.get("id") if result else None
+        async with db.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO swe_cron_executions (
+                        job_id, job_name, tenant_id,
+                        scheduled_time, actual_time, end_time, duration_ms,
+                        status, error_message,
+                        instance_id, executor_leader, is_manual,
+                        trace_id, session_id,
+                        input_snapshot, output_preview, meta,
+                        dispatch_intent_id, dispatch_batch_id,
+                        dispatch_attempt,
+                        notification_status, notification_due_at, notification_timezone,
+                        is_read, read_at,
+                        created_at
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s
+                    )
+                    """,
+                    (
+                        request.job_id,
+                        request.job_name,
+                        request.tenant_id,
+                        request.scheduled_time,
+                        request.actual_time,
+                        request.end_time,
+                        request.duration_ms,
+                        request.status,
+                        error_message,
+                        request.instance_id,
+                        request.executor_leader,
+                        request.is_manual,
+                        request.trace_id,
+                        request.session_id,
+                        input_snapshot,
+                        output_preview,
+                        meta,
+                        dispatch_intent_id,
+                        dispatch_batch_id,
+                        dispatch_attempt,
+                        request.notification_status,
+                        _to_beijing_naive(request.notification_due_at),
+                        request.notification_timezone,
+                        request.is_read,
+                        _to_beijing_naive(request.read_at),
+                        now,
+                    ),
+                )
+                execution_id = getattr(cur, "lastrowid", None)
 
         logger.info(
             "Recorded execution: job_id=%s execution_id=%s status=%s",
@@ -531,8 +621,41 @@ class SyncService:
             execution_id,
             request.status,
         )
-
         return execution_id
+
+    async def find_execution_by_dispatch_identity(
+        self,
+        *,
+        intent_id: int,
+        batch_id: str,
+        dispatch_attempt: int,
+    ) -> Optional[int]:
+        """Find an existing execution row for a scheduler dispatch callback."""
+        if intent_id <= 0 or not batch_id or dispatch_attempt <= 0:
+            return None
+        db = get_db_connection()
+        row = await db.fetch_one(
+            """
+            SELECT id
+            FROM swe_cron_executions
+            WHERE dispatch_intent_id = %s
+              AND dispatch_batch_id = %s
+              AND dispatch_attempt = %s
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (intent_id, batch_id, dispatch_attempt),
+        )
+        if not row:
+            return None
+        if isinstance(row, dict):
+            raw_id = row.get("id")
+        else:
+            raw_id = row[0]
+        try:
+            return int(raw_id)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
 
 
 # Global sync service instance

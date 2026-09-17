@@ -43,7 +43,8 @@ CHECK_DISPLAY_NAMES = {
     MCP_TOOLS_CHECK: "MCP 工具可用性",
 }
 
-_IDENTITY_HEADING = "### 用户身份信息"
+_IDENTITY_HEADING = "用户身份信息"
+_IDENTITY_HEADING_PATTERN = re.compile(r"^\s*(?:#+\s*)?用户身份信息\s*$", re.MULTILINE)
 _IDENTITY_FIELDS = ("分行号", "网点机构编号", "岗位编号", "客户经理ID")
 _FIELD_PATTERN_TEMPLATE = r"{field}\s*[:：]\s*(?P<value>\S+)"
 _MCP_SERVER_TIMEOUT_SECONDS = 10.0
@@ -163,7 +164,7 @@ class ProfileIdentityBlockStrategy:
                 _elapsed_ms(started_at),
             )
 
-        if _IDENTITY_HEADING not in content:
+        if _IDENTITY_HEADING_PATTERN.search(content) is None:
             return _result(
                 self.name,
                 self.display_name,

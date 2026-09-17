@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { SessionApi } from "./index";
+import { convertArchivedPage, SessionApi } from "./index";
 
 const apiMocks = vi.hoisted(() => ({
   listChats: vi.fn(),
@@ -67,6 +67,64 @@ describe("SessionApi identity mapping", () => {
     runtimeWindow.currentUserId = undefined;
     runtimeWindow.currentChannel = undefined;
     runtimeWindow.__env__ = {};
+  });
+
+  it("converts a terminal recovery snapshot into chat cards", () => {
+    const sessionApi = new SessionApi();
+    const messages = sessionApi.applyChatSnapshot("chat-1", {
+      messages: [
+        {
+          id: "user-1",
+          role: "user",
+          content: [{ type: "text", text: "hello" }],
+        },
+      ],
+    });
+
+    expect(messages).toHaveLength(1);
+    expect(messages?.[0]).toMatchObject({
+      id: "user-1",
+      role: "user",
+      history: true,
+      cards: [{ code: "AgentScopeRuntimeRequestCard" }],
+    });
+  });
+
+  it("keeps attachments when rebuilding a user message from chat history", () => {
+    const sessionApi = new SessionApi();
+    const messages = sessionApi.applyChatSnapshot("chat-1", {
+      messages: [
+        {
+          id: "user-with-attachment",
+          role: "user",
+          content: [
+            { type: "text", text: "请分析附件" },
+            {
+              type: "file",
+              file_url: "https://files.example.test/report.pdf",
+              filename: "报告.pdf",
+            },
+            {
+              type: "image",
+              image_url: "https://files.example.test/screenshot.png",
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(messages?.[0].cards?.[0].data.input[0].content).toMatchObject([
+      { type: "text", text: "请分析附件" },
+      {
+        type: "file",
+        file_url: "https://files.example.test/report.pdf",
+        file_name: "报告.pdf",
+      },
+      {
+        type: "image",
+        image_url: "https://files.example.test/screenshot.png",
+      },
+    ]);
   });
 
   it("keeps the logical session id stable after the first reply resolves a real chat id", async () => {
@@ -1395,5 +1453,173 @@ describe("SessionApi identity mapping", () => {
     const list = await sessionApi.loadMoreSessions();
 
     expect(list).toEqual([]);
+  });
+});
+
+describe("archived conversation card conversion", () => {
+  it("keeps the compaction boundary after a local timestamp session resolves", async () => {
+    const sessionApi = new SessionApi();
+    await sessionApi.createSession({ name: "new chat", messages: [] });
+    const localSessionId = sessionApi.getPendingSessionId();
+    expect(localSessionId).toBeTruthy();
+    apiMocks.listChats.mockResolvedValue([
+      {
+        id: "chat-real-1",
+        name: "new chat",
+        session_id: localSessionId,
+        user_id: "user-1",
+        channel: "console",
+        meta: {},
+        status: "idle",
+        created_at: "2026-08-01T00:00:00Z",
+      },
+    ]);
+    apiMocks.getChat.mockResolvedValue({
+      id: "chat-real-1",
+      messages: [{ id: "online-1", role: "user", content: "current" }],
+      archive: {
+        has_more: true,
+        boundaries: [
+          {
+            id: "boundary-1",
+            archived_message_count: 3,
+            first_message_id: "archived-1",
+            last_message_id: "archived-3",
+            created_at: "2026-08-01T12:00:00+00:00",
+          },
+        ],
+      },
+    });
+
+    await sessionApi.updateSession({ id: localSessionId!, name: "new chat" });
+    const session = await sessionApi.getSession(localSessionId!);
+
+    expect(session.messages?.[0]?.cards?.[0]?.code).toBe(
+      "ConversationCompactionBoundary",
+    );
+  });
+
+  it("shows the latest archive boundary before online messages", async () => {
+    apiMocks.getChat.mockResolvedValue({
+      id: "chat-real-1",
+      messages: [{ id: "online-1", role: "user", content: "current" }],
+      archive: {
+        has_more: true,
+        boundaries: [
+          {
+            id: "boundary-1",
+            archived_message_count: 3,
+            first_message_id: "archived-1",
+            last_message_id: "archived-3",
+            created_at: "2026-08-01T12:00:00+00:00",
+          },
+        ],
+      },
+    });
+    const sessionApi = new SessionApi();
+
+    const session = await sessionApi.getSession("chat-real-1");
+
+    expect(session.messages?.map((message) => message.cards?.[0]?.code)).toEqual(
+      [
+        "ConversationCompactionBoundary",
+        "AgentScopeRuntimeRequestCard",
+      ],
+    );
+  });
+
+  it("places a compaction boundary after the batch it terminates", () => {
+    const cards = convertArchivedPage(
+      [
+        { id: "user-1", role: "user", content: "first" },
+        {
+          id: "assistant-1",
+          role: "assistant",
+          content: "answer",
+          metadata: {
+            plan_interaction_card: {
+              card_type: "plan_review",
+              plan_id: "plan-1",
+              title: "Implementation plan",
+              summary: "Review before execution",
+              steps: [],
+              risks: [],
+              verification: [],
+            },
+          },
+        },
+        { id: "user-2", role: "user", content: "second" },
+      ],
+      [
+        {
+          id: "boundary-1",
+          archived_message_count: 2,
+          first_message_id: "user-1",
+          last_message_id: "assistant-1",
+          created_at: "2026-08-01T12:00:00+00:00",
+        },
+      ],
+    );
+
+    expect(cards.map((card) => card.cards?.[0]?.code)).toEqual([
+      "AgentScopeRuntimeRequestCard",
+      "AgentScopeRuntimeResponseCard",
+      "ConversationCompactionBoundary",
+      "AgentScopeRuntimeRequestCard",
+    ]);
+    expect(cards[1]?.cards?.map((card) => card.code)).toEqual([
+      "AgentScopeRuntimeResponseCard",
+      "PlanInteraction",
+      "ResponseFeedback",
+    ]);
+    expect(cards[1]?.cards?.[0]?.data).toMatchObject({
+      planReviewCard: {
+        card_type: "plan_review",
+        plan_id: "plan-1",
+      },
+    });
+  });
+
+  it("places a compaction boundary after the final runtime fragment of its source message", () => {
+    const cards = convertArchivedPage(
+      [
+        {
+          id: "runtime-fragment-1",
+          role: "assistant",
+          content: "thinking",
+          metadata: { original_id: "source-message-1" },
+        },
+        {
+          id: "runtime-fragment-2",
+          role: "assistant",
+          content: "answer",
+          metadata: { original_id: "source-message-1" },
+        },
+        {
+          id: "runtime-message-3",
+          role: "user",
+          content: "follow-up",
+          metadata: { original_id: "source-message-2" },
+        },
+      ],
+      [
+        {
+          id: "boundary-1",
+          archived_message_count: 1,
+          first_message_id: "source-message-1",
+          last_message_id: "source-message-1",
+          created_at: "2026-08-01T12:00:00+00:00",
+        },
+      ],
+    );
+
+    expect(cards.map((card) => card.cards?.[0]?.code)).toEqual([
+      "AgentScopeRuntimeResponseCard",
+      "ConversationCompactionBoundary",
+      "AgentScopeRuntimeRequestCard",
+    ]);
+    expect(
+      (cards[0]?.cards?.[0]?.data as { output?: unknown[] }).output,
+    ).toHaveLength(2);
   });
 });

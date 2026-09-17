@@ -22,8 +22,8 @@ logger = logging.getLogger("swe.task_progress")
 
 
 async def update_task_progress(
-    title: str,
     items: list[dict[str, Any]],
+    title: str | None = None,
     current_step_index: int | None = None,
     phase_status: Literal["active", "completed", "cancelled"] = "active",
 ) -> ToolResponse:
@@ -93,9 +93,10 @@ async def update_task_progress(
 
     existing = await tracker.get_task_progress(chat_id)
     next_version = (existing.version + 1) if existing is not None else 1
+    normalized_title = title.strip() if isinstance(title, str) else None
     payload = normalize_task_progress_payload(
         turn_id=turn_id,
-        title=title.strip() or None,
+        title=normalized_title or None,
         items=items,
         current_step_index=current_step_index,
         version=next_version,

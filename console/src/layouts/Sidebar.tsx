@@ -20,7 +20,6 @@ import {
   SparkWifiLine,
   // SparkUserGroupLine,
   SparkDateLine,
-  SparkVoiceChat01Line,
   SparkLocalFileLine,
   SparkModePlazaLine,
   SparkInternetLine,
@@ -48,6 +47,7 @@ import {
   Store,
   Wrench,
   Puzzle,
+  SlidersHorizontal,
 } from "lucide-react";
 import { clearAuthToken } from "../api/config";
 import { authApi } from "../api/modules/auth";
@@ -64,17 +64,22 @@ const { Sider } = Layout;
 
 interface SidebarProps {
   selectedKey: string;
+  withoutHeader?: boolean;
 }
 
 // ── Sidebar ───────────────────────────────────────────────────────────────
 
-export default function Sidebar({ selectedKey }: SidebarProps) {
+export default function Sidebar({
+  selectedKey,
+  withoutHeader = false,
+}: SidebarProps) {
   const navigate = useNavigate();
   const { t } = useTranslation();
   const { message } = useAppMessage();
   const { isDark } = useTheme();
   const isSuperManager = useIframeStore((state) => state.isSuperManager);
   const manager = useIframeStore((state) => state.manager);
+  const hideChat = useIframeStore((state) => state.hideChat);
   const [authEnabled, setAuthEnabled] = useState(false);
   const [accountModalOpen, setAccountModalOpen] = useState(false);
   const [accountLoading, setAccountLoading] = useState(false);
@@ -162,28 +167,28 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
     },
     // 创作中心
     {
-      key: "workspace",
-      icon: <SparkLocalFileLine size={18} />,
-      path: "/workspace",
-      label: t("nav.workspace"),
-    },
-    {
       key: "my-skills",
       icon: <Wrench size={18} />,
       path: "/my-skills",
       label: t("nav.mySkills"),
     },
     {
-      key: "tools",
-      icon: <SparkToolLine size={18} />,
-      path: "/tools",
-      label: t("nav.tools"),
-    },
-    {
       key: "my-mcp",
       icon: <Puzzle size={18} />,
       path: "/my-mcp",
       label: t("nav.myMcp"),
+    },
+    {
+      key: "experts",
+      icon: <SearchCheck size={18} />,
+      path: "/experts",
+      label: t("nav.myExperts"),
+    },
+    {
+      key: "workspace",
+      icon: <SparkLocalFileLine size={18} />,
+      path: "/workspace",
+      label: t("nav.workspace"),
     },
     // 应用市场
     {
@@ -212,10 +217,10 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       label: t("nav.agentConfig"),
     },
     {
-      key: "heartbeat",
-      icon: <SparkVoiceChat01Line size={18} />,
-      path: "/heartbeat",
-      label: t("nav.heartbeat"),
+      key: "tools",
+      icon: <SparkToolLine size={18} />,
+      path: "/tools",
+      label: t("nav.tools"),
     },
     // 系统设置
     {
@@ -230,6 +235,16 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       path: "/featured-cases-management",
       label: t("nav.featuredCasesManagement", "精选案例管理"),
     },
+    ...(canManageCurrentSourceConfig
+      ? [
+          {
+            key: "scenario-presets-management",
+            icon: <Settings size={18} />,
+            path: "/scenario-presets-management",
+            label: "场景预设管理",
+          },
+        ]
+      : []),
     {
       key: "environments",
       icon: <SparkInternetLine size={18} />,
@@ -242,6 +257,16 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       path: "/security",
       label: t("nav.security"),
     },
+    ...(isRMassistSource
+      ? [
+          {
+            key: "skill-config",
+            icon: <SlidersHorizontal size={18} />,
+            path: "/skill-config",
+            label: t("nav.skillConfig", "Skill 配置"),
+          },
+        ]
+      : []),
     ...(canManageCurrentSourceConfig
       ? [
           {
@@ -273,6 +298,12 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       path: "/analytics/business-overview",
       label: t("nav.analyticsBusinessOverview", "运营看板"),
     },
+    {
+      key: "analytics-claw-data-overview",
+      icon: <SparkBarChartLine size={18} />,
+      path: "/analytics/claw-data-overview",
+      label: t("nav.analyticsClawDataOverview", "Claw技能运行看板"),
+    },
     ...(canManageCurrentSourceConfig
       ? [
           {
@@ -281,15 +312,11 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
             path: "/analytics/continuous-governance",
             label: t("nav.analyticsContinuousGovernance", "质量工程看板"),
           },
-        ]
-      : []),
-    ...(isRMassistSource
-      ? [
           {
-            key: "analytics-claw-data-overview",
-            icon: <SparkBarChartLine size={18} />,
-            path: "/analytics/claw-data-overview",
-            label: t("nav.analyticsClawDataOverview", "Claw数据看板"),
+            key: "monitor-cron-batch-dispatch",
+            icon: <SparkRefreshLine size={18} />,
+            path: "/monitor/cron-batch-dispatch",
+            label: t("nav.monitorCronBatchDispatch", "批调度监控"),
           },
         ]
       : []),
@@ -298,6 +325,12 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       icon: <SparkSearchLine size={18} />,
       path: "/analytics/messages",
       label: t("nav.analyticsMessages", "Messages"),
+    },
+    {
+      key: "monitor-task-center",
+      icon: <SparkSearchLine size={18} />,
+      path: "/monitor/tasks",
+      label: t("nav.monitorTaskCenter", "异步任务中心"),
     },
     // {
     //   key: "analytics-users",
@@ -311,12 +344,12 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
     //   path: "/analytics/sessions",
     //   label: t("nav.analyticsSessions", "Sessions"),
     // },
-    //     {
-    //       key: "analytics-traces",
-    //       icon: <SparkFileTxtLine size={18} />,
-    //       path: "/analytics/traces",
-    //       label: t("nav.analyticsTraces", "Traces"),
-    //     },
+    // {
+    //   key: "analytics-traces",
+    //   icon: <SparkFileTxtLine size={18} />,
+    //   path: "/analytics/traces",
+    //   label: t("nav.analyticsTraces", "Traces"),
+    // },
     {
       key: "continuous-iteration",
       icon: <SparkRefreshLine size={18} />,
@@ -329,7 +362,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
 
   const menuItems: MenuProps["items"] = [
     // 1. 聊天（单独一级）
-    {
+    !hideChat && {
       key: "chat",
       label: collapsed ? null : t("nav.chat"),
       icon: <SparkChatTabFill size={16} />,
@@ -341,24 +374,24 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       icon: <PencilLine size={16} />,
       children: [
         {
-          key: "workspace",
-          label: collapsed ? null : t("nav.workspace"),
-          icon: <SparkLocalFileLine size={16} />,
-        },
-        {
           key: "my-skills",
           label: collapsed ? null : t("nav.mySkills"),
           icon: <Wrench size={16} />,
         },
         {
-          key: "tools",
-          label: collapsed ? null : t("nav.tools"),
-          icon: <SparkToolLine size={16} />,
-        },
-        {
           key: "my-mcp",
           label: collapsed ? null : t("nav.myMcp"),
           icon: <Puzzle size={16} />,
+        },
+        {
+          key: "experts",
+          label: collapsed ? null : t("nav.myExperts"),
+          icon: <SearchCheck size={16} />,
+        },
+        {
+          key: "workspace",
+          label: collapsed ? null : t("nav.workspace"),
+          icon: <SparkLocalFileLine size={16} />,
         },
       ],
     },
@@ -367,6 +400,11 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       key: "market",
       label: collapsed ? null : t("nav.market"),
       icon: <Store size={16} />,
+    },
+    {
+      key: "expert-community",
+      label: collapsed ? null : "专家社区",
+      icon: <SearchCheck size={16} />,
     },
     // 4. 运行中心
     {
@@ -390,9 +428,14 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           icon: <SparkModifyLine size={16} />,
         },
         {
-          key: "heartbeat",
-          label: collapsed ? null : t("nav.heartbeat"),
-          icon: <SparkVoiceChat01Line size={16} />,
+          key: "tools",
+          label: collapsed ? null : t("nav.tools"),
+          icon: <SparkToolLine size={16} />,
+        },
+        {
+          key: "hook-management",
+          label: collapsed ? null : t("nav.hookManagement"),
+          icon: <ShieldCheck size={16} />,
         },
       ],
     },
@@ -409,9 +452,20 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
         },
         {
           key: "featured-cases-management",
-          label: collapsed ? null : t("nav.featuredCasesManagement", "精选案例管理"),
+          label: collapsed
+            ? null
+            : t("nav.featuredCasesManagement", "精选案例管理"),
           icon: <SparkFileTxtLine size={16} />,
         },
+        ...(canManageCurrentSourceConfig
+          ? [
+              {
+                key: "scenario-presets-management",
+                label: collapsed ? null : "场景预设管理",
+                icon: <Settings size={16} />,
+              },
+            ]
+          : []),
         {
           key: "environments",
           label: collapsed ? null : t("nav.environments"),
@@ -422,6 +476,15 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           label: collapsed ? null : t("nav.security"),
           icon: <SparkBrowseLine size={16} />,
         },
+        ...(isRMassistSource
+          ? [
+              {
+                key: "skill-config",
+                label: collapsed ? null : t("nav.skillConfig", "Skill 配置"),
+                icon: <SlidersHorizontal size={16} />,
+              },
+            ]
+          : []),
         ...(canManageCurrentSourceConfig
           ? [
               {
@@ -456,11 +519,18 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       label: collapsed ? null : t("nav.insightCenter"),
       icon: <ChartColumn size={16} />,
       children: [
-        {
+        !hideChat && {
           key: "analytics-business-overview",
           label: collapsed
             ? null
             : t("nav.analyticsBusinessOverview", "运营看板"),
+          icon: <SparkBarChartLine size={16} />,
+        },
+        {
+          key: "analytics-claw-data-overview",
+          label: collapsed
+            ? null
+            : t("nav.analyticsClawDataOverview", "Claw技能运行看板"),
           icon: <SparkBarChartLine size={16} />,
         },
         ...(canManageCurrentSourceConfig
@@ -472,16 +542,12 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
                   : t("nav.analyticsContinuousGovernance", "质量工程看板"),
                 icon: <SparkRefreshLine size={16} />,
               },
-            ]
-          : []),
-        ...(isRMassistSource
-          ? [
               {
-                key: "analytics-claw-data-overview",
+                key: "monitor-cron-batch-dispatch",
                 label: collapsed
                   ? null
-                  : t("nav.analyticsClawDataOverview", "Claw数据看板"),
-                icon: <SparkBarChartLine size={16} />,
+                  : t("nav.monitorCronBatchDispatch", "批调度监控"),
+                icon: <SparkRefreshLine size={16} />,
               },
             ]
           : []),
@@ -490,21 +556,26 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           label: collapsed ? null : t("nav.analyticsMessages", "Messages"),
           icon: <SparkSearchLine size={16} />,
         },
+        {
+          key: "monitor-task-center",
+          label: collapsed ? null : t("nav.monitorTaskCenter", "异步任务中心"),
+          icon: <SparkSearchLine size={16} />,
+        },
         // {
-        //   key: "analytics-users",
-        //   label: collapsed ? null : t("nav.analyticsUsers", "Users"),
-        //   icon: <SparkUserGroupLine size={16} />,
+        //   key: "analytics-users",
+        //   label: collapsed ? null : t("nav.analyticsUsers", "Users"),
+        //   icon: <SparkUserGroupLine size={16} />,
         // },
         // {
-        //   key: "analytics-sessions",
-        //   label: collapsed ? null : t("nav.analyticsSessions", "Sessions"),
-        //   icon: <SparkMessageLine size={16} />,
+        //   key: "analytics-sessions",
+        //   label: collapsed ? null : t("nav.analyticsSessions", "Sessions"),
+        //   icon: <SparkMessageLine size={16} />,
         // },
-        //         {
-        //           key: "analytics-traces",
-        //           label: collapsed ? null : t("nav.analyticsTraces", "Traces"),
-        //           icon: <SparkFileTxtLine size={16} />,
-        //         },
+        // {
+        //   key: "analytics-traces",
+        //   label: collapsed ? null : t("nav.analyticsTraces", "Traces"),
+        //   icon: <SparkFileTxtLine size={16} />,
+        // },
       ],
     },
     // 7. 质量工程
@@ -539,7 +610,9 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       width={collapsed ? 72 : 240}
       className={`${styles.sider}${
         collapsed ? ` ${styles.siderCollapsed}` : ""
-      }${isDark ? ` ${styles.siderDark}` : ""}`}
+      }${isDark ? ` ${styles.siderDark}` : ""}${
+        withoutHeader ? ` ${styles.siderWithoutHeader}` : ""
+      }`}
     >
       {/* ==================== 选择智能体 (Kun He) - 已注释 ==================== */}
       {/* <div className={styles.agentSelectorContainer}>

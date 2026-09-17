@@ -69,6 +69,17 @@ async def _finalize_lifecycle_task(
     await _cancel_lifecycle_task(lifecycle_task)
 
 
+def _reset_client_state(client: Any) -> None:
+    client._lifecycle_task = None
+    client.session = None
+    client.is_connected = False
+    client._cached_tools = None
+    client._ready_event.clear()
+    if client._startup_waiter and not client._startup_waiter.done():
+        client._startup_waiter.cancel()
+    client._startup_waiter = None
+
+
 async def _call_with_timeout(
     coro,
     timeout: float,
@@ -182,6 +193,23 @@ async def _call_with_timeout_refresh(
     except Exception:
         task.cancel()
         raise
+
+
+async def _wait_for_lifecycle_signal(
+    reload_event: asyncio.Event,
+    stop_event: asyncio.Event,
+) -> None:
+    """Wait until reload or stop is requested without idle polling."""
+    reload_task = asyncio.create_task(reload_event.wait())
+    stop_task = asyncio.create_task(stop_event.wait())
+    tasks = (reload_task, stop_task)
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 class StdIOStatefulClient(StatefulClientBase):
@@ -299,12 +327,10 @@ class StdIOStatefulClient(StatefulClientBase):
                         self._startup_waiter.set_result(None)
                     logger.info(f"MCP client connected: {self.name}")
 
-                    # Wait for reload or stop signal
-                    while (
-                        not self._reload_event.is_set()
-                        and not self._stop_event.is_set()
-                    ):
-                        await asyncio.sleep(0.1)
+                    await _wait_for_lifecycle_signal(
+                        self._reload_event,
+                        self._stop_event,
+                    )
 
                     # Clear state before exiting context
                     self.session = None
@@ -407,7 +433,7 @@ class StdIOStatefulClient(StatefulClientBase):
         Raises:
             RuntimeError: If not connected (unless ignore_errors=True)
         """
-        if not self.is_connected:
+        if not self.is_connected and self._lifecycle_task is None:
             if not ignore_errors:
                 raise RuntimeError(
                     f"MCP client '{self.name}' is not connected. "
@@ -419,14 +445,18 @@ class StdIOStatefulClient(StatefulClientBase):
             # Signal stop and wait for lifecycle task to finish
             self._stop_event.set()
             if self._lifecycle_task:
-                await self._lifecycle_task
-                self._lifecycle_task = None
+                if self.is_connected:
+                    await self._lifecycle_task
+                else:
+                    await _finalize_lifecycle_task(self._lifecycle_task)
         except Exception as e:
             if not ignore_errors:
                 raise
             logger.warning(
                 f"Error closing MCP client '{self.name}': {e}",
             )
+        finally:
+            _reset_client_state(self)
 
     async def reload(self, timeout: float = 30.0) -> None:
         """Reload the MCP client (reconnect).
@@ -445,6 +475,7 @@ class StdIOStatefulClient(StatefulClientBase):
             )
 
         logger.info(f"Triggering reload for MCP client: {self.name}")
+        self._ready_event.clear()
         self._reload_event.set()
 
         # Wait for new connection
@@ -710,12 +741,10 @@ class HttpStatefulClient(StatefulClientBase):
                         self._startup_waiter.set_result(None)
                     logger.info(f"MCP client connected: {self.name}")
 
-                    # Wait for reload or stop signal
-                    while (
-                        not self._reload_event.is_set()
-                        and not self._stop_event.is_set()
-                    ):
-                        await asyncio.sleep(0.1)
+                    await _wait_for_lifecycle_signal(
+                        self._reload_event,
+                        self._stop_event,
+                    )
 
                     # Clear state before exiting context
                     self.session = None
@@ -814,7 +843,7 @@ class HttpStatefulClient(StatefulClientBase):
         Raises:
             RuntimeError: If not connected (unless ignore_errors=True)
         """
-        if not self.is_connected:
+        if not self.is_connected and self._lifecycle_task is None:
             if not ignore_errors:
                 raise RuntimeError(
                     f"MCP client '{self.name}' is not connected. "
@@ -825,14 +854,18 @@ class HttpStatefulClient(StatefulClientBase):
         try:
             self._stop_event.set()
             if self._lifecycle_task:
-                await self._lifecycle_task
-                self._lifecycle_task = None
+                if self.is_connected:
+                    await self._lifecycle_task
+                else:
+                    await _finalize_lifecycle_task(self._lifecycle_task)
         except Exception as e:
             if not ignore_errors:
                 raise
             logger.warning(
                 f"Error closing MCP client '{self.name}': {e}",
             )
+        finally:
+            _reset_client_state(self)
 
     async def list_tools(self, timeout: float = MCP_CALL_TIMEOUT):
         """Get all available tools from the server.

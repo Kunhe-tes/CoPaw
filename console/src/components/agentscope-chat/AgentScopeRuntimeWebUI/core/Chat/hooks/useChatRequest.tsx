@@ -15,15 +15,19 @@ import {
   emitTaskProgressUpdate,
   extractTaskProgress,
 } from "@/pages/Chat/taskProgressEvents";
+import { emitSubAgentRunsRefreshIfPresent } from "@/pages/Chat/subAgentRunEvents";
+import {
+  extractPlanInteractionCard,
+  type ChatRuntimeResponseCardData,
+} from "@/pages/Chat/messageMeta";
 import {
   isActiveChatRequestOwner,
   type ChatRequestOwner,
 } from "./requestOwnership";
-import {
-  createChatStreamAbortReason,
-  isAbortLikeError,
-} from "./abortReasons";
+import { createChatStreamAbortReason, isAbortLikeError } from "./abortReasons";
 import { emit } from "../../Context/useChatAnywhereEventEmitter";
+
+export const CONVERSATION_COMPACTION_EVENT = "conversation_compacted";
 
 interface UseChatRequestOptions {
   currentQARef: CurrentQARef;
@@ -31,6 +35,11 @@ interface UseChatRequestOptions {
   hasMessage?: (id: string) => boolean;
   getCurrentSessionId: () => string;
   onFinish: (owner: ChatRequestOwner) => void;
+  applyRecoverySnapshot?: (
+    history: unknown,
+    owner: ChatRequestOwner,
+  ) => void | Promise<void>;
+  recoverAfterNotFound?: (owner: ChatRequestOwner) => void | Promise<void>;
 }
 
 function isTaskCancellationMessage(message: unknown) {
@@ -63,8 +72,8 @@ function getUserVisibleErrorMessage(error: unknown) {
   return error instanceof Error
     ? error.message
     : typeof error === "string"
-      ? error
-      : JSON.stringify(error);
+    ? error
+    : JSON.stringify(error);
 }
 
 function getSessionTitlePatch(data: unknown) {
@@ -98,6 +107,45 @@ function getSessionTitlePatch(data: unknown) {
   };
 }
 
+function getConversationCompaction(data: unknown) {
+  if (!data || typeof data !== "object") return undefined;
+  const frame = data as {
+    object?: unknown;
+    chat_id?: unknown;
+    boundary?: unknown;
+  };
+  if (
+    frame.object !== CONVERSATION_COMPACTION_EVENT ||
+    typeof frame.chat_id !== "string" ||
+    !frame.chat_id ||
+    !frame.boundary ||
+    typeof frame.boundary !== "object"
+  ) {
+    return undefined;
+  }
+  return { chat_id: frame.chat_id, boundary: frame.boundary };
+}
+
+function getChatSnapshot(data: unknown) {
+  if (!data || typeof data !== "object") return undefined;
+  const frame = data as {
+    object?: unknown;
+    chat_id?: unknown;
+    msgid?: unknown;
+    history?: unknown;
+  };
+  if (
+    frame.object !== "chat_snapshot" ||
+    typeof frame.chat_id !== "string" ||
+    !frame.chat_id ||
+    !frame.history ||
+    typeof frame.history !== "object"
+  ) {
+    return undefined;
+  }
+  return frame;
+}
+
 /**
  * 处理 API 请求和流式响应的 Hook
  */
@@ -108,8 +156,9 @@ export default function useChatRequest(options: UseChatRequestOptions) {
     hasMessage = () => true,
     getCurrentSessionId,
     onFinish,
-  } =
-    options;
+    applyRecoverySnapshot,
+    recoverAfterNotFound,
+  } = options;
   const apiOptions = useChatAnywhereOptions((v) => v.api);
 
   // 使用 ref 保存最新的 apiOptions，避免闭包陷阱
@@ -178,7 +227,13 @@ export default function useChatRequest(options: UseChatRequestOptions) {
 
       onFinish(owner);
     },
-    [currentQARef, getResponseHeaderTimestamp, hasMessage, onFinish, updateMessage],
+    [
+      currentQARef,
+      getResponseHeaderTimestamp,
+      hasMessage,
+      onFinish,
+      updateMessage,
+    ],
   );
 
   const mockRequest = useCallback(async (mockdata) => {
@@ -207,16 +262,30 @@ export default function useChatRequest(options: UseChatRequestOptions) {
 
   const processSSEResponse = useCallback(
     async (response: Response, owner: ChatRequestOwner) => {
+      const responseMsgid = response.headers?.get("X-Swe-Msgid");
+      const responseChatId = response.headers?.get("X-Swe-Chatid");
+      const responseSessionId = response.headers?.get("X-Swe-Sessionid");
+      if (responseMsgid) owner.msgid = responseMsgid;
+      if (responseChatId) owner.chatId = responseChatId;
+      if (responseSessionId) owner.logicalSessionId = responseSessionId;
       const responseHeaderTimestamp = getResponseHeaderTimestamp();
       const isOwnerActive = () =>
-        isActiveChatRequestOwner(currentQARef.current.activeRequestOwner, owner);
+        isActiveChatRequestOwner(
+          currentQARef.current.activeRequestOwner,
+          owner,
+        );
+      let didFinish = false;
+      const finishOnce = () => {
+        if (didFinish) return;
+        didFinish = true;
+        onFinish(owner);
+      };
       const isLiveResponseMounted = () => {
         const responseId = currentQARef.current.response?.id;
         return Boolean(responseId && hasMessage(responseId));
       };
       const buildResponseCard = () => {
-        const responseData = currentQARef.current.response?.cards?.[0]
-          ?.data as
+        const responseData = currentQARef.current.response?.cards?.[0]?.data as
           | {
               id?: string;
               status?: AgentScopeRuntimeRunStatus;
@@ -232,7 +301,11 @@ export default function useChatRequest(options: UseChatRequestOptions) {
         });
 
         if (responseData) {
-          builder.handle(responseData as never);
+          builder.handle({
+            ...responseData,
+            object: "response",
+            output: responseData.output ?? [],
+          } as never);
         }
 
         return builder;
@@ -250,6 +323,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
               session_id: owner.sessionId,
               logical_session_id: owner.logicalSessionId,
               chat_id: owner.chatId,
+              msgid: owner.msgid,
             }),
           ).catch((error) => {
             console.error(error);
@@ -274,18 +348,26 @@ export default function useChatRequest(options: UseChatRequestOptions) {
       const agentScopeRuntimeResponseBuilder = buildResponseCard();
 
       if (!response.ok) {
-        response.json().then((data) => {
-          const res = agentScopeRuntimeResponseBuilder.handle({
-            object: "message",
-            type: AgentScopeRuntimeMessageType.ERROR,
-            content: [],
-            id: "error",
-            role: "assistant",
-            status: AgentScopeRuntimeRunStatus.Failed,
-            code: String(response.status),
-            message: JSON.stringify(data),
-          });
+        if (response.status === 404 && owner.kind === "reconnect") {
+          await recoverAfterNotFound?.(owner);
+          return;
+        }
+        const data = await response.json().catch(() => ({}));
+        if (!isOwnerActive()) {
+          return;
+        }
+        const res = agentScopeRuntimeResponseBuilder.handle({
+          object: "message",
+          type: AgentScopeRuntimeMessageType.ERROR,
+          content: [],
+          id: "error",
+          role: "assistant",
+          status: AgentScopeRuntimeRunStatus.Failed,
+          code: String(response.status),
+          message: JSON.stringify(data),
+        });
 
+        if (currentQARef.current.response) {
           currentQARef.current.response.cards = [
             {
               code: "AgentScopeRuntimeResponseCard",
@@ -293,7 +375,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
             },
           ];
           onFinish(owner);
-        });
+        }
         return;
       }
 
@@ -312,7 +394,8 @@ export default function useChatRequest(options: UseChatRequestOptions) {
 
         if (metadata && typeof metadata === "object") {
           // 路径1: metadata.approval_action (直接)
-          const directAction = (metadata as Record<string, unknown>).approval_action;
+          const directAction = (metadata as Record<string, unknown>)
+            .approval_action;
           if (directAction && typeof directAction === "object") {
             return directAction;
           }
@@ -320,7 +403,8 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           // 路径2: metadata.metadata.approval_action (嵌套)
           const nestedMetadata = (metadata as Record<string, unknown>).metadata;
           if (nestedMetadata && typeof nestedMetadata === "object") {
-            const nestedAction = (nestedMetadata as Record<string, unknown>).approval_action;
+            const nestedAction = (nestedMetadata as Record<string, unknown>)
+              .approval_action;
             if (nestedAction && typeof nestedAction === "object") {
               return nestedAction;
             }
@@ -332,14 +416,17 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           for (const msg of data.output) {
             const msgMetadata = getMetadata(msg);
             if (msgMetadata && typeof msgMetadata === "object") {
-              const directAction = (msgMetadata as Record<string, unknown>).approval_action;
+              const directAction = (msgMetadata as Record<string, unknown>)
+                .approval_action;
               if (directAction && typeof directAction === "object") {
                 return directAction;
               }
 
-              const nestedMetadata = (msgMetadata as Record<string, unknown>).metadata;
+              const nestedMetadata = (msgMetadata as Record<string, unknown>)
+                .metadata;
               if (nestedMetadata && typeof nestedMetadata === "object") {
-                const nestedAction = (nestedMetadata as Record<string, unknown>).approval_action;
+                const nestedAction = (nestedMetadata as Record<string, unknown>)
+                  .approval_action;
                 if (nestedAction && typeof nestedAction === "object") {
                   return nestedAction;
                 }
@@ -355,6 +442,32 @@ export default function useChatRequest(options: UseChatRequestOptions) {
         for await (const chunk of Stream({
           readableStream: response.body,
         })) {
+          if (chunk.event === "chat.snapshot" && chunk.data) {
+            const responseParser =
+              apiOptionsRef.current.responseParser || JSON.parse;
+            const snapshot = getChatSnapshot(responseParser(chunk.data));
+            if (
+              snapshot &&
+              isOwnerActive() &&
+              (!owner.chatId || snapshot.chat_id === owner.chatId)
+            ) {
+              if (typeof snapshot.msgid === "string") {
+                owner.msgid = snapshot.msgid;
+              }
+              await applyRecoverySnapshot?.(snapshot.history, owner);
+              return;
+            }
+            if (isOwnerActive()) {
+              failActiveResponse(
+                owner,
+                new Error("Invalid chat recovery snapshot"),
+              );
+            }
+            if (!isOwnerActive()) {
+              return;
+            }
+            return;
+          }
           if (!chunk.data) {
             continue;
           }
@@ -362,6 +475,15 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           const responseParser =
             apiOptionsRef.current.responseParser || JSON.parse;
           const chunkData = responseParser(chunk.data);
+
+          const compaction = getConversationCompaction(chunkData);
+          if (compaction) {
+            if (!isOwnerActive() || compaction.chat_id !== owner.chatId) {
+              return;
+            }
+            emit({ type: CONVERSATION_COMPACTION_EVENT, data: compaction });
+            continue;
+          }
 
           // 标题生成帧不依赖当前请求归属，切会话后也要同步本地标题。
           const sessionTitlePatch = getSessionTitlePatch(chunkData);
@@ -387,7 +509,26 @@ export default function useChatRequest(options: UseChatRequestOptions) {
 
           if (isTaskCancellationFrame(chunkData)) {
             emitTaskProgressUpdate(null, owner);
-            onFinish(owner);
+            finishOnce();
+            return;
+          }
+
+          if (
+            chunkData &&
+            typeof chunkData === "object" &&
+            (chunkData as { object?: unknown }).object ===
+              "wplus_sop_entry_proposal"
+          ) {
+            if (currentQARef.current.response && isLiveResponseMounted()) {
+              currentQARef.current.response.cards = [
+                {
+                  code: "WPlusSopEntryProposal",
+                  data: chunkData,
+                },
+              ];
+              emitTaskProgressUpdate(null, owner);
+              finishOnce();
+            }
             return;
           }
 
@@ -395,10 +536,12 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           if (streamedTaskProgress !== undefined) {
             emitTaskProgressUpdate(streamedTaskProgress, owner);
           }
+          emitSubAgentRunsRefreshIfPresent(chunkData);
           const res = agentScopeRuntimeResponseBuilder.handle(chunkData);
           const isTerminalResponse =
             res.status === AgentScopeRuntimeRunStatus.Completed ||
-            res.status === AgentScopeRuntimeRunStatus.Failed;
+            res.status === AgentScopeRuntimeRunStatus.Failed ||
+            res.status === AgentScopeRuntimeRunStatus.Canceled;
           const hasRenderableOutput = Boolean(
             res.output?.some((message) => message.content?.length),
           );
@@ -409,15 +552,26 @@ export default function useChatRequest(options: UseChatRequestOptions) {
             continue;
           }
 
-          if (
+          const canUpdateLiveResponse = Boolean(
             currentQARef.current.response &&
-            isOwnerActive() &&
-            isLiveResponseMounted()
-          ) {
+              isOwnerActive() &&
+              isLiveResponseMounted(),
+          );
+          if (canUpdateLiveResponse) {
+            const planInteractionCard =
+              extractPlanInteractionCard(chunkData) ||
+              extractPlanInteractionCard(res);
+            const responseData = {
+              ...withResponseHeaderMeta(res, responseHeaderTimestamp),
+              planReviewCard:
+                planInteractionCard?.card_type === "plan_review"
+                  ? planInteractionCard
+                  : undefined,
+            } as ChatRuntimeResponseCardData;
             const cards: any[] = [
               {
                 code: "AgentScopeRuntimeResponseCard",
-                data: withResponseHeaderMeta(res, responseHeaderTimestamp),
+                data: responseData,
               },
             ];
 
@@ -431,18 +585,40 @@ export default function useChatRequest(options: UseChatRequestOptions) {
               });
             }
 
+            if (planInteractionCard) {
+              cards.push({
+                code: "PlanInteraction",
+                data: planInteractionCard,
+              });
+            }
+
+            if (res.status === AgentScopeRuntimeRunStatus.Completed) {
+              cards.push({
+                code: "ResponseFeedback",
+                data: responseData,
+              });
+            }
+
             currentQARef.current.response.cards = cards;
 
             if (
               res.status === AgentScopeRuntimeRunStatus.Completed ||
-              res.status === AgentScopeRuntimeRunStatus.Failed
+              res.status === AgentScopeRuntimeRunStatus.Failed ||
+              res.status === AgentScopeRuntimeRunStatus.Canceled
             ) {
               emitTaskProgressUpdate(null, owner);
-              onFinish(owner);
+              finishOnce();
             } else {
               updateMessage(currentQARef.current.response);
             }
           }
+        }
+        if (
+          isOwnerActive() &&
+          currentQARef.current.response &&
+          isLiveResponseMounted()
+        ) {
+          finishOnce();
         }
       } catch (error) {
         console.error(error);
@@ -453,7 +629,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           currentQARef.current.response?.msgStatus === "interrupted" ||
           isAbortLikeError(error)
         ) {
-          onFinish(owner);
+          finishOnce();
           return;
         }
         failActiveResponse(owner, error);
@@ -461,11 +637,13 @@ export default function useChatRequest(options: UseChatRequestOptions) {
     },
     [
       currentQARef,
+      applyRecoverySnapshot,
       failActiveResponse,
       getCurrentSessionId,
       getResponseHeaderTimestamp,
       hasMessage,
       onFinish,
+      recoverAfterNotFound,
       updateMessage,
     ],
   );
@@ -515,7 +693,10 @@ export default function useChatRequest(options: UseChatRequestOptions) {
       } catch (error) {
         if (
           !isAbortLikeError(error) &&
-          isActiveChatRequestOwner(currentQARef.current.activeRequestOwner, requestOwner)
+          isActiveChatRequestOwner(
+            currentQARef.current.activeRequestOwner,
+            requestOwner,
+          )
         ) {
           failActiveResponse(requestOwner, error);
         }
@@ -541,21 +722,43 @@ export default function useChatRequest(options: UseChatRequestOptions) {
 
       const abortSignal = currentQARef.current.abortController?.signal;
       let response: Response | undefined;
-      try {
-        response = await currentApiOptions.reconnect({
-          session_id: sessionId,
-          signal: abortSignal,
-          logical_session_id: requestOwner.logicalSessionId,
-          chat_id: requestOwner.chatId,
-        });
-      } catch (error) {
-        if (
-          !isAbortLikeError(error) &&
-          isActiveChatRequestOwner(currentQARef.current.activeRequestOwner, requestOwner)
-        ) {
-          failActiveResponse(requestOwner, error);
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          response = await currentApiOptions.reconnect({
+            session_id: sessionId,
+            signal: abortSignal,
+            logical_session_id: requestOwner.logicalSessionId,
+            chat_id: requestOwner.chatId,
+          });
+        } catch (error) {
+          if (
+            !isAbortLikeError(error) &&
+            isActiveChatRequestOwner(
+              currentQARef.current.activeRequestOwner,
+              requestOwner,
+            )
+          ) {
+            failActiveResponse(requestOwner, error);
+          }
+          return;
         }
-        return;
+        if (
+          response.status !== 503 ||
+          attempt === 2 ||
+          !isActiveChatRequestOwner(
+            currentQARef.current.activeRequestOwner,
+            requestOwner,
+          )
+        ) {
+          break;
+        }
+        await response.body?.cancel?.().catch(() => undefined);
+        const retryAfter = Number(response.headers.get("Retry-After"));
+        await sleep(
+          Number.isFinite(retryAfter) && retryAfter > 0
+            ? Math.min(retryAfter * 1000, 2000)
+            : 250,
+        );
       }
 
       if (response && response.body) {
@@ -597,6 +800,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           session_id: activeSessionId,
           logical_session_id: activeOwner?.logicalSessionId,
           chat_id: activeOwner?.chatId,
+          msgid: activeOwner?.msgid,
         }),
       ).catch((error) => {
         console.error(error);
@@ -618,7 +822,12 @@ export default function useChatRequest(options: UseChatRequestOptions) {
     }
 
     emitTaskProgressUpdate(null, activeOwner);
-  }, [currentQARef, getCurrentSessionId, getResponseHeaderTimestamp, updateMessage]);
+  }, [
+    currentQARef,
+    getCurrentSessionId,
+    getResponseHeaderTimestamp,
+    updateMessage,
+  ]);
 
   return { request, reconnect, mockRequest, cancelActiveRequest };
 }

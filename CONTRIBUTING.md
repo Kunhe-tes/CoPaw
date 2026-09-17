@@ -76,10 +76,14 @@ docs(skills): document Skills Hub import
   ```
 - **If pre-commit modifies files:** Commit those changes, then rerun
   `pre-commit run --all-files` until it passes cleanly.
-- **CI policy:** Pull requests with failing pre-commit checks are not merge-ready.
-- **Frontend formatting:** If your changes involve the `console` or `website` directories, run the formatter before committing:
+- **CI policy:** Pull requests with failing pre-commit or `Console Typecheck` checks are not merge-ready.
+- **Console type checking:** If your changes involve the `console` directory, run the type check before committing:
   ```bash
-  cd console && npm run format
+  cd console
+  pnpm run typecheck
+  ```
+- **Website formatting:** If your changes involve the `website` directory, run its formatter before committing:
+  ```bash
   cd website && npm run format
   ```
 - **Documentation:** Update docs and README when you add or change user-facing behavior. The docs live under `website/public/docs/`.

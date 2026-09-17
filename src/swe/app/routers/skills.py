@@ -32,16 +32,18 @@ from ...agents.skills_manager import (
     SkillPoolService,
     SkillInfo,
     SkillService,
+    _has_unmanaged_workspace_skill_conflict,
     _default_pool_manifest,
     _default_workspace_manifest,
     _get_skill_mtime,
     _mutate_json,
+    _normalize_skill_dir_name,
     _read_skill_from_dir,
     get_pool_builtin_sync_status,
     get_pool_skill_manifest_path,
     get_skill_pool_dir,
     get_workspace_skill_manifest_path,
-    get_workspace_skills_dir,
+    resolve_workspace_managed_skill_dir,
     import_builtin_skills,
     list_builtin_import_candidates,
     list_workspaces,
@@ -49,6 +51,7 @@ from ...agents.skills_manager import (
     read_skill_manifest,
     reconcile_pool_manifest,
     reconcile_workspace_manifest,
+    resolve_effective_skills,
     suggest_conflict_name,
     update_single_builtin,
 )
@@ -63,6 +66,7 @@ from ..utils import schedule_agent_reload
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/skills", tags=["skills"])
+_POOL_SKILL_DOWNLOAD_LOCK = asyncio.Lock()
 
 
 def _scan_error_payload(exc: SkillScanError) -> dict[str, Any]:
@@ -113,6 +117,13 @@ class SkillSpec(SkillInfo):
     channels: list[str] = Field(default_factory=lambda: ["all"])
     config: dict[str, Any] = Field(default_factory=dict)
     last_updated: str = ""
+
+
+class EffectiveSkillSpec(BaseModel):
+    """Safe skill metadata used by the Console chat composer."""
+
+    name: str
+    description: str = ""
 
 
 class PoolSkillSpec(SkillInfo):
@@ -304,9 +315,16 @@ def _snapshot_workspace_skill(
 ) -> dict[str, Any]:
     manifest = read_skill_manifest(workspace_dir)
     entry = manifest.get("skills", {}).get(skill_name)
-    skill_dir = workspace_dir / "skills" / skill_name
     backup_dir: Path | None = None
-    if skill_dir.exists():
+    if entry is not None:
+        skill_dir = resolve_workspace_managed_skill_dir(
+            workspace_dir,
+            skill_name,
+            enabled=bool(entry.get("enabled", False)),
+        )
+    else:
+        skill_dir = None
+    if skill_dir is not None and skill_dir.exists():
         backup_root = Path(
             tempfile.mkdtemp(prefix=f"swe_skill_rollback_{skill_name}_"),
         )
@@ -321,16 +339,22 @@ def _snapshot_workspace_skill(
 
 
 def _restore_workspace_skill(snapshot: dict[str, Any]) -> None:
+    from ...agents.skill_runtime_snapshot import workspace_skill_coordinator
+
     workspace_dir = Path(snapshot["workspace_dir"])
     skill_name = str(snapshot["skill_name"])
-    skill_dir = workspace_dir / "skills" / skill_name
     backup_dir = snapshot.get("backup_dir")
     entry = snapshot.get("entry")
-
-    if skill_dir.exists():
-        shutil.rmtree(skill_dir)
-    if backup_dir is not None and Path(backup_dir).exists():
-        shutil.copytree(Path(backup_dir), skill_dir)
+    active_dir = resolve_workspace_managed_skill_dir(
+        workspace_dir,
+        skill_name,
+        enabled=True,
+    )
+    hidden_dir = resolve_workspace_managed_skill_dir(
+        workspace_dir,
+        skill_name,
+        enabled=False,
+    )
 
     def _restore(payload: dict[str, Any]) -> None:
         payload.setdefault("skills", {})
@@ -339,12 +363,28 @@ def _restore_workspace_skill(snapshot: dict[str, Any]) -> None:
             return
         payload["skills"][skill_name] = copy.deepcopy(entry)
 
-    _mutate_json(
-        get_workspace_skill_manifest_path(workspace_dir),
-        _default_workspace_manifest(),
-        _restore,
-    )
-    reconcile_workspace_manifest(workspace_dir)
+    with workspace_skill_coordinator(workspace_dir):
+        for skill_dir in (active_dir, hidden_dir):
+            if skill_dir.exists():
+                shutil.rmtree(skill_dir)
+        if (
+            entry is not None
+            and backup_dir is not None
+            and Path(backup_dir).exists()
+        ):
+            restore_dir = resolve_workspace_managed_skill_dir(
+                workspace_dir,
+                skill_name,
+                enabled=bool(entry.get("enabled", False)),
+            )
+            restore_dir.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(Path(backup_dir), restore_dir)
+        _mutate_json(
+            get_workspace_skill_manifest_path(workspace_dir),
+            _default_workspace_manifest(),
+            _restore,
+        )
+        reconcile_workspace_manifest(workspace_dir)
     if backup_dir is not None:
         shutil.rmtree(Path(backup_dir).parent, ignore_errors=True)
 
@@ -380,12 +420,13 @@ def _read_pool_skill_entry(
     return entry, source_dir
 
 
-def _broadcast_skills_to_tenant(
+async def _broadcast_skills_to_tenant(
     *,
     source_working_dir: Path,
     target_tenant_id: str,
     skill_names: list[str],
     source_id: str | None,
+    tenant_workspace_pool: Any,
 ) -> BroadcastDefaultAgentTenantResult:
     from ..workspace.tenant_initializer import TenantInitializer
 
@@ -394,33 +435,53 @@ def _broadcast_skills_to_tenant(
         target_tenant_id,
         source_id=source_id,
     )
-    target_working_dir = initializer.tenant_dir
     was_bootstrapped = initializer.has_seeded_bootstrap()
     if not was_bootstrapped:
-        initializer.ensure_seeded_bootstrap()
+        await tenant_workspace_pool.ensure_bootstrap(
+            target_tenant_id,
+            source_id=source_id,
+        )
+    target_working_dir = initializer.tenant_dir
+    workspace_dir = target_working_dir / "workspaces" / "default"
+    workspace_service = SkillService(workspace_dir)
+    workspace_manifest = await asyncio.to_thread(
+        read_skill_manifest,
+        workspace_dir,
+        reconcile=False,
+    )
+    for skill_name in skill_names:
+        final_name = _normalize_skill_dir_name(skill_name)
+        if _has_unmanaged_workspace_skill_conflict(
+            workspace_dir,
+            final_name,
+            workspace_manifest,
+        ):
+            raise ValueError(
+                f"Workspace skill '{final_name}' conflicts with "
+                "unmanaged content",
+            )
 
     pool_service = SkillPoolService(working_dir=target_working_dir)
-    workspace_service = SkillService(
-        target_working_dir / "workspaces" / "default",
-    )
-
     pool_updated: list[str] = []
     default_updated: list[str] = []
     for skill_name in skill_names:
-        entry, source_dir = _read_pool_skill_entry(
+        entry, source_dir = await asyncio.to_thread(
+            _read_pool_skill_entry,
             working_dir=source_working_dir,
             skill_name=skill_name,
         )
         source = str(entry.get("source") or "customized")
         config = entry.get("config") or {}
-        pool_service.replace_pool_skill_from_dir(
+        await asyncio.to_thread(
+            pool_service.replace_pool_skill_from_dir,
             skill_name=skill_name,
             source_dir=source_dir,
             source=source,
             config=config,
         )
         pool_updated.append(skill_name)
-        workspace_service.replace_workspace_skill_from_dir(
+        await asyncio.to_thread(
+            workspace_service.replace_workspace_skill_from_dir,
             skill_name=skill_name,
             source_dir=source_dir,
             source=source,
@@ -443,17 +504,18 @@ async def _broadcast_default_agents(
     target_tenant_ids: list[str],
     skill_names: list[str],
     source_id: str | None,
+    tenant_workspace_pool: Any,
 ) -> BroadcastDefaultAgentsResponse:
     results: list[BroadcastDefaultAgentTenantResult] = []
     for tenant_id in target_tenant_ids:
         try:
             validated_tenant_id = _validate_target_tenant_id(tenant_id)
-            result = await asyncio.to_thread(
-                _broadcast_skills_to_tenant,
+            result = await _broadcast_skills_to_tenant(
                 source_working_dir=source_working_dir,
                 target_tenant_id=validated_tenant_id,
                 skill_names=skill_names,
                 source_id=source_id,
+                tenant_workspace_pool=tenant_workspace_pool,
             )
             results.append(result)
         except Exception as exc:
@@ -476,7 +538,8 @@ async def _ensure_source_pool_skills_exist(
         raise HTTPException(status_code=400, detail="No skill names provided")
     for skill_name in skill_names:
         try:
-            _read_pool_skill_entry(
+            await asyncio.to_thread(
+                _read_pool_skill_entry,
                 working_dir=working_dir,
                 skill_name=skill_name,
             )
@@ -602,7 +665,11 @@ async def _run_hub_install_task(
         )
         imported_skill_name = result.name
         if cancel_event.is_set():
-            _cleanup_imported_skill(workspace_dir, result.name)
+            await asyncio.to_thread(
+                _cleanup_imported_skill,
+                workspace_dir,
+                result.name,
+            )
             await _hub_task_set_status(
                 task_id,
                 HubInstallTaskStatus.CANCELLED,
@@ -626,7 +693,11 @@ async def _run_hub_install_task(
         )
     except SkillImportCancelled:
         if imported_skill_name:
-            _cleanup_imported_skill(workspace_dir, imported_skill_name)
+            await asyncio.to_thread(
+                _cleanup_imported_skill,
+                workspace_dir,
+                imported_skill_name,
+            )
         await _hub_task_set_status(task_id, HubInstallTaskStatus.CANCELLED)
     except SkillScanError as exc:
         await _hub_task_set_status(
@@ -678,11 +749,14 @@ def _mtime_to_iso(mtime: float) -> str:
 def _build_workspace_skill_specs(workspace_dir: Path) -> list[SkillSpec]:
     manifest = read_skill_manifest(workspace_dir, reconcile=False)
     entries = manifest.get("skills", {})
-    skill_root = get_workspace_skills_dir(workspace_dir)
     specs: list[SkillSpec] = []
     for skill_name, entry in sorted(entries.items()):
         source = entry.get("source", "customized")
-        skill_dir = skill_root / skill_name
+        skill_dir = resolve_workspace_managed_skill_dir(
+            workspace_dir,
+            skill_name,
+            enabled=bool(entry.get("enabled", False)),
+        )
         skill = _read_skill_from_dir(skill_dir, source)
         if skill is None:
             continue
@@ -738,16 +812,46 @@ def _build_pool_skill_specs(
 
 @router.get("")
 async def list_skills(request: Request) -> list[SkillSpec]:
+    import asyncio
+
     workspace_dir = await _request_workspace_dir(request)
-    return _build_workspace_skill_specs(workspace_dir)
+    return await asyncio.to_thread(_build_workspace_skill_specs, workspace_dir)
+
+
+@router.get("/effective")
+async def list_effective_skills(
+    request: Request,
+) -> list[EffectiveSkillSpec]:
+    """Return only skills currently available to the Console runtime."""
+    import asyncio
+
+    workspace_dir = await _request_workspace_dir(request)
+    effective_names = set(
+        await asyncio.to_thread(
+            resolve_effective_skills,
+            workspace_dir,
+            "console",
+        ),
+    )
+    specs = await asyncio.to_thread(
+        _build_workspace_skill_specs,
+        workspace_dir,
+    )
+    return [
+        EffectiveSkillSpec(name=skill.name, description=skill.description)
+        for skill in specs
+        if skill.name in effective_names
+    ]
 
 
 @router.post("/refresh")
 async def refresh_skills(request: Request) -> list[SkillSpec]:
     """Force reconcile and return updated workspace skill list."""
+    import asyncio
+
     workspace_dir = await _request_workspace_dir(request)
-    reconcile_workspace_manifest(workspace_dir)
-    return _build_workspace_skill_specs(workspace_dir)
+    await asyncio.to_thread(reconcile_workspace_manifest, workspace_dir)
+    return await asyncio.to_thread(_build_workspace_skill_specs, workspace_dir)
 
 
 @router.get("/hub/search")
@@ -755,7 +859,7 @@ async def search_hub(
     q: str = "",
     limit: int = 20,
 ) -> list[HubSkillSpec]:
-    results = search_hub_skills(q, limit=limit)
+    results = await asyncio.to_thread(search_hub_skills, q, limit=limit)
     return [
         HubSkillSpec(
             slug=item.slug,
@@ -773,17 +877,22 @@ async def list_workspace_skill_sources(
     request: Request,
 ) -> list[WorkspaceSkillSummary]:
     summaries: list[WorkspaceSkillSummary] = []
-    workspaces = list_workspaces(
+    workspaces = await asyncio.to_thread(
+        list_workspaces,
         tenant_id=_request_effective_tenant_id(request),
     )
     for workspace in workspaces:
         workspace_dir = Path(workspace["workspace_dir"])
+        skills = await asyncio.to_thread(
+            _build_workspace_skill_specs,
+            workspace_dir,
+        )
         summaries.append(
             WorkspaceSkillSummary(
                 agent_id=workspace["agent_id"],
                 agent_name=workspace.get("agent_name", ""),
                 workspace_dir=str(workspace_dir),
-                skills=_build_workspace_skill_specs(workspace_dir),
+                skills=skills,
             ),
         )
     return summaries
@@ -854,7 +963,8 @@ async def cancel_hub_install(task_id: str) -> dict[str, Any]:
 async def list_pool_skills(
     request: Request,
 ) -> list[PoolSkillSpec]:
-    return _build_pool_skill_specs(
+    return await asyncio.to_thread(
+        _build_pool_skill_specs,
         working_dir=_request_tenant_working_dir(request),
     )
 
@@ -865,20 +975,22 @@ async def refresh_pool_skills(
 ) -> list[PoolSkillSpec]:
     """Force reconcile and return updated pool skill list."""
     working_dir = _request_tenant_working_dir(request)
-    reconcile_pool_manifest(working_dir=working_dir)
-    return _build_pool_skill_specs(working_dir=working_dir)
+    await asyncio.to_thread(reconcile_pool_manifest, working_dir=working_dir)
+    return await asyncio.to_thread(
+        _build_pool_skill_specs,
+        working_dir=working_dir,
+    )
 
 
 @router.get("/pool/builtin-sources")
 async def list_pool_builtin_sources(
     request: Request,
 ) -> list[BuiltinImportSpec]:
-    return [
-        BuiltinImportSpec(**item)
-        for item in list_builtin_import_candidates(
-            working_dir=_request_tenant_working_dir(request),
-        )
-    ]
+    items = await asyncio.to_thread(
+        list_builtin_import_candidates,
+        working_dir=_request_tenant_working_dir(request),
+    )
+    return [BuiltinImportSpec(**item) for item in items]
 
 
 @router.post("")
@@ -891,7 +1003,8 @@ async def create_skill(
     workspace = await get_agent_for_request(request)
     workspace_dir = Path(workspace.workspace_dir)
     try:
-        created = SkillService(workspace_dir).create_skill(
+        created = await asyncio.to_thread(
+            SkillService(workspace_dir).create_skill,
             name=body.name,
             content=body.content,
             overwrite=body.overwrite,
@@ -971,9 +1084,10 @@ async def create_pool_skill(
     body: CreateSkillRequest,
 ) -> dict[str, Any]:
     try:
-        created = SkillPoolService(
-            working_dir=_request_tenant_working_dir(request),
-        ).create_skill(
+        created = await asyncio.to_thread(
+            SkillPoolService(
+                working_dir=_request_tenant_working_dir(request),
+            ).create_skill,
             name=body.name,
             content=body.content,
             references=body.references,
@@ -1013,7 +1127,8 @@ async def save_pool_skill(
         working_dir=_request_tenant_working_dir(request),
     )
     try:
-        result = service.save_pool_skill(
+        result = await asyncio.to_thread(
+            service.save_pool_skill,
             skill_name=body.source_name or body.name,
             target_name=body.name,
             content=body.content,
@@ -1080,7 +1195,8 @@ async def import_skill_pool_from_hub(
     body: HubInstallRequest,
 ) -> dict[str, Any]:
     try:
-        result = import_pool_skill_from_hub(
+        result = await asyncio.to_thread(
+            import_pool_skill_from_hub,
             bundle_url=body.bundle_url,
             version=body.version,
             target_name=body.target_name,
@@ -1113,9 +1229,10 @@ async def upload_workspace_skill_to_pool(
         tenant_id=tenant_id,
     )
     try:
-        result = SkillPoolService(
-            working_dir=_request_tenant_working_dir(request),
-        ).upload_from_workspace(
+        result = await asyncio.to_thread(
+            SkillPoolService(
+                working_dir=_request_tenant_working_dir(request),
+            ).upload_from_workspace,
             workspace_dir=workspace_dir,
             skill_name=body.skill_name,
             target_name=body.new_name,
@@ -1228,20 +1345,16 @@ def _build_download_plan(
     return plan
 
 
-@router.post("/pool/download")
-async def download_pool_skill_to_workspaces(
-    request: Request,
+def _download_pool_skill_transaction(
     body: DownloadFromPoolRequest,
+    *,
+    tenant_id: str | None,
+    working_dir: Path,
 ) -> dict[str, Any]:
-    """Download one pool skill into one or more workspaces.
-
-    All-or-nothing: if any target conflicts, reject everything.
-    """
-    tenant_id = _request_effective_tenant_id(request)
     targets, hub_service = _resolve_and_preflight(
         body,
         tenant_id=tenant_id,
-        working_dir=_request_tenant_working_dir(request),
+        working_dir=working_dir,
     )
 
     execution_plan = _build_download_plan(
@@ -1292,9 +1405,32 @@ async def download_pool_skill_to_workspaces(
         for plan in execution_plan:
             backup_dir = plan["snapshot"].get("backup_dir")
             if backup_dir is not None:
-                shutil.rmtree(Path(backup_dir).parent, ignore_errors=True)
+                shutil.rmtree(
+                    Path(backup_dir).parent,
+                    ignore_errors=True,
+                )
 
     return {"downloaded": downloaded}
+
+
+@router.post("/pool/download")
+async def download_pool_skill_to_workspaces(
+    request: Request,
+    body: DownloadFromPoolRequest,
+) -> dict[str, Any]:
+    """Download one pool skill into one or more workspaces.
+
+    All-or-nothing: if any target conflicts, reject everything.
+    """
+    tenant_id = _request_effective_tenant_id(request)
+    working_dir = _request_tenant_working_dir(request)
+    async with _POOL_SKILL_DOWNLOAD_LOCK:
+        return await asyncio.to_thread(
+            _download_pool_skill_transaction,
+            body,
+            tenant_id=tenant_id,
+            working_dir=working_dir,
+        )
 
 
 @router.post("/pool/import-builtin")
@@ -1302,7 +1438,8 @@ async def import_pool_builtins(
     request: Request,
     body: ImportBuiltinRequest,
 ) -> dict[str, Any]:
-    result = import_builtin_skills(
+    result = await asyncio.to_thread(
+        import_builtin_skills,
         body.skill_names,
         overwrite_conflicts=body.overwrite_conflicts,
         working_dir=_request_tenant_working_dir(request),
@@ -1353,10 +1490,21 @@ async def broadcast_pool_skills_to_default_agents(
         working_dir=source_working_dir,
         skill_names=body.skill_names,
     )
+    tenant_workspace_pool = getattr(
+        getattr(getattr(request, "app", None), "state", request.state),
+        "tenant_workspace_pool",
+        None,
+    )
+    if tenant_workspace_pool is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Tenant pool not available",
+        )
     return await _broadcast_default_agents(
         source_working_dir=source_working_dir,
         target_tenant_ids=body.target_tenant_ids,
         skill_names=body.skill_names,
+        tenant_workspace_pool=tenant_workspace_pool,
         source_id=source_id,
     )
 
@@ -1367,7 +1515,8 @@ async def update_pool_builtin(
     request: Request,
 ) -> dict[str, Any]:
     try:
-        return update_single_builtin(
+        return await asyncio.to_thread(
+            update_single_builtin,
             skill_name,
             working_dir=_request_tenant_working_dir(request),
         )
@@ -1380,9 +1529,12 @@ async def delete_pool_skill(
     skill_name: str,
     request: Request,
 ) -> dict[str, Any]:
-    deleted = SkillPoolService(
-        working_dir=_request_tenant_working_dir(request),
-    ).delete_skill(skill_name)
+    deleted = await asyncio.to_thread(
+        SkillPoolService(
+            working_dir=_request_tenant_working_dir(request),
+        ).delete_skill,
+        skill_name,
+    )
     if not deleted:
         raise HTTPException(
             status_code=409,
@@ -1396,7 +1548,8 @@ async def get_pool_skill_config(
     skill_name: str,
     request: Request,
 ) -> dict[str, Any]:
-    manifest = read_skill_pool_manifest(
+    manifest = await asyncio.to_thread(
+        read_skill_pool_manifest,
         working_dir=_request_tenant_working_dir(request),
     )
     entry = manifest.get("skills", {}).get(skill_name)
@@ -1422,7 +1575,12 @@ async def update_pool_skill_config(
         entry["config"] = dict(body.config)
         return True
 
-    updated = _mutate_json(manifest_path, _default_pool_manifest(), _update)
+    updated = await asyncio.to_thread(
+        _mutate_json,
+        manifest_path,
+        _default_pool_manifest(),
+        _update,
+    )
     if not updated:
         raise HTTPException(status_code=404, detail="Pool skill not found")
     return {"updated": True}
@@ -1444,7 +1602,12 @@ async def delete_pool_skill_config(
         entry.pop("config", None)
         return True
 
-    updated = _mutate_json(manifest_path, _default_pool_manifest(), _update)
+    updated = await asyncio.to_thread(
+        _mutate_json,
+        manifest_path,
+        _default_pool_manifest(),
+        _update,
+    )
     if not updated:
         raise HTTPException(status_code=404, detail="Pool skill not found")
     return {"cleared": True}
@@ -1461,8 +1624,8 @@ async def batch_delete_skills(
     results: dict[str, Any] = {}
     for skill_name in skills:
         try:
-            service.disable_skill(skill_name)
-            deleted = service.delete_skill(skill_name)
+            await asyncio.to_thread(service.disable_skill, skill_name)
+            deleted = await asyncio.to_thread(service.delete_skill, skill_name)
             results[skill_name] = {
                 "success": deleted,
                 "reason": None if deleted else "delete_failed",
@@ -1487,7 +1650,7 @@ async def batch_delete_pool_skills(
     results: dict[str, Any] = {}
     for skill_name in skills:
         try:
-            deleted = service.delete_skill(skill_name)
+            deleted = await asyncio.to_thread(service.delete_skill, skill_name)
             results[skill_name] = {
                 "success": deleted,
                 "reason": None if deleted else "delete_failed",
@@ -1508,7 +1671,17 @@ async def batch_disable_skills(
     workspace = await _request_workspace(request)
     workspace_dir = Path(workspace.workspace_dir)
     service = SkillService(workspace_dir)
-    results = {skill: service.disable_skill(skill) for skill in skills}
+    results = dict(
+        zip(
+            skills,
+            await asyncio.gather(
+                *(
+                    asyncio.to_thread(service.disable_skill, skill)
+                    for skill in skills
+                ),
+            ),
+        ),
+    )
     if any(result.get("success") for result in results.values()):
         _schedule_workspace_reload(request, workspace)
     return {"results": results}
@@ -1532,7 +1705,10 @@ async def batch_enable_skills(
     results: dict[str, Any] = {}
     for skill in skills:
         try:
-            results[skill] = service.enable_skill(skill)
+            results[skill] = await asyncio.to_thread(
+                service.enable_skill,
+                skill,
+            )
         except SkillScanError as exc:
             results[skill] = {
                 "success": False,
@@ -1551,7 +1727,10 @@ async def disable_skill(
 ) -> dict[str, Any]:
     workspace = await _request_workspace(request)
     workspace_dir = Path(workspace.workspace_dir)
-    result = SkillService(workspace_dir).disable_skill(skill_name)
+    result = await asyncio.to_thread(
+        SkillService(workspace_dir).disable_skill,
+        skill_name,
+    )
     if not result.get("success"):
         raise HTTPException(status_code=404, detail="Skill not found")
     _schedule_workspace_reload(request, workspace)
@@ -1567,7 +1746,10 @@ async def enable_skill(
     workspace = await _request_workspace(request)
     workspace_dir = Path(workspace.workspace_dir)
     try:
-        result = SkillService(workspace_dir).enable_skill(skill_name)
+        result = await asyncio.to_thread(
+            SkillService(workspace_dir).enable_skill,
+            skill_name,
+        )
     except SkillScanError as exc:
         return _scan_error_response(exc)
     if not result.get("success"):
@@ -1586,8 +1768,8 @@ async def delete_skill(
 ) -> dict[str, Any]:
     workspace_dir = await _request_workspace_dir(request)
     service = SkillService(workspace_dir)
-    service.disable_skill(skill_name)
-    deleted = service.delete_skill(skill_name)
+    await asyncio.to_thread(service.disable_skill, skill_name)
+    deleted = await asyncio.to_thread(service.delete_skill, skill_name)
     if not deleted:
         raise HTTPException(
             status_code=409,
@@ -1604,7 +1786,8 @@ async def load_skill_file(
     file_path: str,
 ) -> dict[str, Any]:
     workspace_dir = await _request_workspace_dir(request)
-    content = SkillService(workspace_dir).load_skill_file(
+    content = await asyncio.to_thread(
+        SkillService(workspace_dir).load_skill_file,
         skill_name=skill_name,
         file_path=file_path,
         source=source,
@@ -1624,7 +1807,8 @@ async def save_workspace_skill(
     workspace = await get_agent_for_request(request)
     workspace_dir = Path(workspace.workspace_dir)
     try:
-        result = SkillService(workspace_dir).save_skill(
+        result = await asyncio.to_thread(
+            SkillService(workspace_dir).save_skill,
             skill_name=body.source_name or body.name,
             content=body.content,
             target_name=body.name if body.source_name else None,
@@ -1655,7 +1839,8 @@ async def update_skill_channels_endpoint(
 
     workspace = await get_agent_for_request(request)
     workspace_dir = Path(workspace.workspace_dir)
-    updated = SkillService(workspace_dir).set_skill_channels(
+    updated = await asyncio.to_thread(
+        SkillService(workspace_dir).set_skill_channels,
         skill_name,
         channels,
     )
@@ -1671,7 +1856,7 @@ async def get_skill_config_endpoint(
     skill_name: str,
 ) -> dict[str, Any]:
     workspace_dir = await _request_workspace_dir(request)
-    manifest = read_skill_manifest(workspace_dir)
+    manifest = await asyncio.to_thread(read_skill_manifest, workspace_dir)
     entry = manifest.get("skills", {}).get(skill_name)
     if entry is None:
         raise HTTPException(status_code=404, detail="Skill not found")
@@ -1694,7 +1879,8 @@ async def update_skill_config_endpoint(
         entry["config"] = dict(body.config)
         return True
 
-    updated = _mutate_json(
+    updated = await asyncio.to_thread(
+        _mutate_json,
         manifest_path,
         _default_workspace_manifest(),
         _update,
@@ -1719,7 +1905,8 @@ async def delete_skill_config_endpoint(
         entry.pop("config", None)
         return True
 
-    updated = _mutate_json(
+    updated = await asyncio.to_thread(
+        _mutate_json,
         manifest_path,
         _default_workspace_manifest(),
         _update,

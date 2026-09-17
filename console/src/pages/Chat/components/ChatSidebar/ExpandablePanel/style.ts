@@ -62,9 +62,10 @@ export default createGlobalStyle`
 .expandable-panel-header-title {
   font-size: 16px;
   font-weight: 600;
-  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+  //font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
   color: ${DESIGN_TOKENS.colorTextPrimary};
-  line-height: 21px;
+  line-height: 22px;
+  margin-left: 4px;
 }
 
 .expandable-panel-content {
@@ -228,7 +229,7 @@ export default createGlobalStyle`
 }
 
 .expandable-panel-task-title {
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 400;
   font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
   color: ${DESIGN_TOKENS.colorTextPrimary};
@@ -311,7 +312,6 @@ export default createGlobalStyle`
 .expandable-panel-task-status {
   font-size: 12px;
   line-height: 16px;
-  font-weight: 600;
   margin-top: 4px;
 
   &--auto {
@@ -338,7 +338,7 @@ export default createGlobalStyle`
 
 .expandable-panel-task-next-run {
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 400;
   font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
   color: ${DESIGN_TOKENS.colorTextSecondary};
   line-height: 16px;
@@ -390,11 +390,11 @@ export default createGlobalStyle`
 }
 
 .expandable-panel-history-title {
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 400;
-  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+  //font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
   color: ${DESIGN_TOKENS.colorTextSecondary};
-  line-height: 21px;
+  line-height: 22px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

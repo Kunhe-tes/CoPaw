@@ -316,6 +316,7 @@ async def broadcast_workspace_files(
     service = FileBroadcastService(
         default_ws_dir,
         source_id=source_id,
+        tenant_workspace_pool=request.app.state.tenant_workspace_pool,
     )
     return await service.broadcast(
         file_names=body.file_names,

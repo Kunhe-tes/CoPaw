@@ -177,4 +177,7 @@ SWE_INTERNAL_URL = EnvVarLoader.get_str(
     "SWE_INTERNAL_URL",
     "http://localhost:8088",
 )
+
+# src/swe 内部调用本服务时需要携带的 token（可选，留空则不校验）
+MARKET_INTERNAL_TOKEN = EnvVarLoader.get_str("MARKET_INTERNAL_TOKEN", "")
 SWE_INTERNAL_TOKEN = EnvVarLoader.get_str("SWE_INTERNAL_TOKEN", "")

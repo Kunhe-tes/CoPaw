@@ -11,8 +11,10 @@ Tests cover:
 
 from __future__ import annotations
 
+import asyncio
 import shlex
 import os
+import signal
 import sys
 from pathlib import Path
 from typing import Generator
@@ -27,10 +29,15 @@ from swe.envs.store import save_envs
 from swe.agents.tool_failure import ToolExecutionError
 from swe.agents.tools.shell import (
     execute_shell_command,
+    _classify_shell_failure,
     _extract_path_tokens,
+    _prepare_subprocess_env,
+    prepare_shell_command,
+    _scan_python_source_for_outside_path,
     _validate_shell_paths,
     _resolve_cwd,
 )
+from swe.agents.skill_context_manager import get_skill_context_manager
 from swe.security.tenant_path_boundary import (
     TenantPathBoundaryError,
     TenantContextMissingError,
@@ -91,21 +98,28 @@ def _write_process_limit_config(
     shell: bool = True,
     cpu_time_limit_seconds: int | None = None,
     memory_max_mb: int | None = None,
+    shell_max_concurrent: int | None = None,
+    shell_acquire_timeout_seconds: float | None = None,
 ) -> None:
+    process_limits = {
+        "enabled": enabled,
+        "shell": shell,
+        "mcp_stdio": True,
+        "cpu_time_limit_seconds": cpu_time_limit_seconds,
+        "memory_max_mb": memory_max_mb,
+    }
+    if shell_max_concurrent is not None:
+        process_limits["shell_max_concurrent"] = shell_max_concurrent
+    if shell_acquire_timeout_seconds is not None:
+        process_limits["shell_acquire_timeout_seconds"] = (
+            shell_acquire_timeout_seconds
+        )
     tenant_dir = base_dir / tenant_id
     tenant_dir.mkdir(parents=True, exist_ok=True)
     save_config(
         Config.model_validate(
             {
-                "security": {
-                    "process_limits": {
-                        "enabled": enabled,
-                        "shell": shell,
-                        "mcp_stdio": True,
-                        "cpu_time_limit_seconds": cpu_time_limit_seconds,
-                        "memory_max_mb": memory_max_mb,
-                    },
-                },
+                "security": {"process_limits": process_limits},
             },
         ),
         tenant_dir / "config.json",
@@ -130,6 +144,77 @@ def _assert_tool_error(
 ) -> None:
     assert exc_info.value.error_type == error_type
     assert detail_contains in exc_info.value.detail
+
+
+def test_shell_subprocess_env_preserves_backend_storage_roots(
+    mock_working_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shell 子进程应继承后端确定的 SWE 存储根路径。"""
+    backend_working_dir = mock_working_dir / "backend-working"
+    backend_secret_dir = mock_working_dir / "backend-working.secret"
+    monkeypatch.setenv("SWE_WORKING_DIR", str(backend_working_dir))
+    monkeypatch.setenv("SWE_SECRET_DIR", str(backend_secret_dir))
+
+    _write_scope_env(
+        mock_working_dir,
+        "test_tenant",
+        "source-a",
+        {
+            "SWE_WORKING_DIR": "/tmp/tenant-overrides-working",
+            "SWE_SECRET_DIR": "/tmp/tenant-overrides-secret",
+            "PYTHONPATH": "/tmp/tenant-pythonpath",
+            "APP_TOKEN": "tenant-secret",
+        },
+    )
+
+    with tenant_context(tenant_id="test_tenant", source_id="source-a"):
+        env = _prepare_subprocess_env()
+
+    assert env["SWE_WORKING_DIR"] == str(backend_working_dir)
+    assert env["SWE_SECRET_DIR"] == str(backend_secret_dir)
+    assert env["APP_TOKEN"] == "tenant-secret"
+    assert "PYTHONPATH" not in env
+
+
+def test_shell_subprocess_env_defaults_blas_thread_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shell 子进程默认限制常见 BLAS/OpenMP 运行时线程数。"""
+    thread_limit_keys = {
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+    }
+    for key in thread_limit_keys:
+        monkeypatch.delenv(key, raising=False)
+
+    env = _prepare_subprocess_env()
+
+    assert {key: env[key] for key in thread_limit_keys} == {
+        key: "1" for key in thread_limit_keys
+    }
+
+
+def test_shell_subprocess_env_preserves_explicit_blas_thread_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shell 子进程不覆盖调用方已经指定的线程限制。"""
+    explicit_limits = {
+        "OPENBLAS_NUM_THREADS": "2",
+        "OMP_NUM_THREADS": "3",
+        "MKL_NUM_THREADS": "4",
+        "NUMEXPR_NUM_THREADS": "5",
+        "VECLIB_MAXIMUM_THREADS": "6",
+    }
+    for key, value in explicit_limits.items():
+        monkeypatch.setenv(key, value)
+
+    env = _prepare_subprocess_env()
+
+    assert {key: env[key] for key in explicit_limits} == explicit_limits
 
 
 # =============================================================================
@@ -319,6 +404,304 @@ class TestValidateShellPaths:
             result = _validate_shell_paths("cat file.txt", base_dir=tenant_dir)
             assert result is None
 
+    def test_direct_active_workspace_skill_write_target_denied(
+        self,
+        mock_working_dir: Path,
+    ):
+        tenant_dir = mock_working_dir / "test_tenant"
+        workspace_dir = tenant_dir / "workspaces" / "agent_a"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        (workspace_dir / "skill.json").write_text(
+            '{"skills": {"uploaded": {"source": "marketplace:demo"}}}',
+            encoding="utf-8",
+        )
+
+        with tenant_context(
+            tenant_id="test_tenant",
+            workspace_dir=workspace_dir,
+        ):
+            context_manager = get_skill_context_manager()
+            context_manager.push_skill("uploaded")
+            try:
+                result = _validate_shell_paths(
+                    "unzip uploaded.zip -d skills/uploaded",
+                    base_dir=workspace_dir,
+                )
+            finally:
+                context_manager.clear()
+
+        assert result is not None
+        assert "skills/uploaded" in result
+
+    def test_other_workspace_skill_write_target_allowed(
+        self,
+        mock_working_dir: Path,
+    ):
+        tenant_dir = mock_working_dir / "test_tenant"
+        workspace_dir = tenant_dir / "workspaces" / "agent_a"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        (workspace_dir / "skill.json").write_text(
+            '{"skills": {"uploaded": {"source": "customized"}}}',
+            encoding="utf-8",
+        )
+
+        with tenant_context(
+            tenant_id="test_tenant",
+            workspace_dir=workspace_dir,
+        ):
+            context_manager = get_skill_context_manager()
+            context_manager.push_skill("edited-skill")
+            try:
+                result = _validate_shell_paths(
+                    "unzip uploaded.zip -d skills/uploaded",
+                    base_dir=workspace_dir,
+                )
+            finally:
+                context_manager.clear()
+
+        assert result is None
+
+    def test_disabled_workspace_skill_write_target_allowed(
+        self,
+        mock_working_dir: Path,
+    ):
+        tenant_dir = mock_working_dir / "test_tenant"
+        workspace_dir = tenant_dir / "workspaces" / "agent_a"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        (workspace_dir / "skill.json").write_text(
+            '{"skills": {"uploaded": {"source": "customized"}}}',
+            encoding="utf-8",
+        )
+
+        with tenant_context(
+            tenant_id="test_tenant",
+            workspace_dir=workspace_dir,
+        ):
+            result = _validate_shell_paths(
+                "unzip uploaded.zip -d .disabled_skills/uploaded",
+                base_dir=workspace_dir,
+            )
+
+        assert result is None
+
+    def test_workspace_skill_root_removal_denied(
+        self,
+        mock_working_dir: Path,
+    ):
+        tenant_dir = mock_working_dir / "test_tenant"
+        workspace_dir = tenant_dir / "workspaces" / "agent_a"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        (workspace_dir / "skill.json").write_text(
+            '{"skills": {"uploaded": {"source": "customized"}}}',
+            encoding="utf-8",
+        )
+
+        with tenant_context(
+            tenant_id="test_tenant",
+            workspace_dir=workspace_dir,
+        ):
+            result = _validate_shell_paths(
+                "rm -rf skills",
+                base_dir=workspace_dir,
+            )
+
+        assert result is not None
+        assert "skills" in result
+
+    def test_new_workspace_skill_creation_allowed(
+        self,
+        mock_working_dir: Path,
+    ):
+        tenant_dir = mock_working_dir / "test_tenant"
+        workspace_dir = tenant_dir / "workspaces" / "agent_a"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        with tenant_context(
+            tenant_id="test_tenant",
+            workspace_dir=workspace_dir,
+        ):
+            context_manager = get_skill_context_manager()
+            context_manager.push_skill("new-skill")
+            try:
+                result = _validate_shell_paths(
+                    "mkdir -p skills/new-skill",
+                    base_dir=workspace_dir,
+                )
+            finally:
+                context_manager.clear()
+
+        assert result is None
+
+    def test_created_workspace_skill_file_removal_allowed(
+        self,
+        mock_working_dir: Path,
+    ):
+        tenant_dir = mock_working_dir / "test_tenant"
+        workspace_dir = tenant_dir / "workspaces" / "agent_a"
+        skill_dir = workspace_dir / "skills" / "uploaded"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text("x", encoding="utf-8")
+        (workspace_dir / "skill.json").write_text(
+            '{"skills": {"uploaded": {"source": "customized"}}}',
+            encoding="utf-8",
+        )
+
+        with tenant_context(
+            tenant_id="test_tenant",
+            workspace_dir=workspace_dir,
+        ):
+            result = _validate_shell_paths(
+                "rm -f skills/uploaded/SKILL.md",
+                base_dir=workspace_dir,
+            )
+
+        assert result is None
+
+    def test_created_workspace_skill_root_removal_allowed(
+        self,
+        mock_working_dir: Path,
+    ):
+        tenant_dir = mock_working_dir / "test_tenant"
+        workspace_dir = tenant_dir / "workspaces" / "agent_a"
+        skill_dir = workspace_dir / "skills" / "uploaded"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text("x", encoding="utf-8")
+        (workspace_dir / "skill.json").write_text(
+            '{"skills": {"uploaded": {"source": "customized"}}}',
+            encoding="utf-8",
+        )
+
+        with tenant_context(
+            tenant_id="test_tenant",
+            workspace_dir=workspace_dir,
+        ):
+            result = _validate_shell_paths(
+                "rm -rf skills/uploaded",
+                base_dir=workspace_dir,
+            )
+
+        assert result is None
+
+    def test_new_workspace_skill_root_removal_allowed(
+        self,
+        mock_working_dir: Path,
+    ):
+        tenant_dir = mock_working_dir / "test_tenant"
+        workspace_dir = tenant_dir / "workspaces" / "agent_a"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        with tenant_context(
+            tenant_id="test_tenant",
+            workspace_dir=workspace_dir,
+        ):
+            context_manager = get_skill_context_manager()
+            context_manager.push_skill("new-skill")
+            try:
+                result = _validate_shell_paths(
+                    "rm -rf skills/new-skill",
+                    base_dir=workspace_dir,
+                )
+            finally:
+                context_manager.clear()
+
+        assert result is None
+
+    def test_existing_workspace_skill_root_without_manifest_denied(
+        self,
+        mock_working_dir: Path,
+    ):
+        tenant_dir = mock_working_dir / "test_tenant"
+        workspace_dir = tenant_dir / "workspaces" / "agent_a"
+        skill_dir = workspace_dir / "skills" / "received"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+
+        with tenant_context(
+            tenant_id="test_tenant",
+            workspace_dir=workspace_dir,
+        ):
+            result = _validate_shell_paths(
+                "rm -rf skills/received",
+                base_dir=workspace_dir,
+            )
+
+        assert result is not None
+        assert "skills/received" in result
+
+    def test_workspace_skill_root_chmod_denied(
+        self,
+        mock_working_dir: Path,
+    ):
+        tenant_dir = mock_working_dir / "test_tenant"
+        workspace_dir = tenant_dir / "workspaces" / "agent_a"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        (workspace_dir / "skill.json").write_text(
+            '{"skills": {"uploaded": {"source": "customized"}}}',
+            encoding="utf-8",
+        )
+
+        with tenant_context(
+            tenant_id="test_tenant",
+            workspace_dir=workspace_dir,
+        ):
+            result = _validate_shell_paths(
+                "chmod 700 skills",
+                base_dir=workspace_dir,
+            )
+
+        assert result is not None
+        assert "skills" in result
+
+    def test_non_created_workspace_skill_move_source_denied(
+        self,
+        mock_working_dir: Path,
+    ):
+        tenant_dir = mock_working_dir / "test_tenant"
+        workspace_dir = tenant_dir / "workspaces" / "agent_a"
+        skill_dir = workspace_dir / "skills" / "received"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text("x", encoding="utf-8")
+        (workspace_dir / "skill.json").write_text(
+            '{"skills": {"received": {"source": "marketplace:demo"}}}',
+            encoding="utf-8",
+        )
+
+        with tenant_context(
+            tenant_id="test_tenant",
+            workspace_dir=workspace_dir,
+        ):
+            result = _validate_shell_paths(
+                "mv skills/received/SKILL.md notes.txt",
+                base_dir=workspace_dir,
+            )
+
+        assert result is not None
+        assert "skills/received/SKILL.md" in result
+
+    def test_unsafe_active_skill_name_does_not_escape_skill_root(
+        self,
+        mock_working_dir: Path,
+    ):
+        tenant_dir = mock_working_dir / "test_tenant"
+        workspace_dir = tenant_dir / "workspaces" / "agent_a"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        with tenant_context(
+            tenant_id="test_tenant",
+            workspace_dir=workspace_dir,
+        ):
+            context_manager = get_skill_context_manager()
+            context_manager.push_skill("../outside")
+            try:
+                result = _validate_shell_paths(
+                    "touch skills/other/SKILL.md",
+                    base_dir=workspace_dir,
+                )
+            finally:
+                context_manager.clear()
+
+        assert result is not None
+        assert "skills/other/SKILL.md" in result
+
     def test_python_script_content_outside_path_denied(
         self,
         mock_working_dir: Path,
@@ -373,6 +756,27 @@ class TestValidateShellPaths:
             assert "Python code contains path outside" in result
             assert "/etc/passwd" in result
 
+    def test_python_code_string_tenant_absolute_opt_path_allowed(
+        self,
+        mock_working_dir: Path,
+    ):
+        """Tenant-local absolute paths under /opt should not be rejected as system paths."""
+        tenant_dir = mock_working_dir / "test_tenant"
+        code = (
+            "path = "
+            "'/opt/deployments/app/working/test_tenant/workspaces/default/"
+            "tool_result/result.txt'\n"
+            "print(open(path).read())"
+        )
+
+        with patch(
+            "swe.agents.tools.shell.is_path_within_tenant_with_base",
+            return_value=True,
+        ):
+            result = _scan_python_source_for_outside_path(code, tenant_dir)
+
+        assert result is None
+
     def test_python_directory_content_outside_path_denied(
         self,
         mock_working_dir: Path,
@@ -410,6 +814,30 @@ class TestValidateShellPaths:
                 base_dir=tenant_dir,
             )
             assert result is None
+
+    def test_python_script_system_path_string_denied(
+        self,
+        mock_working_dir: Path,
+    ):
+        """ctypes/syscall scripts should not hide system path strings."""
+        tenant_dir = mock_working_dir / "test_tenant"
+        script = tenant_dir / "copy_opt.py"
+        script.write_text(
+            "import ctypes\n"
+            "ctypes.CDLL(None)\n"
+            "source = '/opt/python/bin/jp.py'\n"
+            "print(source)\n",
+        )
+
+        with tenant_context(tenant_id="test_tenant"):
+            result = _validate_shell_paths(
+                "python copy_opt.py",
+                base_dir=tenant_dir,
+            )
+
+        assert result is not None
+        assert "system path string" in result
+        assert "/opt/python/bin/jp.py" in result
 
     def test_python_script_symlink_outside_tenant_denied(
         self,
@@ -462,6 +890,17 @@ class TestValidateShellPaths:
             assert result is not None
             assert "outside the allowed workspace" in result
 
+    def test_dev_null_output_sink_allowed(self, mock_working_dir: Path):
+        """Common output probes may write to /dev/null without escaping tenant data."""
+        tenant_dir = mock_working_dir / "test_tenant"
+        with tenant_context(tenant_id="test_tenant"):
+            result = _validate_shell_paths(
+                'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1',
+                base_dir=tenant_dir,
+            )
+
+        assert result is None
+
     def test_relative_traversal_denied(self, mock_working_dir: Path):
         """Should reject relative paths that traverse outside tenant."""
         tenant_dir = mock_working_dir / "test_tenant"
@@ -483,6 +922,32 @@ class TestValidateShellPaths:
             )
             assert result is not None
             assert "outside the allowed workspace" in result
+
+    def test_home_env_path_denied(self, mock_working_dir: Path):
+        """Shell path variables should not bypass tenant path checks."""
+        tenant_dir = mock_working_dir / "test_tenant"
+        with tenant_context(tenant_id="test_tenant"):
+            result = _validate_shell_paths(
+                "cat $HOME/.ssh/id_rsa",
+                base_dir=tenant_dir,
+            )
+
+        assert result is not None
+        assert "environment path variable" in result
+        assert "$HOME" in result
+
+    def test_braced_home_env_path_denied(self, mock_working_dir: Path):
+        """Braced shell path variables should be rejected too."""
+        tenant_dir = mock_working_dir / "test_tenant"
+        with tenant_context(tenant_id="test_tenant"):
+            result = _validate_shell_paths(
+                "ls ${HOME}/.config",
+                base_dir=tenant_dir,
+            )
+
+        assert result is not None
+        assert "environment path variable" in result
+        assert "${HOME}" in result
 
     def test_relative_path_against_cwd_within_tenant_allowed(
         self,
@@ -611,12 +1076,9 @@ class TestResolveCwd:
         self,
         mock_working_dir: Path,
     ):
-        """default + source should accept cwd under encoded scope."""
+        """default + source should accept cwd under default_{source}."""
         workspace_dir = (
-            mock_working_dir
-            / encode_scope_id("default", "RMASSIST")
-            / "workspaces"
-            / "default"
+            mock_working_dir / "default_RMASSIST" / "workspaces" / "default"
         )
         workspace_dir.mkdir(parents=True)
 
@@ -672,6 +1134,120 @@ class TestResolveCwd:
 
 class TestExecuteShellCommand:
     """Integration tests for execute_shell_command with tenant boundary."""
+
+    def test_prepare_shell_command_reuses_shell_boundary_context(
+        self,
+        mock_working_dir: Path,
+    ):
+        """共享 Shell 准备逻辑应统一解析 cwd 和租户环境。"""
+        from swe.agents.tools.shell import prepare_shell_command
+
+        tenant_dir = mock_working_dir / "test_tenant"
+
+        with tenant_context(
+            tenant_id="test_tenant",
+            user_id="user_a",
+            workspace_dir=tenant_dir,
+        ):
+            prepared = prepare_shell_command(
+                "echo ok",
+                cwd=str(tenant_dir),
+            )
+
+        assert prepared.command == "echo ok"
+        assert prepared.working_dir == tenant_dir.resolve()
+        assert "PATH" in prepared.env
+        assert prepared.python_runtime_guard is not None
+
+    def test_prepare_shell_command_injects_opencli_execution_credentials(
+        self,
+        mock_working_dir: Path,
+    ):
+        """Shared shell preparation should apply OpenCLI auth interception."""
+        tenant_dir = mock_working_dir / "test_tenant"
+
+        with (
+            patch(
+                "swe.agents.tools.shell_interceptor."
+                "resolve_auth_token_for_execution",
+            ) as resolve_token,
+            tenant_context(
+                tenant_id="test_tenant",
+                user_id="user_a",
+                workspace_dir=tenant_dir,
+            ),
+        ):
+            resolve_token.return_value.token = "resolved-authorization"
+            resolve_token.return_value.cookie_header = "resolved-cookie"
+            prepared = prepare_shell_command(
+                "opencli apps list",
+                cwd=str(tenant_dir),
+            )
+
+        assert prepared.command == (
+            'opencli apps list --authorization "Bearer resolved-authorization" '
+            '--cookie "resolved-cookie"'
+        )
+        resolve_token.assert_called_once_with(
+            tenant_id="test_tenant",
+            workspace_dir=tenant_dir,
+        )
+
+    def test_prepare_shell_command_preserves_unix_multiline_python(
+        self,
+        mock_working_dir: Path,
+    ):
+        """Unix shell commands must keep newlines for python -c and heredocs."""
+        tenant_dir = mock_working_dir / "test_tenant"
+        command = (
+            'python3 -c "\n'
+            "import json\n"
+            "print(json.dumps({'ok': True}))\n"
+            '"'
+        )
+
+        with (
+            patch("swe.agents.tools.shell.sys.platform", "linux"),
+            tenant_context(tenant_id="test_tenant", workspace_dir=tenant_dir),
+        ):
+            prepared = prepare_shell_command(command, cwd=str(tenant_dir))
+
+        assert "\nimport json\n" in prepared.command
+        assert "import json print" not in prepared.command
+
+    def test_prepare_shell_command_preserves_unix_heredoc(
+        self,
+        mock_working_dir: Path,
+    ):
+        """Here-doc bodies are executable shell syntax and must not be flattened."""
+        tenant_dir = mock_working_dir / "test_tenant"
+        command = "python3 << 'PYEOF'\nprint('ok')\nPYEOF"
+
+        with (
+            patch("swe.agents.tools.shell.sys.platform", "linux"),
+            tenant_context(tenant_id="test_tenant", workspace_dir=tenant_dir),
+        ):
+            prepared = prepare_shell_command(command, cwd=str(tenant_dir))
+
+        assert prepared.command == command
+
+    def test_prepare_shell_command_collapses_windows_newlines(
+        self,
+        mock_working_dir: Path,
+    ):
+        """Windows cmd still receives single-line commands to avoid truncation."""
+        tenant_dir = mock_working_dir / "test_tenant"
+
+        with (
+            patch("swe.agents.tools.shell.sys.platform", "win32"),
+            tenant_context(tenant_id="test_tenant", workspace_dir=tenant_dir),
+        ):
+            prepared = prepare_shell_command(
+                "echo hello\nworld",
+                cwd=str(tenant_dir),
+            )
+
+        assert prepared.command == "echo hello world"
 
     @pytest.mark.asyncio
     async def test_accepts_string_cwd_within_tenant(
@@ -903,7 +1479,7 @@ class TestExecuteShellCommand:
         self,
         mock_working_dir: Path,
     ):
-        """当前 shell 启动不会注入租户级 preexec_fn。"""
+        """Shell launch injects the current tenant's process-limit preexec_fn."""
         from swe.agents.tools.shell import execute_shell_command
 
         _write_process_limit_config(
@@ -939,7 +1515,7 @@ class TestExecuteShellCommand:
         ):
             with tenant_context(tenant_id="tenant-a"):
                 await execute_shell_command("echo tenant")
-            assert captured["preexec_fn"] is None
+            assert captured["preexec_fn"] is not None
 
             with tenant_context(tenant_id="tenant-b"):
                 await execute_shell_command("echo tenant")
@@ -951,7 +1527,7 @@ class TestExecuteShellCommand:
         self,
         mock_working_dir: Path,
     ):
-        """当前 shell 在 macOS 分支也不会构造 preexec_fn。"""
+        """macOS shell launch still injects a CPU-only preexec_fn."""
         from swe.agents.tools.shell import execute_shell_command
 
         _write_process_limit_config(
@@ -990,7 +1566,7 @@ class TestExecuteShellCommand:
                 result = await execute_shell_command("echo ok")
 
         assert result.content[0]["text"].startswith("ok")
-        assert captured["preexec_fn"] is None
+        assert captured["preexec_fn"] is not None
 
     @pytest.mark.asyncio
     @pytest.mark.skipif(
@@ -1001,7 +1577,7 @@ class TestExecuteShellCommand:
         self,
         mock_working_dir: Path,
     ):
-        """当前 shell CPU 忙循环仍以通用超时文案返回。"""
+        """CPU rlimit termination is reported as process-limit failure."""
         from swe.agents.tools.shell import execute_shell_command
 
         _write_process_limit_config(
@@ -1021,8 +1597,8 @@ class TestExecuteShellCommand:
 
         _assert_tool_error(
             exc_info,
-            error_type="tool_timeout",
-            detail_contains="TimeoutError",
+            error_type="process_limit_exceeded",
+            detail_contains="exit code",
         )
 
     @pytest.mark.asyncio
@@ -1034,7 +1610,7 @@ class TestExecuteShellCommand:
         self,
         mock_working_dir: Path,
     ):
-        """当前 shell 保留子进程 stderr，不再包装为 process-limit 文案。"""
+        """Memory-limit style failures are classified separately."""
         from swe.agents.tools.shell import execute_shell_command
 
         _write_process_limit_config(
@@ -1054,9 +1630,12 @@ class TestExecuteShellCommand:
         async def _fake_create_subprocess_shell(*args, **kwargs):
             return _FakeProcess()
 
-        with patch(
-            "swe.agents.tools.shell.asyncio.create_subprocess_shell",
-            side_effect=_fake_create_subprocess_shell,
+        with (
+            patch(
+                "swe.agents.tools.shell.asyncio.create_subprocess_shell",
+                side_effect=_fake_create_subprocess_shell,
+            ),
+            patch("swe.security.process_limits.sys.platform", "linux"),
         ):
             with tenant_context(tenant_id="test_tenant"):
                 with pytest.raises(ToolExecutionError) as exc_info:
@@ -1064,7 +1643,7 @@ class TestExecuteShellCommand:
 
         _assert_tool_error(
             exc_info,
-            error_type="shell_command_failed",
+            error_type="process_limit_exceeded",
             detail_contains="MemoryError",
         )
 
@@ -1073,7 +1652,7 @@ class TestExecuteShellCommand:
         self,
         mock_working_dir: Path,
     ):
-        """当前 shell 不会把 process-limit 平台诊断拼入正常输出。"""
+        """Unsupported platform diagnostics are visible in shell output."""
         from swe.agents.tools.shell import execute_shell_command
 
         _write_process_limit_config(
@@ -1092,6 +1671,45 @@ class TestExecuteShellCommand:
                 result = await execute_shell_command("echo hello")
 
         assert "hello" in result.content[0]["text"]
+        assert "not enforced on this platform" in result.content[0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_shell_concurrency_limit_fails_when_slot_is_unavailable(
+        self,
+        mock_working_dir: Path,
+    ):
+        """A tenant cannot exceed its configured shell execution slots."""
+        from swe.agents.tools.shell import execute_shell_command
+
+        _write_process_limit_config(
+            mock_working_dir,
+            "test_tenant",
+            enabled=True,
+            shell=True,
+            shell_max_concurrent=1,
+            shell_acquire_timeout_seconds=0.01,
+        )
+
+        async def _blocking_execute_platform_subprocess(*args, **kwargs):
+            await asyncio.sleep(0.2)
+            return 0, "held", ""
+
+        with patch(
+            "swe.agents.tools.shell._execute_platform_subprocess",
+            side_effect=_blocking_execute_platform_subprocess,
+        ):
+            with tenant_context(tenant_id="test_tenant"):
+                first = asyncio.create_task(execute_shell_command("echo one"))
+                await asyncio.sleep(0.02)
+                with pytest.raises(ToolExecutionError) as exc_info:
+                    await execute_shell_command("echo two")
+                await first
+
+        _assert_tool_error(
+            exc_info,
+            error_type="shell_concurrency_limit_exceeded",
+            detail_contains="shell execution slots",
+        )
 
     @pytest.mark.asyncio
     async def test_shell_command_receives_source_scoped_tenant_env(
@@ -1117,6 +1735,51 @@ class TestExecuteShellCommand:
         assert "API_TOKEN" not in os.environ
 
     @pytest.mark.asyncio
+    async def test_shell_command_receives_runtime_claim_env(
+        self,
+        mock_working_dir: Path,
+    ):
+        """shell 子进程应接收运行时调用 claims env。"""
+        from swe.runtime_invocation_claims import (
+            runtime_invocation_claims_context,
+        )
+
+        command = (
+            'python -c "import json, os; '
+            "print(json.dumps({"
+            "'tenant': os.environ.get('SWE_TENANT_ID'), "
+            "'source': os.environ.get('SWE_SOURCE_ID'), "
+            "'scope': os.environ.get('SWE_RUNTIME_SCOPE_ID'), "
+            "'session': os.environ.get('SWE_SESSION_ID'), "
+            "'chat': os.environ.get('SWE_CHAT_ID'), "
+            "'trace': os.environ.get('SWE_TRACE_ID')}))\""
+        )
+        (mock_working_dir / encode_scope_id("test_tenant", "source-a")).mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        with (
+            tenant_context(tenant_id="test_tenant", source_id="source-a"),
+            runtime_invocation_claims_context(
+                session_id="session-1",
+                chat_id="chat-uuid-1",
+                trace_id="trace-1",
+            ),
+        ):
+            result = await execute_shell_command(command)
+
+        text = result.content[0]["text"]
+        assert '"tenant": "test_tenant"' in text
+        assert '"source": "source-a"' in text
+        assert (
+            '"scope": "' + encode_scope_id("test_tenant", "source-a") in text
+        )
+        assert '"session": "session-1"' in text
+        assert '"chat": "chat-uuid-1"' in text
+        assert '"trace": "trace-1"' in text
+
+    @pytest.mark.asyncio
     async def test_shell_rejects_boundary_escape_before_runtime_env_build(
         self,
         mock_working_dir: Path,
@@ -1135,3 +1798,63 @@ class TestExecuteShellCommand:
             error_type="permission_denied",
             detail_contains="outside the allowed workspace",
         )
+
+
+def test_shell_sigkill_failure_is_not_process_limit_without_enforcement():
+    assert (
+        _classify_shell_failure(
+            -signal.SIGKILL,
+            "",
+            process_limits_enforced=False,
+        )
+        == "shell_command_failed"
+    )
+
+
+def test_shell_sigkill_failure_is_process_limit_when_enforced():
+    assert (
+        _classify_shell_failure(
+            -signal.SIGKILL,
+            "",
+            process_limits_enforced=True,
+            memory_limit_enforced=False,
+        )
+        == "process_limit_exceeded"
+    )
+
+
+def test_shell_memory_error_is_not_process_limit_without_memory_enforcement():
+    assert (
+        _classify_shell_failure(
+            1,
+            "MemoryError",
+            process_limits_enforced=True,
+            memory_limit_enforced=False,
+        )
+        == "shell_command_failed"
+    )
+
+
+def test_shell_memory_error_is_process_limit_with_memory_enforcement():
+    assert (
+        _classify_shell_failure(
+            1,
+            "MemoryError",
+            process_limits_enforced=True,
+            memory_limit_enforced=True,
+        )
+        == "process_limit_exceeded"
+    )
+
+
+def test_shell_curl_exit_28_is_tool_timeout():
+    assert _classify_shell_failure(28, "") == "tool_timeout"
+
+
+def test_shell_network_timeout_traceback_is_tool_timeout():
+    stderr = (
+        "Traceback (most recent call last):\n"
+        "urllib3.exceptions.ConnectTimeoutError: Connection timed out"
+    )
+
+    assert _classify_shell_failure(1, stderr) == "tool_timeout"

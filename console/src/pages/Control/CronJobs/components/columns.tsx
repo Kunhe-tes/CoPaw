@@ -1,10 +1,11 @@
 import { Button, Tooltip, Dropdown } from "@agentscope-ai/design";
 import type { ColumnsType } from "antd/es/table";
 import type { MenuProps } from "antd";
+import { Popover, Tag } from "antd";
 import type { CronJobSpecOutput } from "../../../../api/types";
 import { CopyOutlined, MoreOutlined } from "@ant-design/icons";
 import { TFunction } from "i18next";
-import { parseCron } from "./parseCron";
+import { parseCron } from "../../../../utils/parseCron";
 import { copyToClipboard } from "../../../../utils/clipboard";
 import type { ExecutionModelOption } from "@/hooks/useExecutionModelOptions";
 import { formatExecutionModelLabel } from "@/hooks/useExecutionModelOptions";
@@ -13,11 +14,20 @@ import styles from "../index.module.less";
 
 type CronJob = CronJobSpecOutput;
 
+export interface BroadcastParentInfo {
+  sourceJobId: string;
+  sourceJobName: string;
+  sourceTenantId: string;
+  sourceTenantName: string;
+  sourceBbkId: string;
+}
+
 interface ColumnHandlers {
   onToggleEnabled: (job: CronJob) => void;
   onExecuteNow: (job: CronJob) => void;
   onBroadcast: (job: CronJob) => void;
   onManageChildren: (job: CronJob) => void;
+  onBatchConfigure: (job: CronJob) => void;
   onEdit: (job: CronJob) => void;
   onDelete: (jobId: string) => void;
   onCopySuccess: () => void;
@@ -25,6 +35,77 @@ interface ColumnHandlers {
   executionModelOptions: ExecutionModelOption[];
   tenantDefaultModelLabel: string;
   t: TFunction;
+}
+
+function optionalMetaText(value: unknown): string {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+  if (value === null || value === undefined) {
+    return "";
+  }
+  return String(value).trim();
+}
+
+export function getBroadcastParentInfo(job: CronJob): BroadcastParentInfo {
+  const meta = job.meta || {};
+  return {
+    sourceJobId: optionalMetaText(meta.broadcast_source_job_id),
+    sourceJobName: optionalMetaText(meta.broadcast_source_job_name),
+    sourceTenantId: optionalMetaText(meta.broadcast_source_tenant_id),
+    sourceTenantName: optionalMetaText(meta.broadcast_source_tenant_name),
+    sourceBbkId: optionalMetaText(meta.broadcast_source_bbk_id),
+  };
+}
+
+export function isBroadcastChildJob(job: CronJob): boolean {
+  return Boolean(getBroadcastParentInfo(job).sourceJobId);
+}
+
+export function isBatchDispatchJob(job: CronJob): boolean {
+  return job.meta?.broadcast_dispatch_intents_enabled === true;
+}
+
+function formatParentUser(info: BroadcastParentInfo): string {
+  if (!info.sourceTenantId && !info.sourceTenantName) {
+    return "未记录";
+  }
+  return info.sourceTenantName
+    ? `${info.sourceTenantName}${
+        info.sourceTenantId ? ` (${info.sourceTenantId})` : ""
+      }`
+    : info.sourceTenantId;
+}
+
+function renderBroadcastChildTag(record: CronJob) {
+  const parentInfo = getBroadcastParentInfo(record);
+  if (!parentInfo.sourceJobId) {
+    return null;
+  }
+  const content = (
+    <div className={styles.broadcastChildPopover}>
+      <div>
+        <span className={styles.broadcastChildPopoverLabel}>父用户</span>
+        <span>{formatParentUser(parentInfo)}</span>
+      </div>
+      <div>
+        <span className={styles.broadcastChildPopoverLabel}>父任务</span>
+        <span>{parentInfo.sourceJobName || "未记录"}</span>
+      </div>
+      <div>
+        <span className={styles.broadcastChildPopoverLabel}>父任务ID</span>
+        <span>{parentInfo.sourceJobId}</span>
+      </div>
+    </div>
+  );
+
+  return (
+    <Popover content={content} placement="topLeft" trigger="hover">
+      <Tag color="blue" className={styles.broadcastChildTag}>
+        分发子任务
+      </Tag>
+    </Popover>
+  );
 }
 
 export const createColumns = (
@@ -52,6 +133,12 @@ export const createColumns = (
       dataIndex: "name",
       key: "name",
       width: 250,
+      render: (_name: string, record: CronJob) => (
+        <div className={styles.jobNameCell}>
+          <span className={styles.jobNameText}>{record.name}</span>
+          {renderBroadcastChildTag(record)}
+        </div>
+      ),
     },
     {
       title: handlers.t("cronJobs.enabled"),
@@ -77,15 +164,17 @@ export const createColumns = (
       width: 120,
       render: (_: unknown, record: CronJob) => {
         const isRunning = record.task?.is_running;
-        const status = isRunning ? "running" : record.state?.last_status || "idle";
+        const status = isRunning
+          ? "running"
+          : record.state?.last_status || "idle";
         const toneClass =
           status === "running"
             ? styles.statusDotRunning
             : status === "success"
-              ? styles.statusDotSuccess
-              : status === "error" || status === "cancelled"
-                ? styles.statusDotError
-                : styles.statusDotIdle;
+            ? styles.statusDotSuccess
+            : status === "error" || status === "cancelled"
+            ? styles.statusDotError
+            : styles.statusDotIdle;
 
         return (
           <span className={styles.statusIndicator}>
@@ -107,7 +196,9 @@ export const createColumns = (
       dataIndex: ["schedule", "cron"],
       key: "cron",
       width: 180,
-      render: (cron: string) => {
+      render: (cron: string, record: CronJob) => {
+        const batchDispatch = isBatchDispatchJob(record);
+
         // Parse cron to friendly text
         const cronParts = parseCron(cron || "0 9 * * *");
         let displayText = "";
@@ -162,7 +253,10 @@ export const createColumns = (
               </div>
             }
           >
-            <span className={styles.cronText}>{displayText}</span>
+            <span className={styles.cronText}>
+              {batchDispatch && <Tag color="processing">批调度</Tag>}
+              <span>{displayText}</span>
+            </span>
           </Tooltip>
         );
       },
@@ -338,16 +432,41 @@ export const createColumns = (
       width: 240,
       fixed: "right",
       render: (_: unknown, record: CronJob) => {
+        const broadcastChild = isBroadcastChildJob(record);
+        const batchConfigurationDisabled =
+          broadcastChild || !isBatchDispatchJob(record);
         const menuItems: MenuProps["items"] = [
           {
             key: "broadcast",
-            label: "广播到租户",
-            onClick: () => handlers.onBroadcast(record),
+            label: broadcastChild ? "广播到租户（子任务不支持）" : "广播到租户",
+            disabled: broadcastChild,
+            onClick: () => {
+              if (!broadcastChild) {
+                handlers.onBroadcast(record);
+              }
+            },
           },
           {
             key: "broadcast_children",
-            label: "查看分发用户",
-            onClick: () => handlers.onManageChildren(record),
+            label: broadcastChild
+              ? "查看分发用户（子任务不支持）"
+              : "查看分发用户",
+            disabled: broadcastChild,
+            onClick: () => {
+              if (!broadcastChild) {
+                handlers.onManageChildren(record);
+              }
+            },
+          },
+          {
+            key: "batch_configuration",
+            label: "批调度配置",
+            disabled: batchConfigurationDisabled,
+            onClick: () => {
+              if (!batchConfigurationDisabled) {
+                handlers.onBatchConfigure(record);
+              }
+            },
           },
           {
             key: "edit",

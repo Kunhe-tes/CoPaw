@@ -65,4 +65,3 @@ Generated preview targets SHALL use the same static route semantics as the exist
 - **WHEN** content is written through `/assets/text/write` using a generated preview target
 - **THEN** the public URL returned by the write response SHALL match the generated preview URL
 - **AND** the file SHALL be stored under `<WORKING_DIR>/<scope_id>/workspaces/default/static/<generated_file_name>`
-

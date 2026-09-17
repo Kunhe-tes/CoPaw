@@ -5,6 +5,7 @@ import type {
   BroadcastDefaultAgentsResponse,
   BroadcastTenantListResponse,
   BuiltinImportSpec,
+  EffectiveSkillSpec,
   HubInstallTaskResponse,
   HubSkillSpec,
   PoolSkillSpec,
@@ -115,6 +116,8 @@ async function _uploadZip(
 }
 
 export const skillApi = {
+  listEffectiveSkills: () => request<EffectiveSkillSpec[]>("/skills/effective"),
+
   listSkills: async (agentId?: string) => {
     const cacheKey = `/skills${agentId ? `?agent=${agentId}` : ""}`;
     const cached = getCached<SkillSpec[]>(cacheKey);

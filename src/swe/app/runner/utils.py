@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import hashlib
 import json
 import logging
 import platform
@@ -25,12 +26,66 @@ from ...agents.utils.tool_summary import (
     generate_tool_call_summary,
     generate_tool_output_summary,
 )
+from ...agents.tool_failure import TOOL_GOVERNANCE_BLOCK_FIELD
 from ...config import load_config  # pylint: disable=no-name-in-module
 from .models import ChatMessage
-from .tool_status import apply_running_tool_status, apply_terminal_tool_status
+from .operation_group import (
+    OPERATION_GROUP_FIELD,
+    attach_operation_group,
+    normalize_operation_group,
+)
+from .tool_status import (
+    apply_governance_tool_status,
+    apply_running_tool_status,
+    apply_terminal_tool_status,
+)
 
 logger = logging.getLogger(__name__)
 _MISSING_SOURCE_ID_PLACEHOLDER = "(not provided)"
+_RUNTIME_MESSAGE_ROLES = {"assistant", "system", "user", "tool"}
+
+
+def legacy_message_id(
+    session_id: str,
+    position: int,
+    timestamp: str | None,
+    role: str | None,
+    content: object,
+) -> str:
+    """Return a stable identity for persisted messages without a raw ID."""
+    normalized_content = (
+        content
+        if isinstance(content, str)
+        else json.dumps(
+            content,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+    )
+    material = "\x1f".join(
+        (
+            str(session_id or ""),
+            str(position),
+            str(timestamp or ""),
+            str(role or ""),
+            normalized_content,
+        ),
+    )
+    return f"legacy:{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
+
+
+def _normalize_runtime_message_role(
+    role: str | None,
+    metadata: dict,
+) -> str:
+    """把不被 runtime schema 接受的角色降级为 system。"""
+    if not isinstance(role, str) or not role:
+        return "assistant"
+    if role in _RUNTIME_MESSAGE_ROLES:
+        return role
+    metadata["original_role"] = role
+    return "system"
 
 
 def build_env_context(
@@ -317,6 +372,9 @@ def _build_media_message_from_block(
 # pylint: disable=too-many-branches,too-many-statements, too-many-nested-blocks
 def agentscope_msg_to_message(
     messages: Union[Msg, List[Msg]],
+    *,
+    session_id: str = "",
+    position_offset: int = 0,
 ) -> List[ChatMessage]:
     """
     Convert AgentScope Msg(s) into one or more runtime Message objects.
@@ -342,15 +400,29 @@ def agentscope_msg_to_message(
     ) -> ChatMessage:
         payload = message.model_dump()
         payload["timestamp"] = timestamp
+        metadata = payload.get("metadata")
+        if isinstance(metadata, dict):
+            stable_id = metadata.get("original_id")
+            if isinstance(stable_id, str) and stable_id:
+                payload["id"] = stable_id
         return ChatMessage.model_validate(payload)
 
-    for msg in msgs:
-        role = msg.role or "assistant"
+    for position, msg in enumerate(msgs, start=position_offset):
+        raw_id = getattr(msg, "id", None)
+        raw_id = str(raw_id).strip() if raw_id else ""
+        stable_id = raw_id or legacy_message_id(
+            session_id,
+            position,
+            msg.timestamp,
+            msg.role,
+            msg.content,
+        )
         metadata = {
-            "original_id": msg.id,
+            "original_id": stable_id,
             "original_name": msg.name,
             "metadata": msg.metadata,
         }
+        role = _normalize_runtime_message_role(msg.role, metadata)
 
         if isinstance(msg.content, str):
             message = Message(type=MessageType.MESSAGE, role=role)
@@ -452,9 +524,10 @@ def agentscope_msg_to_message(
                 tool_name = str(block.get("name") or "")
 
                 # Generate user-friendly summary for tool call
+                attach_operation_group(call_data, arguments)
                 call_data["summary"] = generate_tool_call_summary(
                     tool_name=tool_name,
-                    arguments=arguments,
+                    arguments=call_data["arguments"],
                     server_label=block.get("server_label"),
                 )
                 apply_running_tool_status(call_data)
@@ -502,11 +575,23 @@ def agentscope_msg_to_message(
                 output_data["output_summary"] = generate_tool_output_summary(
                     tool_name=tool_name,
                     output=output,
+                    governance_status=block.get(
+                        TOOL_GOVERNANCE_BLOCK_FIELD,
+                    ),
                 )
                 apply_terminal_tool_status(
                     output_data,
                     raw_output=block.get("output"),
                 )
+                apply_governance_tool_status(
+                    output_data,
+                    block.get(TOOL_GOVERNANCE_BLOCK_FIELD),
+                )
+                operation_group = normalize_operation_group(
+                    block.get(OPERATION_GROUP_FIELD),
+                )
+                if operation_group is not None:
+                    output_data[OPERATION_GROUP_FIELD] = operation_group
 
                 data_content = DataContent(
                     delta=False,
@@ -561,6 +646,10 @@ def agentscope_msg_to_message(
                     base64_data = block.get("source", {}).get("data", "")
                     url = f"data:{media_type};base64,{base64_data}"
                     kwargs["image_url"] = url
+                elif isinstance(block.get("image_url"), str):
+                    kwargs["image_url"] = _resolve_content_url(
+                        block["image_url"],
+                    )
 
                 image_content = ImageContent(
                     delta=False,
@@ -607,6 +696,12 @@ def agentscope_msg_to_message(
                     url = f"data:{media_type};base64,{base64_data}"
                     kwargs["data"] = url
                     kwargs["format"] = media_type
+                else:
+                    url = block.get("audio_url") or block.get("data")
+                    if isinstance(url, str):
+                        url = _resolve_content_url(url)
+                        kwargs["data"] = url
+                    kwargs["format"] = block.get("format")
 
                 audio_content = AudioContent(
                     delta=False,
@@ -651,6 +746,10 @@ def agentscope_msg_to_message(
                     base64_data = block.get("source", {}).get("data", "")
                     url = f"data:{media_type};base64,{base64_data}"
                     kwargs["video_url"] = url
+                elif isinstance(block.get("video_url"), str):
+                    kwargs["video_url"] = _resolve_content_url(
+                        block["video_url"],
+                    )
 
                 video_content = VideoContent(
                     delta=False,
@@ -676,7 +775,8 @@ def agentscope_msg_to_message(
                     current_type = MessageType.MESSAGE
 
                 kwargs = {
-                    "filename": block.get("filename"),
+                    "filename": block.get("filename")
+                    or block.get("file_name"),
                 }
                 if (
                     isinstance(block.get("source"), dict)
@@ -700,6 +800,12 @@ def agentscope_msg_to_message(
                 elif isinstance(block.get("source"), str):
                     url = _resolve_content_url(block.get("source", ""))
                     kwargs["file_url"] = url
+                elif isinstance(block.get("file_url"), str):
+                    kwargs["file_url"] = _resolve_content_url(
+                        block["file_url"],
+                    )
+                elif isinstance(block.get("file_id"), str):
+                    kwargs["file_id"] = block["file_id"]
 
                 file_content = FileContent(
                     delta=False,

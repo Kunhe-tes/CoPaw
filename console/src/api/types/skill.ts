@@ -17,6 +17,11 @@ export interface SkillSpec {
   last_updated?: string;
 }
 
+export interface EffectiveSkillSpec {
+  name: string;
+  description: string;
+}
+
 export interface PoolSkillSpec {
   name: string;
   description?: string;

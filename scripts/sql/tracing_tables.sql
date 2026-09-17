@@ -14,6 +14,7 @@ SET FOREIGN_KEY_CHECKS = 0;
 CREATE TABLE IF NOT EXISTS `swe_tracing_traces` (
     `id` BIGINT AUTO_INCREMENT COMMENT '自增主键',
     `trace_id` VARCHAR(36) NOT NULL COMMENT '追踪唯一标识，UUID格式',
+    `b3_trace_id` VARCHAR(64) DEFAULT NULL COMMENT 'Upstream B3 trace identifier',
     `source_id` VARCHAR(64) NOT NULL COMMENT '数据源标识，用于多租户数据隔离',
     `user_id` VARCHAR(128) DEFAULT NULL COMMENT '用户标识，发起请求的用户ID',
     `user_name` VARCHAR(256) DEFAULT NULL COMMENT '用户名称',
@@ -36,6 +37,7 @@ CREATE TABLE IF NOT EXISTS `swe_tracing_traces` (
     PRIMARY KEY (`id`),
     UNIQUE KEY `uk_trace_id` (`trace_id`),
     INDEX `idx_source_id` (`source_id`),
+    INDEX `idx_source_b3_trace` (`source_id`, `b3_trace_id`),
     INDEX `idx_source_start_time` (`source_id`, `start_time`),
     INDEX `idx_source_user` (`source_id`, `user_id`),
     INDEX `idx_source_session` (`source_id`, `session_id`),
@@ -67,7 +69,7 @@ CREATE TABLE IF NOT EXISTS `swe_tracing_spans` (
     `output_tokens` INT DEFAULT NULL COMMENT '输出Token数，仅LLM事件使用',
     `tool_name` VARCHAR(64) DEFAULT NULL COMMENT '工具名称，仅工具事件使用',
     `skill_name` VARCHAR(128) DEFAULT NULL COMMENT '技能名称，用于工具归属和技能事件',
-    `skill_description` TEXT DEFAULT NULL COMMENT '技能描述，从 SKILL.md 的 description 字段读取',
+    `skill_id` VARCHAR(128) DEFAULT NULL COMMENT '技能唯一标识符，跨服务稳定关联 swe_skills.skill_id',
     `mcp_server` VARCHAR(64) DEFAULT NULL COMMENT 'MCP服务器名，标识MCP工具来源',
     `tool_input` JSON DEFAULT NULL COMMENT '工具输入参数，脱敏后的JSON格式',
     `tool_output` TEXT DEFAULT NULL COMMENT '工具输出结果，截断后的摘要',
@@ -84,6 +86,7 @@ CREATE TABLE IF NOT EXISTS `swe_tracing_spans` (
     INDEX `idx_source_tool` (`source_id`, `event_type`, `tool_name`),
     INDEX `idx_event_type` (`event_type`),
     INDEX `idx_skill_name` (`skill_name`),
+    INDEX `idx_skill_id` (`skill_id`),
     INDEX `idx_mcp_server` (`mcp_server`),
     INDEX `idx_start_time` (`start_time`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Span记录表';

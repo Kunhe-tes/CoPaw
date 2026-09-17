@@ -8,6 +8,7 @@ import threading
 
 import pytest
 
+from swe.agents.tool_failure import ToolExecutionError
 from swe.agents.tools import file_io
 from swe.config.context import tenant_context
 
@@ -116,3 +117,23 @@ async def test_append_file_cancellation_does_not_modify_target(
             await _wait_for_temp_cleanup(workspace_dir)
 
     assert target.read_text(encoding="utf-8-sig") == "original"
+
+
+@pytest.mark.asyncio
+async def test_write_file_rejects_direct_workspace_skill_write(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace_dir = _workspace(tmp_path)
+
+    with monkeypatch.context() as m:
+        m.setattr("swe.security.tenant_path_boundary.WORKING_DIR", tmp_path)
+        with tenant_context(tenant_id="tenant_a", workspace_dir=workspace_dir):
+            with pytest.raises(ToolExecutionError) as exc_info:
+                await file_io.write_file(
+                    "skills/uploaded/SKILL.md",
+                    "# Uploaded\n",
+                )
+
+    assert exc_info.value.error_type == "permission_denied"
+    assert not (workspace_dir / "skills" / "uploaded" / "SKILL.md").exists()

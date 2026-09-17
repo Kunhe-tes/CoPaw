@@ -61,6 +61,12 @@ def _ts() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
 
+def _console_output_enabled() -> bool:
+    """Return whether terminal rendering is enabled for the console channel."""
+    value = os.getenv("SWE_CONSOLE_OUTPUT_ENABLED", "true")
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
 def _event_to_sse_json(event: Any, request: Any) -> str:
     """序列化 SSE 事件，并为 response 事件补充当前请求的 trace_id。"""
     if hasattr(event, "model_dump_json"):
@@ -131,6 +137,7 @@ class ConsoleChannel(BaseChannel):
         )
         self.enabled = enabled
         self.bot_prefix = bot_prefix
+        self._output_enabled = _console_output_enabled()
         self._workspace_dir = (
             Path(workspace_dir).expanduser() if workspace_dir else None
         )
@@ -313,6 +320,7 @@ class ConsoleChannel(BaseChannel):
             session_id=session_id,
             content_parts=content_parts,
             channel_meta=meta,
+            message_id=meta.get("msgid"),
         )
         request.channel_meta = meta
 
@@ -320,10 +328,16 @@ class ConsoleChannel(BaseChannel):
         # AgentRequest 支持 extra="allow"
         user_name = meta.get("user_name")
         bbk_id = meta.get("bbk_id")
+        b3_trace_id = meta.get("b3_trace_id")
+        b3_context = meta.get("b3_context")
         if user_name:
             request.user_name = user_name  # type: ignore[attr-defined]
         if bbk_id:
             request.bbk_id = bbk_id  # type: ignore[attr-defined]
+        if b3_trace_id:
+            request.b3_trace_id = b3_trace_id  # type: ignore[attr-defined]
+        if isinstance(b3_context, dict):
+            request.b3_context = dict(b3_context)  # type: ignore[attr-defined]
 
         return request
 
@@ -421,21 +435,37 @@ class ConsoleChannel(BaseChannel):
                 status: Any,
             ) -> bool:
                 """外层 response 启动帧应等标题事件先发给前端。"""
+                latest_meta = getattr(request, "channel_meta", None)
+                if not isinstance(latest_meta, dict):
+                    latest_meta = send_meta
+                has_title = bool(latest_meta.get("session_title"))
                 status_value = getattr(status, "value", status)
                 return (
                     not title_emitted
+                    and has_title
                     and obj == "response"
                     and str(status_value).lower() == "in_progress"
                 )
 
             async def build_session_title_event() -> str | None:
-                """生成标题刷新事件；标题任务存在时先等待其完成。"""
+                """生成标题刷新事件；可选等待后台标题任务完成。"""
+                return await build_session_title_event_with_wait(
+                    wait_for_task=False,
+                )
+
+            async def build_session_title_event_with_wait(
+                *,
+                wait_for_task: bool,
+            ) -> str | None:
+                """生成标题刷新事件；流中不等待未完成的后台标题任务。"""
                 nonlocal send_meta, title_emitted, title_task_waited
                 if title_emitted:
                     return None
 
                 title_task = getattr(request, "_session_title_task", None)
                 if title_task is not None and not title_task_waited:
+                    if not wait_for_task and not title_task.done():
+                        return None
                     title_task_waited = True
                     try:
                         await asyncio.shield(title_task)
@@ -509,6 +539,47 @@ class ConsoleChannel(BaseChannel):
                             if media_message:
                                 event.output.append(media_message)
 
+                event_metadata = getattr(event, "metadata", None)
+                boundary = (
+                    event_metadata.get("conversation_compaction_boundary")
+                    if isinstance(event_metadata, dict)
+                    else None
+                )
+                if obj == "message" and isinstance(boundary, dict):
+                    latest_channel_meta = getattr(
+                        request,
+                        "channel_meta",
+                        None,
+                    )
+                    metadata_chat_id = (
+                        latest_channel_meta.get("chat_id")
+                        if isinstance(latest_channel_meta, dict)
+                        else None
+                    )
+                    if (
+                        not isinstance(metadata_chat_id, str)
+                        or not metadata_chat_id
+                    ):
+                        metadata_chat_id = getattr(request, "chat_id", "")
+                    chat_id = (
+                        metadata_chat_id
+                        if isinstance(metadata_chat_id, str)
+                        else ""
+                    )
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            {
+                                "object": "conversation_compacted",
+                                "chat_id": chat_id,
+                                "boundary": boundary,
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n\n"
+                    )
+                    continue
+
                 data = _event_to_sse_json(event, request)
                 if should_buffer_before_title(obj, status):
                     buffered_initial_events.append(f"data: {data}\n\n")
@@ -534,6 +605,11 @@ class ConsoleChannel(BaseChannel):
 
             for buffered in flush_buffered_initial_events():
                 yield buffered
+            title_event = await build_session_title_event_with_wait(
+                wait_for_task=True,
+            )
+            if title_event:
+                yield title_event
 
             logger.info(
                 "console stream done: event_count=%s has_response=%s",
@@ -573,6 +649,8 @@ class ConsoleChannel(BaseChannel):
         piped or contains unsupported characters. This wrapper handles
         such cases gracefully.
         """
+        if not self._output_enabled:
+            return
         try:
             print(text)
         except OSError as e:
@@ -662,10 +740,10 @@ class ConsoleChannel(BaseChannel):
         to_handle: str,
         text: str,
         meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         """Send a text message — prints to stdout and pushes to frontend."""
         if not self.enabled:
-            return
+            return False
         ts = _ts()
         prefix = (meta or {}).get("bot_prefix", self.bot_prefix) or ""
         self._safe_print(
@@ -674,23 +752,38 @@ class ConsoleChannel(BaseChannel):
         )
         sid = (meta or {}).get("session_id")
         if sid and text.strip():
-            await push_store_append(sid, text.strip())
+            await push_store_append(
+                sid,
+                text.strip(),
+                delivery_key=str((meta or {}).get("cron_delivery_key") or ""),
+            )
+        return True
 
     async def send_content_parts(
         self,
         to_handle: str,
         parts: List[OutgoingContentPart],
         meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         """
         Send content parts — prints to stdout and pushes to frontend store.
         """
+        if not self.enabled:
+            return False
         self._print_parts(parts)
+        body = self._parts_to_text(parts, meta)
+        if not body.strip():
+            return False
         sid = (meta or {}).get("session_id")
         if sid:
-            body = self._parts_to_text(parts, meta)
-            if body.strip():
-                await push_store_append(sid, body.strip())
+            await push_store_append(
+                sid,
+                body.strip(),
+                delivery_key=str(
+                    (meta or {}).get("cron_delivery_key") or "",
+                ),
+            )
+        return True
 
     # ── lifecycle ───────────────────────────────────────────────────
 

@@ -114,7 +114,6 @@ export type FileType = "previewable" | "unsupported";
 const AUTO_PREVIEW_MARKERS = [
   "[auto-preview]",
   "auto-preview",
-  "存款到期完整客户名单",
 ];
 const HTML_PREVIEW_EXTS = ["html", "htm"];
 

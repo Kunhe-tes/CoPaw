@@ -11,6 +11,7 @@ from ..__version__ import __version__
 from ..config.constant import DOCS_ENABLED, CORS_ORIGINS
 from ..database.config import get_database_config
 from ..database.connection import DatabaseConnection
+from .middleware import RequestLoggingMiddleware
 from .routers import api_router
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,14 @@ async def lifespan(fastapi_app: FastAPI):
     else:
         logger.info("Database connection disabled (no host configured)")
     fastapi_app.state.db = db
+    from ..security.skill_scanner import install_skill_scan_history_recorder
+    from ..security.skill_scanner.history import MarketSkillScanHistoryWriter
 
+    scan_history_writer = (
+        MarketSkillScanHistoryWriter(db)
+        if getattr(db, "is_connected", False)
+        else None
+    )
     marketplace_root = (
         Path(
             os.environ.get(
@@ -74,9 +82,15 @@ async def lifespan(fastapi_app: FastAPI):
         marketplace_root=marketplace_root,
         swe_root=swe_root,
     )
+    fastapi_app.state.skill_scan_history_recorder = scan_history_writer
+    fastapi_app.state.marketplace.skill_scan_history_recorder = (
+        scan_history_writer
+    )
+    install_skill_scan_history_recorder(scan_history_writer)
 
     yield
 
+    install_skill_scan_history_recorder(None)
     await db.close()
     logger.info("Market service shutting down...")
 
@@ -100,5 +114,7 @@ if CORS_ORIGINS:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+app.add_middleware(RequestLoggingMiddleware)
 
 app.include_router(api_router, prefix="/api")

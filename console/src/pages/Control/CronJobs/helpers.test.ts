@@ -2,9 +2,11 @@ import dayjs from "dayjs";
 import { describe, expect, it } from "vitest";
 import type { CronJobSpecOutput } from "@/api/types";
 import {
+  buildSkillSelectOptions,
   buildCronJobFormValues,
   buildCronJobSubmitPayload,
   getBroadcastResultMessage,
+  getBroadcastTaskProgressText,
   normalizeSkillIdsInput,
 } from "./helpers";
 
@@ -77,6 +79,18 @@ describe("CronJobs helpers", () => {
     expect(result.notificationDelayUnit).toBe("hours");
   });
 
+  it("does not hydrate legacy dispatch intent meta into the broadcast switch", () => {
+    const result = buildCronJobFormValues(
+      buildCronJob({
+        meta: {
+          dispatch_intents_enabled: true,
+        },
+      }),
+    );
+
+    expect(result.meta?.broadcast_dispatch_intents_enabled).toBeUndefined();
+  });
+
   it("builds submit payload with explicit model_slot for agent jobs", () => {
     const result = buildCronJobSubmitPayload({
       ...buildCronJob(),
@@ -100,12 +114,107 @@ describe("CronJobs helpers", () => {
     expect(result.request?.input).toEqual([{ role: "user", content: [] }]);
   });
 
+  it("removes hidden broadcast dispatch intent flag on submit", () => {
+    const result = buildCronJobSubmitPayload({
+      ...buildCronJob({
+        meta: {
+          existing_meta: "kept",
+          broadcast_dispatch_intents_enabled: true,
+        },
+      }),
+    });
+
+    expect(result.meta).toMatchObject({
+      existing_meta: "kept",
+      notification_delay_minutes: 0,
+    });
+    expect(result.meta).not.toHaveProperty(
+      "broadcast_dispatch_intents_enabled",
+    );
+  });
+
+  it("removes disabled broadcast dispatch intent flag on submit", () => {
+    const result = buildCronJobSubmitPayload({
+      ...buildCronJob({
+        meta: {
+          existing_meta: "kept",
+          broadcast_dispatch_intents_enabled: false,
+        },
+      }),
+    });
+
+    expect(result.meta?.existing_meta).toBe("kept");
+    expect(result.meta).not.toHaveProperty(
+      "broadcast_dispatch_intents_enabled",
+    );
+  });
+
+  it("removes legacy dispatch intent flag on submit", () => {
+    const result = buildCronJobSubmitPayload({
+      ...buildCronJob({
+        meta: {
+          dispatch_intents_enabled: true,
+          broadcast_dispatch_intents_enabled: false,
+        },
+      }),
+    });
+
+    expect(result.meta).not.toHaveProperty("dispatch_intents_enabled");
+    expect(result.meta).not.toHaveProperty(
+      "broadcast_dispatch_intents_enabled",
+    );
+  });
+
+  it("does not persist hidden broadcast dispatch switch on child jobs", () => {
+    const result = buildCronJobSubmitPayload({
+      ...buildCronJob({
+        meta: {
+          broadcast_source_job_id: "parent-job",
+          broadcast_dispatch_intents_enabled: true,
+        },
+      }),
+    });
+
+    expect(result.meta?.broadcast_source_job_id).toBe("parent-job");
+    expect(result.meta).not.toHaveProperty(
+      "broadcast_dispatch_intents_enabled",
+    );
+  });
+
   it("normalizes manually entered skill ids before submit", () => {
     expect(normalizeSkillIdsInput("a, b\nc a")).toBe("a,b,c");
   });
 
-  it("rejects invalid skill id characters", () => {
-    expect(() => normalizeSkillIdsInput("bad/id")).toThrow();
+  it("normalizes selected skill ids before submit", () => {
+    expect(normalizeSkillIdsInput(["a", "b", "a"])).toBe("a,b");
+  });
+
+  it("deduplicates dropdown options by skill_id", () => {
+    expect(
+      buildSkillSelectOptions([
+        {
+          skill_id: "same-skill-id",
+          skill_name: "first_skill_name",
+          cn_name: "首次展示",
+        },
+        {
+          skill_id: "same-skill-id",
+          skill_name: "second_skill_name",
+          cn_name: "重复展示",
+        },
+      ]),
+    ).toEqual([
+      {
+        value: "same-skill-id",
+        label: "首次展示 (same-skill-id)",
+      },
+    ]);
+  });
+
+  it("accepts selected database skill ids without frontend character filtering", () => {
+    expect(normalizeSkillIdsInput(["数据分析/技能_001", "skill:demo"])).toBe(
+      "数据分析/技能_001,skill:demo",
+    );
   });
 
   it("rejects skill ids beyond the API length limit", () => {
@@ -115,7 +224,7 @@ describe("CronJobs helpers", () => {
   it("maps form skillIds to API skill_ids in submit payload", () => {
     const result = buildCronJobSubmitPayload({
       ...buildCronJob(),
-      skillIds: "a b",
+      skillIds: ["a", "b"],
     });
 
     expect(result.skill_ids).toBe("a,b");
@@ -128,7 +237,7 @@ describe("CronJobs helpers", () => {
       }),
     );
 
-    expect(result.skillIds).toBe("a,b");
+    expect(result.skillIds).toEqual(["a", "b"]);
   });
 
   it("clears model_slot for text jobs on submit", () => {
@@ -199,5 +308,48 @@ describe("CronJobs helpers", () => {
       tone: "warning",
       text: "Broadcasted 1, failed 1",
     });
+  });
+
+  it("summarizes running broadcast task progress", () => {
+    expect(
+      getBroadcastTaskProgressText({
+        task_id: "task-1",
+        status: "running",
+        tenant_count: 5,
+        completed_count: 2,
+        failed_count: 1,
+        results: [],
+        reused: false,
+      }),
+    ).toBe("Broadcasting 2/5 tenants, failed 1");
+  });
+
+  it("summarizes completed broadcast task progress", () => {
+    expect(
+      getBroadcastTaskProgressText({
+        task_id: "task-1",
+        status: "completed",
+        tenant_count: 3,
+        completed_count: 3,
+        failed_count: 0,
+        results: [],
+        reused: false,
+      }),
+    ).toBe("Broadcast completed 3/3 tenants");
+  });
+
+  it("uses task-level broadcast failure summary", () => {
+    expect(
+      getBroadcastTaskProgressText({
+        task_id: "task-1",
+        status: "failed",
+        tenant_count: 3,
+        completed_count: 1,
+        failed_count: 0,
+        results: [],
+        failure_summary: "database unavailable",
+        reused: false,
+      }),
+    ).toBe("Broadcast failed: database unavailable");
   });
 });

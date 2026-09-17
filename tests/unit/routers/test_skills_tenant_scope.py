@@ -53,6 +53,9 @@ get_workspace_skill_manifest_path = (
     skills_manager.get_workspace_skill_manifest_path
 )
 get_workspace_skills_dir = skills_manager.get_workspace_skills_dir
+get_workspace_disabled_skills_dir = (
+    skills_manager.get_workspace_disabled_skills_dir
+)
 reconcile_pool_manifest = skills_manager.reconcile_pool_manifest
 reconcile_workspace_manifest = skills_manager.reconcile_workspace_manifest
 
@@ -63,13 +66,35 @@ skills_router = _load_module(
 )
 
 
+class _FakeTenantWorkspacePool:
+    async def ensure_bootstrap(
+        self,
+        _tenant_id: str,
+        *,
+        source_id: str | None = None,
+    ) -> None:
+        del source_id
+
+
 def _request(
     tenant_id: str | None = "tenant-a",
     source_id: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        state=SimpleNamespace(tenant_id=tenant_id, source_id=source_id),
+        state=SimpleNamespace(
+            tenant_id=tenant_id,
+            source_id=source_id,
+            tenant_workspace_pool=_FakeTenantWorkspacePool(),
+        ),
     )
+
+
+class _NoopAsyncLock:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
 
 
 def _write_skill(skill_dir: Path, description: str) -> None:
@@ -99,6 +124,35 @@ def _write_workspace_scaffold(workspace_dir: Path) -> None:
         )
 
 
+def _stub_bootstrapped_tenant_initializer(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class FakeInitializer:
+        def __init__(
+            self,
+            base_working_dir: Path,
+            tenant_id: str,
+            source_id: str | None = None,
+        ):
+            self.base_working_dir = base_working_dir
+            self.tenant_id = tenant_id
+            self.source_id = source_id
+            self.tenant_dir = tmp_path / tenant_id
+
+        def has_seeded_bootstrap(self) -> bool:
+            return True
+
+        def ensure_seeded_bootstrap(self) -> dict[str, object]:
+            raise AssertionError("should not bootstrap an existing tenant")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "swe.app.workspace.tenant_initializer",
+        SimpleNamespace(TenantInitializer=FakeInitializer),
+    )
+
+
 def _set_workspace_skill_state(
     workspace_dir: Path,
     skill_name: str,
@@ -107,19 +161,14 @@ def _set_workspace_skill_state(
     description: str,
 ) -> None:
     _write_workspace_scaffold(workspace_dir)
-    _write_skill(
-        get_workspace_skills_dir(workspace_dir) / skill_name,
-        description,
+    created = skills_manager.SkillService(workspace_dir).create_skill(
+        name=skill_name,
+        content=(
+            f"---\nname: {skill_name}\n" f"description: {description}\n---\n"
+        ),
+        enable=enabled,
     )
-    reconcile_workspace_manifest(workspace_dir)
-
-    manifest_path = get_workspace_skill_manifest_path(workspace_dir)
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["skills"][skill_name]["enabled"] = enabled
-    manifest_path.write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    assert created == skill_name
 
 
 def _workspace_skill_enabled(workspace_dir: Path, skill_name: str) -> bool:
@@ -129,6 +178,125 @@ def _workspace_skill_enabled(workspace_dir: Path, skill_name: str) -> bool:
         ),
     )
     return bool(manifest["skills"][skill_name]["enabled"])
+
+
+def test_list_effective_skills_returns_only_console_available_metadata(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    _set_workspace_skill_state(
+        workspace,
+        "console-guide",
+        enabled=True,
+        description="Console guidance",
+    )
+    _set_workspace_skill_state(
+        workspace,
+        "other-channel",
+        enabled=True,
+        description="Other channel guidance",
+    )
+    _set_workspace_skill_state(
+        workspace,
+        "disabled-guide",
+        enabled=False,
+        description="Disabled guidance",
+    )
+    manifest_path = get_workspace_skill_manifest_path(workspace)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["skills"]["other-channel"]["channels"] = ["feishu"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    async def fake_workspace_dir(_request: object) -> Path:
+        return workspace
+
+    monkeypatch.setattr(
+        skills_router,
+        "_request_workspace_dir",
+        fake_workspace_dir,
+    )
+
+    result = asyncio.run(skills_router.list_effective_skills(_request()))
+
+    assert [item.model_dump() for item in result] == [
+        {"name": "console-guide", "description": "Console guidance"},
+    ]
+
+
+def test_restore_workspace_skill_returns_disabled_package_to_hidden_root(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    _set_workspace_skill_state(
+        workspace,
+        "demo",
+        enabled=False,
+        description="original disabled",
+    )
+    snapshot = skills_router._snapshot_workspace_skill(workspace, "demo")
+    skills_manager.SkillService(workspace).create_skill(
+        "demo",
+        "---\nname: demo\ndescription: replacement\n---\n",
+        overwrite=True,
+        enable=True,
+    )
+    active_dir = get_workspace_skills_dir(workspace) / "demo"
+    _write_skill(active_dir, "stray active")
+
+    skills_router._restore_workspace_skill(snapshot)
+
+    hidden_dir = get_workspace_disabled_skills_dir(workspace) / "demo"
+    assert not active_dir.exists()
+    assert "original disabled" in (hidden_dir / "SKILL.md").read_text(
+        encoding="utf-8",
+    )
+    assert _workspace_skill_enabled(workspace, "demo") is False
+
+
+def test_restore_workspace_skill_removes_both_roots_when_entry_was_absent(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    snapshot = skills_router._snapshot_workspace_skill(workspace, "demo")
+    _set_workspace_skill_state(
+        workspace,
+        "demo",
+        enabled=True,
+        description="downloaded",
+    )
+    hidden_dir = get_workspace_disabled_skills_dir(workspace) / "demo"
+    _write_skill(hidden_dir, "stray hidden")
+
+    skills_router._restore_workspace_skill(snapshot)
+
+    assert not (get_workspace_skills_dir(workspace) / "demo").exists()
+    assert not hidden_dir.exists()
+    manifest = json.loads(
+        get_workspace_skill_manifest_path(workspace).read_text(
+            encoding="utf-8",
+        ),
+    )
+    assert "demo" not in manifest["skills"]
+
+
+def test_management_specs_include_registered_disabled_skill(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    _set_workspace_skill_state(
+        workspace,
+        "demo",
+        enabled=False,
+        description="disabled demo",
+    )
+
+    specs = skills_router._build_workspace_skill_specs(workspace)
+
+    assert not (get_workspace_skills_dir(workspace) / "demo").exists()
+    assert (get_workspace_disabled_skills_dir(workspace) / "demo").exists()
+    assert [spec.name for spec in specs] == ["demo"]
+    assert specs[0].enabled is False
 
 
 def _stub_agent_request(
@@ -607,6 +775,223 @@ def test_download_pool_skill_to_workspaces_uses_effective_tenant_id(
     }
 
 
+def test_download_pool_skill_to_workspaces_runs_transaction_off_loop(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    observed: dict[str, object] = {}
+
+    async def fake_to_thread(func, *args, **kwargs):
+        observed["func"] = func
+        observed["args"] = args
+        observed["kwargs"] = kwargs
+        return {"downloaded": [{"workspace_id": "default"}]}
+
+    def fake_tenant_working_dir(tenant_id=None):
+        return tmp_path / (
+            "default_ruice" if tenant_id == "default" else str(tenant_id)
+        )
+
+    monkeypatch.setattr(
+        skills_router,
+        "get_tenant_request_working_dir",
+        fake_tenant_working_dir,
+    )
+    monkeypatch.setattr(skills_router.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(
+        skills_router,
+        "_POOL_SKILL_DOWNLOAD_LOCK",
+        _NoopAsyncLock(),
+    )
+
+    result = asyncio.run(
+        skills_router.download_pool_skill_to_workspaces(
+            _request("default", "ruice"),
+            skills_router.DownloadFromPoolRequest(
+                skill_name="guidance",
+                targets=[
+                    skills_router.PoolDownloadTarget(workspace_id="default"),
+                ],
+                overwrite=True,
+            ),
+        ),
+    )
+
+    assert result == {"downloaded": [{"workspace_id": "default"}]}
+    assert observed["func"] is skills_router._download_pool_skill_transaction
+    args = observed["args"]
+    assert isinstance(args, tuple)
+    assert args[0].skill_name == "guidance"
+    assert observed["kwargs"] == {
+        "tenant_id": "default_ruice",
+        "working_dir": tmp_path / "default_ruice",
+    }
+
+
+def test_download_pool_skill_to_workspaces_acquires_async_lock_before_thread(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    observed: list[str] = []
+
+    class FakeAsyncLock:
+        async def __aenter__(self):
+            observed.append("enter")
+
+        async def __aexit__(self, exc_type, exc, tb):
+            observed.append("exit")
+
+    async def fake_to_thread(func, *args, **kwargs):
+        observed.append("to_thread")
+        return {"downloaded": [{"workspace_id": "default"}]}
+
+    monkeypatch.setattr(
+        skills_router,
+        "get_tenant_request_working_dir",
+        lambda tenant_id=None: tmp_path / str(tenant_id),
+    )
+    monkeypatch.setattr(skills_router.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(
+        skills_router,
+        "_POOL_SKILL_DOWNLOAD_LOCK",
+        FakeAsyncLock(),
+    )
+
+    result = asyncio.run(
+        skills_router.download_pool_skill_to_workspaces(
+            _request("default"),
+            skills_router.DownloadFromPoolRequest(
+                skill_name="guidance",
+                targets=[
+                    skills_router.PoolDownloadTarget(workspace_id="default"),
+                ],
+                overwrite=True,
+            ),
+        ),
+    )
+
+    assert result == {"downloaded": [{"workspace_id": "default"}]}
+    assert observed == ["enter", "to_thread", "exit"]
+
+
+def test_download_pool_skill_transaction_runs_synchronously(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    observed: list[str] = []
+
+    def fake_resolve_and_preflight(
+        body,
+        *,
+        tenant_id: str | None,
+        working_dir: Path,
+    ):
+        observed.append("preflight")
+
+        class FakeHubService:
+            def download_to_workspace(self, **_kwargs):
+                observed.append("download")
+                return {
+                    "success": True,
+                    "workspace_name": "Default",
+                    "name": body.skill_name,
+                }
+
+        return list(body.targets), FakeHubService()
+
+    monkeypatch.setattr(
+        skills_router,
+        "_resolve_and_preflight",
+        fake_resolve_and_preflight,
+    )
+    monkeypatch.setattr(
+        skills_router,
+        "_build_download_plan",
+        lambda targets, skill_name, tenant_id=None: [
+            {
+                "workspace_id": "default",
+                "workspace_dir": tmp_path / "workspace",
+                "target_name": None,
+                "snapshot": {"backup_dir": None},
+            },
+        ],
+    )
+
+    result = skills_router._download_pool_skill_transaction(
+        skills_router.DownloadFromPoolRequest(
+            skill_name="guidance",
+            targets=[skills_router.PoolDownloadTarget(workspace_id="default")],
+            overwrite=True,
+        ),
+        tenant_id="default_ruice",
+        working_dir=tmp_path / "default_ruice",
+    )
+
+    assert result == {
+        "downloaded": [
+            {
+                "workspace_id": "default",
+                "workspace_name": "Default",
+                "name": "guidance",
+            },
+        ],
+    }
+    assert observed == ["preflight", "download"]
+
+
+def test_download_transaction_preflight_preserves_all_targets_on_late_unmanaged_conflict(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    working_dir = tmp_path / "tenant-a"
+    _write_skill(
+        get_skill_pool_dir(working_dir=working_dir) / "guidance",
+        "pool guidance",
+    )
+    reconcile_pool_manifest(working_dir=working_dir)
+    first_workspace = working_dir / "workspaces" / "first"
+    second_workspace = working_dir / "workspaces" / "second"
+    unmanaged = get_workspace_skills_dir(second_workspace) / "guidance"
+    _write_skill(unmanaged, "unmanaged guidance")
+    unmanaged_bytes = (unmanaged / "SKILL.md").read_bytes()
+
+    monkeypatch.setattr(
+        skills_router,
+        "_workspace_dir_for_agent",
+        lambda agent_id, tenant_id=None: {
+            "first": first_workspace,
+            "second": second_workspace,
+        }[agent_id],
+    )
+
+    try:
+        skills_router._download_pool_skill_transaction(
+            skills_router.DownloadFromPoolRequest(
+                skill_name="guidance",
+                targets=[
+                    skills_router.PoolDownloadTarget(workspace_id="first"),
+                    skills_router.PoolDownloadTarget(workspace_id="second"),
+                ],
+                overwrite=True,
+            ),
+            tenant_id="tenant-a",
+            working_dir=working_dir,
+        )
+    except skills_router.HTTPException as exc:
+        assert exc.status_code == 409
+        assert exc.detail["downloaded"] == []
+        assert exc.detail["conflicts"][0]["reason"] == "conflict"
+    else:
+        raise AssertionError("expected unmanaged conflict")
+
+    assert not (
+        get_workspace_skills_dir(first_workspace) / "guidance"
+    ).exists()
+    assert not get_workspace_skill_manifest_path(first_workspace).exists()
+    assert (unmanaged / "SKILL.md").read_bytes() == unmanaged_bytes
+    assert not get_workspace_skill_manifest_path(second_workspace).exists()
+
+
 def test_broadcast_pool_skills_to_bootstrapped_tenant(
     monkeypatch,
     tmp_path: Path,
@@ -704,6 +1089,199 @@ def test_broadcast_pool_skills_to_bootstrapped_tenant(
     assert "tenant local only" in untouched_workspace_skill
 
 
+def test_broadcast_rejects_unmanaged_workspace_before_pool_replacement(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    source_tenant = tmp_path / "tenant-a"
+    target_tenant = tmp_path / "tenant-b"
+    target_workspace = target_tenant / "workspaces" / "default"
+    _write_skill(
+        get_skill_pool_dir(working_dir=source_tenant) / "guidance",
+        "source guidance",
+    )
+    reconcile_pool_manifest(working_dir=source_tenant)
+    target_pool_dir = (
+        get_skill_pool_dir(working_dir=target_tenant) / "guidance"
+    )
+    _write_skill(target_pool_dir, "target pool guidance")
+    reconcile_pool_manifest(working_dir=target_tenant)
+    target_pool_bytes = (target_pool_dir / "SKILL.md").read_bytes()
+    target_pool_manifest = get_pool_skill_manifest_path(
+        working_dir=target_tenant,
+    )
+    target_pool_manifest_bytes = target_pool_manifest.read_bytes()
+    unmanaged = get_workspace_skills_dir(target_workspace) / "guidance"
+    _write_skill(unmanaged, "unmanaged guidance")
+    unmanaged_bytes = (unmanaged / "SKILL.md").read_bytes()
+
+    monkeypatch.setattr(
+        skills_router,
+        "get_tenant_request_working_dir",
+        lambda tenant_id=None: tmp_path / str(tenant_id),
+    )
+    _stub_bootstrapped_tenant_initializer(monkeypatch, tmp_path)
+
+    result = asyncio.run(
+        skills_router.broadcast_pool_skills_to_default_agents(
+            _request("tenant-a"),
+            skills_router.BroadcastDefaultAgentsRequest(
+                skill_names=["guidance"],
+                target_tenant_ids=["tenant-b"],
+                overwrite=True,
+            ),
+        ),
+    )
+
+    assert result.results[0].success is False
+    assert "conflict" in result.results[0].error.lower()
+    assert (unmanaged / "SKILL.md").read_bytes() == unmanaged_bytes
+    assert not get_workspace_skill_manifest_path(target_workspace).exists()
+    assert (target_pool_dir / "SKILL.md").read_bytes() == target_pool_bytes
+    assert target_pool_manifest.read_bytes() == target_pool_manifest_bytes
+
+
+def test_broadcast_late_unmanaged_conflict_prevents_all_skill_updates(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    source_tenant = tmp_path / "tenant-a"
+    target_tenant = tmp_path / "tenant-b"
+    target_workspace = target_tenant / "workspaces" / "default"
+    for skill_name in ("alpha", "guidance"):
+        _write_skill(
+            get_skill_pool_dir(working_dir=source_tenant) / skill_name,
+            f"source {skill_name}",
+        )
+        _write_skill(
+            get_skill_pool_dir(working_dir=target_tenant) / skill_name,
+            f"target {skill_name}",
+        )
+    reconcile_pool_manifest(working_dir=source_tenant)
+    reconcile_pool_manifest(working_dir=target_tenant)
+    target_pool_manifest = get_pool_skill_manifest_path(
+        working_dir=target_tenant,
+    )
+    target_pool_manifest_bytes = target_pool_manifest.read_bytes()
+    target_pool_bytes = {
+        skill_name: (
+            get_skill_pool_dir(working_dir=target_tenant)
+            / skill_name
+            / "SKILL.md"
+        ).read_bytes()
+        for skill_name in ("alpha", "guidance")
+    }
+    unmanaged = get_workspace_skills_dir(target_workspace) / "guidance"
+    _write_skill(unmanaged, "unmanaged guidance")
+    unmanaged_bytes = (unmanaged / "SKILL.md").read_bytes()
+
+    monkeypatch.setattr(
+        skills_router,
+        "get_tenant_request_working_dir",
+        lambda tenant_id=None: tmp_path / str(tenant_id),
+    )
+    _stub_bootstrapped_tenant_initializer(monkeypatch, tmp_path)
+
+    result = asyncio.run(
+        skills_router.broadcast_pool_skills_to_default_agents(
+            _request("tenant-a"),
+            skills_router.BroadcastDefaultAgentsRequest(
+                skill_names=["alpha", "guidance"],
+                target_tenant_ids=["tenant-b"],
+                overwrite=True,
+            ),
+        ),
+    )
+
+    assert result.results[0].success is False
+    assert "conflict" in result.results[0].error.lower()
+    assert not (get_workspace_skills_dir(target_workspace) / "alpha").exists()
+    assert (unmanaged / "SKILL.md").read_bytes() == unmanaged_bytes
+    assert not get_workspace_skill_manifest_path(target_workspace).exists()
+    for skill_name, original_bytes in target_pool_bytes.items():
+        target_path = (
+            get_skill_pool_dir(working_dir=target_tenant)
+            / skill_name
+            / "SKILL.md"
+        )
+        assert target_path.read_bytes() == original_bytes
+    assert target_pool_manifest.read_bytes() == target_pool_manifest_bytes
+
+
+def test_broadcast_unmanaged_conflict_prevents_target_bootstrap(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    source_tenant = tmp_path / "tenant-a"
+    target_tenant = tmp_path / "tenant-b"
+    target_workspace = target_tenant / "workspaces" / "default"
+    _write_skill(
+        get_skill_pool_dir(working_dir=source_tenant) / "guidance",
+        "source guidance",
+    )
+    reconcile_pool_manifest(working_dir=source_tenant)
+    target_pool_dir = (
+        get_skill_pool_dir(working_dir=target_tenant) / "guidance"
+    )
+    _write_skill(target_pool_dir, "target guidance")
+    reconcile_pool_manifest(working_dir=target_tenant)
+    target_pool_bytes = (target_pool_dir / "SKILL.md").read_bytes()
+    target_pool_manifest = get_pool_skill_manifest_path(
+        working_dir=target_tenant,
+    )
+    target_pool_manifest_bytes = target_pool_manifest.read_bytes()
+    unmanaged = get_workspace_skills_dir(target_workspace) / "guidance"
+    _write_skill(unmanaged, "unmanaged guidance")
+    unmanaged_bytes = (unmanaged / "SKILL.md").read_bytes()
+    bootstrap_calls: list[str] = []
+
+    class FakeInitializer:
+        def __init__(
+            self,
+            base_working_dir: Path,
+            tenant_id: str,
+            source_id: str | None = None,
+        ):
+            self.tenant_dir = tmp_path / tenant_id
+
+        def has_seeded_bootstrap(self) -> bool:
+            return False
+
+        def ensure_seeded_bootstrap(self) -> dict[str, object]:
+            bootstrap_calls.append("called")
+            raise AssertionError("bootstrap must follow workspace preflight")
+
+    monkeypatch.setattr(
+        skills_router,
+        "get_tenant_request_working_dir",
+        lambda tenant_id=None: tmp_path / str(tenant_id),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "swe.app.workspace.tenant_initializer",
+        SimpleNamespace(TenantInitializer=FakeInitializer),
+    )
+
+    result = asyncio.run(
+        skills_router.broadcast_pool_skills_to_default_agents(
+            _request("tenant-a"),
+            skills_router.BroadcastDefaultAgentsRequest(
+                skill_names=["guidance"],
+                target_tenant_ids=["tenant-b"],
+                overwrite=True,
+            ),
+        ),
+    )
+
+    assert result.results[0].success is False
+    assert "conflict" in result.results[0].error.lower()
+    assert bootstrap_calls == []
+    assert (unmanaged / "SKILL.md").read_bytes() == unmanaged_bytes
+    assert not get_workspace_skill_manifest_path(target_workspace).exists()
+    assert (target_pool_dir / "SKILL.md").read_bytes() == target_pool_bytes
+    assert target_pool_manifest.read_bytes() == target_pool_manifest_bytes
+
+
 def test_broadcast_pool_skills_bootstraps_missing_tenant(
     monkeypatch,
     tmp_path: Path,
@@ -763,10 +1341,18 @@ def test_broadcast_pool_skills_bootstraps_missing_tenant(
                 ),
                 encoding="utf-8",
             )
-            get_workspace_skill_manifest_path(default_workspace).write_text(
+            workspace_manifest_path = get_workspace_skill_manifest_path(
+                default_workspace,
+            )
+            workspace_manifest_path.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+            workspace_manifest_path.write_text(
                 json.dumps(
                     {
                         "schema_version": "workspace-skill-manifest.v1",
+                        "layout_version": 2,
                         "version": 1,
                         "skills": {},
                     },
@@ -783,9 +1369,20 @@ def test_broadcast_pool_skills_bootstraps_missing_tenant(
         SimpleNamespace(TenantInitializer=FakeInitializer),
     )
 
+    request = _request("tenant-a", "ruice")
+
+    class BootstrapPool:
+        async def ensure_bootstrap(self, tenant_id, *, source_id=None):
+            FakeInitializer(
+                tmp_path,
+                tenant_id,
+                source_id,
+            ).ensure_seeded_bootstrap()
+
+    request.state.tenant_workspace_pool = BootstrapPool()
     result = asyncio.run(
         skills_router.broadcast_pool_skills_to_default_agents(
-            _request("tenant-a", "ruice"),
+            request,
             skills_router.BroadcastDefaultAgentsRequest(
                 skill_names=["guidance"],
                 target_tenant_ids=["tenant-new"],
@@ -997,9 +1594,20 @@ def test_broadcast_pool_skills_reports_partial_success(
     reconcile_workspace_manifest(ok_workspace)
     reconcile_pool_manifest(working_dir=tmp_path / "tenant-ok")
 
+    request = _request("tenant-a")
+
+    class BootstrapPool:
+        async def ensure_bootstrap(self, tenant_id, *, source_id=None):
+            FakeInitializer(
+                tmp_path,
+                tenant_id,
+                source_id,
+            ).ensure_seeded_bootstrap()
+
+    request.state.tenant_workspace_pool = BootstrapPool()
     result = asyncio.run(
         skills_router.broadcast_pool_skills_to_default_agents(
-            _request("tenant-a"),
+            request,
             skills_router.BroadcastDefaultAgentsRequest(
                 skill_names=["guidance"],
                 target_tenant_ids=["tenant-ok", "tenant-fail"],

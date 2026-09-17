@@ -194,6 +194,20 @@ class ZhaohuConfig(BaseChannelConfig):
         ),
     )
     session_end_push_enabled: bool = False
+    # 会话结束推送跳转链接前缀（使用人在招乎配置页自行配置，配置后推送附带跳转链接）
+    session_end_push_link_prefix: str = Field(
+        default_factory=lambda: EnvVarLoader.get_str(
+            "SWE_ZHAOHU_SESSION_END_PUSH_LINK_PREFIX",
+            "",
+        ),
+    )
+    # 跳转链接使用的 ID 类型："chat_id" 或 "session_id"
+    session_end_push_link_id_type: str = Field(
+        default_factory=lambda: EnvVarLoader.get_str(
+            "SWE_ZHAOHU_SESSION_END_PUSH_LINK_ID_TYPE",
+            "session_id",
+        ),
+    )
 
 
 class ConsoleConfig(BaseChannelConfig):
@@ -398,13 +412,44 @@ class ContextCompactConfig(BaseModel):
         description="Whether to enable automatic context compaction",
     )
 
-    memory_compact_ratio: float = Field(
-        default=0.75,
-        ge=0.3,
-        le=0.9,
+    lightweight_governance_ratio: float = Field(
+        default=0.65,
+        ge=0.30,
+        le=0.79,
         description=(
-            "Compaction trigger threshold ratio: compaction is triggered when "
-            "the context length reaches this fraction of max_input_length"
+            "Start asynchronously preparing checkpoint-compaction candidates "
+            "when context usage reaches this fraction of max_input_length"
+        ),
+    )
+
+    precompaction_step_ratio: float = Field(
+        default=0.05,
+        ge=0.01,
+        le=0.20,
+        description=(
+            "Prepare at most one newer checkpoint-compaction candidate for "
+            "each additional fraction of max_input_length consumed"
+        ),
+    )
+
+    memory_compact_ratio: float = Field(
+        default=0.80,
+        ge=0.31,
+        le=0.89,
+        description=(
+            "Active compaction threshold ratio: install a valid prepared "
+            "candidate or compact when context reaches this fraction of "
+            "max_input_length"
+        ),
+    )
+
+    emergency_compact_ratio: float = Field(
+        default=0.90,
+        ge=0.32,
+        le=0.95,
+        description=(
+            "Emergency degradation threshold ratio: preferentially install a "
+            "valid prepared candidate before deterministic fallback compaction"
         ),
     )
 
@@ -422,6 +467,65 @@ class ContextCompactConfig(BaseModel):
         default=True,
         description="Whether to include thinking blocks when compacting",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_context_compact_stages(cls, data: Any) -> Any:
+        """Backfill valid stages for persisted pre-checkpoint configs.
+
+        Old configs contain only ``memory_compact_ratio``. Preserve that active
+        threshold when possible and place the lightweight stage below it, so an
+        existing agent can load before its configuration is next saved.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        stage_fields = (
+            "lightweight_governance_ratio",
+            "precompaction_step_ratio",
+            "emergency_compact_ratio",
+        )
+        if "memory_compact_ratio" not in data or any(
+            field in data for field in stage_fields
+        ):
+            return data
+
+        try:
+            legacy_active_ratio = float(data["memory_compact_ratio"])
+        except (TypeError, ValueError):
+            return data
+
+        active_ratio = min(max(legacy_active_ratio, 0.31), 0.89)
+        lightweight_ratio = max(0.30, min(0.65, active_ratio - 0.05))
+        step_ratio = round(
+            max(0.01, min(0.05, active_ratio - lightweight_ratio)),
+            2,
+        )
+        emergency_ratio = round(
+            max(0.90, min(0.95, active_ratio + 0.05)),
+            2,
+        )
+
+        return {
+            **data,
+            "lightweight_governance_ratio": lightweight_ratio,
+            "precompaction_step_ratio": step_ratio,
+            "memory_compact_ratio": active_ratio,
+            "emergency_compact_ratio": emergency_ratio,
+        }
+
+    @model_validator(mode="after")
+    def validate_context_compact_stages(self) -> "ContextCompactConfig":
+        """Require the ordered lightweight, active, and emergency stages."""
+        if not (
+            self.lightweight_governance_ratio
+            < self.memory_compact_ratio
+            < self.emergency_compact_ratio
+        ):
+            raise ValueError(
+                "lightweight, active, and emergency ratios must increase",
+            )
+        return self
 
 
 class ToolResultCompactConfig(BaseModel):
@@ -657,12 +761,11 @@ class HookRuntimeRunningConfig(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    max_before_stop_turns: Optional[int] = Field(
+    max_stop_turns: Optional[int] = Field(
         default=None,
         ge=0,
         description=(
-            "BeforeStop 阻断后允许自动续跑的最大轮数；"
-            "未配置时使用 Runner 默认值"
+            "Stop 阻断后允许自动续跑的最大轮数；" "未配置时使用 Runner 默认值"
         ),
     )
     max_automatic_follow_up_turns: Optional[int] = Field(
@@ -673,6 +776,20 @@ class HookRuntimeRunningConfig(BaseModel):
             "未配置时按各机制预算推导"
         ),
     )
+    max_stop_transform_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description="Stop 输出变换流水线的总时限（秒）",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_legacy_before_stop_budget(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "max_before_stop_turns" in data:
+            raise ValueError(
+                "max_before_stop_turns has been removed; use max_stop_turns",
+            )
+        return data
 
 
 class AgentsRunningConfig(BaseModel):
@@ -688,12 +805,12 @@ class AgentsRunningConfig(BaseModel):
         ),
     )
 
-    max_before_stop_turns: Optional[int] = Field(
+    max_stop_turns: Optional[int] = Field(
         default=None,
         ge=0,
         description=(
-            "BeforeStop 阻断后允许自动续跑的最大轮数；"
-            "兼容旧版 running 顶层配置"
+            "Stop 阻断后允许自动续跑的最大轮数；"
+            "未配置时由 hook_runtime 配置或默认值决定"
         ),
     )
 
@@ -855,6 +972,15 @@ class AgentsRunningConfig(BaseModel):
                 DEFAULT_LLM_CRON_MAX_CONCURRENT
             )
         return normalized
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_legacy_before_stop_budget(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "max_before_stop_turns" in data:
+            raise ValueError(
+                "max_before_stop_turns has been removed; use max_stop_turns",
+            )
+        return data
 
     @model_validator(mode="after")
     def validate_llm_retry_backoff(self) -> "AgentsRunningConfig":
@@ -1311,6 +1437,26 @@ def _default_builtin_tools() -> Dict[str, BuiltinToolConfig]:
             enabled=True,
             description="Execute shell commands",
         ),
+        "start_background_process": BuiltinToolConfig(
+            name="start_background_process",
+            enabled=False,
+            description="Start a managed background shell process",
+        ),
+        "list_background_processes": BuiltinToolConfig(
+            name="list_background_processes",
+            enabled=False,
+            description="List managed background shell processes",
+        ),
+        "get_process_output": BuiltinToolConfig(
+            name="get_process_output",
+            enabled=False,
+            description="Read managed background process output",
+        ),
+        "stop_background_process": BuiltinToolConfig(
+            name="stop_background_process",
+            enabled=False,
+            description="Stop a managed background shell process",
+        ),
         "read_file": BuiltinToolConfig(
             name="read_file",
             enabled=True,
@@ -1341,16 +1487,6 @@ def _default_builtin_tools() -> Dict[str, BuiltinToolConfig]:
             enabled=True,
             description="Get current date and time",
         ),
-        "set_user_timezone": BuiltinToolConfig(
-            name="set_user_timezone",
-            enabled=True,
-            description="Set user timezone",
-        ),
-        "get_token_usage": BuiltinToolConfig(
-            name="get_token_usage",
-            enabled=True,
-            description="Get llm token usage",
-        ),
         "copy_file_to_static": BuiltinToolConfig(
             name="copy_file_to_static",
             enabled=True,
@@ -1362,7 +1498,23 @@ def _default_builtin_tools() -> Dict[str, BuiltinToolConfig]:
             description="update task progress state",
             display_to_user=False,
         ),
+        "emit_wplus_sop_event": BuiltinToolConfig(
+            name="emit_wplus_sop_event",
+            enabled=True,
+            description="commit a typed W+ SOP workspace event",
+            display_to_user=False,
+        ),
     }
+
+
+RETIRED_BUILTIN_TOOL_NAMES = frozenset(
+    {
+        "get_token_usage",
+        "view_image",
+        "view_video",
+        "set_user_timezone",
+    },
+)
 
 
 class ToolsConfig(BaseModel):
@@ -1375,6 +1527,8 @@ class ToolsConfig(BaseModel):
     @model_validator(mode="after")
     def _merge_default_tools(self):
         """Ensure new code-defined tools are present in saved configs."""
+        for name in RETIRED_BUILTIN_TOOL_NAMES:
+            self.builtin_tools.pop(name, None)
         for name, tc in _default_builtin_tools().items():
             if name not in self.builtin_tools:
                 self.builtin_tools[name] = tc
@@ -1484,7 +1638,9 @@ class ProcessLimitsConfig(BaseModel):
     shell: bool = True
     mcp_stdio: bool = False
     cpu_time_limit_seconds: int | None = Field(default=30, ge=1)
-    memory_max_mb: int | None = Field(default=150, ge=1)
+    memory_max_mb: int | None = Field(default=34000, ge=1)
+    shell_max_concurrent: int | None = Field(default=5, ge=1)
+    shell_acquire_timeout_seconds: float = Field(default=5, gt=0)
 
     @model_validator(mode="after")
     def validate_enabled_policy(self) -> "ProcessLimitsConfig":
@@ -1495,9 +1651,17 @@ class ProcessLimitsConfig(BaseModel):
             raise ValueError(
                 "enabled process_limits policy must target shell or mcp_stdio",
             )
-        if self.cpu_time_limit_seconds is None and self.memory_max_mb is None:
+        has_process_ceiling = (
+            self.cpu_time_limit_seconds is not None
+            or self.memory_max_mb is not None
+        )
+        has_shell_concurrency_limit = (
+            self.shell and self.shell_max_concurrent is not None
+        )
+        if not has_process_ceiling and not has_shell_concurrency_limit:
             raise ValueError(
-                "enabled process_limits policy requires at least one limit",
+                "enabled process_limits policy requires at least one "
+                "applicable limit",
             )
         return self
 
@@ -1579,7 +1743,7 @@ class ServiceHeartbeatConfig(BaseModel):
         """从环境变量获取心跳间隔秒数。"""
         return EnvVarLoader.get_int(
             "SWE_SERVICE_HEARTBEAT_INTERVAL",
-            default=30,
+            default=20,
             min_value=5,
             max_value=300,
         )

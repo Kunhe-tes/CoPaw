@@ -18,28 +18,9 @@ export default createGlobalStyle`
   pointer-events: none;
 }
 
-.conversation-quick-nav::before,
-.conversation-quick-nav::after {
-  content: '';
-  position: absolute;
-  right: 0;
-  width: 36px;
-  height: 14px;
-  z-index: 1;
-  pointer-events: none;
-}
-
-.conversation-quick-nav::before {
-  top: 0;
-  background: linear-gradient(to bottom, rgba(255, 255, 255, 0.9), transparent);
-}
-
-.conversation-quick-nav::after {
-  bottom: 0;
-  background: linear-gradient(to top, rgba(255, 255, 255, 0.9), transparent);
-}
-
 .conversation-quick-nav__scroll {
+  --quick-nav-fade-depth: clamp(56px, 18%, 80px);
+
   width: 36px;
   height: 100%;
   overflow-y: auto;
@@ -51,6 +32,53 @@ export default createGlobalStyle`
   scrollbar-color: transparent transparent;
   -ms-overflow-style: none;
   overscroll-behavior: contain;
+}
+
+.conversation-quick-nav__scroll--fade-top {
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--quick-nav-fade-depth),
+    #000 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--quick-nav-fade-depth),
+    #000 100%
+  );
+}
+
+.conversation-quick-nav__scroll--fade-bottom {
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    #000 0,
+    #000 calc(100% - var(--quick-nav-fade-depth)),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    #000 0,
+    #000 calc(100% - var(--quick-nav-fade-depth)),
+    transparent 100%
+  );
+}
+
+.conversation-quick-nav__scroll--fade-top.conversation-quick-nav__scroll--fade-bottom {
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--quick-nav-fade-depth),
+    #000 calc(100% - var(--quick-nav-fade-depth)),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--quick-nav-fade-depth),
+    #000 calc(100% - var(--quick-nav-fade-depth)),
+    transparent 100%
+  );
 }
 
 .conversation-quick-nav__items {
@@ -246,59 +274,4 @@ export default createGlobalStyle`
   }
 }
 
-/* ─── Dark Mode Adaptation ─── */
-[data-theme='dark'] .quick-nav-dot {
-  background-color: rgba(180, 180, 180, 0.4);
-}
-
-[data-theme='dark'] .quick-nav-dot:hover,
-[data-theme='dark'] .quick-nav-dot--active {
-  background-color: ${DESIGN_TOKENS.colorPrimary};
-}
-
-[data-theme='dark'] .quick-nav-tooltip {
-  background: linear-gradient(135deg, rgba(55, 105, 252, 0.9), rgba(55, 105, 252, 0.75));
-  box-shadow: 0 2px 8px rgba(55, 105, 252, 0.2);
-}
-
-[data-theme='dark'] .quick-nav-overflow-hint {
-  border-color: rgba(255, 255, 255, 0.16);
-  background: rgba(32, 32, 32, 0.96);
-  color: rgba(255, 255, 255, 0.72);
-}
-
-[data-theme='dark'] .quick-nav-overflow-hint:hover,
-[data-theme='dark'] .quick-nav-overflow-hint:focus-visible {
-  color: ${DESIGN_TOKENS.colorPrimary};
-  border-color: ${DESIGN_TOKENS.colorPrimary};
-}
-
-[data-theme='dark'] .conversation-quick-nav::before {
-  background: linear-gradient(to bottom, rgba(20, 20, 20, 0.9), transparent);
-}
-
-[data-theme='dark'] .conversation-quick-nav::after {
-  background: linear-gradient(to top, rgba(20, 20, 20, 0.9), transparent);
-}
-
-[data-theme='dark'] .quick-nav-tooltip::before {
-  border-left-color: rgba(55, 105, 252, 0.75);
-}
-
-[data-theme='dark'] .quick-nav-tooltip-content span {
-  color: rgba(255, 255, 255, 0.9);
-}
-
-[data-theme='dark'] .quick-nav-highlight-flash {
-  animation: highlight-flash-dark 1.5s ease-out;
-}
-
-@keyframes highlight-flash-dark {
-  0%, 100% {
-    background-color: transparent;
-  }
-  20%, 60% {
-    background-color: rgba(55, 105, 252, 0.12);
-  }
-}
 `;

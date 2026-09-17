@@ -68,4 +68,3 @@ The system SHALL refresh the frontend effective source config after a successful
 #### Scenario: Save refreshes effective config
 - **WHEN** a manager successfully saves tool result compaction settings
 - **THEN** the Console SHALL reload effective source config for the active source before reporting the save as complete
-

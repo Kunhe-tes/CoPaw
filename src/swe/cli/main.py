@@ -111,6 +111,11 @@ class LazyGroup(click.Group):
         "cron": ("swe.cli.cron_cmd", "cron_group", ".cron_cmd"),
         "env": ("swe.cli.env_cmd", "env_group", ".env_cmd"),
         "init": ("swe.cli.init_cmd", "init_cmd", ".init_cmd"),
+        "init-source-template": (
+            "swe.cli.init_cmd",
+            "init_source_template_cmd",
+            ".init_cmd",
+        ),
         "models": (
             "swe.cli.providers_cmd",
             "models_group",

@@ -7,18 +7,20 @@ import { request } from "../request";
 import type {
   HtmlPreviewCustomerClickResponse,
   HtmlPreviewClickEventListResponse,
-  HtmlPreviewClickEventPayload,
+  HtmlTrackerPayloadType,
   HtmlPreviewClickSubmitResponse,
   HtmlPreviewClickSummaryResponse,
   HtmlPreviewCustomerClickSummaryResponse,
   HtmlPreviewListSnapshotPayload,
   HtmlPreviewListSnapshotResponse,
   HtmlPreviewListSummaryResponse,
+  HtmlPreviewEventType,
+  HtmlPreviewTemplateType,
 } from "../types/htmlPreviewEvents";
 
 function withClickRuntimeContext(
-  payload: HtmlPreviewClickEventPayload,
-): HtmlPreviewClickEventPayload {
+  payload: HtmlTrackerPayloadType,
+): HtmlTrackerPayloadType {
   const iframeContext = getIframeContext();
   return {
     ...payload,
@@ -42,7 +44,7 @@ function withListSnapshotRuntimeContext(
 
 export const htmlPreviewEventsApi = {
   recordClick: async (
-    payload: HtmlPreviewClickEventPayload,
+    payload: HtmlTrackerPayloadType,
   ): Promise<HtmlPreviewClickSubmitResponse> => {
     try {
       const response = await fetch(getApiUrl("/html-preview/events"), {
@@ -88,7 +90,14 @@ export const htmlPreviewEventsApi = {
     cronTaskId?: string | null;
     fileUrl?: string | null;
     listKey?: string | null;
+    eventType?: HtmlPreviewEventType | "all" | null;
+    templateType?: HtmlPreviewTemplateType | null;
+    templateId?: number | null;
+    resultId?: string | null;
+    eventTargetId?: string | null;
+    traceId?: string | null;
     limit?: number;
+    offset?: number;
   }) => {
     const search = buildSearchParams(params);
     const query = search.toString();
@@ -174,7 +183,14 @@ function buildSearchParams(params?: {
   cronTaskId?: string | null;
   fileUrl?: string | null;
   listKey?: string | null;
+  eventType?: HtmlPreviewEventType | "all" | null;
+  templateType?: HtmlPreviewTemplateType | null;
+  templateId?: number | null;
+  resultId?: string | null;
+  eventTargetId?: string | null;
+  traceId?: string | null;
   limit?: number;
+  offset?: number;
 }) {
   const search = new URLSearchParams();
   if (params?.startTime) {
@@ -195,8 +211,29 @@ function buildSearchParams(params?: {
   if (params?.listKey) {
     search.set("list_key", params.listKey);
   }
+  if (params?.eventType) {
+    search.set("event_type", params.eventType);
+  }
+  if (params?.templateType) {
+    search.set("template_type", params.templateType);
+  }
+  if (params?.templateId) {
+    search.set("template_id", String(params.templateId));
+  }
+  if (params?.resultId) {
+    search.set("result_id", params.resultId);
+  }
+  if (params?.eventTargetId) {
+    search.set("event_target_id", params.eventTargetId);
+  }
+  if (params?.traceId) {
+    search.set("trace_id", params.traceId);
+  }
   if (params?.limit) {
     search.set("limit", String(params.limit));
+  }
+  if (params?.offset !== undefined) {
+    search.set("offset", String(params.offset));
   }
   return search;
 }

@@ -29,6 +29,9 @@ curl.exe "$monitorUrl/monitor/cron/executions?job_id=<job-id>&page=1&page_size=2
 - `trace_id`：回到 SWE trace 或日志继续查
 - `output_preview`：判断 Agent 是否真的产出结果
 - `notification_status`：是否进入 pending / sent / failed
+- `need_notification`：是否明确需要完成通知；为 0 时 pending 也不会被 worker 领取
+- `async_status`：通知领取要求异步状态也为 success
+- execution meta 的 `cron_dispatch`：存在完整 intent/batch/attempt 时，本次结果先回执独立 Scheduler
 
 ## 标记 Monitor 已读
 
@@ -45,10 +48,11 @@ curl.exe -X POST "$monitorUrl/monitor/cron/jobs/<job-id>/mark-read" `
 
 1. SWE 侧 `CronExecutor` 是否返回 `status=success`。
 2. `CronManager._record_task_execution_success()` 是否记录成功任务卡片。
-3. `MonitorSyncClient.record_execution()` 是否把 execution 写入 Monitor。
-4. `monitor/src/monitor/app/services/cron/notification_service.py` 是否能 claim 到 pending execution。
-5. `CronNotificationWorker` 是否成功调用 `send_task_success_notification()`。
-6. zhaohu 通道是否接受该 `target.user_id` 和 `target.session_id`。
+3. 普通 execution 是否由 `MonitorSyncClient.record_execution()` 写入 Monitor；批调度 execution 是否先成功回执 `/api/scheduler/cron/execution`。
+4. execution 是否同时满足 `status=success`、`async_status=success`、`need_notification=1`、`notification_status=pending`，且 due time 已到。
+5. `monitor/src/monitor/app/services/cron/notification_service.py` 是否能 claim 到这条 execution。
+6. `CronNotificationWorker` 是否成功调用 `send_task_success_notification()`。
+7. zhaohu 通道是否接受该 `target.user_id` 和 `target.session_id`。
 
 ## 状态是 cancelled 但有输出时
 

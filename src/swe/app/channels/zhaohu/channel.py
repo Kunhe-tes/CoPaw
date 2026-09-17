@@ -16,16 +16,19 @@ import time
 from typing import Any, Dict, Optional, Union
 from urllib.parse import quote as url_quote
 
+import asyncio
 import ssl
 
 import httpx
 from agentscope_runtime.engine.schemas.agent_schemas import (
     ContentType,
+    MessageType,
     TextContent,
 )
 
 from ....config.config import ZhaohuConfig as ZhaohuChannelConfig
 from ..base import BaseChannel, OnReplySent, ProcessHandler
+from ..renderer import MessageRenderer, RenderStyle
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,9 @@ _SUMMARY_LIMIT = 50
 _DEFAULT_CHANNEL = "ZH"
 _DEFAULT_NET = "DMZ"
 _DEFAULT_TIMEOUT = 15.0
+_APPROVAL_TEXT_LIMIT = 800
+_APPROVAL_INPUT_LIMIT = 600
+_DELIVERY_UNAVAILABLE_MESSAGE = "zhaohu delivery unavailable"
 
 # Message dedup: keep processed IDs for 5 minutes
 _DEDUP_TTL_SECONDS = 300
@@ -93,6 +99,33 @@ def _clean_payload(obj: Any) -> Any:
             out.append(cleaned)
         return out
     return obj
+
+
+def _raise_cron_delivery_failure(meta: Optional[dict], detail: str) -> None:
+    if isinstance(meta, dict) and meta.get("cron_delivery_key"):
+        raise RuntimeError(f"{_DELIVERY_UNAVAILABLE_MESSAGE}: {detail}")
+
+
+def _build_approval_result_text(
+    *,
+    request_id: str,
+    session_id: str,
+    user_id: str,
+    tool_name: str,
+    decision: str,
+    source_channel: str,
+) -> str:
+    """构建不含按钮的工具审批结果通知正文。"""
+    decision_text = "通过" if decision == "approved" else "拒绝"
+    source_channel_text = "招乎" if source_channel == "zhaohu" else "平台"
+    lines = [
+        f"{tool_name or 'unknown'}工具审批已{decision_text}",
+        f"审批ID：{request_id}",
+        f"用户：{user_id or '-'}",
+    ]
+    if source_channel:
+        lines.append(f"审批来源：{source_channel_text}")
+    return "\n".join(lines)
 
 
 class ZhaohuChannel(BaseChannel):
@@ -169,6 +202,26 @@ class ZhaohuChannel(BaseChannel):
         # Message dedup: set of processed message IDs with timestamp
         self._processed_message_ids: Dict[str, float] = {}
         self._dedup_lock = threading.Lock()
+
+        # Per-user route lock for /new session switching
+        self._user_route_locks: Dict[str, asyncio.Lock] = {}
+        self._route_lock_guard = asyncio.Lock()
+
+        # 简洁模式（filter_thinking=True，前端"显示思考过程"禁用）下，
+        # 按接收方缓冲最后一条完成消息，流程结束时只推送最终结果
+        # （思考/工具等中间消息只在 Console 展示）。
+        self._zhaohu_pending: Dict[str, Any] = {}
+        # 详细模式（filter_thinking=False，前端"显示思考过程"启用）下
+        # 思考内容也要推送，用不受过滤的独立渲染器
+        # （MessageRenderer 无状态，可安全共享）。
+        self._verbose_renderer = MessageRenderer(
+            RenderStyle(
+                show_tool_details=self._show_tool_details,
+                filter_tool_messages=self._filter_tool_messages,
+                filter_thinking=False,
+                internal_tools=self._render_style.internal_tools,
+            ),
+        )
 
         # OAuth token cache: token string and creation timestamp
         self._oauth_token: Optional[str] = None
@@ -290,6 +343,121 @@ class ZhaohuChannel(BaseChannel):
         """
         return f"zhaohu:callback:{sender_id}"
 
+    async def _get_user_route_lock(self, sap_id: str) -> asyncio.Lock:
+        """Get per-user route lock for serializing /new pointer switches."""
+        async with self._route_lock_guard:
+            lock = self._user_route_locks.get(sap_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._user_route_locks[sap_id] = lock
+            return lock
+
+    async def _get_active_session_id(self, sap_id: str) -> str:
+        """Get the user's current active session_id.
+
+        Returns the active pointer if set and the corresponding ChatSpec
+        still exists.  If the ChatSpec was deleted, clears the stale
+        pointer and falls back to the legacy format.
+        """
+        if (
+            self._workspace is None
+            or self._workspace.runner is None
+            or self._workspace.runner.session is None
+        ):
+            return self.resolve_session_id(sap_id)
+
+        meta_session_id = f"zhaohu:active:{sap_id}"
+        try:
+            state = (
+                await self._workspace.runner.session.get_session_state_dict(
+                    session_id=meta_session_id,
+                    user_id=sap_id,
+                    allow_not_exist=True,
+                )
+            )
+            active_sid = state.get("active_session_id")
+            if active_sid:
+                # Verify the ChatSpec still exists
+                if self._workspace.chat_manager is not None:
+                    existing = (
+                        await self._workspace.chat_manager.get_chat_by_session(
+                            active_sid,
+                            self.channel,
+                            sap_id,
+                        )
+                    )
+                    if existing is not None:
+                        logger.info(
+                            "zhaohu active session: sapId=%s -> session_id=%s",
+                            sap_id,
+                            active_sid,
+                        )
+                        return active_sid
+
+                    # ChatSpec deleted — clear stale pointer
+                    logger.warning(
+                        "zhaohu active session not found in chat_manager, "
+                        "clearing pointer: sapId=%s session_id=%s "
+                        "channel=%s user_id=%s",
+                        sap_id,
+                        active_sid,
+                        self.channel,
+                        sap_id,
+                    )
+                    await self._set_active_session_id(sap_id, "")
+                else:
+                    return active_sid
+        except Exception:
+            logger.warning(
+                "zhaohu _get_active_session_id: failed for sapId=%s",
+                sap_id,
+                exc_info=True,
+            )
+
+        default_sid = self.resolve_session_id(sap_id)
+        logger.info(
+            "zhaohu no active pointer, using default: sapId=%s -> session_id=%s",
+            sap_id,
+            default_sid,
+        )
+        return default_sid
+
+    async def _set_active_session_id(
+        self,
+        sap_id: str,
+        session_id: str,
+    ) -> None:
+        """Set the user's current active session_id pointer."""
+        if (
+            self._workspace is None
+            or self._workspace.runner is None
+            or self._workspace.runner.session is None
+        ):
+            logger.warning(
+                "zhaohu _set_active_session_id: workspace/session not available",
+            )
+            return
+
+        meta_session_id = f"zhaohu:active:{sap_id}"
+        try:
+            await self._workspace.runner.session.update_session_state(
+                session_id=meta_session_id,
+                key="active_session_id",
+                value=session_id,
+                user_id=sap_id,
+            )
+            logger.info(
+                "zhaohu set active session: sapId=%s -> session_id=%s",
+                sap_id,
+                session_id,
+            )
+        except Exception:
+            logger.warning(
+                "zhaohu _set_active_session_id: failed for sapId=%s",
+                sap_id,
+                exc_info=True,
+            )
+
     def get_to_handle_from_request(self, request: Any) -> str:
         """Get the send target from AgentRequest.
 
@@ -329,7 +497,10 @@ class ZhaohuChannel(BaseChannel):
         channel_id = payload.get("channel_id") or self.channel
         sender_id = payload.get("sender_id") or ""
         meta = payload.get("meta") or {}
-        session_id = self.resolve_session_id(sender_id, meta)
+        session_id = payload.get("session_id") or self.resolve_session_id(
+            sender_id,
+            meta,
+        )
         content_parts = payload.get("content_parts") or []
 
         if not content_parts:
@@ -564,6 +735,240 @@ class ZhaohuChannel(BaseChannel):
                 self.custom_card_url,
             )
             return (-1, "request failed")
+
+    def _format_approval_tool_input(self, tool_input: object) -> str:
+        """把工具参数格式化为可读文本，避免通知正文无限增长。"""
+        if not tool_input:
+            return ""
+        try:
+            text = json.dumps(
+                tool_input,
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        except Exception:
+            text = str(tool_input)
+        return _truncate(_normalize_text(text), _APPROVAL_INPUT_LIMIT)
+
+    def _build_approval_pending_text(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        tool_name: str,
+        result_summary: str,
+        findings_count: object,
+        tool_input: object,
+    ) -> str:
+        """构建不含审批按钮的工具审批待处理通知正文。"""
+        lines = [
+            f"{tool_name or 'unknown'}工具调用需要审批",
+        ]
+        params_text = self._format_approval_tool_input(tool_input)
+        if params_text:
+            lines.extend(["调用参数：", params_text])
+        lines.extend(
+            [
+                f"审批ID：{request_id}",
+                f"用户：{user_id or '-'}",
+            ],
+        )
+        return "\n".join(lines)
+
+    async def send_cron_approval_card(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        tool_name: str,
+        agent_id: str = "",
+        tenant_id: str = "",
+        source_id: str = "",
+        result_summary: str = "",
+        findings_count: object = 0,
+        tool_input: object = None,
+        **_: object,
+    ) -> tuple[int, str]:
+        """发送工具审批待处理通知，本阶段只发正文信息，不发按钮。"""
+        if not user_id:
+            logger.warning(
+                "zhaohu approval pending notification skipped: user_id is empty",
+            )
+            return (-1, "user_id is empty")
+
+        text = self._build_approval_pending_text(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            tool_name=tool_name,
+            result_summary=result_summary,
+            findings_count=findings_count,
+            tool_input=tool_input,
+        )
+        content = self._build_approval_task_initiated_card(
+            text,
+            agent_id=agent_id,
+            request_id=request_id,
+            tenant_id=tenant_id,
+            source_id=source_id,
+        )
+        open_id = await self.deal_eight_sap_to_open(user_id)
+        await self.send_custom_card(
+            open_id,
+            content,
+        )
+        return (0, "sent")
+
+    @staticmethod
+    def _build_zhclient_url(tag: dict) -> str:
+        """Build zhclient:// URL for approval button actionLink.
+
+        Format: zhclient:///?actionCode=9&actionParams=UrlEncode(Base64(params))
+        Encoding: UTF-8
+        """
+        params = json.dumps({"tag": tag}, ensure_ascii=False)
+        encoded = url_quote(
+            base64.b64encode(params.encode("utf-8")).decode("utf-8"),
+        )
+        return f"zhclient:///?actionCode=9&actionParams={encoded}"
+
+    def _build_approval_task_initiated_card(
+        self,
+        task_content: str,
+        agent_id: str = "",
+        request_id: str = "",
+        tenant_id: str = "",
+        source_id: str = "",
+    ) -> list:
+        """Build card content for task initiated notification (Template 1).
+
+        Used when user message length > 10 (task assignment).
+
+        Args:
+            task_content: The original task content from user message
+
+        Returns:
+            Card content array for send_custom_card
+        """
+        # Template 1: Task initiated notification
+        approval_tag = {
+            "agent_id": agent_id,
+            "agentId": agent_id,
+            "tenant_id": tenant_id,
+            "source_id": source_id,
+            "request_id": request_id,
+        }
+        approve_url = self._build_zhclient_url(
+            {**approval_tag, "type": "approve"},
+        )
+        reject_url = self._build_zhclient_url(
+            {**approval_tag, "type": "reject"},
+        )
+        card_content = [
+            {
+                "type": "content",
+                "list": [
+                    {
+                        "type": [0],
+                        "content": f"{task_content}",
+                        "style": 5,
+                    },
+                ],
+            },
+            {
+                "type": "operate",
+                "arrange": 0,
+                "list": [
+                    {
+                        "content": "通过",
+                        "style": 1,
+                        "action": 3,
+                        "tag": "approve",
+                        "disable": 0,
+                        "actionLink": {
+                            "url": approve_url,
+                            "pcUrl": approve_url,
+                            "mobileUrl": approve_url,
+                        },
+                    },
+                    {
+                        "content": "拒绝",
+                        "style": 0,
+                        "action": 3,
+                        "tag": "reject",
+                        "disable": 0,
+                        "actionLink": {
+                            "url": reject_url,
+                            "pcUrl": reject_url,
+                            "mobileUrl": reject_url,
+                        },
+                    },
+                ],
+            },
+        ]
+
+        return card_content
+
+    async def deal_eight_sap_to_open(self, send_addr):
+        if send_addr and len(send_addr) == 8:
+            logger.info(
+                "zhaohu _build_push_payload: send_addr is 8, querying user info for sapId=%s",
+                send_addr,
+            )
+            user_info = await self._query_user_info_by_sap(send_addr)
+            if user_info and user_info.get("openId"):
+                open_id = user_info.get("openId")
+                logger.info(
+                    "zhaohu _build_push_payload: sapId=%s -> openId=%s",
+                    send_addr,
+                    open_id,
+                )
+                send_addr = open_id
+            else:
+                logger.warning(
+                    "zhaohu _build_push_payload: failed to get openId for sapId=%s",
+                    send_addr,
+                )
+        return send_addr
+
+    async def send_cron_approval_result(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        tool_name: str = "",
+        decision: str,
+        source_channel: str = "",
+        **_: object,
+    ) -> tuple[int, str]:
+        """发送工具审批结果通知，本阶段只发正文信息，不发按钮。"""
+        if not user_id:
+            logger.warning(
+                "zhaohu approval result notification skipped: user_id is empty",
+            )
+            return (-1, "user_id is empty")
+
+        text = _build_approval_result_text(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            tool_name=tool_name,
+            decision=decision,
+            source_channel=source_channel,
+        )
+        await self.send(
+            user_id,
+            text,
+            {
+                "session_id": session_id,
+                "notification_summary": "工具审批结果",
+            },
+        )
+        return (0, "sent")
 
     def _build_claw_url(
         self,
@@ -1385,6 +1790,7 @@ class ZhaohuChannel(BaseChannel):
             user_name,
         )
         source_id = str(meta.get("source_id") or self.channel)
+        meta["source_id"] = source_id
         logger.info("source id final sourceId=%s", source_id)
 
         with bind_tenant_context(
@@ -1534,6 +1940,66 @@ class ZhaohuChannel(BaseChannel):
             )
             return False
 
+    async def _handle_new_session(
+        self,
+        sap_id: str,
+        from_id: str,
+        first_message: str,
+        meta: Dict[str, Any],
+        yst_id: str,
+    ) -> None:
+        """Handle /new command: create a new session and switch active pointer."""
+        seq = format(int(time.time()), "x")[-8:]
+        new_session_id = f"zhaohu:callback:{sap_id}:{seq}"
+
+        await self._set_active_session_id(sap_id, new_session_id)
+
+        if not first_message:
+            await self.send(yst_id, "已开启新会话，请发送消息开始对话。", meta)
+            return
+
+        content_parts = [
+            TextContent(type=ContentType.TEXT, text=first_message),
+        ]
+        native_payload = {
+            "channel_id": self.channel,
+            "sender_id": sap_id,
+            "session_id": new_session_id,
+            "content_parts": content_parts,
+            "meta": meta,
+        }
+
+        if self._workspace is not None:
+            request = self.build_agent_request_from_user_content(
+                channel_id=self.channel,
+                sender_id=sap_id,
+                session_id=new_session_id,
+                content_parts=content_parts,
+                channel_meta=meta,
+            )
+            request.channel_meta = meta
+            await self._consume_with_tracker(request, native_payload)
+        else:
+            logger.warning(
+                "zhaohu _handle_new_session: workspace not set, "
+                "using direct processing",
+            )
+            request = self.build_agent_request_from_user_content(
+                channel_id=self.channel,
+                sender_id=sap_id,
+                session_id=new_session_id,
+                content_parts=content_parts,
+                channel_meta=meta,
+            )
+            request.channel_meta = meta
+            await self._get_llm_response_direct(
+                meta,
+                "",
+                request,
+                "",
+                yst_id,
+            )
+
     async def _route_message(
         self,
         msg_id: str,
@@ -1544,8 +2010,51 @@ class ZhaohuChannel(BaseChannel):
         meta: Dict[str, Any],
     ) -> None:
         """Route message by content type."""
+        route_lock = await self._get_user_route_lock(sap_id)
+        async with route_lock:
+            await self._route_message_inner(
+                msg_id,
+                from_id,
+                sap_id,
+                yst_id,
+                msg_content,
+                meta,
+            )
+
+    async def _route_message_inner(
+        self,
+        msg_id: str,
+        from_id: str,
+        sap_id: str,
+        yst_id: str,
+        msg_content: str,
+        meta: Dict[str, Any],
+    ) -> None:
+        """Inner routing logic, called under per-user lock."""
         msg_content_stripped = msg_content.strip()
         msg_content_len = len(msg_content_stripped)
+
+        # Case 0: /new prefix - create new session
+        if msg_content_stripped.startswith("/new"):
+            after_new = (
+                msg_content_stripped[4:]
+                if len(msg_content_stripped) > 4
+                else ""
+            )
+            if after_new == "" or after_new[0] == " ":
+                remaining = after_new.strip()
+                logger.info(
+                    "zhaohu message type: new_session, content=%s",
+                    msg_content_stripped[:50],
+                )
+                await self._handle_new_session(
+                    sap_id,
+                    from_id,
+                    remaining,
+                    meta,
+                    yst_id,
+                )
+                return
 
         # Case 1: Task progress query
         if msg_content_stripped in self._TASK_PROGRESS_KEYWORDS:
@@ -1613,8 +2122,8 @@ class ZhaohuChannel(BaseChannel):
         """
         from ....config.context import get_current_workspace_dir
 
-        # Use same session_id as casual chat (callback session)
-        session_id = self.resolve_session_id(sap_id, meta)
+        # Use active session (or fallback to legacy format)
+        session_id = await self._get_active_session_id(sap_id)
         logger.info(
             "zhaohu task assignment: sessionId=%s userId=%s working_dir=%s",
             session_id,
@@ -1715,8 +2224,8 @@ class ZhaohuChannel(BaseChannel):
         # Build content parts
         content_parts = [TextContent(type=ContentType.TEXT, text=msg_content)]
 
-        # Build session_id
-        session_id = self.resolve_session_id(sap_id, meta)
+        # Build session_id (active session or fallback to legacy format)
+        session_id = await self._get_active_session_id(sap_id)
         logger.info(
             "zhaohu session: sessionId=%s userId=%s working_dir=%s",
             session_id,
@@ -1808,6 +2317,56 @@ class ZhaohuChannel(BaseChannel):
                 msg_id,
             )
 
+    async def on_event_message_completed(
+        self,
+        request,
+        to_handle: str,
+        event: Any,
+        send_meta: Dict[str, Any],
+    ) -> None:
+        """按 filter_thinking 控制推送策略：
+        - True（过滤思考，前端"显示思考过程"禁用）：只推最终结果 1 条，
+          思考/工具等中间消息只在 Console 流式展示，流程结束时推送
+          保留的最后一条完成消息；
+        - False（不过滤，前端"显示思考过程"启用）：思考/工具/最终
+          结果全部推送到 Zhaohu。"""
+        if self._filter_thinking:
+            # 简洁模式：跳过思考，缓冲最后一条完成消息待流程结束推送
+            if getattr(event, "type", None) == MessageType.REASONING:
+                return
+            self._zhaohu_pending[to_handle] = (event, send_meta)
+            return
+        # 详细模式：思考内容用不受过滤的渲染器渲染后立即推送
+        if getattr(event, "type", None) == MessageType.REASONING:
+            parts = self._verbose_renderer.message_to_parts(event)
+            if parts:
+                await self.send_content_parts(to_handle, parts, send_meta)
+            return
+        await super().on_event_message_completed(
+            request,
+            to_handle,
+            event,
+            send_meta,
+        )
+
+    async def _on_process_completed(
+        self,
+        request,
+        to_handle: str,
+        send_meta: Dict[str, Any],
+    ) -> None:
+        """简洁模式下流程结束：推送该回话保留的最后一条完成消息。"""
+        if self._filter_thinking:
+            pending = self._zhaohu_pending.pop(to_handle, None)
+            if pending is not None:
+                event, meta = pending
+                await self.send_message_content(
+                    to_handle,
+                    event,
+                    meta or send_meta,
+                )
+        await super()._on_process_completed(request, to_handle, send_meta)
+
     async def start(self) -> None:
         if not self.enabled:
             logger.debug("zhaohu channel disabled")
@@ -1826,27 +2385,44 @@ class ZhaohuChannel(BaseChannel):
         to_handle: str,
         text: str,
         meta: Optional[dict] = None,
-    ) -> None:
+    ) -> bool:
         """POST a Zhaohu push payload to the configured endpoint."""
+        if not self._validate_send_configuration(to_handle, meta):
+            return False
+        payload = await self._build_push_payload(to_handle, text, meta or {})
+        data = await self._post_push_payload(payload)
+        return self._handle_push_response(to_handle, data, meta)
+
+    def _validate_send_configuration(
+        self,
+        to_handle: str,
+        meta: Optional[dict],
+    ) -> bool:
         if not self.enabled:
-            return
+            logger.warning("zhaohu send skipped: channel disabled")
+            _raise_cron_delivery_failure(meta, "disabled")
+            return False
         if not self.push_url:
             logger.warning(
                 "zhaohu send skipped: push_url not configured for %s",
                 to_handle,
             )
-            return
+            _raise_cron_delivery_failure(meta, "push_url not configured")
+            return False
         if (
-            not self.sys_id
-            or not self.robot_open_id
-            or not to_handle
-            or to_handle.strip() == ""
+            self.sys_id
+            and self.robot_open_id
+            and to_handle
+            and to_handle.strip()
         ):
-            logger.warning(
-                "zhaohu send skipped: sys_id or robot_open_id or to_handle missing",
-            )
-            return
-        payload = await self._build_push_payload(to_handle, text, meta or {})
+            return True
+        logger.warning(
+            "zhaohu send skipped: sys_id or robot_open_id or to_handle missing",
+        )
+        _raise_cron_delivery_failure(meta, "identity not configured")
+        return False
+
+    async def _post_push_payload(self, payload: dict) -> dict:
         timeout = httpx.Timeout(self.request_timeout, connect=10.0)
         # 自定义SSL上下文
         context = ssl.create_default_context()
@@ -1861,18 +2437,38 @@ class ZhaohuChannel(BaseChannel):
                 data = response.json() if response.content else {}
             except ValueError:
                 data = {}
+        return data
+
+    def _handle_push_response(
+        self,
+        to_handle: str,
+        data: dict,
+        meta: Optional[dict],
+    ) -> bool:
         body = data.get("body") or []
         exp_msg_ids = [
             str(item.get("expMsgId"))
             for item in body
             if isinstance(item, dict) and item.get("expMsgId")
         ]
+        return_code = str(data.get("returnCode") or "")
+        if return_code != "SUC0000":
+            detail = f"returnCode={return_code or '(empty)'}"
+            if isinstance(meta, dict) and meta.get("cron_delivery_key"):
+                raise RuntimeError(f"zhaohu delivery failed: {detail}")
+            logger.warning(
+                "zhaohu push failed: to=%s %s",
+                to_handle,
+                detail,
+            )
+            return False
         logger.info(
             "zhaohu push ok: to=%s returnCode=%s expMsgIds=%s",
             to_handle,
-            str(data.get("returnCode") or "(empty)"),
+            return_code,
             exp_msg_ids,
         )
+        return True
 
     async def _build_push_payload(
         self,
@@ -1969,7 +2565,9 @@ class ZhaohuChannel(BaseChannel):
             },
             "msgCtlInfo": {
                 "configId": meta.get("config_id") or "",
-                "batchId": meta.get("batch_id") or "",
+                "batchId": (
+                    meta.get("cron_delivery_key") or meta.get("batch_id") or ""
+                ),
             },
             "msgContent": {
                 "summary": notification_summary,

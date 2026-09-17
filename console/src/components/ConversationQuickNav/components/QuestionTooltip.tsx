@@ -1,3 +1,5 @@
+import { createPortal } from "react-dom";
+
 interface QuestionTooltipProps {
   /** 问题序号 */
   index: number;
@@ -18,9 +20,11 @@ export function QuestionTooltip({
   visible,
   position,
 }: QuestionTooltipProps) {
-  return (
+  return createPortal(
     <div
-      className={`quick-nav-tooltip ${visible ? "quick-nav-tooltip--visible" : ""}`}
+      className={`quick-nav-tooltip ${
+        visible ? "quick-nav-tooltip--visible" : ""
+      }`}
       style={
         position
           ? {
@@ -34,6 +38,7 @@ export function QuestionTooltip({
         <strong># {index}</strong>
         <span>{text}</span>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

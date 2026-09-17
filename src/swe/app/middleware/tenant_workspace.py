@@ -12,11 +12,11 @@ AgentContextMiddleware.
 import logging
 from pathlib import Path
 import time
-from typing import Callable, Awaitable
+from typing import TYPE_CHECKING, Callable, Awaitable
 
 from fastapi import Request, HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
 
 from swe.config.context import (
@@ -28,7 +28,32 @@ from swe.config.context import (
 from swe.app.middleware.tenant_identity import (
     PUBLIC_ROUTE_EXEMPT_PREFIXES,
 )
+from swe.app.middleware.provider_models_timing import (
+    is_provider_models_list_request,
+    log_provider_models_middleware_before_next,
+    log_provider_models_middleware_done,
+    log_provider_models_middleware_error,
+)
 from swe.app.identity_resolver import resolve_user_identity
+
+if TYPE_CHECKING:
+    from swe.app.workspace.bootstrap_state import (
+        TenantBootstrapUnavailable as _TenantBootstrapUnavailable,
+    )
+else:
+    try:
+        from swe.app.workspace.bootstrap_state import (
+            TenantBootstrapUnavailable as _TenantBootstrapUnavailable,
+        )
+    except (
+        ModuleNotFoundError
+    ):  # pragma: no cover - isolated router module tests
+
+        class _TenantBootstrapUnavailable(RuntimeError):
+            """Compatibility placeholder when workspace package is stubbed."""
+
+            retry_after_seconds = 2
+
 
 logger = logging.getLogger(__name__)
 
@@ -115,17 +140,27 @@ class TenantWorkspaceMiddleware(BaseHTTPMiddleware):
             HTTPException: If workspace is required but cannot be loaded.
         """
         # Use effective tenant_id for source-scoped default tenants.
+        is_timing = is_provider_models_list_request(request)
+        started_at = time.perf_counter()
         tenant_id = _get_effective_request_tenant_id(request)
         workspace = None
         workspace_token = None
+        workspace_ms = 0
+        before_next_at = None
 
         try:
-            if request.method == "OPTIONS":
+            if request.method == "OPTIONS" or self._is_workspace_exempt(
+                request.url.path,
+            ):
                 return await call_next(request)
 
             # Load workspace if tenant_id is available
             if tenant_id:
+                workspace_started_at = time.perf_counter()
                 workspace = await self._get_workspace(request, tenant_id)
+                workspace_ms = int(
+                    (time.perf_counter() - workspace_started_at) * 1000,
+                )
 
                 if workspace:
                     # Store workspace in request state
@@ -169,14 +204,58 @@ class TenantWorkspaceMiddleware(BaseHTTPMiddleware):
                     )
 
             # Call next handler
+            if is_timing:
+                before_next_at = log_provider_models_middleware_before_next(
+                    logger,
+                    "TenantWorkspaceMiddleware",
+                    request,
+                    started_at,
+                    effective_tenant_id=tenant_id,
+                    workspace_loaded=workspace is not None,
+                    workspace_ms=workspace_ms,
+                    require_workspace=self._require_workspace,
+                )
             response = await call_next(request)
 
             # Add workspace info to response headers (for debugging)
             if workspace and tenant_id:
                 response.headers["X-Tenant-Workspace-Loaded"] = "true"
 
+            if is_timing and before_next_at is not None:
+                log_provider_models_middleware_done(
+                    logger,
+                    "TenantWorkspaceMiddleware",
+                    request,
+                    started_at,
+                    before_next_at,
+                    response,
+                    effective_tenant_id=tenant_id,
+                    workspace_loaded=workspace is not None,
+                    workspace_ms=workspace_ms,
+                    require_workspace=self._require_workspace,
+                )
             return response
 
+        except _TenantBootstrapUnavailable as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "Tenant bootstrap unavailable"},
+                headers={"Retry-After": str(exc.retry_after_seconds)},
+            )
+        except Exception:
+            if is_timing:
+                log_provider_models_middleware_error(
+                    logger,
+                    "TenantWorkspaceMiddleware",
+                    request,
+                    started_at,
+                    before_next_at,
+                    effective_tenant_id=tenant_id,
+                    workspace_loaded=workspace is not None,
+                    workspace_ms=workspace_ms,
+                    require_workspace=self._require_workspace,
+                )
+            raise
         finally:
             # Reset workspace context if set
             if workspace_token:
@@ -208,6 +287,8 @@ class TenantWorkspaceMiddleware(BaseHTTPMiddleware):
             return None
 
         try:
+            is_timing = is_provider_models_list_request(request)
+            started_at = time.perf_counter()
             # Get source_id from request state (set by TenantIdentityMiddleware)
             source_id = getattr(request.state, "source_id", None)
             raw_scope_id = getattr(request.state, "scope_id", None)
@@ -219,26 +300,34 @@ class TenantWorkspaceMiddleware(BaseHTTPMiddleware):
             # Get user_name and bbk_id from request state for database record
             user_name = getattr(request.state, "user_name", None)
             bbk_id = getattr(request.state, "bbk_id", None)
-            resolved_identity = await resolve_user_identity(
-                tenant_id=getattr(request.state, "tenant_id", None)
-                or tenant_id,
-                source_id=source_id,
-                user_name=user_name,
-                bbk_id=bbk_id,
-                headers={
-                    key: value
-                    for key, value in {
-                        "Content-Type": "application/json",
-                        "Authorization": request.headers.get(
-                            "Authorization",
-                        ),
-                    }.items()
-                    if value
-                },
-                allow_remote_lookup=True,
-            )
-            user_name = resolved_identity.user_name
-            bbk_id = resolved_identity.bbk_id
+            resolve_identity_ms = 0
+            if not user_name or not bbk_id:
+                resolve_identity_started_at = time.perf_counter()
+                resolved_identity = await resolve_user_identity(
+                    tenant_id=getattr(request.state, "tenant_id", None)
+                    or tenant_id,
+                    source_id=source_id,
+                    user_name=user_name,
+                    bbk_id=bbk_id,
+                    headers={
+                        key: value
+                        for key, value in {
+                            "Content-Type": "application/json",
+                            "Authorization": request.headers.get(
+                                "Authorization",
+                            ),
+                        }.items()
+                        if value
+                    },
+                    allow_remote_lookup=True,
+                )
+                resolve_identity_ms = int(
+                    (time.perf_counter() - resolve_identity_started_at) * 1000,
+                )
+                user_name = resolved_identity.user_name
+                bbk_id = resolved_identity.bbk_id
+                request.state.user_name = user_name
+                request.state.bbk_id = bbk_id
 
             # Ensure tenant is bootstrapped (minimal - directories only)
             bootstrap_started_at = time.perf_counter()
@@ -263,17 +352,52 @@ class TenantWorkspaceMiddleware(BaseHTTPMiddleware):
 
             # Create lightweight context without starting workspace runtime
             # The full Workspace runtime is lazy-loaded via MultiAgentManager.get_agent()
+            context_started_at = time.perf_counter()
             workspace_dir = pool.get_tenant_workspace_dir(tenant_id)
             context = TenantWorkspaceContext(
                 tenant_id=tenant_id,
                 workspace_dir=workspace_dir,
             )
+            context_ms = int(
+                (time.perf_counter() - context_started_at) * 1000,
+            )
+            if is_timing:
+                logger.info(
+                    "provider_models_workspace_get_done tenant_id=%s "
+                    "source_id=%s scope_id=%s total_ms=%d "
+                    "resolve_identity_ms=%d ensure_bootstrap_ms=%d "
+                    "context_ms=%d workspace_dir=%s resolved_bbk_id=%s "
+                    "resolved_user_name_present=%s",
+                    tenant_id,
+                    source_id,
+                    scope_id,
+                    int((time.perf_counter() - started_at) * 1000),
+                    resolve_identity_ms,
+                    bootstrap_duration_ms,
+                    context_ms,
+                    workspace_dir,
+                    bool(bbk_id),
+                    bool(user_name),
+                )
             logger.debug(
                 f"Created TenantWorkspaceContext for tenant={tenant_id}, "
                 f"dir={workspace_dir}",
             )
             return context
+        except _TenantBootstrapUnavailable:
+            logger.warning(
+                "tenant_bootstrap_unavailable tenant_id=%s",
+                tenant_id,
+            )
+            raise
         except Exception as e:
+            if is_provider_models_list_request(request):
+                logger.exception(
+                    "provider_models_workspace_get_error tenant_id=%s "
+                    "duration_ms=%d",
+                    tenant_id,
+                    int((time.perf_counter() - started_at) * 1000),
+                )
             logger.error(
                 f"Error bootstrapping tenant {tenant_id}: {e}",
             )
@@ -298,6 +422,12 @@ class TenantWorkspaceMiddleware(BaseHTTPMiddleware):
                 "/readyz",
                 "/alive",
                 "/api/version",
+                "/api/runtime/memory-diagnostic",
+                "/api/runtime/memory-type-holders",
+                "/api/runtime/inotify-diagnostic",
+                # Read-only jobs list; identity/auth checks still apply.
+                "/api/external/cron/jobs",
+                "/api/external/cron/jobs/",
                 "/docs",
                 "/redoc",
                 "/openapi.json",

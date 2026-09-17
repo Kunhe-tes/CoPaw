@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import importlib.util
 import logging
 import os
+import sys
 
 import click
 import uvicorn
@@ -10,6 +12,15 @@ import uvicorn
 from ..constant import LOG_LEVEL_ENV
 from ..config.utils import write_last_api
 from ..utils.my_logging import setup_logger, SuppressPathAccessLogFilter
+
+
+def _select_uvicorn_loop() -> str:
+    """Prefer uvloop for the service process when the platform supports it."""
+    if sys.platform == "win32":
+        return "auto"
+    if importlib.util.find_spec("uvloop") is None:
+        return "auto"
+    return "uvloop"
 
 
 @click.command("app")
@@ -89,6 +100,11 @@ def app_cmd(
     else:
         os.environ.pop("SWE_RELOAD_MODE", None)
 
+    # Keep the service process quiet by default. Set this explicitly to
+    # ``true`` when terminal rendering is desired (for example, during local
+    # interactive debugging).
+    os.environ.setdefault("SWE_CONSOLE_OUTPUT_ENABLED", "false")
+
     setup_logger(log_level)
     if log_level in ("debug", "trace"):
         from .main import log_init_timings
@@ -105,7 +121,9 @@ def app_cmd(
         "swe.app._app:app",
         host=host,
         port=port,
+        loop=_select_uvicorn_loop(),
         reload=reload,
         workers=1,
         log_level=log_level,
+        access_log=False,
     )

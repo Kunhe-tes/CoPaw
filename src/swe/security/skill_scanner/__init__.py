@@ -30,17 +30,18 @@ Quick start::
 
 from __future__ import annotations
 
+import asyncio
 from concurrent import futures
 import hashlib
-import json
 import logging
 import os
 import threading
-from dataclasses import dataclass, field
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .history import BlockedSkillRecord, SkillScanHistoryRecorder
 from .models import (
     Finding,
     ScanResult,
@@ -50,6 +51,8 @@ from .models import (
 )
 from .scan_policy import ScanPolicy
 from .analyzers import BaseAnalyzer
+from .analyzers.ast_behavior_analyzer import AstBehaviorAnalyzer
+from .analyzers.package_analyzer import PackageAnalyzer
 from .analyzers.pattern_analyzer import PatternAnalyzer
 from .scanner import SkillScanner
 
@@ -58,7 +61,9 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "BaseAnalyzer",
     "BlockedSkillRecord",
+    "AstBehaviorAnalyzer",
     "Finding",
+    "PackageAnalyzer",
     "PatternAnalyzer",
     "ScanPolicy",
     "ScanResult",
@@ -68,11 +73,10 @@ __all__ = [
     "SkillScanError",
     "ThreatCategory",
     "compute_skill_content_hash",
-    "get_blocked_history",
-    "clear_blocked_history",
-    "remove_blocked_entry",
+    "install_skill_scan_history_recorder",
     "is_skill_whitelisted",
     "scan_skill_directory",
+    "scan_skill_directory_async",
 ]
 
 # ---------------------------------------------------------------------------
@@ -172,50 +176,15 @@ def is_skill_whitelisted(
 # Blocked history persistence
 # ---------------------------------------------------------------------------
 
-_BLOCKED_HISTORY_FILE = "skill_scanner_blocked.json"
-_history_lock = threading.Lock()
+_history_recorder: SkillScanHistoryRecorder | None = None
 
 
-def _get_blocked_history_path() -> Path:
-    try:
-        from ...constant import WORKING_DIR
-
-        return WORKING_DIR / _BLOCKED_HISTORY_FILE
-    except Exception:
-        return Path.home() / ".swe" / _BLOCKED_HISTORY_FILE
-
-
-@dataclass
-class BlockedSkillRecord:
-    """A record of a scan alert (blocked or warned)."""
-
-    skill_name: str
-    blocked_at: str
-    max_severity: str
-    findings: list[dict[str, Any]] = field(default_factory=list)
-    content_hash: str = ""
-    action: str = "blocked"
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "skill_name": self.skill_name,
-            "blocked_at": self.blocked_at,
-            "max_severity": self.max_severity,
-            "findings": self.findings,
-            "content_hash": self.content_hash,
-            "action": self.action,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> BlockedSkillRecord:
-        return cls(
-            skill_name=data.get("skill_name", ""),
-            blocked_at=data.get("blocked_at", ""),
-            max_severity=data.get("max_severity", ""),
-            findings=data.get("findings", []),
-            content_hash=data.get("content_hash", ""),
-            action=data.get("action", "blocked"),
-        )
+def install_skill_scan_history_recorder(
+    recorder: SkillScanHistoryRecorder | None,
+) -> None:
+    """Install the application-scoped database history recorder."""
+    global _history_recorder
+    _history_recorder = recorder
 
 
 def _finding_to_dict(f: Finding) -> dict[str, Any]:
@@ -226,6 +195,7 @@ def _finding_to_dict(f: Finding) -> dict[str, Any]:
         "file_path": f.file_path,
         "line_number": f.line_number,
         "rule_id": f.rule_id,
+        "analyzer": f.analyzer,
     }
 
 
@@ -234,8 +204,11 @@ def _record_blocked_skill(
     skill_dir: Path,
     *,
     action: str = "blocked",
+    source_id: str = "",
+    user_id: str = "",
+    bbk_id: str = "",
 ) -> None:
-    """Append a scan alert to the history file."""
+    """Submit a scan alert to the database-backed history recorder."""
     record = BlockedSkillRecord(
         skill_name=result.skill_name,
         blocked_at=datetime.now(timezone.utc).isoformat(),
@@ -243,64 +216,31 @@ def _record_blocked_skill(
         findings=[_finding_to_dict(f) for f in result.findings],
         content_hash=compute_skill_content_hash(skill_dir),
         action=action,
+        source_id=source_id,
+        user_id=user_id,
+        bbk_id=bbk_id,
     )
-    path = _get_blocked_history_path()
-    with _history_lock:
-        try:
-            existing: list[dict[str, Any]] = []
-            if path.is_file():
-                existing = json.loads(path.read_text(encoding="utf-8"))
-            existing.append(record.to_dict())
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                json.dumps(existing, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-        except Exception as exc:
-            logger.warning("Failed to record blocked skill: %s", exc)
-
-
-def get_blocked_history() -> list[BlockedSkillRecord]:
-    """Load all blocked skill records from disk."""
-    path = _get_blocked_history_path()
-    if not path.is_file():
-        return []
+    recorder = _history_recorder
+    if recorder is None:
+        logger.error(
+            "Skill scan history recorder is unavailable; record %s was dropped",
+            record.id,
+        )
+        return
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return [BlockedSkillRecord.from_dict(d) for d in data]
+        accepted = recorder.submit(record)
     except Exception as exc:
-        logger.warning("Failed to load blocked history: %s", exc)
-        return []
-
-
-def clear_blocked_history() -> None:
-    """Delete all blocked skill records."""
-    path = _get_blocked_history_path()
-    try:
-        if path.is_file():
-            path.unlink()
-    except OSError as exc:
-        logger.warning("Failed to clear blocked history: %s", exc)
-
-
-def remove_blocked_entry(index: int) -> bool:
-    """Remove a single blocked record by index. Returns True on success."""
-    path = _get_blocked_history_path()
-    if not path.is_file():
-        return False
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if 0 <= index < len(data):
-            data.pop(index)
-            path.write_text(
-                json.dumps(data, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-            return True
-        return False
-    except Exception as exc:
-        logger.warning("Failed to remove blocked entry: %s", exc)
-        return False
+        logger.error(
+            "Failed to submit skill scan history record %s: %s",
+            record.id,
+            exc,
+        )
+        return
+    if not accepted:
+        logger.error(
+            "Skill scan history recorder rejected record %s",
+            record.id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +249,11 @@ def remove_blocked_entry(index: int) -> bool:
 
 _scanner_instance: SkillScanner | None = None
 _scanner_lock = threading.Lock()
+_scan_executor: futures.ThreadPoolExecutor | None = None
+_scan_executor_workers: int | None = None
+_scan_executor_slots: threading.BoundedSemaphore | None = None
+_scan_executor_pid: int | None = None
+_scan_executor_lock = threading.Lock()
 
 
 def _get_scanner() -> SkillScanner:
@@ -321,28 +266,116 @@ def _get_scanner() -> SkillScanner:
     return _scanner_instance
 
 
+def _configured_scan_executor_workers() -> int:
+    raw_value = os.environ.get("SWE_SKILL_SCAN_EXECUTOR_WORKERS")
+    if raw_value:
+        try:
+            return max(1, int(raw_value))
+        except ValueError:
+            logger.warning(
+                "Invalid SWE_SKILL_SCAN_EXECUTOR_WORKERS=%r; using 4",
+                raw_value,
+            )
+    return 4
+
+
+def _get_scan_executor() -> tuple[
+    futures.ThreadPoolExecutor,
+    threading.BoundedSemaphore,
+]:
+    """Return a shared, bounded executor for blocking scan work."""
+    global _scan_executor, _scan_executor_pid, _scan_executor_slots
+    global _scan_executor_workers
+    workers = _configured_scan_executor_workers()
+    current_pid = os.getpid()
+    executor_stale = (
+        _scan_executor is None
+        or _scan_executor_workers != workers
+        or _scan_executor_pid != current_pid
+    )
+    if executor_stale:
+        with _scan_executor_lock:
+            executor_stale = (
+                _scan_executor is None
+                or _scan_executor_workers != workers
+                or _scan_executor_pid != current_pid
+            )
+            if executor_stale:
+                if (
+                    _scan_executor is not None
+                    and _scan_executor_pid == current_pid
+                ):
+                    _scan_executor.shutdown(
+                        wait=False,
+                        cancel_futures=True,
+                    )
+                _scan_executor = futures.ThreadPoolExecutor(  # pylint: disable=consider-using-with
+                    max_workers=workers,
+                )
+                _scan_executor_workers = workers
+                _scan_executor_pid = current_pid
+                _scan_executor_slots = threading.BoundedSemaphore(workers)
+    assert _scan_executor is not None
+    assert _scan_executor_slots is not None
+    return _scan_executor, _scan_executor_slots
+
+
+def _scan_with_slot_release(
+    scanner: SkillScanner,
+    resolved: Path,
+    *,
+    skill_name: str | None,
+    slot: threading.BoundedSemaphore,
+    queued_at: float | None = None,
+) -> ScanResult:
+    scan_started_at = time.monotonic()
+    try:
+        return scanner.scan_skill(resolved, skill_name=skill_name)
+    finally:
+        try:
+            logger.debug(
+                "skill_scan_queue_ms=%.1f skill_scan_ms=%.1f skill_name=%s",
+                (
+                    max(
+                        0.0,
+                        (scan_started_at - queued_at) * 1000,
+                    )
+                    if queued_at is not None
+                    else 0.0
+                ),
+                (time.monotonic() - scan_started_at) * 1000,
+                skill_name or resolved.name,
+            )
+        finally:
+            slot.release()
+
+
 # ---------------------------------------------------------------------------
 # Scan result cache (mtime-based)
 # ---------------------------------------------------------------------------
 
 _MAX_CACHE_ENTRIES = 64
-_scan_cache: dict[str, tuple[float, ScanResult]] = {}
+_scan_cache: dict[str, tuple[str, str, ScanResult]] = {}
 _cache_lock = threading.Lock()
 
 
-def _get_dir_mtime(skill_dir: Path) -> float:
-    """Return the latest mtime among the directory and its immediate files."""
+def _get_tree_stat_token(skill_dir: Path) -> str:
+    """Return a cheap recursive path/stat fingerprint for cache probing."""
+    digest = hashlib.blake2b(digest_size=16)
     try:
-        latest = skill_dir.stat().st_mtime
+        for path in sorted(skill_dir.rglob("*")):
+            if not path.is_file() or path.is_symlink():
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            digest.update(path.relative_to(skill_dir).as_posix().encode())
+            digest.update(str(stat.st_mtime_ns).encode())
+            digest.update(str(stat.st_size).encode())
     except OSError:
-        return 0.0
-    try:
-        for p in skill_dir.iterdir():
-            if p.is_file() and not p.is_symlink():
-                latest = max(latest, p.stat().st_mtime)
-    except OSError:
-        pass
-    return latest
+        return "missing"
+    return digest.hexdigest()
 
 
 def _get_cached_result(
@@ -354,13 +387,18 @@ def _get_cached_result(
         entry = _scan_cache.get(key)
     if entry is None:
         return None
-    cached_mtime, cached_result = entry
-    current_mtime = _get_dir_mtime(skill_dir)
-    if current_mtime == cached_mtime:
+    cached_stat, cached_hash, cached_result = entry
+    current_stat = _get_tree_stat_token(skill_dir)
+    if current_stat == cached_stat:
         logger.debug(
             "Returning cached scan result for '%s'",
             cached_result.skill_name,
         )
+        return cached_result
+    current_hash = compute_skill_content_hash(skill_dir)
+    if current_hash == cached_hash:
+        with _cache_lock:
+            _scan_cache[key] = (current_stat, cached_hash, cached_result)
         return cached_result
     return None
 
@@ -371,10 +409,11 @@ def _store_cached_result(
 ) -> None:
     """Store a scan result in the cache (LRU eviction)."""
     key = str(skill_dir)
-    mtime = _get_dir_mtime(skill_dir)
+    stat_token = _get_tree_stat_token(skill_dir)
+    content_hash = compute_skill_content_hash(skill_dir)
     with _cache_lock:
         _scan_cache.pop(key, None)
-        _scan_cache[key] = (mtime, result)
+        _scan_cache[key] = (stat_token, content_hash, result)
         while len(_scan_cache) > _MAX_CACHE_ENTRIES:
             oldest = next(iter(_scan_cache))
             del _scan_cache[oldest]
@@ -419,6 +458,11 @@ def scan_skill_directory(
     skill_name: str | None = None,
     block: bool | None = None,
     timeout: float | None = None,
+    _direct: bool = False,
+    _cache_result: bool = True,
+    source_id: str = "",
+    user_id: str = "",
+    bbk_id: str = "",
 ) -> ScanResult | None:
     """Scan a skill directory and optionally block on unsafe results.
 
@@ -466,17 +510,56 @@ def scan_skill_directory(
     cached = _get_cached_result(resolved)
     if cached is not None:
         result = cached
+        logger.debug(
+            "skill_scan_queue_ms=0.0 skill_scan_ms=0.0 "
+            "skill_scan_cache_hit=true skill_name=%s",
+            effective_name,
+        )
     else:
         scanner = _get_scanner()
-
-        with futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(
-                scanner.scan_skill,
+        deadline = time.monotonic() + effective_timeout
+        queued_at = time.monotonic()
+        executor, slot = _get_scan_executor()
+        # Slot acquisition is released by _scan_with_slot_release.
+        # pylint: disable-next=consider-using-with
+        if not slot.acquire(timeout=effective_timeout):
+            logger.warning(
+                "Security scan of skill '%s' timed out after %.0fs "
+                "(waiting for scan executor)",
+                effective_name,
+                effective_timeout,
+            )
+            return None
+        if _direct:
+            result = _scan_with_slot_release(
+                scanner,
                 resolved,
                 skill_name=skill_name,
+                slot=slot,
+                queued_at=queued_at,
             )
+        else:
             try:
-                result = future.result(timeout=effective_timeout)
+                future = executor.submit(
+                    _scan_with_slot_release,
+                    scanner,
+                    resolved,
+                    skill_name=skill_name,
+                    slot=slot,
+                    queued_at=queued_at,
+                )
+            except Exception:
+                slot.release()
+                raise
+
+            future.add_done_callback(
+                lambda completed: (
+                    slot.release() if completed.cancelled() else None
+                ),
+            )
+            remaining_timeout = max(0.0, deadline - time.monotonic())
+            try:
+                result = future.result(timeout=remaining_timeout)
             except futures.TimeoutError:
                 logger.warning(
                     "Security scan of skill '%s' timed out after %.0fs",
@@ -486,14 +569,29 @@ def scan_skill_directory(
                 future.cancel()
                 return None
 
-        _store_cached_result(resolved, result)
+        if _cache_result:
+            _store_cached_result(resolved, result)
 
     if not result.is_safe:
         should_block = block if block is not None else (mode == "block")
         if should_block:
-            _record_blocked_skill(result, resolved, action="blocked")
+            _record_blocked_skill(
+                result,
+                resolved,
+                action="blocked",
+                source_id=source_id,
+                user_id=user_id,
+                bbk_id=bbk_id,
+            )
             raise SkillScanError(result)
-        _record_blocked_skill(result, resolved, action="warned")
+        _record_blocked_skill(
+            result,
+            resolved,
+            action="warned",
+            source_id=source_id,
+            user_id=user_id,
+            bbk_id=bbk_id,
+        )
         logger.warning(
             "Skill '%s' has %d security finding(s) (max severity: %s) "
             "but blocking is disabled – proceeding anyway.",
@@ -503,3 +601,31 @@ def scan_skill_directory(
         )
 
     return result
+
+
+async def scan_skill_directory_async(
+    skill_dir: str | Path,
+    *,
+    skill_name: str | None = None,
+    block: bool | None = None,
+    timeout: float | None = None,
+) -> ScanResult | None:
+    """Await the scanner on its bounded executor without nested pools."""
+    loop = asyncio.get_running_loop()
+    executor, _slot = _get_scan_executor()
+    future = executor.submit(
+        scan_skill_directory,
+        skill_dir,
+        skill_name=skill_name,
+        block=block,
+        timeout=timeout,
+        _direct=True,
+    )
+    wrapped = asyncio.wrap_future(future, loop=loop)
+    try:
+        if timeout is None:
+            return await wrapped
+        return await asyncio.wait_for(wrapped, timeout=timeout)
+    except asyncio.CancelledError:
+        future.cancel()
+        raise

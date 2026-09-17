@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Annotated, Any, Literal
@@ -16,7 +17,6 @@ class HookEventName(str, Enum):
     PRE_TOOL_USE = "PreToolUse"
     POST_TOOL_USE = "PostToolUse"
     POST_TOOL_USE_FAILURE = "PostToolUseFailure"
-    BEFORE_STOP = "BeforeStop"
     STOP = "Stop"
 
 
@@ -25,7 +25,8 @@ PROMPT_HANDLER_BLOCKABLE_EVENTS = {
     HookEventName.SESSION_START,
     HookEventName.USER_PROMPT_SUBMIT,
     HookEventName.PRE_TOOL_USE,
-    HookEventName.BEFORE_STOP,
+    HookEventName.POST_TOOL_USE,
+    HookEventName.POST_TOOL_USE_FAILURE,
     HookEventName.STOP,
 }
 
@@ -139,6 +140,8 @@ class HookHandlerResult(BaseModel):
     reason: str = ""
     failed: bool = False
     failure_type: str = ""
+    replacement_text: str | None = None
+    output_transform: bool = False
 
 
 class HookPermissionDecision(BaseModel):
@@ -163,6 +166,8 @@ class MergedHookResult(BaseModel):
     session_title: str | None = None
     suppress_output: bool = False
     system_messages: list[str] = Field(default_factory=list)
+    has_blocking_failure: bool = False
+    blocking_failure_reason: str = ""
 
     @property
     def blocked(self) -> bool:
@@ -171,6 +176,15 @@ class MergedHookResult(BaseModel):
             HookDecision.DENY,
             HookDecision.STOP,
         }
+
+
+class StopHookExecutionResult(BaseModel):
+    final_response: str
+    validation_result: MergedHookResult = Field(
+        default_factory=MergedHookResult,
+    )
+    transformation_failed: bool = False
+    transformation_failure_reason: str = ""
 
 
 class BaseHookHandlerConfig(BaseModel):
@@ -186,6 +200,7 @@ class BaseHookHandlerConfig(BaseModel):
     timeout: float = Field(default=10.0, gt=0)
     status_message: str = Field(default="", alias="statusMessage")
     once: bool = False
+    output_transform: bool = Field(default=False, alias="outputTransform")
     include_conversation_snapshot: bool = Field(
         default=False,
         alias="includeConversationSnapshot",
@@ -320,18 +335,53 @@ class HookConfig(BaseModel):
     @model_validator(mode="after")
     def validate_prompt_handler_events(self) -> "HookConfig":
         for event_name, groups in self.events.items():
-            if event_name in PROMPT_HANDLER_BLOCKABLE_EVENTS:
-                continue
             for group in groups:
-                if any(
-                    isinstance(handler, PromptHookHandlerConfig)
-                    for handler in group.hooks
-                ):
-                    raise ValueError(
-                        "prompt hook handlers must be configured on "
-                        "blockable events only",
-                    )
+                for handler in group.hooks:
+                    validate_handler_event(handler, event_name)
         return self
+
+
+def validate_handler_event(
+    handler: HookHandlerConfig,
+    event_name: HookEventName,
+) -> None:
+    if (
+        isinstance(handler, PromptHookHandlerConfig)
+        and event_name not in PROMPT_HANDLER_BLOCKABLE_EVENTS
+    ):
+        raise ValueError(
+            "prompt hook handlers must be configured on blockable events only",
+        )
+    if handler.output_transform and event_name != HookEventName.STOP:
+        raise ValueError(
+            "outputTransform handlers must be configured on Stop only",
+        )
+    if handler.output_transform and handler.once:
+        raise ValueError("outputTransform handlers cannot use once")
+
+
+def skill_hook_handler_definition(
+    event_name: HookEventName | str,
+    group: HookMatcherGroupConfig,
+    handler: HookHandlerConfig,
+) -> str:
+    """Return the stable source definition used to guard Skill once state."""
+    return json.dumps(
+        {
+            "event": str(getattr(event_name, "value", event_name)),
+            "group": group.id,
+            "matcher": group.matcher.model_dump(
+                mode="json",
+                by_alias=True,
+            ),
+            "handler": handler.model_dump(
+                mode="json",
+                by_alias=True,
+            ),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 class HookOverlayEntry(BaseModel):
@@ -396,6 +446,40 @@ class LoadedSkillHookSource(BaseModel):
         return self.hook_config.handler_ids()
 
 
+class SkillHookFileVersion(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    exists: bool
+    mtime_ns: int = Field(default=0, alias="mtimeNs")
+    size: int = 0
+    inode: int = 0
+
+
+class MonitoredSkillHookSource(BaseModel):
+    model_config = ConfigDict(
+        extra="ignore",
+        populate_by_name=True,
+        use_enum_values=True,
+    )
+
+    source_id: str = Field(alias="sourceId")
+    skill_name: str = Field(alias="skillName")
+    skill_root: str = Field(alias="skillRoot")
+    source_path: str = Field(alias="sourcePath")
+    file_version: SkillHookFileVersion | None = Field(
+        default=None,
+        alias="fileVersion",
+    )
+
+    @model_validator(mode="after")
+    def validate_monitored_skill_source(self) -> "MonitoredSkillHookSource":
+        if self.source_id != f"skill:{self.skill_name}":
+            raise ValueError(
+                "monitored skill hook source id must match skill namespace",
+            )
+        return self
+
+
 class HookSessionState(BaseModel):
     model_config = ConfigDict(
         extra="ignore",
@@ -407,6 +491,10 @@ class HookSessionState(BaseModel):
         default_factory=list,
         alias="loadedSkillSources",
     )
+    monitored_skill_sources: list[MonitoredSkillHookSource] = Field(
+        default_factory=list,
+        alias="monitoredSkillSources",
+    )
     entries: list[HookOverlayEntry] = Field(default_factory=list)
     once_executed: dict[str, bool] = Field(default_factory=dict)
 
@@ -414,6 +502,7 @@ class HookSessionState(BaseModel):
     def validate_session_state(self) -> "HookSessionState":
         seen_source_ids: set[str] = set()
         seen_skill_names: set[str] = set()
+        seen_monitored_skill_names: set[str] = set()
         available_skill_handler_ids: set[str] = set()
         for source in self.loaded_skill_sources:
             if source.source_id in seen_source_ids:
@@ -423,6 +512,11 @@ class HookSessionState(BaseModel):
             seen_source_ids.add(source.source_id)
             seen_skill_names.add(source.skill_name)
             available_skill_handler_ids.update(source.handler_ids())
+
+        for source in self.monitored_skill_sources:
+            if source.skill_name in seen_monitored_skill_names:
+                raise ValueError("duplicate monitored skill hook skill name")
+            seen_monitored_skill_names.add(source.skill_name)
 
         for entry in self.entries:
             if entry.hook_id.startswith("skill:"):
@@ -441,6 +535,9 @@ class HookSessionState(BaseModel):
     def has_loaded_skill_sources(self) -> bool:
         return bool(self.loaded_skill_sources)
 
+    def has_monitored_skill_sources(self) -> bool:
+        return bool(self.monitored_skill_sources)
+
 
 class HookSessionOverlay(HookSessionState):
     """Backward-compatible name for persisted session hook state."""
@@ -453,6 +550,8 @@ class EffectiveHookHandler(BaseModel):
     group_id: str
     order: int
     dedupe_key: str
+    source: str = "tenant"
+    skill_definition: str | None = None
 
     def success(self, raw_output: dict[str, Any] | None) -> HookHandlerResult:
         from .output import normalize_hook_output

@@ -21,8 +21,11 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
+from typing import Callable
 
 from .analyzers import BaseAnalyzer
+from .analyzers.ast_behavior_analyzer import AstBehaviorAnalyzer
+from .analyzers.package_analyzer import PackageAnalyzer
 from .analyzers.pattern_analyzer import PatternAnalyzer
 from .models import Finding, ScanResult, SkillFile
 from .scan_policy import ScanPolicy
@@ -307,13 +310,21 @@ class SkillScanner:
     def _default_analyzers(
         policy: ScanPolicy | None = None,
     ) -> list[BaseAnalyzer]:
-        """Instantiate default analyzers, sharing the active policy."""
+        """实例化默认分析器集合."""
         analyzers: list[BaseAnalyzer] = []
 
-        # YAML regex signatures (baseline scanner).
-        try:
-            analyzers.append(PatternAnalyzer(policy=policy))
-        except Exception as exc:
-            logger.error("Failed to load PatternAnalyzer: %s", exc)
+        def make_pattern_analyzer() -> BaseAnalyzer:
+            return PatternAnalyzer(policy=policy)
+
+        analyzer_factories: tuple[Callable[[], BaseAnalyzer], ...] = (
+            PackageAnalyzer,
+            make_pattern_analyzer,
+            AstBehaviorAnalyzer,
+        )
+        for factory in analyzer_factories:
+            try:
+                analyzers.append(factory())
+            except Exception as exc:
+                logger.error("加载 Skill 安全分析器失败: %s", exc)
 
         return analyzers

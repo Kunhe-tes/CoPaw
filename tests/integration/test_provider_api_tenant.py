@@ -5,17 +5,20 @@
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, AsyncMock
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 from fastapi import FastAPI, Request
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
+from swe.app.routers import providers as providers_module
 from swe.app.routers.providers import router as providers_router
 from swe.app.routers.providers import tenant_providers_router
-from swe.providers.provider import ProviderInfo
+from swe.providers.provider import ModelRuntimeConfig, ProviderInfo
 
 
 @pytest.fixture
@@ -40,6 +43,112 @@ def client():
 class TestProviderAPIGetProviders:
     """Tests for GET /models endpoint."""
 
+    @pytest.mark.asyncio
+    async def test_get_provider_manager_cache_hit_avoids_threadpool(
+        self,
+        monkeypatch,
+    ):
+        """Cached provider managers return on the async hot path."""
+        manager = SimpleNamespace(
+            tenant_id="scope-a",
+            refresh_if_due=AsyncMock(),
+        )
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/api/models"),
+            state=SimpleNamespace(source_id="source-a", scope_id="scope-a"),
+        )
+
+        provider_manager = MagicMock()
+        provider_manager._instances = {"scope-a": manager}
+        provider_manager._resolve_effective_provider_tenant_id.return_value = (
+            "scope-a"
+        )
+        provider_manager._get_tenant_root_path.return_value = Path(
+            "/tmp/scope-a/providers",
+        )
+        monkeypatch.setattr(
+            providers_module,
+            "ProviderManager",
+            provider_manager,
+        )
+        monkeypatch.setattr(
+            providers_module,
+            "_get_effective_tenant_id",
+            lambda _request: "scope-a",
+        )
+
+        async def fail_run_sync(*args, **kwargs):
+            raise AssertionError("cache hit should not enter threadpool")
+
+        monkeypatch.setattr(anyio.to_thread, "run_sync", fail_run_sync)
+
+        result = await providers_module.get_provider_manager(request)
+
+        assert result is manager
+        provider_manager.ensure_tenant_provider_storage.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_provider_manager_cache_miss_records_threadpool_wait(
+        self,
+        monkeypatch,
+    ):
+        """Cold provider managers run in threadpool and expose wait timing."""
+        logged_messages = []
+        manager = SimpleNamespace(
+            tenant_id="scope-cold",
+            refresh_if_due=AsyncMock(),
+        )
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/api/models"),
+            state=SimpleNamespace(
+                source_id="source-cold",
+                scope_id="scope-cold",
+            ),
+        )
+
+        provider_manager = MagicMock()
+        provider_manager._instances = {}
+        provider_manager._resolve_effective_provider_tenant_id.return_value = (
+            "scope-cold"
+        )
+        provider_manager._get_tenant_root_path.return_value = Path(
+            "/tmp/scope-cold/providers",
+        )
+        provider_manager.get_or_create_instance = AsyncMock(
+            return_value=manager,
+        )
+        monkeypatch.setattr(
+            providers_module,
+            "ProviderManager",
+            provider_manager,
+        )
+        monkeypatch.setattr(
+            providers_module,
+            "_get_effective_tenant_id",
+            lambda _request: "scope-cold",
+        )
+        monkeypatch.setattr(
+            providers_module.logger,
+            "info",
+            lambda message, *args, **kwargs: logged_messages.append(message),
+        )
+
+        async def immediate_run_sync(func, *args, **kwargs):
+            return func(*args)
+
+        monkeypatch.setattr(anyio.to_thread, "run_sync", immediate_run_sync)
+
+        result = await providers_module.get_provider_manager(request)
+
+        assert result is manager
+        assert (
+            request.state.provider_manager_dependency_threadpool_wait_ms >= 0
+        )
+        assert not any(
+            "provider_manager_dependency_threadpool_enter" in message
+            for message in logged_messages
+        )
+
     def test_get_providers_uses_tenant_from_header(self, client):
         """GET /models uses tenant ID from header."""
         with patch(
@@ -57,7 +166,9 @@ class TestProviderAPIGetProviders:
                 ],
             )
             mock_manager.get_active_model.return_value = None
-            mock_pm_class.get_instance.return_value = mock_manager
+            mock_pm_class.get_or_create_instance = AsyncMock(
+                return_value=mock_manager,
+            )
 
             response = client.get(
                 "/models/",
@@ -66,7 +177,7 @@ class TestProviderAPIGetProviders:
 
             assert response.status_code == 200
             # Verify get_instance was called with tenant-a
-            mock_pm_class.get_instance.assert_called_with("tenant-a")
+            mock_pm_class.get_or_create_instance.assert_called_with("tenant-a")
 
     def test_get_providers_uses_default_without_header(self, client):
         """GET /models uses default tenant without header."""
@@ -76,13 +187,15 @@ class TestProviderAPIGetProviders:
             mock_manager = MagicMock()
             mock_manager.list_provider_info = AsyncMock(return_value=[])
             mock_manager.get_active_model.return_value = None
-            mock_pm_class.get_instance.return_value = mock_manager
+            mock_pm_class.get_or_create_instance = AsyncMock(
+                return_value=mock_manager,
+            )
 
             response = client.get("/models/")
 
             assert response.status_code == 200
             # Verify get_instance was called with default
-            mock_pm_class.get_instance.assert_called_with("default")
+            mock_pm_class.get_or_create_instance.assert_called_with("default")
 
 
 class TestProviderAPICreateProvider:
@@ -102,9 +215,11 @@ class TestProviderAPICreateProvider:
                     is_custom=True,
                 ),
             )
-            mock_pm_class.get_instance.return_value = mock_manager
+            mock_pm_class.get_or_create_instance = AsyncMock(
+                return_value=mock_manager,
+            )
 
-            response = client.post(
+            client.post(
                 "/models/custom-providers",
                 headers={"X-Tenant-Id": "tenant-b"},
                 json={
@@ -118,7 +233,7 @@ class TestProviderAPICreateProvider:
             )
 
             # Verify get_instance was called with tenant-b
-            mock_pm_class.get_instance.assert_called_with("tenant-b")
+            mock_pm_class.get_or_create_instance.assert_called_with("tenant-b")
 
 
 class TestProviderAPIUpdateProvider:
@@ -139,16 +254,48 @@ class TestProviderAPIUpdateProvider:
                     is_custom=False,
                 ),
             )
-            mock_pm_class.get_instance.return_value = mock_manager
+            mock_pm_class.get_or_create_instance = AsyncMock(
+                return_value=mock_manager,
+            )
 
-            response = client.put(
+            client.put(
                 "/models/openai/config",
                 headers={"X-Tenant-Id": "tenant-c"},
                 json={"api_key": "sk-test"},
             )
 
             # Verify get_instance was called with tenant-c
-            mock_pm_class.get_instance.assert_called_with("tenant-c")
+            mock_pm_class.get_or_create_instance.assert_called_with("tenant-c")
+
+
+class TestProviderAPIModelConfig:
+    """Tests for the tenant-scoped model runtime config endpoint."""
+
+    def test_update_model_config_uses_tenant_from_header(self, client):
+        with patch(
+            "swe.app.routers.providers.ProviderManager",
+        ) as mock_pm_class:
+            mock_manager = MagicMock()
+            mock_manager.update_model_config.return_value = ModelRuntimeConfig(
+                temperature=0.2,
+            )
+            mock_pm_class.get_or_create_instance = AsyncMock(
+                return_value=mock_manager,
+            )
+
+            response = client.put(
+                "/models/openai/models/gpt-5/config",
+                headers={"X-Tenant-Id": "tenant-c"},
+                json={"temperature": 0.2},
+            )
+
+            assert response.status_code == 200
+            mock_pm_class.get_or_create_instance.assert_called_with("tenant-c")
+            mock_manager.update_model_config.assert_called_once_with(
+                "openai",
+                "gpt-5",
+                {"temperature": 0.2},
+            )
 
 
 class TestProviderAPIDeleteProvider:
@@ -163,15 +310,17 @@ class TestProviderAPIDeleteProvider:
             mock_manager.remove_custom_provider.return_value = True
             mock_manager.list_provider_info = AsyncMock(return_value=[])
             mock_manager.builtin_providers = {"openai"}
-            mock_pm_class.get_instance.return_value = mock_manager
+            mock_pm_class.get_or_create_instance = AsyncMock(
+                return_value=mock_manager,
+            )
 
-            response = client.delete(
+            client.delete(
                 "/models/custom-providers/custom",
                 headers={"X-Tenant-Id": "tenant-d"},
             )
 
             # Verify get_instance was called with tenant-d
-            mock_pm_class.get_instance.assert_called_with("tenant-d")
+            mock_pm_class.get_or_create_instance.assert_called_with("tenant-d")
 
 
 class TestProviderAPISetActiveModel:
@@ -185,9 +334,11 @@ class TestProviderAPISetActiveModel:
             mock_manager = MagicMock()
             mock_manager.activate_model = AsyncMock(return_value=None)
             mock_manager.get_active_model.return_value = None
-            mock_pm_class.get_instance.return_value = mock_manager
+            mock_pm_class.get_or_create_instance = AsyncMock(
+                return_value=mock_manager,
+            )
 
-            response = client.put(
+            client.put(
                 "/models/active",
                 headers={"X-Tenant-Id": "tenant-e"},
                 json={
@@ -198,7 +349,7 @@ class TestProviderAPISetActiveModel:
             )
 
             # Verify get_instance was called with tenant-e
-            mock_pm_class.get_instance.assert_called_with("tenant-e")
+            mock_pm_class.get_or_create_instance.assert_called_with("tenant-e")
 
     def test_set_active_model_scope_agent_is_compatible(self, client):
         """PUT /models/active with scope=agent is treated as global (backward compat)."""
@@ -208,7 +359,9 @@ class TestProviderAPISetActiveModel:
             mock_manager = MagicMock()
             mock_manager.activate_model = AsyncMock(return_value=None)
             mock_manager.get_active_model.return_value = None
-            mock_pm_class.get_instance.return_value = mock_manager
+            mock_pm_class.get_or_create_instance = AsyncMock(
+                return_value=mock_manager,
+            )
 
             # Use deprecated scope=agent
             response = client.put(
@@ -235,7 +388,9 @@ class TestProviderAPISetActiveModel:
             "swe.app.routers.providers.ProviderManager",
         ) as mock_pm_class:
             mock_manager = MagicMock()
-            mock_pm_class.get_instance.return_value = mock_manager
+            mock_pm_class.get_or_create_instance = AsyncMock(
+                return_value=mock_manager,
+            )
 
             response = client.put(
                 "/models/active",
@@ -289,7 +444,9 @@ class TestProviderAPITenantIsolation:
             def get_instance(tenant_id):
                 return manager_a if tenant_id == "tenant-a" else manager_b
 
-            mock_pm_class.get_instance.side_effect = get_instance
+            mock_pm_class.get_or_create_instance = AsyncMock(
+                side_effect=get_instance,
+            )
 
             # Get providers for tenant-a
             response_a = client.get(
@@ -324,7 +481,9 @@ class TestProviderAPITenantIsolation:
                     is_custom=False,
                 ),
             )
-            mock_pm_class.get_instance.return_value = mock_manager
+            mock_pm_class.get_or_create_instance = AsyncMock(
+                return_value=mock_manager,
+            )
 
             # Update for tenant-x
             client.put(
@@ -341,10 +500,10 @@ class TestProviderAPITenantIsolation:
             )
 
             # Verify different tenants were used
-            assert mock_pm_class.get_instance.call_count == 2
+            assert mock_pm_class.get_or_create_instance.call_count == 2
             calls = [
                 call.args[0]
-                for call in mock_pm_class.get_instance.call_args_list
+                for call in mock_pm_class.get_or_create_instance.call_args_list
             ]
             assert "tenant-x" in calls
             assert "tenant-y" in calls
@@ -375,7 +534,9 @@ class TestDeprecatedProvidersEndpoint:
                 provider_id="openai",
                 model="gpt-4",
             )
-            mock_pm_class.get_instance.return_value = mock_manager
+            mock_pm_class.get_or_create_instance = AsyncMock(
+                return_value=mock_manager,
+            )
 
             # endpoint 现在读取 effective tenant，兼容 source-scoped 存储。
             with patch(

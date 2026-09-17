@@ -28,9 +28,9 @@ repos:
     hooks:
       - id: tsc
         name: TypeScript type check
-        entry: bash -c 'cd console && pnpm exec tsc --noEmit'
+        entry: pnpm --dir console run typecheck
         language: system
-        files: ^console/.*\.(tsx?|json)$
+        files: ^console/.*\.(tsx?|json|ya?ml)$
         pass_filenames: false
   - repo: https://github.com/asottile/add-trailing-comma
     rev: v3.1.0
@@ -147,5 +147,6 @@ repos:
           --disable=W1309,
           --disable=W1404,
           --disable=W1514,
+          --disable=R0904,  # Too many public methods (common in test classes)
         ]
   # prettier hook removed - console/ is excluded and it requires downloading Node.js

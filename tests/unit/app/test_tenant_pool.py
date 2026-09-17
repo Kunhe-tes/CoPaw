@@ -6,11 +6,12 @@ Tests lazy creation, cache hits, concurrent creation safety, and stop-all cleanu
 
 # pylint: disable=wrong-import-position,protected-access,unused-import
 import asyncio
-import logging
 import json
 import sys
+import threading
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+import time
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
@@ -21,6 +22,7 @@ from swe.app.workspace.tenant_pool import (  # noqa: E402
     TenantWorkspaceEntry,
 )
 from swe.config.config import (  # noqa: E402
+    AgentProfileConfig,
     Config,
     AgentsConfig,
     AgentProfileRef,
@@ -69,6 +71,370 @@ class TestTenantWorkspacePoolBasics:
         """Empty pool doesn't contain any tenant."""
         pool = TenantWorkspacePool(tmp_path / "tenants")
         assert "tenant-1" not in pool
+
+
+class TestTenantBootstrapReadyRegistry:
+    """Regression tests for the in-memory bootstrap-ready fast path."""
+
+    def test_rejects_negative_bootstrap_validation_ttl(self, tmp_path):
+        """Bootstrap validation TTL must not be negative."""
+        with pytest.raises(ValueError):
+            TenantWorkspacePool(
+                tmp_path / "tenants",
+                bootstrap_validation_ttl_seconds=-1,
+            )
+
+    async def _bootstrap_without_external_work(
+        self,
+        pool,
+        tenant_id,
+        monkeypatch,
+    ):
+        """Run ensure's cold path without recovery or external services."""
+
+        async def fake_perform_bootstrap(
+            bootstrap_tenant_id,
+            *_args,
+            **_kwargs,
+        ):
+            await pool._register_tenant_entry(bootstrap_tenant_id)
+
+        monkeypatch.setattr(pool, "_perform_bootstrap", fake_perform_bootstrap)
+        await pool.ensure_bootstrap(tenant_id)
+
+    @pytest.mark.asyncio
+    async def test_ready_entry_skips_persisted_validation_on_reuse(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A ready entry must make subsequent bootstrap checks memory-only."""
+        pool = TenantWorkspacePool(tmp_path / "tenants")
+        await self._bootstrap_without_external_work(
+            pool,
+            "tenant-ready",
+            monkeypatch,
+        )
+
+        persisted_check = Mock(return_value=False)
+        monkeypatch.setattr(
+            pool,
+            "_has_persisted_bootstrap",
+            persisted_check,
+        )
+
+        entry = pool._workspaces["tenant-ready"]
+        assert entry.bootstrap_ready is True
+        persisted_check.reset_mock()
+        persisted_check.side_effect = AssertionError(
+            "persisted bootstrap validation should not run for a ready entry",
+        )
+
+        outcome = await pool.ensure_bootstrap("tenant-ready")
+
+        assert outcome.status == "already_ready"
+        persisted_check.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_invalidate_bootstrap_forces_persisted_revalidation(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Invalidation must make the next ensure consult persisted state."""
+        pool = TenantWorkspacePool(tmp_path / "tenants")
+        await self._bootstrap_without_external_work(
+            pool,
+            "tenant-refresh",
+            monkeypatch,
+        )
+        await pool.invalidate_bootstrap(
+            "tenant-refresh",
+            reason="config_reload",
+        )
+
+        persisted_check = Mock(return_value=False)
+        monkeypatch.setattr(
+            pool,
+            "_has_persisted_bootstrap",
+            persisted_check,
+        )
+        persisted_check.return_value = True
+
+        async def runtime_worker(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch(
+            "swe.app.workspace.tenant_pool.run_runtime_state_work",
+            new=AsyncMock(side_effect=runtime_worker),
+        ) as runtime_work:
+            outcome = await pool.ensure_bootstrap("tenant-refresh")
+
+        assert outcome.status == "already_ready"
+        persisted_check.assert_called_once()
+        runtime_work.assert_awaited_once()
+        assert runtime_work.await_args.args[0] is persisted_check
+
+    @pytest.mark.asyncio
+    async def test_expired_positive_validation_ttl_rechecks_via_runtime_worker(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """An expired positive validation TTL must use the runtime worker."""
+        pool = TenantWorkspacePool(
+            tmp_path / "tenants",
+            bootstrap_validation_ttl_seconds=60,
+        )
+        await self._bootstrap_without_external_work(
+            pool,
+            "tenant-ttl",
+            monkeypatch,
+        )
+        persisted_check = Mock(return_value=True)
+        monkeypatch.setattr(
+            pool,
+            "_has_persisted_bootstrap",
+            persisted_check,
+        )
+        entry = pool._workspaces["tenant-ttl"]
+        entry.validated_at = time.monotonic() - 61
+
+        async def runtime_worker(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch(
+            "swe.app.workspace.tenant_pool.run_runtime_state_work",
+            new=AsyncMock(side_effect=runtime_worker),
+        ) as runtime_work:
+            await pool.ensure_bootstrap("tenant-ttl")
+
+        persisted_check.assert_called_once()
+        runtime_work.assert_awaited_once()
+        assert runtime_work.await_args.args[0] is persisted_check
+
+    @pytest.mark.asyncio
+    async def test_zero_validation_ttl_rechecks_via_runtime_worker(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Zero TTL must never serve a ready entry from memory."""
+        pool = TenantWorkspacePool(
+            tmp_path / "tenants",
+            bootstrap_validation_ttl_seconds=0,
+        )
+        await self._bootstrap_without_external_work(
+            pool,
+            "tenant-zero-ttl",
+            monkeypatch,
+        )
+        persisted_check = Mock(return_value=True)
+        monkeypatch.setattr(
+            pool,
+            "_has_persisted_bootstrap",
+            persisted_check,
+        )
+
+        async def runtime_worker(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch(
+            "swe.app.workspace.tenant_pool.run_runtime_state_work",
+            new=AsyncMock(side_effect=runtime_worker),
+        ) as runtime_work:
+            outcome = await pool.ensure_bootstrap("tenant-zero-ttl")
+
+        assert outcome.status == "already_ready"
+        persisted_check.assert_called_once()
+        runtime_work.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_invalidation_during_bootstrap_prevents_stale_ready_publish(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """An invalidation must win over an in-flight bootstrap publish."""
+        pool = TenantWorkspacePool(tmp_path / "tenants")
+        bootstrap_started = asyncio.Event()
+        release_bootstrap = asyncio.Event()
+
+        async def incomplete_bootstrap(*_args, **_kwargs):
+            return False
+
+        async def blocked_bootstrap(*_args, **_kwargs):
+            bootstrap_started.set()
+            await release_bootstrap.wait()
+
+        monkeypatch.setattr(
+            pool,
+            "_check_existing_bootstrap",
+            incomplete_bootstrap,
+        )
+        monkeypatch.setattr(pool, "_perform_bootstrap", blocked_bootstrap)
+
+        from swe.app.workspace.bootstrap_state import (
+            TenantBootstrapUnavailable,
+        )
+
+        task = asyncio.create_task(pool.ensure_bootstrap("tenant-race"))
+        await bootstrap_started.wait()
+        await pool.invalidate_bootstrap("tenant-race", reason="test_race")
+        release_bootstrap.set()
+        with pytest.raises(TenantBootstrapUnavailable):
+            await task
+
+        entry = pool._workspaces["tenant-race"]
+        assert entry.bootstrap_ready is False
+
+    @pytest.mark.asyncio
+    async def test_invalidation_during_persisted_check_cannot_publish_ready(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A stale persisted-ready result must lose to an invalidation."""
+        import swe.app.workspace.tenant_pool as tenant_pool_module
+
+        pool = TenantWorkspacePool(tmp_path / "tenants")
+        validation_started = asyncio.Event()
+        release_validation = asyncio.Event()
+        worker_calls = 0
+        monkeypatch.setattr(
+            pool,
+            "_has_persisted_bootstrap",
+            Mock(return_value=True),
+        )
+        monkeypatch.setattr(pool, "_perform_bootstrap", AsyncMock())
+
+        async def blocked_runtime_worker(func, /, *args, **kwargs):
+            nonlocal worker_calls
+            worker_calls += 1
+            if worker_calls == 1:
+                validation_started.set()
+                await release_validation.wait()
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr(
+            tenant_pool_module,
+            "run_runtime_state_work",
+            blocked_runtime_worker,
+        )
+
+        from swe.app.workspace.bootstrap_state import (
+            TenantBootstrapUnavailable,
+        )
+
+        task = asyncio.create_task(
+            pool.ensure_bootstrap("tenant-persisted-race"),
+        )
+        await validation_started.wait()
+        await pool.invalidate_bootstrap(
+            "tenant-persisted-race",
+            reason="test_persisted_race",
+        )
+        release_validation.set()
+        with pytest.raises(TenantBootstrapUnavailable):
+            await task
+
+        entry = pool._workspaces["tenant-persisted-race"]
+        assert entry.bootstrap_ready is False
+        pool._perform_bootstrap.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_cold_bootstrap_runs_once_and_waiter_reuses_ready(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A same-tenant waiter must not duplicate a completed bootstrap."""
+        pool = TenantWorkspacePool(tmp_path / "tenants")
+        bootstrap_started = asyncio.Event()
+        release_bootstrap = asyncio.Event()
+        bootstrap_count = 0
+
+        async def incomplete_bootstrap(*_args, **_kwargs):
+            return False
+
+        async def blocked_bootstrap(*_args, **_kwargs):
+            nonlocal bootstrap_count
+            bootstrap_count += 1
+            bootstrap_started.set()
+            await release_bootstrap.wait()
+
+        monkeypatch.setattr(
+            pool,
+            "_check_existing_bootstrap",
+            incomplete_bootstrap,
+        )
+        monkeypatch.setattr(pool, "_perform_bootstrap", blocked_bootstrap)
+
+        first = asyncio.create_task(pool.ensure_bootstrap("tenant-concurrent"))
+        await bootstrap_started.wait()
+        second = asyncio.create_task(
+            pool.ensure_bootstrap("tenant-concurrent"),
+        )
+        await asyncio.sleep(0)
+        release_bootstrap.set()
+
+        first_outcome, second_outcome = await asyncio.gather(first, second)
+
+        assert bootstrap_count == 1
+        assert first_outcome.status == "bootstrapped"
+        assert second_outcome.status == "already_ready"
+
+    @pytest.mark.asyncio
+    async def test_waiter_revalidates_after_normal_ready_publish(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Normal ready publication must not stale a waiting strict check."""
+        import swe.app.workspace.tenant_pool as tenant_pool_module
+
+        pool = TenantWorkspacePool(tmp_path / "tenants")
+        bootstrap_started = asyncio.Event()
+        release_bootstrap = asyncio.Event()
+        validation_started = asyncio.Event()
+        release_validation = asyncio.Event()
+        bootstrap_count = 0
+        worker_calls = 0
+
+        async def blocked_bootstrap(*_args, **_kwargs):
+            nonlocal bootstrap_count
+            bootstrap_count += 1
+            bootstrap_started.set()
+            await release_bootstrap.wait()
+
+        async def controlled_runtime_worker(_func, /, *_args, **_kwargs):
+            nonlocal worker_calls
+            worker_calls += 1
+            if worker_calls == 3:
+                validation_started.set()
+                await release_validation.wait()
+                return True
+            return False
+
+        monkeypatch.setattr(pool, "_perform_bootstrap", blocked_bootstrap)
+        monkeypatch.setattr(
+            tenant_pool_module,
+            "run_runtime_state_work",
+            controlled_runtime_worker,
+        )
+
+        first = asyncio.create_task(pool.ensure_bootstrap("tenant-waiter"))
+        await bootstrap_started.wait()
+        second = asyncio.create_task(pool.ensure_bootstrap("tenant-waiter"))
+        await validation_started.wait()
+        release_bootstrap.set()
+        first_outcome = await first
+        release_validation.set()
+        second_outcome = await second
+
+        assert bootstrap_count == 1
+        assert first_outcome.status == "bootstrapped"
+        assert second_outcome.status == "already_ready"
 
 
 class TestTenantWorkspaceCreation:
@@ -532,6 +898,10 @@ class TestTenantBootstrapConcurrency:
             (workspace / "agent.json").unlink()
             (workspace / "token_usage.json").unlink()
 
+            await pool.invalidate_bootstrap(
+                "tenant-heal",
+                reason="scaffold_deleted",
+            )
             await pool.ensure_bootstrap("tenant-heal")
 
             return workspace
@@ -640,11 +1010,16 @@ class TestTenantBootstrapInitSourceMapping:
         )
         monkeypatch.setattr(
             "swe.app.workspace.tenant_pool.TenantInitializer"
-            ".ensure_seeded_bootstrap",
-            lambda self: {"pool_seed": {}, "workspace_seed": {}},
+            ".recover_seeded_bootstrap",
+            lambda self, **kwargs: {"recovered_paths": []},
         )
 
         pool = TenantWorkspacePool(tmp_path)
+        monkeypatch.setattr(
+            pool,
+            "_require_ready_source_template",
+            lambda *_args: None,
+        )
 
         await pool.ensure_bootstrap(
             "tenant-1",
@@ -682,7 +1057,10 @@ class TestTenantBootstrapObservability:
 
         monkeypatch.setattr(pool, "_check_existing_bootstrap", fake_check)
         with patch.object(tenant_pool_module.logger, "debug") as mock_debug:
-            await pool.ensure_bootstrap("tenant-1")
+            outcome = await pool.ensure_bootstrap("tenant-1")
+
+        assert outcome.status == "already_ready"
+        assert outcome.tenant_id == "tenant-1"
 
         assert any(
             call.args
@@ -710,15 +1088,356 @@ class TestTenantBootstrapObservability:
         monkeypatch.setattr(pool, "_check_existing_bootstrap", fake_check)
         monkeypatch.setattr(pool, "_perform_bootstrap", perform_bootstrap)
         with patch.object(tenant_pool_module.logger, "debug") as mock_debug:
-            await pool.ensure_bootstrap("tenant-1")
+            outcome = await pool.ensure_bootstrap("tenant-1")
 
         perform_bootstrap.assert_awaited_once()
+        assert outcome.status == "bootstrapped"
+        assert outcome.tenant_id == "tenant-1"
         assert any(
             call.args
             and "bootstrap_fast_path_miss tenant_id=%s" in call.args[0]
             and call.args[1] == "tenant-1"
             for call in mock_debug.call_args_list
         )
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_recovery_does_not_block_event_loop(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Recovery filesystem work must execute outside the event loop."""
+        import swe.app.workspace.tenant_pool as tenant_pool_module
+
+        class NoopFlock:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+        async def fake_check(*_args, **_kwargs) -> bool:
+            return False
+
+        def blocking_recovery(self, **_kwargs):
+            del self
+            time.sleep(0.1)
+            return {"recovered_paths": []}
+
+        pool = TenantWorkspacePool(tmp_path)
+        monkeypatch.setattr(tenant_pool_module, "AsyncFlock", NoopFlock)
+        monkeypatch.setattr(pool, "_check_existing_bootstrap", fake_check)
+        monkeypatch.setattr(
+            pool,
+            "_require_ready_source_template",
+            lambda *_args: None,
+        )
+        monkeypatch.setattr(
+            tenant_pool_module.TenantInitializer,
+            "recover_seeded_bootstrap",
+            blocking_recovery,
+        )
+
+        started_at = time.perf_counter()
+        task = asyncio.create_task(pool.ensure_bootstrap("tenant-1"))
+        await asyncio.sleep(0)
+
+        assert time.perf_counter() - started_at < 0.05
+        await task
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_cancellation_waits_for_recovery_before_unlocking(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Cancellation must retain the file lock until recovery completes."""
+        import swe.app.workspace.tenant_pool as tenant_pool_module
+
+        recovery_started = threading.Event()
+        release_recovery = threading.Event()
+        lock_released = threading.Event()
+
+        class TrackingFlock:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                lock_released.set()
+
+        async def incomplete_bootstrap(*_args, **_kwargs) -> bool:
+            return False
+
+        def blocking_recovery(self, **_kwargs):
+            del self
+            recovery_started.set()
+            assert release_recovery.wait(timeout=1)
+            return {"recovered_paths": []}
+
+        pool = TenantWorkspacePool(tmp_path)
+        monkeypatch.setattr(tenant_pool_module, "AsyncFlock", TrackingFlock)
+        monkeypatch.setattr(
+            pool,
+            "_check_existing_bootstrap",
+            incomplete_bootstrap,
+        )
+        monkeypatch.setattr(
+            pool,
+            "_require_ready_source_template",
+            lambda *_args: None,
+        )
+        monkeypatch.setattr(
+            tenant_pool_module.TenantInitializer,
+            "recover_seeded_bootstrap",
+            blocking_recovery,
+        )
+
+        task = asyncio.create_task(pool.ensure_bootstrap("tenant-1"))
+        assert await asyncio.to_thread(recovery_started.wait, 1)
+
+        task.cancel()
+        try:
+            await asyncio.sleep(0)
+            assert not await asyncio.to_thread(lock_released.wait, 0.05)
+        finally:
+            release_recovery.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert lock_released.is_set()
+
+
+class TestTenantBootstrapProcessLock:
+    """Cross-process bootstrap coordination is fail-closed."""
+
+    @pytest.mark.asyncio
+    async def test_lock_timeout_prevents_bootstrap_mutation(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A contended file lock must not fall back to an unlocked repair."""
+        import swe.app.workspace.tenant_pool as tenant_pool_module
+        from swe.app.workspace.bootstrap_lock import BootstrapLockTimeout
+        from swe.app.workspace.bootstrap_state import (
+            TenantBootstrapUnavailable,
+        )
+
+        class TimedOutLock:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                raise BootstrapLockTimeout("contended")
+
+            async def __aexit__(self, *_args):
+                return None
+
+        pool = TenantWorkspacePool(tmp_path)
+        perform_bootstrap = AsyncMock()
+        monkeypatch.setattr(tenant_pool_module, "AsyncFlock", TimedOutLock)
+        monkeypatch.setattr(pool, "_perform_bootstrap", perform_bootstrap)
+
+        with pytest.raises(TenantBootstrapUnavailable):
+            await pool.ensure_bootstrap("tenant-lock-timeout")
+
+        perform_bootstrap.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_source_template_must_be_provisioned_before_tenant_bootstrap(
+        self,
+        tmp_path,
+    ):
+        """Normal source-scoped traffic cannot lazily create a template."""
+        from swe.app.workspace.bootstrap_state import SourceTemplateUnavailable
+
+        pool = TenantWorkspacePool(tmp_path)
+
+        with pytest.raises(SourceTemplateUnavailable):
+            await pool.ensure_bootstrap("tenant-a", source_id="ruice")
+
+        assert not (tmp_path / "default_ruice").exists()
+
+    @pytest.mark.asyncio
+    async def test_ready_tenant_skips_source_template_validation(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A persisted ready tenant must not depend on its template after restart."""
+        pool = TenantWorkspacePool(tmp_path)
+        storage_tenant_id = pool._resolve_bootstrap_tenant_id(
+            "tenant-a",
+            "RMASSIST",
+            None,
+        )
+        tenant_dir = pool._get_tenant_workspace_dir(storage_tenant_id)
+        workspace_dir = tenant_dir / "workspaces" / "default"
+        workspace_dir.mkdir(parents=True)
+        config = Config(
+            agents=AgentsConfig(
+                active_agent="default",
+                profiles={
+                    "default": AgentProfileRef(
+                        id="default",
+                        workspace_dir=str(workspace_dir),
+                        enabled=True,
+                    ),
+                },
+            ),
+        )
+        (tenant_dir / "config.json").write_text(
+            json.dumps(config.model_dump(mode="json")),
+            encoding="utf-8",
+        )
+        agent = AgentProfileConfig(
+            id="default",
+            name="Default Agent",
+            workspace_dir=str(workspace_dir),
+        )
+        (workspace_dir / "agent.json").write_text(
+            json.dumps(agent.model_dump(mode="json")),
+            encoding="utf-8",
+        )
+        for file_name in (
+            "AGENTS.md",
+            "HEARTBEAT.md",
+            "MEMORY.md",
+            "PROFILE.md",
+            "SOUL.md",
+        ):
+            (workspace_dir / file_name).write_text(
+                "# required\n",
+                encoding="utf-8",
+            )
+        for directory_name in ("sessions", "memory", "skills"):
+            (workspace_dir / directory_name).mkdir()
+        for file_name, payload in (
+            ("chats.json", {"version": 1, "chats": []}),
+            ("jobs.json", {"version": 1, "jobs": []}),
+            ("token_usage.json", {}),
+            ("skill.json", {"version": 1, "skills": {}}),
+        ):
+            (workspace_dir / file_name).write_text(
+                json.dumps(payload),
+                encoding="utf-8",
+            )
+        skill_pool = tenant_dir / "skill_pool"
+        skill_pool.mkdir()
+        (skill_pool / "skill.json").write_text(
+            json.dumps({"version": 1, "skills": {}}),
+            encoding="utf-8",
+        )
+        require_template = Mock(
+            side_effect=AssertionError("ready tenant checked its template"),
+        )
+        monkeypatch.setattr(
+            pool,
+            "_require_ready_source_template",
+            require_template,
+        )
+
+        await pool.ensure_bootstrap("tenant-a", source_id="RMASSIST")
+
+        require_template.assert_not_called()
+        assert storage_tenant_id in pool
+
+    @pytest.mark.asyncio
+    async def test_default_source_scope_uses_provider_aware_readiness(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Default source scopes must validate the source providers directory."""
+        import swe.app.workspace.tenant_pool as tenant_pool_module
+        from swe.app.workspace.bootstrap_state import BootstrapReadiness
+
+        pool = TenantWorkspacePool(tmp_path)
+        source_readiness = BootstrapReadiness(
+            ready=False,
+            missing_paths=(tmp_path / "secret/providers",),
+            invalid_json_paths=(),
+            reason="missing_providers",
+        )
+        inspect_source = Mock(return_value=source_readiness)
+        monkeypatch.setattr(
+            tenant_pool_module,
+            "inspect_source_template_readiness",
+            inspect_source,
+        )
+
+        assert not await pool._check_existing_bootstrap(
+            "default_RMASSIST",
+            "default",
+            "RMASSIST",
+            None,
+        )
+        inspect_source.assert_called_once_with(tmp_path, "RMASSIST")
+
+    @pytest.mark.asyncio
+    async def test_explicit_default_source_scope_uses_provider_readiness(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Explicit default source scopes must also validate providers."""
+        import swe.app.workspace.tenant_pool as tenant_pool_module
+        from swe.app.workspace.bootstrap_state import BootstrapReadiness
+
+        pool = TenantWorkspacePool(tmp_path)
+        source_readiness = BootstrapReadiness(
+            ready=False,
+            missing_paths=(tmp_path / "secret/providers",),
+            invalid_json_paths=(),
+            reason="missing_providers",
+        )
+        inspect_source = Mock(return_value=source_readiness)
+        monkeypatch.setattr(
+            tenant_pool_module,
+            "inspect_source_template_readiness",
+            inspect_source,
+        )
+
+        assert not await pool._check_existing_bootstrap(
+            "default_RMASSIST",
+            "default",
+            "RMASSIST",
+            encode_scope_id("default", "RMASSIST"),
+        )
+        inspect_source.assert_called_once_with(tmp_path, "RMASSIST")
+
+    @pytest.mark.asyncio
+    async def test_readiness_check_runs_outside_registry_lock(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Persisted readiness I/O must not hold the global registry lock."""
+        pool = TenantWorkspacePool(tmp_path)
+        readiness_lock_state = []
+
+        def has_seeded_bootstrap(_initializer):
+            readiness_lock_state.append(pool._registry_lock.locked())
+            return True
+
+        monkeypatch.setattr(
+            "swe.app.workspace.tenant_pool.TenantInitializer.has_seeded_bootstrap",
+            has_seeded_bootstrap,
+        )
+
+        assert await pool._check_existing_bootstrap(
+            "tenant-a",
+            "tenant-a",
+            None,
+            None,
+        )
+        assert readiness_lock_state == [False]
 
 
 class TestTenantWorkspaceDirectoryLayout:

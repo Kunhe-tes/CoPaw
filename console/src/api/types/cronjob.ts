@@ -100,11 +100,34 @@ export interface CronBroadcastTarget {
 
 export interface CronBroadcastOptions {
   enable_offset?: boolean;
+  enable_batch_dispatch?: boolean;
+  offset_window_hours?: number;
+}
+
+export interface CronBatchDispatchOptions {
   offset_window_hours?: number;
 }
 
 export interface CronBroadcastResponse {
   results: CronBroadcastTenantResult[];
+}
+
+export type CronBroadcastTaskStatus = "running" | "completed" | "failed";
+
+export interface CronBroadcastTaskResponse {
+  task_id: string;
+  status: CronBroadcastTaskStatus;
+  tenant_count: number;
+  completed_count: number;
+  failed_count: number;
+  results: CronBroadcastTenantResult[];
+  failure_summary?: string | null;
+  updated_at?: string | null;
+  reused: boolean;
+}
+
+export interface CronBroadcastCurrentTaskResponse {
+  task?: CronBroadcastTaskResponse | null;
 }
 
 export interface CronBroadcastChildItem {
@@ -122,8 +145,24 @@ export interface CronBroadcastChildItem {
   last_error?: string | null;
 }
 
+export type CronBroadcastChildrenLookupStatus =
+  | "idle"
+  | "running"
+  | "completed"
+  | "failed";
+
 export interface CronBroadcastChildrenResponse {
   items: CronBroadcastChildItem[];
+  status: CronBroadcastChildrenLookupStatus;
+  tenant_count: number;
+  failed_tenants: number;
+  failure_summary?: string | null;
+  updated_at?: string | null;
+}
+
+export interface CronBroadcastChildrenRefreshResponse
+  extends CronBroadcastChildrenResponse {
+  reused: boolean;
 }
 
 export interface CronBroadcastChildRef {

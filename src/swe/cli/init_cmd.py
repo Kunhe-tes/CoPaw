@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import click
 from rich.console import Console
 from rich.panel import Panel
@@ -86,6 +88,27 @@ DEFAULT_HEARTBEAT_MDS = {
 - Лёгкая проверка при отсутствии активности более 8 часов
 """,
 }
+
+
+@click.command("init-source-template")
+@click.option("--source-id", required=True, help="Source ID to provision.")
+def init_source_template_cmd(source_id: str) -> None:
+    """Explicitly create or repair the template for one source ID."""
+    from ..app.workspace.bootstrap_state import SourceTemplateUnavailable
+    from ..app.workspace.source_template_provisioner import (
+        SourceTemplateProvisioner,
+    )
+
+    try:
+        result = asyncio.run(
+            SourceTemplateProvisioner(WORKING_DIR).ensure(source_id),
+        )
+    except SourceTemplateUnavailable as exc:
+        raise click.ClickException("Source template unavailable") from exc
+    click.echo(
+        f"source_id={result.source_id} template={result.template_name} "
+        f"status={result.status}",
+    )
 
 
 @click.command("init")

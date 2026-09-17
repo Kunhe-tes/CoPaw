@@ -203,6 +203,8 @@ describe("ConversationQuickNav", () => {
     const overflowHint = await screen.findByRole("button", {
       name: /下方还有 \d+ 个问题/,
     });
+    expect(nav).toHaveClass("conversation-quick-nav__scroll--fade-bottom");
+    expect(nav).not.toHaveClass("conversation-quick-nav__scroll--fade-top");
     fireEvent.click(overflowHint);
 
     expect(scrollBy).toHaveBeenCalledWith({

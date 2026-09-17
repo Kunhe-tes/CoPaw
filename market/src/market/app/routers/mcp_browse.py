@@ -3,7 +3,7 @@
 
 from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 
 from ...marketplace.schemas import MarketMCPDetail, MarketMCPItem
 from ..deps import require_source_id
@@ -15,15 +15,26 @@ router = APIRouter()
 async def list_market_mcp(
     request: Request,
     category_id: Optional[int] = None,
+    bbk_ids: Optional[str] = Query(
+        default=None,
+        description="逗号分隔的分行ID列表",
+    ),
     x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
     x_bbk_id: Optional[str] = Header(default=None, alias="X-Bbk-Id"),
 ):
-    """浏览市场 MCP 列表."""
+    """浏览市场 MCP 列表（按 category_id + bbk_ids 过滤）."""
     source_id = require_source_id(x_source_id)
     user_bbk_id = x_bbk_id or "100"
+    # 解析 bbk_ids 参数（逗号分隔）
+    parsed_bbk_ids = None
+    if bbk_ids:
+        parsed_bbk_ids = [b.strip() for b in bbk_ids.split(",") if b.strip()]
     svc = request.app.state.marketplace
     return await svc.list_mcp_items(
-        source_id, user_bbk_id, category_id=category_id
+        source_id,
+        user_bbk_id,
+        category_id=category_id,
+        bbk_ids=parsed_bbk_ids,
     )
 
 

@@ -173,3 +173,73 @@ async def test_copy_file_to_static_returns_business_url_from_context(
     assert payload["network"] == "business"
     assert payload["path"] == f"![report.html]({payload['url']})"
     assert get_current_file_url_network() == "office"
+
+
+@pytest.mark.asyncio
+async def test_copy_file_to_static_recovers_duplicated_static_url_path(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    scope_id = encode_scope_id("alice", "portal")
+    workspace_dir = tmp_path / scope_id / "workspaces" / "agent-a"
+    static_dir = workspace_dir / "static"
+    static_dir.mkdir(parents=True)
+    existing_file = static_dir / "report.html"
+    existing_file.write_text("<p>already static</p>", encoding="utf-8")
+    mistaken_file_path = static_dir / scope_id / "agent-a" / "report.html"
+    monkeypatch.setenv("FILE_URL", "https://files.example/")
+    set_current_agent_id("agent-a")
+
+    user_token = set_current_user_id("alice")
+    source_token = set_current_source_id("portal")
+    scope_token = set_current_scope_id(scope_id)
+    workspace_token = set_current_workspace_dir(workspace_dir)
+    try:
+        response = await copy_file_to_static(str(mistaken_file_path))
+    finally:
+        reset_current_workspace_dir(workspace_token)
+        reset_current_scope_id(scope_token)
+        reset_current_source_id(source_token)
+        reset_current_user_id(user_token)
+        set_current_agent_id("default")
+
+    payload = _tool_payload(response)
+
+    assert payload["ok"] is True
+    assert payload["url"].endswith("/report.html")
+    assert not (static_dir / "report_1.html").exists()
+
+
+@pytest.mark.asyncio
+async def test_copy_file_to_static_accepts_directory_with_single_file(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    scope_id = encode_scope_id("alice", "portal")
+    workspace_dir = tmp_path / scope_id / "workspaces" / "agent-a"
+    export_dir = workspace_dir / "exports"
+    export_dir.mkdir(parents=True)
+    (export_dir / "single.html").write_text("<p>one</p>", encoding="utf-8")
+    monkeypatch.setenv("FILE_URL", "https://files.example/")
+    set_current_agent_id("agent-a")
+
+    user_token = set_current_user_id("alice")
+    source_token = set_current_source_id("portal")
+    scope_token = set_current_scope_id(scope_id)
+    workspace_token = set_current_workspace_dir(workspace_dir)
+    try:
+        response = await copy_file_to_static(str(export_dir))
+    finally:
+        reset_current_workspace_dir(workspace_token)
+        reset_current_scope_id(scope_token)
+        reset_current_source_id(source_token)
+        reset_current_user_id(user_token)
+        set_current_agent_id("default")
+
+    payload = _tool_payload(response)
+
+    assert payload["ok"] is True
+    assert (workspace_dir / "static" / "single.html").read_text(
+        encoding="utf-8",
+    ) == "<p>one</p>"
+    assert payload["url"].endswith("/single.html")

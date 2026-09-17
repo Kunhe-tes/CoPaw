@@ -1,4 +1,10 @@
-export interface HtmlPreviewClickEventPayload {
+export type HtmlPreviewEventType =
+  | "button_click"
+  | "preview_view"
+  | "module_exposure";
+export type HtmlPreviewTemplateType = "main" | "sub";
+
+export interface HtmlTrackerPayloadType {
   source_id?: string | null;
   user_id?: string | null;
   user_name?: string | null;
@@ -17,6 +23,15 @@ export interface HtmlPreviewClickEventPayload {
   customer_name?: string | null;
   customer_info?: Record<string, string> | null;
   clicked_at?: string | null;
+  trace_id?: string | null;
+  event_type?: HtmlPreviewEventType;
+  template_type?: HtmlPreviewTemplateType | null;
+  template_id?: number | null;
+  result_id?: string | null;
+  event_target_id?: string | null;
+  event_target_name?: string | null;
+  page_source?: string | null;
+  plantform_source?: string | null;
 }
 
 export interface HtmlPreviewClickSubmitResponse {
@@ -64,6 +79,13 @@ export interface HtmlPreviewClickEventItem {
   customer_name?: string | null;
   customer_info?: Record<string, string> | null;
   clicked_at?: string | null;
+  event_type?: HtmlPreviewEventType;
+  template_type?: HtmlPreviewTemplateType | null;
+  template_id?: number | null;
+  result_id?: string | null;
+  event_target_id?: string | null;
+  event_target_name?: string | null;
+  trace_id?: string | null;
 }
 
 export interface HtmlPreviewClickEventListResponse {

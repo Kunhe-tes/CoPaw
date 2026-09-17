@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
+import base64
+import json
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -17,6 +20,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
     TextContent,
 )
 
+import swe.app.channels.zhaohu.channel as zhaohu_channel_module
 from swe.app.channels.zhaohu.channel import ZhaohuChannel
 
 # ---------------------------------------------------------------------------
@@ -51,6 +55,13 @@ def _make_channel(**overrides: Any) -> ZhaohuChannel:
     return ch
 
 
+def _decode_action_tag(url: str) -> dict[str, Any]:
+    params = parse_qs(urlparse(url).query)
+    encoded = params["actionParams"][0]
+    payload = json.loads(base64.b64decode(encoded).decode("utf-8"))
+    return payload["tag"]
+
+
 def _make_request(
     session_id: str = "test_session",
     user_id: str = "test_user",
@@ -78,6 +89,198 @@ def _make_completed_event(text: str) -> MagicMock:
     # Mock _message_to_content_parts behavior
     event.content = [TextContent(type=ContentType.TEXT, text=text)]
     return event
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"enabled": False},
+        {"push_url": ""},
+        {"sys_id": ""},
+        {"robot_open_id": ""},
+    ],
+)
+async def test_send_rejects_unavailable_delivery_configuration(
+    overrides,
+) -> None:
+    channel = _make_channel(**overrides)
+
+    with pytest.raises(RuntimeError, match="zhaohu delivery unavailable"):
+        await channel.send(
+            "user-1",
+            "scheduled output",
+            {"cron_delivery_key": "cron:execution-1:output"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_non_cron_send_keeps_unavailable_configuration_as_noop() -> None:
+    channel = _make_channel(push_url="")
+
+    await channel.send("user-1", "ordinary output")
+
+
+@pytest.mark.asyncio
+async def test_send_event_reports_unrenderable_message_as_unconfirmed() -> (
+    None
+):
+    channel = _make_channel()
+    event = _make_completed_event("output")
+    channel._message_to_content_parts = MagicMock(return_value=[])
+
+    delivered = await channel.send_event(
+        user_id="user-1",
+        session_id="session-1",
+        event=event,
+    )
+
+    assert delivered is False
+
+
+@pytest.mark.asyncio
+async def test_send_event_reports_blank_text_as_unconfirmed() -> None:
+    channel = _make_channel()
+    event = _make_completed_event("output")
+    channel._message_to_content_parts = MagicMock(
+        return_value=[TextContent(type=ContentType.TEXT, text="   ")],
+    )
+
+    delivered = await channel.send_event(
+        user_id="user-1",
+        session_id="session-1",
+        event=event,
+    )
+
+    assert delivered is False
+
+
+@pytest.mark.asyncio
+async def test_send_event_requires_explicit_channel_delivery_ack() -> None:
+    channel = _make_channel()
+    event = _make_completed_event("output")
+    channel.send_content_parts = AsyncMock(return_value=None)
+
+    delivered = await channel.send_event(
+        user_id="user-1",
+        session_id="session-1",
+        event=event,
+    )
+
+    assert delivered is False
+
+
+@pytest.mark.asyncio
+async def test_send_rejects_non_successful_push_response(monkeypatch) -> None:
+    class _Response:
+        content = b'{"returnCode":"FAIL"}'
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"returnCode": "FAIL"}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+        async def post(self, *_args, **_kwargs) -> _Response:
+            return _Response()
+
+    monkeypatch.setattr(
+        zhaohu_channel_module.httpx,
+        "AsyncClient",
+        lambda **_kwargs: _Client(),
+    )
+    channel = _make_channel()
+
+    with pytest.raises(RuntimeError, match="returnCode=FAIL"):
+        await channel.send(
+            "user-1",
+            "scheduled output",
+            {"cron_delivery_key": "cron:execution-1:output"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_cron_approval_card_sends_information_without_buttons():
+    ch = _make_channel()
+    ch.send_custom_card = AsyncMock()
+    ch.send = AsyncMock()
+
+    code, msg = await ch.send_cron_approval_card(
+        request_id="approval-1",
+        session_id="cron-task:job-1",
+        user_id="user-1",
+        agent_id="agent-a",
+        tenant_id="tenant-a",
+        source_id="source-a",
+        tool_name="execute_shell_command",
+        result_summary="发现 shell 风险",
+        findings_count=1,
+        tool_input={"cmd": "echo hi"},
+        approve_command="/approve approval-1",
+        deny_command="/deny approval-1",
+    )
+
+    assert (code, msg) == (0, "sent")
+    ch.send_custom_card.assert_awaited_once()
+    open_id, content = ch.send_custom_card.await_args.args
+    assert open_id == "user-1"
+    assert "execute_shell_command" in content[0]["list"][0]["content"]
+    assert "发现 shell 风险" in content[0]["list"][0]["content"]
+    assert "echo hi" in content[0]["list"][0]["content"]
+    assert "approval-1" in content[0]["list"][0]["content"]
+    assert "/approve" not in content[0]["list"][0]["content"]
+    assert "/deny" not in content[0]["list"][0]["content"]
+
+    approve_tag = _decode_action_tag(
+        content[1]["list"][0]["actionLink"]["url"],
+    )
+    reject_tag = _decode_action_tag(
+        content[1]["list"][1]["actionLink"]["url"],
+    )
+    for tag, action_type in (
+        (approve_tag, "approve"),
+        (reject_tag, "reject"),
+    ):
+        assert tag["request_id"] == "approval-1"
+        assert tag["type"] == action_type
+        assert tag["agent_id"] == "agent-a"
+        assert tag["agentId"] == "agent-a"
+        assert tag["tenant_id"] == "tenant-a"
+        assert tag["source_id"] == "source-a"
+    ch.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cron_approval_result_sends_plain_notification():
+    ch = _make_channel()
+    ch.send_custom_card = AsyncMock()
+    ch.send = AsyncMock()
+
+    code, msg = await ch.send_cron_approval_result(
+        request_id="approval-1",
+        session_id="cron-task:job-1",
+        user_id="user-1",
+        tool_name="execute_shell_command",
+        decision="approved",
+    )
+
+    assert (code, msg) == (0, "sent")
+    ch.send.assert_awaited_once()
+    to_handle, text, meta = ch.send.await_args.args
+    assert to_handle == "user-1"
+    assert "工具审批已通过" in text
+    assert "execute_shell_command" in text
+    assert "approval-1" in text
+    assert meta["session_id"] == "cron-task:job-1"
+    assert meta["notification_summary"] == "工具审批结果"
+    ch.send_custom_card.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

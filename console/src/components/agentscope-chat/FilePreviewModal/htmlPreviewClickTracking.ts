@@ -1,5 +1,5 @@
 import type {
-  HtmlPreviewClickEventPayload,
+  HtmlTrackerPayloadType,
   HtmlPreviewListSnapshotPayload,
 } from "@/api/types/htmlPreviewEvents";
 
@@ -11,10 +11,18 @@ export interface HtmlPreviewClickMetadata {
   listKey?: string | null;
   listName?: string | null;
   defaultCustomerInfo?: Record<string, string> | null;
+  traceId?: string;
+  templateId?: string | null;
+  resultId?: string | null;
+  rootTemplateId?: string | null;
+  rootResultId?: string | null;
+  templateType?: 'sub' | 'main' | null;
+  pageSource?: string;
+  platformSource?: string;
 }
 
 export type HtmlPreviewClickReporter = (
-  payload: HtmlPreviewClickEventPayload,
+  payload: HtmlTrackerPayloadType,
 ) => Promise<unknown> | unknown;
 
 export type HtmlPreviewListSnapshotReporter = (
@@ -27,19 +35,34 @@ export interface NestedHtmlPreviewRequest {
   listKey: string;
   listName: string;
   customerInfo: Record<string, string> | null;
+  custUid: string;
 }
 
 const CLICKABLE_SELECTOR = "button,a,[role='button'],[data-track-id]";
 const NESTED_PREVIEW_SELECTOR = "a[data-preview-modal='true']";
 const CUSTOMER_DATA_PREFIX = "customer";
 const CUSTOMER_INFO_DATA_KEY = "customerInfo";
-const CUSTOMER_NAME_HEADER_PATTERN = /^(客户姓名|客户名称|姓名)$/;
+
+// 从 URL 中提取 resultId 和 templateId 的正则表达式
+const RESULT_ID_REGEX = /[?&]resultId=([^&]+)/i;
+const TEMPLATE_ID_REGEX = /[?&]templateId=([^&]+)/i;
+
+function extractResultIdFromUrl(url: string): string | null {
+  const match = url.match(RESULT_ID_REGEX);
+  return match ? match[1] : null;
+}
+
+function extractTemplateIdFromUrl(url: string): string | null {
+  const match = url.match(TEMPLATE_ID_REGEX);
+  return match ? match[1] : null;
+}
+const CUSTOMER_NAME_HEADER_PATTERN = /^(kh姓名|kh名称|姓名)$/;
 const CUSTOMER_INFO_ALLOWED_KEYS = new Set([
   "customer_id",
   "customer_name",
   "name",
-  "客户姓名",
-  "客户名称",
+  "kh姓名",
+  "kh名称",
   "姓名",
 ]);
 
@@ -64,10 +87,10 @@ function normalizeCustomerDatasetKey(key: string) {
 function getElementName(element: HTMLElement, buttonText: string | null) {
   return normalizeText(
     element.dataset.trackName ||
-      element.getAttribute("aria-label") ||
-      element.getAttribute("title") ||
-      element.getAttribute("name") ||
-      buttonText,
+    element.getAttribute("aria-label") ||
+    element.getAttribute("title") ||
+    element.getAttribute("name") ||
+    buttonText,
     255,
   );
 }
@@ -237,8 +260,8 @@ function getCustomerIdentity(customerInfo: Record<string, string> | null) {
     customerName:
       info.name ||
       info.customer_name ||
-      info["客户姓名"] ||
-      info["客户名称"] ||
+      info["kh姓名"] ||
+      info["kh名称"] ||
       info["姓名"] ||
       null,
   };
@@ -261,6 +284,12 @@ function getFileNameFromUrl(url: string) {
   }
 }
 
+// 检测链接是否为动态渲染链接（包含 resultId 和 templateId）
+function isDynamicRenderLink(link: HTMLAnchorElement): boolean {
+  const href = link.getAttribute("href") || link.href;
+  return !!(extractResultIdFromUrl(href) && extractTemplateIdFromUrl(href));
+}
+
 function resolveNestedPreviewUrl(
   link: HTMLAnchorElement,
   metadata: HtmlPreviewClickMetadata,
@@ -277,14 +306,14 @@ export function buildHtmlPreviewClickPayload(
   element: HTMLElement,
   metadata: HtmlPreviewClickMetadata,
   clickedAt: Date = new Date(),
-): HtmlPreviewClickEventPayload | null {
+): HtmlTrackerPayloadType | null {
   const buttonText = normalizeText(element.textContent, 512);
   const buttonId = normalizeText(
     element.dataset.trackId ||
-      element.id ||
-      element.getAttribute("name") ||
-      getClassFallbackId(element, buttonText) ||
-      buttonText,
+    element.id ||
+    element.getAttribute("name") ||
+    getClassFallbackId(element, buttonText) ||
+    buttonText,
     255,
   );
   const buttonName = getElementName(element, buttonText);
@@ -295,7 +324,7 @@ export function buildHtmlPreviewClickPayload(
   if (!buttonId && !buttonName && !buttonText) {
     return null;
   }
-
+  const template_type = metadata.rootTemplateId ? 'sub' : 'main';
   return {
     cron_task_id: metadata.cronTaskId || null,
     cron_task_name: metadata.cronTaskName || null,
@@ -311,6 +340,13 @@ export function buildHtmlPreviewClickPayload(
     customer_name: customerIdentity.customerName,
     customer_info: customerInfo,
     clicked_at: clickedAt.toISOString(),
+    trace_id: metadata.traceId || null,
+    template_id: metadata.templateId ? parseInt(metadata.templateId, 10) : null,
+    result_id: metadata.resultId || null,
+    event_type: "button_click",
+    template_type: metadata.templateType || template_type,
+    page_source: metadata.pageSource || null,
+    plantform_source: metadata.platformSource || null,
   };
 }
 
@@ -376,11 +412,12 @@ export function attachHtmlPreviewClickTracker(params: {
   reporter: HtmlPreviewClickReporter;
   listSnapshotReporter?: HtmlPreviewListSnapshotReporter;
   onOpenNestedPreview?: (preview: NestedHtmlPreviewRequest) => void;
+  getTemplateName?: (templateId: number) => string | undefined;
 }): () => void {
   const doc = params.iframe.contentDocument;
   const view = doc?.defaultView;
   if (!doc || !view) {
-    return () => {};
+    return () => { };
   }
 
   if (params.listSnapshotReporter) {
@@ -412,6 +449,11 @@ export function attachHtmlPreviewClickTracker(params: {
       return;
     }
 
+    // 导航栏点击事件不记录
+    if (element.closest(".nav-item")) {
+      return;
+    }
+
     const payload = buildHtmlPreviewClickPayload(
       element,
       params.metadata,
@@ -428,27 +470,240 @@ export function attachHtmlPreviewClickTracker(params: {
       console.warn("Failed to record HTML preview click:", error);
     }
 
+    // 处理嵌套预览 - 支持两种方式：
+    // 1. 带 data-preview-modal="true" 属性的链接
+    // 2. URL 中包含 resultId 和 templateId 的动态渲染链接
     const nestedPreviewLink = element.closest(NESTED_PREVIEW_SELECTOR);
+    const isDynamicRender = element.closest("a") && isDynamicRenderLink(element.closest("a")!);
+
     if (
       params.onOpenNestedPreview &&
-      nestedPreviewLink instanceof view.HTMLAnchorElement &&
-      nestedPreviewLink.href
+      ((nestedPreviewLink instanceof view.HTMLAnchorElement &&
+        nestedPreviewLink.href) ||
+        isDynamicRender)
     ) {
-      const nestedPreviewUrl = resolveNestedPreviewUrl(
-        nestedPreviewLink,
-        params.metadata,
-      );
+      let nestedPreviewUrl: string;
+      let previewFileName: string;
+      let customerInfo: Record<string, string> | null;
+
+      if (isDynamicRender) {
+        // 动态渲染链接：从 href 中提取 URL 并获取模板名称
+        const anchorElement = element.closest("a")!;
+        const href = anchorElement.getAttribute("href") || anchorElement.href;
+        const templateId = extractTemplateIdFromUrl(href);
+        nestedPreviewUrl = href;
+        previewFileName = href.split("?")[0]?.split("/").pop() || "preview.html";
+
+        // 如果提供了 getTemplateName 回调，使用它获取模板名称
+        if (templateId && params.getTemplateName) {
+          previewFileName = params.getTemplateName(parseInt(templateId, 10)) || previewFileName;
+        }
+        // 查找
+        customerInfo = getCustomerInfo(element);
+        console.log('customerInfo', customerInfo);
+      } else {
+        // data-preview-modal 属性链接
+        nestedPreviewUrl = resolveNestedPreviewUrl(
+          nestedPreviewLink as HTMLAnchorElement,
+          params.metadata,
+        );
+        previewFileName = getFileNameFromUrl(nestedPreviewUrl);
+      }
+
       event.preventDefault();
       params.onOpenNestedPreview({
         fileUrl: nestedPreviewUrl,
-        fileName: getFileNameFromUrl(nestedPreviewUrl),
+        fileName: previewFileName,
         listKey: payload.list_key || getListKey(params.metadata),
         listName: payload.list_name || getListName(params.metadata),
         customerInfo: payload.customer_info || null,
+        custUid: customerInfo?.customer_id || null,
       });
     }
   };
 
   doc.addEventListener("click", handleClick, true);
+
   return () => doc.removeEventListener("click", handleClick, true);
+}
+
+// === Exposure Tracking (曝光埋点) ===
+
+const VISIBLE_MONITOR_SELECTOR = '.js-view-monitor';
+const EXPOSURE_THRESHOLD = 0.5;
+const VIEWPORT_COVERAGE_THRESHOLD = 0.8;
+const EXPOSURE_DURATION_MS = 2000;
+
+export interface ExposureTrackerParams {
+  iframe: HTMLIFrameElement;
+  metadata: HtmlPreviewClickMetadata;
+  reporter?: (payload: HtmlTrackerPayloadType) => void;
+}
+export interface HtmlPreviewExposureMetadata extends HtmlPreviewClickMetadata {
+  sectionId?: string;
+  sectionName?: string;
+}
+export function buildHtmlPreviewExposurePayload(
+  metadata: HtmlPreviewExposureMetadata,
+  clickedAt: Date = new Date(),
+): HtmlTrackerPayloadType | null {
+  // const buttonText = normalizeText(metadata.sectionName, 512);
+  const customerInfo = metadata.defaultCustomerInfo || null;
+  const customerIdentity = getCustomerIdentity(customerInfo);
+
+  if (!metadata.sectionName) {
+    return null;
+  }
+  const template_type = metadata.rootTemplateId ? 'sub' : 'main';
+  return {
+    cron_task_id: metadata.cronTaskId || null,
+    cron_task_name: metadata.cronTaskName || null,
+    file_url: metadata.fileUrl,
+    file_name: metadata.fileName || null,
+    list_key: getListKey(metadata),
+    list_name: getListName(metadata),
+    customer_id: customerIdentity.customerId,
+    customer_name: customerIdentity.customerName,
+    customer_info: customerInfo,
+    clicked_at: clickedAt.toISOString(),
+    trace_id: metadata.traceId || null,
+    event_type: 'module_exposure',
+    template_id: metadata.templateId ? parseInt(metadata.templateId, 10) : null,
+    result_id: metadata.resultId || null,
+    event_target_id: metadata.sectionId || null,
+    event_target_name: metadata.sectionName || null,
+    template_type: metadata.templateType || template_type,
+    page_source: metadata.pageSource || null,
+    plantform_source: metadata.platformSource || null,
+  };
+}
+
+export function attachHtmlPreviewExposureTracker(
+  params: ExposureTrackerParams
+): () => void {
+  const { iframe, metadata, reporter } = params;
+  const doc = iframe.contentDocument;
+  if (!doc) return () => { };
+  const elements = doc.querySelectorAll(VISIBLE_MONITOR_SELECTOR);
+  if (!elements.length) {
+    return () => { };
+  }
+
+  const elementStates = new Map<Element, {
+    timer: ReturnType<typeof setTimeout> | null;
+    reported: boolean;
+  }>();
+
+  const moduleExposureMap = new Map<string, boolean>();
+
+  const viewportHeight = (doc.defaultView?.innerHeight || window.innerHeight);
+
+  const isEffectivelyExposed = (entry: IntersectionObserverEntry): boolean => {
+    if (!entry.isIntersecting) return false;
+    if (entry.intersectionRatio >= EXPOSURE_THRESHOLD) return true;
+    const visibleHeight = entry.intersectionRect.height;
+    return visibleHeight / viewportHeight >= VIEWPORT_COVERAGE_THRESHOLD;
+  };
+
+  const observer = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => {
+        const el = entry.target as HTMLElement;
+        const state = elementStates.get(el);
+        const logData = parseDataLog(el);
+        if (!state || (logData?.sectionId && moduleExposureMap.get(logData.sectionId)) || !logData.sectionId) return;
+
+        if (isEffectivelyExposed(entry)) {
+          if (!state.reported) {
+            if(state.timer){
+              clearTimeout(state.timer);
+            }
+            state.timer = setTimeout(() => {
+              const payload: HtmlTrackerPayloadType = buildHtmlPreviewExposurePayload({ ...metadata, ...logData });
+              reporter?.(payload);
+              moduleExposureMap.set(logData.sectionId, true);
+              state.reported = true;
+              state.timer = null;
+            }, EXPOSURE_DURATION_MS);
+          }
+        } else if (!entry.isIntersecting) {
+          if (state.timer) {
+            clearTimeout(state.timer);
+            state.timer = null;
+          }
+        }
+      });
+    },
+    { threshold: [0, 0.1, 0.2, 0.3, 0.4, EXPOSURE_THRESHOLD] }
+  );
+
+
+  if (elements.length > 0) {
+    elements.forEach((el) => {
+      elementStates.set(el, { timer: null, reported: false });
+      observer.observe(el);
+    });
+  }
+
+  return () => {
+    console.log('[Exposure] Stop tracking');
+    observer.disconnect();
+    if (elementStates) {
+      elementStates.forEach((state) => {
+        if (state.timer) clearTimeout(state.timer);
+      });
+    }
+    elementStates.clear();
+    moduleExposureMap.clear();
+  };
+}
+
+function parseDataLog(el: Element): Record<string, string> {
+  const sectionId = el.getAttribute('data-target-id');
+  const sectionName = el.getAttribute('data-target-name');
+  if (!sectionId || !sectionName) return {};
+  try {
+    return { sectionId, sectionName };
+  } catch {
+    return {};
+  }
+}
+export function buildHtmlPreviewLoadPayload(
+  metadata: HtmlPreviewExposureMetadata,
+  clickedAt: Date = new Date(),
+): HtmlTrackerPayloadType | null {
+  const customerInfo = metadata.defaultCustomerInfo || null;
+  const customerIdentity = getCustomerIdentity(customerInfo);
+  const template_type = metadata.rootTemplateId ? 'sub' : 'main';
+
+  return {
+    cron_task_id: metadata.cronTaskId || null,
+    cron_task_name: metadata.cronTaskName || null,
+    file_url: metadata.fileUrl,
+    file_name: metadata.fileName || null,
+    list_key: getListKey(metadata),
+    list_name: getListName(metadata),
+    customer_id: customerIdentity.customerId,
+    customer_name: customerIdentity.customerName,
+    customer_info: customerInfo,
+    clicked_at: clickedAt.toISOString(),
+    trace_id: metadata.traceId || null,
+    event_type: 'preview_view',
+    template_id: metadata.templateId ? parseInt(metadata.templateId, 10) : null,
+    result_id: metadata.resultId || null,
+    template_type: metadata.templateType || template_type,
+    page_source: metadata.pageSource || null,
+    plantform_source: metadata.platformSource || null,
+  };
+}
+
+export function attachHtmlPreviewLoadTracker(
+  params: ExposureTrackerParams
+) {
+  const { iframe, metadata, reporter } = params;
+  const doc = iframe.contentDocument;
+  if (!doc) return;
+
+  const payload: HtmlTrackerPayloadType = buildHtmlPreviewLoadPayload(metadata);
+  reporter?.(payload);
 }

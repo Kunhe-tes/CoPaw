@@ -92,13 +92,13 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  height: 44px;
+  height: 32px;
   padding: 0 18px;
   border: 1px solid #dbe4f3;
-  border-radius: 12px;
+  border-radius: 8px;
   background: #ffffff;
   color: #2563eb;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
   cursor: pointer;
 }
@@ -312,13 +312,6 @@
   margin-bottom: 16px;
 }
 
-.analysisGridWithDepth {
-  display: grid;
-  grid-template-columns: 2.2fr 2.1fr 1.72fr;
-  gap: 16px;
-  margin-bottom: 16px;
-}
-
 .summaryGrid {
   display: grid;
   grid-template-columns: 2.2fr 2.1fr 1.72fr;
@@ -330,6 +323,8 @@
 .panelMedium {
   min-height: 290px;
   padding: 18px 16px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .panelHeader {
@@ -427,10 +422,28 @@
 }
 
 .trendChart {
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) 28px;
-  align-items: stretch;
-  gap: 0px;
+  display: block;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+  isolation: isolate;
+}
+
+.trendChartCanvas {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.trendChartCanvas :global(*) {
+  box-sizing: border-box;
+}
+
+.trendChartCanvas :global(canvas),
+.trendChartCanvas :global(div) {
+  max-width: 100%;
 }
 
 .axisLeft {
@@ -698,78 +711,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-.depthGrid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  margin-top: 4px;
-}
-
-.depthCard {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  padding: 14px 8px 10px;
-  background: #f9fbff;
-  border: 1px solid #eef3fb;
-  border-radius: 12px;
-
-  .metricChangeUp,
-  .metricChangeDown,
-  .metricChangeFlat {
-    margin-top: 2px;
-    font-size: 12px;
-  }
-}
-
-.depthIconWrap {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  color: #4f46e5;
-  background: #eef2ff;
-}
-
-.depthBody {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  width: 100%;
-}
-
-.depthTitle {
-  color: #6b7280;
-  font-size: 12px;
-  font-weight: 500;
-  text-align: center;
-  line-height: 1.3;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-}
-
-.depthValue {
-  color: #111827;
-  font-size: 20px;
-  font-weight: 700;
-  line-height: 1.2;
-  font-variant-numeric: tabular-nums;
-  text-align: center;
-}
-
-.depthChange {
-  color: #16a34a;
-  font-size: 12px;
-  font-weight: 600;
-  text-align: center;
-}
-
 .donutLayout {
   display: grid;
   grid-template-columns: 140px minmax(0, 1fr);
@@ -899,6 +840,10 @@
   border-radius: 50%;
 }
 
+.legendLabelHoverable {
+  cursor: help;
+}
+
 .legendValue {
   color: #475569;
   font-variant-numeric: tabular-nums;
@@ -1020,6 +965,43 @@
   max-height: 200px;
   overflow-y: auto;
 }
+
+.errorCodeTooltip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 120px;
+}
+
+.errorCodeTooltipRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.errorCodeTooltipCode {
+  color: #cbd5e1;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.errorCodeTooltipCount {
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.errorCodeTooltipEmpty {
+  color: #cbd5e1;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
 .funnelWrap {
   min-height: 0;
 }

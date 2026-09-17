@@ -9,10 +9,11 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from .models import (
     FeaturedCaseCreate,
     FeaturedCaseListResponse,
+    FeaturedCaseReorderRequest,
     FeaturedCaseUpdate,
 )
 from .service import FeaturedCaseService
-from .store import FeaturedCaseStore
+from .store import FeaturedCaseStore, normalize_featured_case_bbk_id
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,24 @@ def get_service() -> FeaturedCaseService:
     if _service is None:
         raise RuntimeError("Featured case module not initialized")
     return _service
+
+
+def _require_source_id(request: Request) -> str:
+    """Return the request source or raise a management validation error."""
+    source_id = request.headers.get("X-Source-Id")
+    if not source_id:
+        raise HTTPException(
+            status_code=400,
+            detail="X-Source-Id header required",
+        )
+    return source_id
+
+
+def _request_bbk_scope(request: Request) -> str:
+    """Return the caller's canonical writable BBK scope."""
+    return normalize_featured_case_bbk_id(
+        request.headers.get("X-Bbk-Id"),
+    )
 
 
 # ==================== Client endpoints (for frontend display) ====================
@@ -124,8 +143,11 @@ async def list_all_cases(
             detail="X-Source-Id header required",
         )
 
-    # Use query param if provided, otherwise fall back to header
-    effective_bbk_id = bbk_id or request.headers.get("X-Bbk-Id")
+    # Management queries are exact-scope. Explicit bbk_id enables the
+    # read-only head-office tab in branch contexts.
+    effective_bbk_id = normalize_featured_case_bbk_id(
+        bbk_id if bbk_id is not None else request.headers.get("X-Bbk-Id"),
+    )
 
     service = get_service()
     cases, total = await service.list_cases(
@@ -146,15 +168,10 @@ async def create_case(request: Request, case: FeaturedCaseCreate) -> dict:
 
     source_id comes from X-Source-Id header (not from request body).
     """
-    source_id = request.headers.get("X-Source-Id")
-    if not source_id:
-        raise HTTPException(
-            status_code=400,
-            detail="X-Source-Id header required",
-        )
-
+    source_id = _require_source_id(request)
+    bbk_id = _request_bbk_scope(request)
     service = get_service()
-    created = await service.create_case(source_id, case)
+    created = await service.create_case(source_id, bbk_id, case)
     return {"success": True, "data": created.model_dump()}
 
 
@@ -162,25 +179,61 @@ async def create_case(request: Request, case: FeaturedCaseCreate) -> dict:
     "/admin/cases/{case_id}",
     summary="Update case (admin)",
 )
-async def update_case(case_id: int, updates: FeaturedCaseUpdate) -> dict:
+async def update_case(
+    request: Request,
+    case_id: int,
+    updates: FeaturedCaseUpdate,
+) -> dict:
     """Update case definition."""
     service = get_service()
     try:
-        updated = await service.update_case(case_id, updates)
+        updated = await service.update_case(
+            case_id,
+            _require_source_id(request),
+            _request_bbk_scope(request),
+            updates,
+        )
         return {"success": True, "data": updated.model_dump()}
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+
+@router.put(
+    "/admin/cases/{case_id}/order",
+    summary="Reorder case (admin)",
+)
+async def reorder_case(
+    request: Request,
+    case_id: int,
+    reorder: FeaturedCaseReorderRequest,
+) -> dict:
+    """Atomically move a case within the caller's exact BBK scope."""
+    service = get_service()
+    try:
+        result = await service.reorder_case(
+            case_id,
+            _require_source_id(request),
+            _request_bbk_scope(request),
+            reorder.sort_order,
+        )
+        return {"success": True, "data": result.model_dump()}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
 
 
 @router.delete(
     "/admin/cases/{case_id}",
     summary="Delete case (admin)",
 )
-async def delete_case(case_id: int) -> dict:
+async def delete_case(request: Request, case_id: int) -> dict:
     """Delete case definition."""
     service = get_service()
     try:
-        await service.delete_case(case_id)
+        await service.delete_case(
+            case_id,
+            _require_source_id(request),
+            _request_bbk_scope(request),
+        )
         return {"success": True}
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise HTTPException(status_code=404, detail=str(e)) from e

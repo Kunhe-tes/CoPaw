@@ -23,6 +23,8 @@ import time
 from pathlib import Path
 
 from .analyzers import BaseAnalyzer
+from .analyzers.ast_behavior_analyzer import AstBehaviorAnalyzer
+from .analyzers.package_analyzer import PackageAnalyzer
 from .analyzers.pattern_analyzer import PatternAnalyzer
 from .models import Finding, ScanResult, SkillFile
 from .scan_policy import ScanPolicy
@@ -315,5 +317,15 @@ class SkillScanner:
             analyzers.append(PatternAnalyzer(policy=policy))
         except Exception as exc:
             logger.error("Failed to load PatternAnalyzer: %s", exc)
+
+        try:
+            analyzers.append(PackageAnalyzer())
+        except Exception as exc:
+            logger.error("Failed to load PackageAnalyzer: %s", exc)
+
+        try:
+            analyzers.append(AstBehaviorAnalyzer())
+        except Exception as exc:
+            logger.error("Failed to load AstBehaviorAnalyzer: %s", exc)
 
         return analyzers

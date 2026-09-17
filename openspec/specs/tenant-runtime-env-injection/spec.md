@@ -253,4 +253,3 @@ target tenants.
 - **THEN** the system SHALL record enough audit metadata to identify the acting
   user or internal caller, target tenant, target source, and affected env keys
 - **AND** the audit metadata SHALL NOT include raw env values
-

@@ -128,12 +128,39 @@ def test_public_asset_upload_api_route_is_exempt() -> None:
     assert tenant_identity.is_source_exempt("/api/assets/upload") is True
 
 
+def test_public_chat_share_route_is_exempt() -> None:
+    assert tenant_identity.is_tenant_exempt("/api/chat-shares/token") is True
+    assert tenant_identity.is_source_exempt("/api/chat-shares/token") is True
+
+
 def test_internal_api_routes_are_exempt() -> None:
     assert (
         tenant_identity.is_tenant_exempt("/api/internal/cron/callback") is True
     )
     assert (
         tenant_identity.is_source_exempt("/api/internal/agents/default/reload")
+        is True
+    )
+
+
+def test_runtime_memory_diagnostic_route_is_exempt() -> None:
+    assert (
+        tenant_identity.is_tenant_exempt("/api/runtime/memory-diagnostic")
+        is True
+    )
+    assert (
+        tenant_identity.is_source_exempt("/api/runtime/memory-diagnostic")
+        is True
+    )
+
+
+def test_runtime_inotify_diagnostic_route_is_exempt() -> None:
+    assert (
+        tenant_identity.is_tenant_exempt("/api/runtime/inotify-diagnostic")
+        is True
+    )
+    assert (
+        tenant_identity.is_source_exempt("/api/runtime/inotify-diagnostic")
         is True
     )
 

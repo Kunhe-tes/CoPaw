@@ -36,6 +36,7 @@ class ZhaohuChannelBindingStore:
         source_id: str,
         robot_id: str,
         open_id: Optional[str] = None,
+        priority: int = 30,
     ) -> bool:
         """插入或更新渠道绑定信息，(tenant_id, source_id) 冲突时更新"""
         db = self._use_db()
@@ -43,14 +44,18 @@ class ZhaohuChannelBindingStore:
             return False
 
         sql = f"""
-            INSERT INTO {_BINDING_TABLE} (tenant_id, source_id, robot_id, open_id)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO {_BINDING_TABLE} (tenant_id, source_id, robot_id, open_id, priority)
+            VALUES (%s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 robot_id = VALUES(robot_id),
-                open_id = COALESCE(VALUES(open_id), open_id)
+                open_id = COALESCE(VALUES(open_id), open_id),
+                priority = VALUES(priority)
         """
         try:
-            await db.execute(sql, (tenant_id, source_id, robot_id, open_id))
+            await db.execute(
+                sql,
+                (tenant_id, source_id, robot_id, open_id, priority),
+            )
             return True
         except Exception:
             logger.exception(
@@ -71,7 +76,7 @@ class ZhaohuChannelBindingStore:
             return None
 
         sql = f"""
-            SELECT tenant_id, source_id, robot_id, open_id, created_at, updated_at
+            SELECT tenant_id, source_id, robot_id, open_id, priority, created_at, updated_at
             FROM {_BINDING_TABLE}
             WHERE tenant_id = %s AND source_id = %s
         """
@@ -123,6 +128,8 @@ class ZhaohuChannelBindingStore:
         sql = f"""
             SELECT source_id FROM {_BINDING_TABLE}
             WHERE tenant_id = %s AND robot_id = %s
+            ORDER BY priority ASC
+            LIMIT 1
         """
         try:
             row = await db.fetch_one(sql, (tenant_id, robot_id))
@@ -145,9 +152,11 @@ class ZhaohuChannelBindingStore:
             return None
 
         sql = f"""
-            SELECT tenant_id, source_id, robot_id, open_id, created_at, updated_at
+            SELECT tenant_id, source_id, robot_id, open_id, priority, created_at, updated_at
             FROM {_BINDING_TABLE}
             WHERE open_id = %s
+            ORDER BY priority ASC
+            LIMIT 1
         """
         try:
             return await db.fetch_one(sql, (open_id,))

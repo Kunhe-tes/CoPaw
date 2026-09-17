@@ -4,6 +4,7 @@
 Provides RESTful API for managing multiple agent instances.
 """
 
+import asyncio
 import json
 import logging
 import shutil
@@ -346,13 +347,17 @@ async def create_agent(
     if request.skill_names is None:
         from ...agents.skills_manager import read_skill_pool_manifest
 
-        manifest = read_skill_pool_manifest(working_dir=tenant_dir)
+        manifest = await asyncio.to_thread(
+            read_skill_pool_manifest,
+            working_dir=tenant_dir,
+        )
         initial_skill_names = sorted(manifest.get("skills", {}))
     else:
         initial_skill_names = request.skill_names
 
     # Initialize workspace with default files
-    _initialize_agent_workspace(
+    await asyncio.to_thread(
+        _initialize_agent_workspace,
         workspace_dir,
         agent_config,
         skill_names=initial_skill_names,
@@ -780,18 +785,24 @@ def _initialize_agent_workspace(  # pylint: disable=too-many-branches
 
     if skill_names is not None:
         from ...agents.skills_manager import (
-            get_skill_pool_dir,
+            SkillPoolService,
             reconcile_workspace_manifest,
         )
 
-        pool_dir = get_skill_pool_dir(working_dir=working_dir)
-        skills_dir = workspace_dir / "skills"
-        for name in skill_names:
-            source = pool_dir / name
-            target = skills_dir / name
-            if source.exists() and not target.exists():
-                shutil.copytree(source, target)
-        reconcile_workspace_manifest(workspace_dir)
+        pool_service = SkillPoolService(working_dir=working_dir)
+        for name in dict.fromkeys(skill_names):
+            download = pool_service.download_to_workspace(
+                name,
+                workspace_dir,
+                overwrite=False,
+            )
+            if not download.get("success"):
+                reason = download.get("reason", "unknown")
+                raise RuntimeError(
+                    f"Failed to download requested skill '{name}': {reason}",
+                )
+        if not skill_names:
+            reconcile_workspace_manifest(workspace_dir)
 
     # Create empty jobs.json for cron jobs
     jobs_file = workspace_dir / "jobs.json"

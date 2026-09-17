@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { type ReactNode, useMemo } from "react";
 import {
   AgentScopeRuntimeContentType,
   AgentScopeRuntimeMessageType,
@@ -9,6 +9,12 @@ import {
 import AgentScopeRuntimeResponseBuilder from "./Builder";
 import Message from "./Message";
 import Tool from "./Tool";
+import OperationGroup from "./OperationGroup";
+import {
+  groupOperationMessages,
+  isOperationGroupToolMessage,
+} from "./operationGrouping";
+import type { OperationGroupedItem } from "./operationGrouping";
 import Reasoning from "./Reasoning";
 import Error from "./Error";
 import { Bubble, Markdown } from "@/components/agentscope-chat";
@@ -19,7 +25,6 @@ import { getCompletedReasoningFallbackText } from "./reasoningFallback";
 import ProcessDisclosure from "./ProcessDisclosure";
 import { resolveToolName } from "./ToolTitle";
 // import { Avatar, Flex } from "antd";
-// import { useChatAnywhereOptions } from "../../Context/ChatAnywhereOptionsContext";
 
 type RetryMetadata = {
   retry_status?: unknown;
@@ -90,6 +95,16 @@ function hasVisibleAnswerContent(message: IAgentScopeRuntimeMessage) {
   );
 }
 
+function findLastVisibleAnswerMessageIndex(
+  messages: IAgentScopeRuntimeMessage[],
+) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (hasVisibleAnswerContent(messages[index])) return index;
+  }
+
+  return -1;
+}
+
 function isToolMessageType(type: AgentScopeRuntimeMessageType) {
   return [
     AgentScopeRuntimeMessageType.PLUGIN_CALL,
@@ -111,6 +126,22 @@ function isHiddenToolMessage(message: IAgentScopeRuntimeMessage) {
       const toolName = resolveToolName(data);
       return toolName ? HIDDEN_PROCESS_TOOL_NAMES.has(toolName) : false;
     }),
+  );
+}
+
+function shouldFoldIntoProcessDisclosure(message: IAgentScopeRuntimeMessage) {
+  return (
+    message.type !== AgentScopeRuntimeMessageType.HEARTBEAT &&
+    !isHiddenToolMessage(message)
+  );
+}
+
+function shouldCountAsProcessStep(message: IAgentScopeRuntimeMessage) {
+  return (
+    message.type === AgentScopeRuntimeMessageType.REASONING ||
+    message.type === AgentScopeRuntimeMessageType.ERROR ||
+    isOperationGroupToolMessage(message) ||
+    Boolean(getRetryStatus(message))
   );
 }
 
@@ -225,9 +256,24 @@ function renderResponseItem(item: IAgentScopeRuntimeMessage) {
   }
 }
 
+function renderGroupedItem(item: OperationGroupedItem) {
+  return item.kind === "group" ? (
+    <OperationGroup key={item.key} entry={item} />
+  ) : (
+    renderResponseItem(item.message)
+  );
+}
+
+function messagesForGroupedItem(
+  item: OperationGroupedItem,
+): IAgentScopeRuntimeMessage[] {
+  return item.kind === "group" ? item.steps : [item.message];
+}
+
 export default function AgentScopeRuntimeResponseCard(props: {
   data: IAgentScopeRuntimeResponse;
   isLast?: boolean;
+  beforeActions?: ReactNode;
 }) {
   // const avatar = useChatAnywhereOptions((v) => v.welcome.avatar);
   // const nick = useChatAnywhereOptions((v) => v.welcome.nick);
@@ -244,48 +290,67 @@ export default function AgentScopeRuntimeResponseCard(props: {
       props.data,
       messages,
     );
-    const hasAnswer = Boolean(
-      reasoningFallbackText ||
-        messages.some((message) => hasVisibleAnswerContent(message)),
-    );
+    const finalAnswerIndex = reasoningFallbackText
+      ? -1
+      : findLastVisibleAnswerMessageIndex(messages);
+    const hasAnswer = Boolean(reasoningFallbackText || finalAnswerIndex >= 0);
+
+    // Operation groups are explicit (agent-declared) and always render as
+    // their own default-collapsed entries; they never fold into the
+    // process disclosure and never merge with messages outside the group.
+    const { items } = groupOperationMessages(messages);
 
     if (!canCollapseProcess || !hasAnswer) {
       return {
-        process: [] as IAgentScopeRuntimeMessage[],
-        direct: messages,
+        process: [] as OperationGroupedItem[],
+        direct: items,
         failedProcessCount: 0,
+        processStepCount: 0,
         toolCallCount: 0,
       };
     }
 
-    const process: IAgentScopeRuntimeMessage[] = [];
-    const direct: IAgentScopeRuntimeMessage[] = [];
+    const process: OperationGroupedItem[] = [];
+    const direct: OperationGroupedItem[] = [];
 
-    messages.forEach((message) => {
-      if (
-        message.type === AgentScopeRuntimeMessageType.REASONING ||
-        (isToolMessageType(message.type) && !isHiddenToolMessage(message)) ||
-        Boolean(getRetryStatus(message))
-      ) {
-        process.push(message);
+    items.forEach((item) => {
+      if (item.kind === "group") {
+        process.push(item);
         return;
       }
-      direct.push(message);
+      const message = item.message;
+      if (finalAnswerIndex >= 0 && message === messages[finalAnswerIndex]) {
+        direct.push({ kind: "message", message });
+        return;
+      }
+
+      if (shouldFoldIntoProcessDisclosure(message)) {
+        process.push(item);
+      } else {
+        direct.push({ kind: "message", message });
+      }
     });
 
+    const processMessages = process.flatMap(messagesForGroupedItem);
     return {
       process,
       direct,
-      failedProcessCount: process.filter(messageHasFailedProcess).length,
-      toolCallCount: process.filter((message) =>
-        isToolMessageType(message.type),
-      ).length,
+      failedProcessCount: processMessages.filter(messageHasFailedProcess)
+        .length,
+      processStepCount: processMessages.filter(shouldCountAsProcessStep).length,
+      toolCallCount: processMessages.filter(isOperationGroupToolMessage).length,
     };
   }, [messages, props.data, reasoningFallbackText]);
   const durationText = useMemo(() => {
     return getMessagesDurationText(messages);
   }, [messages]);
-
+  const hasModelCallFailed =
+    props.data.error?.code === "model_call_failed" ||
+    messages.some(
+      (message) =>
+        message.type === AgentScopeRuntimeMessageType.ERROR &&
+        message.code === "model_call_failed",
+    );
   if (
     !messages?.length &&
     AgentScopeRuntimeResponseBuilder.maybeGenerating(props.data)
@@ -304,7 +369,7 @@ export default function AgentScopeRuntimeResponseCard(props: {
         <ProcessDisclosure
           durationText={durationText}
           failedCount={groupedMessages.failedProcessCount}
-          processCount={groupedMessages.process.length}
+          processCount={groupedMessages.processStepCount}
           toolCallCount={groupedMessages.toolCallCount}
           status={
             props.data.status === AgentScopeRuntimeRunStatus.Canceled
@@ -312,13 +377,14 @@ export default function AgentScopeRuntimeResponseCard(props: {
               : "completed"
           }
         >
-          {groupedMessages.process.map(renderResponseItem)}
+          {groupedMessages.process.map(renderGroupedItem)}
         </ProcessDisclosure>
       )}
-      {groupedMessages.direct.map(renderResponseItem)}
+      {groupedMessages.direct.map(renderGroupedItem)}
       {reasoningFallbackText && <Markdown content={reasoningFallbackText} />}
       {props.data.error && <Error data={props.data.error} />}
-      <Actions {...props} />
+      {props.beforeActions}
+      <Actions {...props} hideReplace={hasModelCallFailed} />
       {props.data.suggestions?.length > 0 && (
         <Suggestions
           suggestions={props.data.suggestions}

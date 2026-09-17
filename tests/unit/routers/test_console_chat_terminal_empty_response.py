@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.swe.app.routers import console as console_router
+from swe.app.answer_turn.models import TurnIdentity, TurnLease
 
 
 class _FakeConsoleChannel:
@@ -47,13 +48,41 @@ class _FakeChatManager:
 
 
 class _FakeTaskTracker:
-    async def attach_or_start(self, _run_key, payload, _stream_fn):
+    def __init__(self) -> None:
+        self.payload = None
+
+    async def attach_or_start(self, _identity, payload, _stream_fn, **_kwargs):
+        self.payload = payload
         return payload, True
 
-    async def stream_from_queue(self, queue, _run_key):
+    async def attach(self, _identity):
+        return None
+
+    async def stream(self, _identity, queue):
         await asyncio.sleep(0)
         async for event in _FakeConsoleChannel().stream_one(queue):
             yield event
+
+
+class _FakeCoordinator:
+    def __init__(self, tracker: _FakeTaskTracker) -> None:
+        self.tracker = tracker
+
+    async def status(self, _chat_id):
+        return None
+
+    async def start_or_attach(self, chat_id, payload, producer, **kwargs):
+        identity = TurnIdentity(
+            chat_id=chat_id,
+            msgid=kwargs.get("msgid") or "msg-1",
+            turn_id="turn-1",
+        )
+        queue, is_new = await self.tracker.attach_or_start(
+            identity,
+            payload,
+            producer,
+        )
+        return TurnLease(identity, queue, is_new)
 
 
 def test_console_chat_allows_terminal_response_frame_without_output(
@@ -66,6 +95,9 @@ def test_console_chat_allows_terminal_response_frame_without_output(
         channel_manager=_FakeChannelManager(),
         chat_manager=_FakeChatManager(),
         task_tracker=_FakeTaskTracker(),
+    )
+    workspace.answer_turn_coordinator = _FakeCoordinator(
+        workspace.task_tracker,
     )
 
     async def _fake_get_agent_for_request(_request):
@@ -107,3 +139,52 @@ def test_console_chat_allows_terminal_response_frame_without_output(
         "completed",
     ]
     assert parsed[-1]["output"] == []
+
+
+def test_console_chat_returns_user_question_msgid_header(
+    monkeypatch,
+) -> None:
+    app = FastAPI()
+    app.include_router(console_router.router)
+
+    task_tracker = _FakeTaskTracker()
+    workspace = SimpleNamespace(
+        channel_manager=_FakeChannelManager(),
+        chat_manager=_FakeChatManager(),
+        task_tracker=task_tracker,
+    )
+    workspace.answer_turn_coordinator = _FakeCoordinator(task_tracker)
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+
+    client = TestClient(app)
+    payload = {
+        "input": [
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        ],
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "channel": "console",
+    }
+
+    with client.stream(
+        "POST",
+        "/console/chat",
+        headers={"X-Source-Id": "src-a"},
+        json=payload,
+    ) as response:
+        assert response.status_code == 200
+        msgid = response.headers.get("X-Swe-Msgid")
+        assert msgid
+        assert response.headers["X-Swe-Sessionid"] == "session-1"
+        list(response.iter_lines())
+
+    assert task_tracker.payload is not None
+    assert task_tracker.payload["meta"]["msgid"] == msgid

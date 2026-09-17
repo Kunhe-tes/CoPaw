@@ -147,10 +147,17 @@ class SuggestionService:
         return model
 
     @classmethod
-    def reset_model(cls) -> None:
+    def reset_model(cls, scope_id: str | None = None) -> None:
         """清理建议模型缓存，用于配置刷新或测试隔离。"""
-        cached_models = list(cls._models_by_trace.values())
-        cls._models_by_trace.clear()
+        if scope_id is None:
+            keys = list(cls._models_by_trace)
+        else:
+            keys = [
+                key
+                for key in cls._models_by_trace
+                if key[1][0] == str(scope_id)
+            ]
+        cached_models = [cls._models_by_trace.pop(key) for key in keys]
         for model in cached_models:
             dispose_cached_model(model)
 

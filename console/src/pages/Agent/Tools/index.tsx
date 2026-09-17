@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import { Card, Switch, Empty, Button } from "@agentscope-ai/design";
+import { Card, Switch, Empty, Button, Tag } from "@agentscope-ai/design";
 import {
   EyeOutlined,
   EyeInvisibleOutlined,
@@ -75,7 +75,14 @@ export default function ToolsPage() {
                 onMouseLeave={() => setHoverKey(null)}
               >
                 <div className={styles.cardHeader}>
-                  <h3 className={styles.toolName}>{tool.name}</h3>
+                  <div>
+                    <h3 className={styles.toolName}>{tool.name}</h3>
+                    {tool.origin === "source" ? (
+                      <Tag color="blue">
+                        系统工具 · v{tool.source_version ?? "-"}
+                      </Tag>
+                    ) : null}
+                  </div>
                   <div className={styles.statusContainer}>
                     <span className={styles.statusDot} />
                     <span className={styles.statusText}>

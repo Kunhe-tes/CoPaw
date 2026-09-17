@@ -21,6 +21,8 @@ from .models import (
     SkillReadinessCheckSummary,
     SkillReadinessConfig,
     SkillReadinessConfigRecord,
+    SkillReadinessOwner,
+    SkillReadinessOwnerSnapshot,
     SkillReadinessRunProgress,
     SkillReadinessUserResult,
 )
@@ -30,6 +32,7 @@ logger = logging.getLogger(__name__)
 _UNAVAILABLE_PREFIX = "skill readiness storage unavailable"
 _CONFIG_TABLE = "swe_skill_readiness_configs"
 _RUN_TABLE = "swe_skill_readiness_runs"
+_OWNER_SNAPSHOT_TABLE = "swe_skill_readiness_owner_snapshots"
 _USER_RESULT_TABLE = "swe_skill_readiness_user_results"
 _CHECK_RESULT_TABLE = "swe_skill_readiness_check_results"
 
@@ -140,12 +143,97 @@ class SkillReadinessStore:
             return None
         return self._row_to_config_record(row)
 
+    async def get_owner_snapshot(
+        self,
+        source_id: str,
+        skill_id: str,
+    ) -> SkillReadinessOwnerSnapshot | None:
+        """读取某个 source/skill 的最近一次 owner 查询快照。"""
+        db = self._require_db()
+        row = await self._call_db(
+            "fetch owner snapshot",
+            db.fetch_one,
+            f"""
+                SELECT source_id, skill_id, status, total_users, owner_users,
+                    failed_users, failure_summary, owners_json, updated_at
+                FROM {_OWNER_SNAPSHOT_TABLE}
+                WHERE source_id = %s AND skill_id = %s
+            """,
+            (source_id, skill_id),
+        )
+        return None if row is None else self._row_to_owner_snapshot(row)
+
+    async def mark_owner_lookup_running(
+        self,
+        source_id: str,
+        skill_id: str,
+    ) -> bool:
+        """抢占 owner 刷新权；已有 running 刷新时返回 False。"""
+        db = self._require_db()
+        affected = await self._call_db(
+            "mark owner lookup running",
+            db.execute,
+            f"""
+                INSERT INTO {_OWNER_SNAPSHOT_TABLE} (
+                    source_id, skill_id, status, owners_json
+                )
+                VALUES (%s, %s, 'running', '[]')
+                ON DUPLICATE KEY UPDATE
+                    status = 'running',
+                    updated_at = updated_at
+            """,
+            (source_id, skill_id),
+        )
+        return int(affected or 0) > 0
+
+    async def record_owner_snapshot(
+        self,
+        source_id: str,
+        skill_id: str,
+        *,
+        status: str,
+        total_users: int,
+        owners: list[SkillReadinessOwner],
+        failed_users: int = 0,
+        failure_summary: str | None = None,
+    ) -> None:
+        """保存 owner 查询结果，供 overview 直接读取最新快照。"""
+        db = self._require_db()
+        await self._call_db(
+            "record owner snapshot",
+            db.execute,
+            f"""
+                INSERT INTO {_OWNER_SNAPSHOT_TABLE} (
+                    source_id, skill_id, status, total_users, owner_users,
+                    failed_users, failure_summary, owners_json
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    status = VALUES(status),
+                    total_users = VALUES(total_users),
+                    owner_users = VALUES(owner_users),
+                    failed_users = VALUES(failed_users),
+                    failure_summary = VALUES(failure_summary),
+                    owners_json = VALUES(owners_json),
+                    updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                source_id,
+                skill_id,
+                status,
+                max(total_users, 0),
+                len(owners),
+                max(failed_users, 0),
+                failure_summary,
+                _dump_json([owner.model_dump(mode="json") for owner in owners]),
+            ),
+        )
+
     async def create_run(
         self,
         source_id: str,
         skill_id: str,
         config_snapshot: SkillReadinessConfig,
-        owner_lookup_summary: dict[str, Any] | None = None,
     ) -> SkillReadinessRunProgress:
         """创建新的 running 运行记录。"""
         db = self._require_db()
@@ -157,9 +245,9 @@ class SkillReadinessStore:
                 INSERT INTO {_RUN_TABLE} (
                     run_id, source_id, skill_id, status, total_users,
                     completed_users, failed_users, config_snapshot,
-                    owner_lookup_summary, failure_summary, started_at
+                    failure_summary, started_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
             """,
             (
                 run_id,
@@ -170,7 +258,6 @@ class SkillReadinessStore:
                 0,
                 0,
                 _dump_json(config_snapshot.model_dump(mode="json")),
-                _dump_json(owner_lookup_summary or {}),
                 None,
             ),
         )
@@ -209,7 +296,6 @@ class SkillReadinessStore:
         source_id: str,
         skill_id: str,
         config_snapshot: SkillReadinessConfig,
-        owner_lookup_summary: dict[str, Any] | None = None,
     ) -> tuple[SkillReadinessRunProgress, bool]:
         """复用正在运行的 run，不存在时创建新 run。"""
         db = self._require_db()
@@ -239,7 +325,6 @@ class SkillReadinessStore:
                         source_id,
                         skill_id,
                         config_snapshot,
-                        owner_lookup_summary=owner_lookup_summary,
                     )
                     return run, False
                 finally:
@@ -750,6 +835,37 @@ class SkillReadinessStore:
             updated_at=row.get("updated_at"),
         )
 
+    def _row_to_owner_snapshot(
+        self,
+        row: dict[str, Any],
+    ) -> SkillReadinessOwnerSnapshot:
+        """将 owner 快照行解析为领域模型。"""
+        raw_owners = row.get("owners_json")
+        try:
+            owner_data = (
+                json.loads(raw_owners)
+                if isinstance(raw_owners, str)
+                else raw_owners
+            ) or []
+        except (TypeError, ValueError):
+            owner_data = []
+        owners = [
+            SkillReadinessOwner.model_validate(item)
+            for item in owner_data
+            if isinstance(item, dict)
+        ]
+        return SkillReadinessOwnerSnapshot(
+            source_id=row["source_id"],
+            skill_id=row["skill_id"],
+            status=row.get("status") or "idle",
+            total_users=int(row.get("total_users") or 0),
+            owner_users=int(row.get("owner_users") or len(owners)),
+            failed_users=int(row.get("failed_users") or 0),
+            failure_summary=row.get("failure_summary"),
+            owners=owners,
+            updated_at=row.get("updated_at"),
+        )
+
     def _row_to_run_progress(
         self,
         row: dict[str, Any],
@@ -855,13 +971,28 @@ _CREATE_TABLE_QUERIES = (
             completed_users INT NOT NULL DEFAULT 0,
             failed_users INT NOT NULL DEFAULT 0,
             config_snapshot TEXT NOT NULL,
-            owner_lookup_summary TEXT NULL,
             failure_summary TEXT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             started_at TIMESTAMP NULL DEFAULT NULL,
             completed_at TIMESTAMP NULL DEFAULT NULL,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 ON UPDATE CURRENT_TIMESTAMP
+        )
+    """,
+    f"""
+        CREATE TABLE IF NOT EXISTS {_OWNER_SNAPSHOT_TABLE} (
+            source_id VARCHAR(128) NOT NULL,
+            skill_id VARCHAR(200) NOT NULL,
+            status VARCHAR(20) NOT NULL,
+            total_users INT NOT NULL DEFAULT 0,
+            owner_users INT NOT NULL DEFAULT 0,
+            failed_users INT NOT NULL DEFAULT 0,
+            failure_summary TEXT NULL,
+            owners_json MEDIUMTEXT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (source_id, skill_id)
         )
     """,
     f"""

@@ -40,6 +40,7 @@ async def _run_query(monkeypatch, request):
     runner.session = SimpleNamespace(
         load_session_state=AsyncMock(),
         save_session_state=AsyncMock(),
+        mutate_session_state=AsyncMock(),
     )
     setattr(runner, "_chat_manager", None)
 
@@ -48,6 +49,7 @@ async def _run_query(monkeypatch, request):
     class FakeAgent:
         def __init__(self, **kwargs):
             del kwargs
+            self.memory = SimpleNamespace(content=[])
 
         async def register_mcp_clients(self):
             return
@@ -73,8 +75,8 @@ async def _run_query(monkeypatch, request):
         lambda *args, **kwargs: _fake_agent_config(),
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner._build_and_connect_mcp_clients",
-        AsyncMock(return_value=[]),
+        "swe.app.runner.runner._build_lazy_mcp_clients",
+        lambda *_args, **_kwargs: [],
     )
     monkeypatch.setattr("swe.app.runner.runner.SWEAgent", FakeAgent)
     monkeypatch.setattr(

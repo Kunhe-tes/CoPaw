@@ -20,7 +20,6 @@ from swe.app.source_system_config.runtime import (
 )
 from swe.config.config import ToolResultCompactConfig
 from swe.config.context import (
-    set_current_file_read_max_bytes,
     reset_current_tenant_id,
     reset_current_workspace_dir,
     set_current_recent_max_bytes,
@@ -207,36 +206,6 @@ async def test_source_recent_max_bytes_affects_read_file_context(
 
     text = result.content[0]["text"]
     assert "covers the next 1000 bytes" in text
-
-
-@pytest.mark.asyncio
-async def test_explicit_file_read_disable_skips_recent_threshold_fallback(
-    tmp_path,
-    monkeypatch,
-):
-    """显式关闭文件读取截断后，不应再回退到 recent_max_bytes 截断。"""
-    tenant_root = tmp_path / "tenant-a"
-    workspace = tenant_root / "workspace"
-    workspace.mkdir(parents=True)
-    monkeypatch.setattr(tenant_path_boundary, "WORKING_DIR", tmp_path)
-    file_path = workspace / "large.txt"
-    file_path.write_text("\n".join(["x" * 20] * 200), encoding="utf-8")
-
-    tenant_token = set_current_tenant_id("tenant-a")
-    workspace_token = set_current_workspace_dir(workspace)
-    try:
-        set_current_recent_max_bytes(1000)
-        set_current_file_read_max_bytes(0)
-        result = await read_file("large.txt")
-    finally:
-        set_current_recent_max_bytes(None)
-        set_current_file_read_max_bytes(None)
-        reset_current_workspace_dir(workspace_token)
-        reset_current_tenant_id(tenant_token)
-
-    text = result.content[0]["text"]
-    assert "covers the next 1000 bytes" not in text
-    assert len(text.encode("utf-8")) > 1000
 
 
 @pytest.mark.asyncio

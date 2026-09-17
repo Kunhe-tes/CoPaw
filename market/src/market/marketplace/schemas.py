@@ -6,6 +6,8 @@ from __future__ import annotations
 from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 
+from .models import ExpertVersion, ExpertVersionsManifest
+
 
 class PublishSkillRequest(BaseModel):
     """上架技能请求体."""
@@ -25,6 +27,11 @@ class PublishSkillRequest(BaseModel):
     overwrite: bool = False
     # 用户工作区版本号，用于版本快照的 source_user_version
     source_user_version: str = ""
+    # 同步模式：直接传递用户已有的 skill_id 和 cn_name，无需再解析
+    skill_id: str = ""
+    cn_name: str = ""
+    # 是否纳入统计
+    include_in_statistics: bool = False
 
 
 class DistributeRequest(BaseModel):
@@ -39,6 +46,7 @@ class MarketSkillResponse(BaseModel):
 
     item_id: str
     name: str
+    skill_id: str = ""
     chinese_name: str = ""
     description: str
     version: str
@@ -52,6 +60,7 @@ class MarketSkillResponse(BaseModel):
     call_count: int = 0
     user_count: int = 0
     version_unchanged: bool = False
+    include_in_statistics: bool = False  # 是否纳入统计
 
 
 class SkillUserStat(BaseModel):
@@ -68,6 +77,82 @@ class MarketSkillDetail(MarketSkillResponse):
     user_stats: list[SkillUserStat] = Field(default_factory=list)
 
 
+class PublishExpertRequest(BaseModel):
+    """上架社区专家请求体."""
+
+    definition_id: str
+    agent_id: str = "default"
+    category_id: int | None = None
+    bbk_ids: list[str] = Field(default_factory=list)
+    overwrite: bool = False
+
+
+class ExpertInstallRequest(BaseModel):
+    """接收专家到一个 Agent Profile。"""
+
+    agent_id: str = "default"
+
+
+class ExpertDistributionRequest(BaseModel):
+    """管理员分发专家。"""
+
+    target_type: Literal["all", "bbk_id", "user_id"]
+    target_values: list[str] = Field(default_factory=list)
+
+
+class ExpertOperationResult(BaseModel):
+    user_id: str
+    success: bool
+    definition_id: str | None = None
+    reason: str | None = None
+
+
+class ExpertDistributionResponse(BaseModel):
+    item_id: str
+    distributed_count: int
+    conflict_count: int = 0
+    results: list[ExpertOperationResult] = Field(default_factory=list)
+
+
+class ExpertRecallRequest(BaseModel):
+    target_user_ids: list[str] | None = None
+
+
+class ExpertRecallResponse(BaseModel):
+    item_id: str
+    recalled_count: int
+    failed_count: int = 0
+    results: list[ExpertOperationResult] = Field(default_factory=list)
+
+
+class MarketExpertResponse(BaseModel):
+    """社区专家列表/详情响应."""
+
+    item_id: str
+    name: str
+    description: str = ""
+    version: str = "1.0.0"
+    creator_id: str
+    creator_name: str = ""
+    category_id: Optional[int] = None
+    bbk_ids: list[str] = Field(default_factory=list)
+    status: str = "active"
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    version_unchanged: bool = False
+
+
+class MarketExpertDetail(MarketExpertResponse):
+    """社区专家详情."""
+
+    versions: list[ExpertVersion] = Field(default_factory=list)
+    definition: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExpertVersionListResponse(ExpertVersionsManifest):
+    """社区专家版本列表响应."""
+
+
 class MySkillItem(BaseModel):
     """我的技能列表条目."""
 
@@ -77,6 +162,7 @@ class MySkillItem(BaseModel):
     description: str = ""
     version: Optional[str] = None
     received_version: Optional[str] = None
+    market_version: Optional[str] = None
     distributed_by: Optional[str] = None
     is_received: bool = False
     has_update: bool = False
@@ -120,13 +206,33 @@ class DistributeConflictItem(BaseModel):
     reason: str
 
 
+class DistributeTenantResult(BaseModel):
+    """单个用户的技能分发结果。"""
+
+    user_id: str
+    success: bool
+    status: str
+    skill_name: str = ""
+    error: str | None = None
+
+
 class DistributeResponse(BaseModel):
     """分发结果."""
 
     distributed_count: int
     conflict_count: int = 0
+    failed_count: int = 0
     conflicts: list[DistributeConflictItem] = []
+    results: list[DistributeTenantResult] = []
     item_id: str
+
+
+class AsyncTaskSubmitResponse(BaseModel):
+    """异步任务提交响应。"""
+
+    task_id: str
+    status: str = "queued"
+    reused: bool = False
 
 
 class FileTreeNode(BaseModel):
@@ -175,6 +281,7 @@ class ParseZipResponse(BaseModel):
     description: str | None = None
     exists: bool = False
     error: str | None = None
+    skill_id_reused: bool = False  # 应用市场场景：是否复用已有 skill_id
     skill_id_conflict: str | None = None  # 我的技能场景：skill_id 冲突提示
     skill_id_used_count: int = 0  # 应用市场场景：持有该 skill_id 的用户数量
     skill_id_used_by: list[str] = Field(
@@ -183,16 +290,17 @@ class ParseZipResponse(BaseModel):
 
 
 class MCPDistributionRequest(BaseModel):
-    """MCP 分发请求体，语义与现有 MCP 菜单分发到租户保持一致。"""
+    """MCP 分发请求体，语义与现有 MCP 菜单分发到用户保持一致。"""
 
     target_tenant_ids: list[str] = Field(default_factory=list)
     overwrite: bool = True
 
 
 class MCPDistributionTenantResult(BaseModel):
-    """单个租户的 MCP 分发结果。"""
+    """单个用户的 MCP 分发结果。"""
 
     tenant_id: str
+    tenant_name: str | None = None
     success: bool
     bootstrapped: bool = False
     default_agent_updated: list[str] = Field(default_factory=list)
@@ -328,3 +436,83 @@ class RecallResponse(BaseModel):
     failed_count: int = 0
     results: list[RecallResultItem] = Field(default_factory=list)
     item_id: str
+
+
+class DistributionPreviewRequest(BaseModel):
+    """分发预览请求体."""
+
+    source_id: str
+    tenant_ids: list[str] = Field(default_factory=list)
+
+
+class UserSkillStatus(BaseModel):
+    """用户技能状态."""
+
+    tenant_id: str
+    tenant_name: str | None = None
+    bbk_id: str | None = None
+    status: str  # first_time / update / conflict
+    current_version: str | None = None  # update 时显示当前版本
+
+
+class DistributionPreviewResponse(BaseModel):
+    """分发预览响应."""
+
+    skill_version: str
+    users: list[UserSkillStatus] = Field(default_factory=list)
+    distributed_user_ids: list[str] = Field(default_factory=list)
+
+
+# ============================================================
+# RPC 接口模型
+# ============================================================
+
+
+class SkillQueryRequest(BaseModel):
+    """技能查询请求体."""
+
+    skill_names: list[str] = Field(
+        ...,
+        description="技能名称列表，最多 100 个",
+        max_length=100,
+    )
+    source_types: Optional[list[str]] = Field(
+        default=None,
+        description="来源类型过滤：builtin/customized/marketplace",
+    )
+    enabled_only: bool = Field(
+        default=False,
+        description="是否只返回已启用技能，默认查询所有",
+    )
+
+
+class SkillInfo(BaseModel):
+    """技能基本信息（纯技能属性）."""
+
+    skill_id: str = Field(description="技能唯一标识符")
+    skill_name: str = Field(description="技能名称（目录名）")
+    cn_name: str = Field(default="", description="中文展示名")
+    source: str = Field(description="来源类型：builtin/customized/marketplace")
+    enabled: bool = Field(description="是否启用")
+    version_text: str = Field(default="1.0.0", description="版本号")
+
+
+class SkillQueryResult(BaseModel):
+    """单个技能查询结果."""
+
+    skill_name: str = Field(description="查询的技能名称")
+    found: bool = Field(description="是否找到")
+    skill: Optional[SkillInfo] = Field(
+        default=None,
+        description="技能信息，未找到时为 null",
+    )
+
+
+class SkillQueryResponse(BaseModel):
+    """技能查询响应."""
+
+    results: list[SkillQueryResult] = Field(
+        description="查询结果列表，按请求顺序",
+    )
+    total_requested: int = Field(description="请求查询的技能数量")
+    total_found: int = Field(description="找到的技能数量")

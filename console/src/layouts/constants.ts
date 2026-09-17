@@ -1,3 +1,4 @@
+// TODO: 合并代码时需要修改的地方
 export const COOKIE_KEYS = {
   userId: "",
   sysId: "",
@@ -41,6 +42,7 @@ export const KEY_TO_PATH: Record<string, string> = {
   "cases-management": "/cases-management",
   "greeting-management": "/greeting-management",
   "featured-cases-management": "/featured-cases-management",
+  "scenario-presets-management": "/scenario-presets-management",
   skills: "/skills",
   "skill-pool": "/skill-pool",
   tools: "/tools",
@@ -50,9 +52,11 @@ export const KEY_TO_PATH: Record<string, string> = {
   models: "/models",
   environments: "/environments",
   "agent-config": "/agent-config",
+  "hook-management": "/hook-management",
   "system-config-page": "/system-config-page",
   "system-check": "/system-check",
   security: "/security",
+  "skill-config": "/skill-config",
   "token-usage": "/token-usage",
   "voice-transcription": "/voice-transcription",
   "analytics-users": "/analytics/users",
@@ -64,6 +68,8 @@ export const KEY_TO_PATH: Record<string, string> = {
   "analytics-cron-job-overview": "/analytics/cron-job-overview",
   "analytics-continuous-governance": "/analytics/continuous-governance",
   "monitor-cron-overview": "/monitor/cron-overview",
+  "monitor-task-center": "/monitor/tasks",
+  "monitor-cron-batch-dispatch": "/monitor/cron-batch-dispatch",
   "instance-overview": "/instance/overview",
   "instance-instances": "/instance/instances",
   "instance-allocations": "/instance/allocations",
@@ -72,6 +78,8 @@ export const KEY_TO_PATH: Record<string, string> = {
   market: "/market",
   "my-skills": "/my-skills",
   "my-mcp": "/my-mcp",
+  experts: "/experts",
+  "expert-community": "/expert-community",
 };
 
 export const KEY_TO_LABEL: Record<string, string> = {
@@ -85,12 +93,14 @@ export const KEY_TO_LABEL: Record<string, string> = {
   tools: "nav.tools",
   mcp: "nav.mcp",
   "agent-config": "nav.agentConfig",
+  "hook-management": "nav.hookManagement",
   "system-config-page": "nav.currentSourceConfig",
   "system-check": "nav.systemCheck",
   workspace: "nav.workspace",
   models: "nav.models",
   environments: "nav.environments",
   security: "nav.security",
+  "skill-config": "nav.skillConfig",
   "token-usage": "nav.tokenUsage",
   agents: "nav.agents",
   "analytics-users": "nav.analyticsUsers",
@@ -101,6 +111,8 @@ export const KEY_TO_LABEL: Record<string, string> = {
   "analytics-claw-data-overview": "nav.analyticsClawDataOverview",
   "analytics-cron-job-overview": "nav.analyticsCronJobOverview", //定时任务概览
   "analytics-continuous-governance": "nav.analyticsContinuousGovernance",
+  "monitor-task-center": "nav.monitorTaskCenter",
+  "monitor-cron-batch-dispatch": "nav.monitorCronBatchDispatch",
   "instance-overview": "nav.instanceOverview",
   "instance-instances": "nav.instanceInstances",
   "instance-allocations": "nav.instanceAllocations",
@@ -109,6 +121,7 @@ export const KEY_TO_LABEL: Record<string, string> = {
   market: "nav.market",
   "my-skills": "nav.mySkills",
   "my-mcp": "nav.myMcp",
+  "expert-community": "nav.expertCommunity",
 };
 
 // ── URL helpers ───────────────────────────────────────────────────────────

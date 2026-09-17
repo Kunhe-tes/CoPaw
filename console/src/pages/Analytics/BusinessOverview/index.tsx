@@ -6,12 +6,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { UIEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  ArrowUp,
-  ArrowUpRight,
   CalendarDays,
   CheckSquare,
   ChevronRight,
-  Clock3,
   Coins,
   Database,
   MessageCircleMore,
@@ -21,37 +18,39 @@ import {
   TrendingUp,
   UserRound,
   Users,
-  Zap,
 } from "lucide-react";
-import { DatePicker, Select, Tooltip, message } from "antd";
+import { DatePicker, Select, Spin, Tooltip, message } from "antd";
 import ReactECharts from "echarts-for-react";
 import type { Dayjs } from "dayjs";
 import dayjs from "dayjs";
 import styles from "./index.module.less";
+import { useIframeStore } from "../../../stores/iframeStore";
+import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
 import {
   tracingApi,
+  displaySkillName,
   type BranchMetricItem,
   type ErrorSummary,
   type OverviewStats,
   type SkillUsage,
   type TaskStatusSummary,
-  type DepthSummary,
 } from "../../../api/modules/tracing";
 import UserDetailModal from "./components/UserDetailModal";
 import SkillDetailModal from "./components/SkillDetailModal";
 import ErrorDetailModal from "./components/ErrorDetailModal";
-import HtmlPreviewClickAnalysis from "./components/HtmlPreviewClickAnalysis";
-import { BBK_ID_MAP, BBK_ID_TO_NAME_MAP, getBbkDisplayName } from "../../../constants/bbk";
+import { BBK_ID_TO_NAME_MAP, getBbkDisplayName } from "../../../constants/bbk";
+import {
+  ensureBranchOptions,
+  getScopedBranchFilter,
+} from "../../../utils/branchScope";
 import {
   formatChange,
-  formatDuration,
   formatNumber,
   formatPercent,
   formatTokens,
-  truncateName,
   toChangeDirection,
+  truncateName,
   type BreakdownItem,
-  type DepthStatCard,
   type OverviewMetricCard,
   type SummaryLegendItem,
   type TimeRange,
@@ -68,7 +67,7 @@ const METRIC_ACCENT_COLORS = [
   "#7c3aed",
 ];
 
-const DONUT_COLORS = ["#18b368", "#ef4444", "#94a3b8"];
+const DONUT_COLORS = ["#18b368", "#f97316", "#ef4444", "#94a3b8"]; // 成功、运行中、失败、取消
 const safeNumber = (value: unknown): number =>
   typeof value === "number" && !Number.isNaN(value) ? value : 0;
 
@@ -77,7 +76,7 @@ const iconMap = {
   conversations: MessageCircleMore,
   sessions: CheckSquare,
   tokens: Coins,
-  skills: Zap,
+  customers: Users,
 };
 
 function mapBreakdown(
@@ -103,15 +102,8 @@ function mapBreakdown(
 function buildMetricCards(
   overviewStats: OverviewStats | null,
   taskStatusSummary: TaskStatusSummary | null,
-  growthStats: {
-    callsGrowth: number | null;
-    tokensGrowth: number | null;
-    sessionGrowth: number | null;
-    userGrowth: number | null;
-    skillGrowth: number | null;
-    cronGrowth: number | null;
-  },
 ): OverviewMetricCard[] {
+  const growthStats = overviewStats?.growth_stats;
   return [
     {
       key: "users",
@@ -131,8 +123,8 @@ function buildMetricCards(
           </span>
         </span>
       ),
-      changeText: formatChange(growthStats.userGrowth),
-      changeDirection: toChangeDirection(growthStats.userGrowth),
+      changeText: formatChange(growthStats?.userGrowth),
+      changeDirection: toChangeDirection(growthStats?.userGrowth),
       accentColor: METRIC_ACCENT_COLORS[0],
       breakdown: mapBreakdown(overviewStats?.branch_breakdown?.users),
     },
@@ -140,24 +132,29 @@ function buildMetricCards(
       key: "sessions",
       title: "总会话数",
       valueText: formatNumber(overviewStats?.total_sessions ?? 0),
-      changeText: formatChange(growthStats.sessionGrowth),
-      changeDirection: toChangeDirection(growthStats.sessionGrowth),
+      changeText: formatChange(growthStats?.sessionGrowth),
+      changeDirection: toChangeDirection(growthStats?.sessionGrowth),
       accentColor: METRIC_ACCENT_COLORS[1],
       breakdown: mapBreakdown(overviewStats?.branch_breakdown?.sessions),
     },
     {
       key: "cron_tasks",
-      title: "定时任务数",
+      title: "定时任务执行数",
       valueText: (
-        <>
-          {formatNumber(taskStatusSummary?.total_tasks ?? 0)}
-          <span className={styles.newCronHint}>
-            <ArrowUp size={10} className={styles.newCronIcon} />新增：{formatNumber(taskStatusSummary?.new_cron_tasks ?? 0)}个
+        <span className={styles.userValueWrap}>
+          <span className={styles.userTotal}>
+            {formatNumber(taskStatusSummary?.total_tasks ?? 0)}
           </span>
-        </>
+          <span className={styles.userAnnotation}>
+            <span className={styles.annotationRow}>
+              <span className={styles.annotationDot} style={{ background: "#22c55e" }} />
+              已读 {formatNumber(taskStatusSummary?.read_count ?? 0)}
+            </span>
+          </span>
+        </span>
       ),
-      changeText: formatChange(growthStats.cronGrowth),
-      changeDirection: toChangeDirection(growthStats.cronGrowth),
+      changeText: formatChange(growthStats?.cronGrowth),
+      changeDirection: toChangeDirection(growthStats?.cronGrowth),
       accentColor: METRIC_ACCENT_COLORS[2],
       breakdown: mapBreakdown(overviewStats?.branch_breakdown?.cron_tasks),
     },
@@ -165,60 +162,35 @@ function buildMetricCards(
       key: "tokens",
       title: "资源消耗",
       valueText: formatTokens(overviewStats?.total_tokens ?? 0),
-      changeText: formatChange(growthStats.tokensGrowth),
-      changeDirection: toChangeDirection(growthStats.tokensGrowth),
+      changeText: formatChange(growthStats?.tokensGrowth),
+      changeDirection: toChangeDirection(growthStats?.tokensGrowth),
       accentColor: METRIC_ACCENT_COLORS[3],
       breakdown: mapBreakdown(overviewStats?.branch_breakdown?.tokens),
     },
     {
-      key: "skills",
-      title: "技能调用次数",
-      valueText: formatNumber(overviewStats?.total_skill_calls ?? 0),
-      changeText: formatChange(growthStats.skillGrowth),
-      changeDirection: toChangeDirection(growthStats.skillGrowth),
+      key: "customers",
+      title: "查看报告客户数",
+      valueText: (
+        <span className={styles.userValueWrap}>
+          <span className={styles.userTotal}>
+            {formatNumber(overviewStats?.plan_customers ?? 0)}
+          </span>
+          <span className={styles.userAnnotation}>
+            <span className={styles.annotationRow}>
+              <span className={styles.annotationDot} style={{ background: "#3b82f6" }} />
+              去洞察客户数 {formatNumber(overviewStats?.insight_customers ?? 0)}
+            </span>
+            <span className={styles.annotationRow}>
+              <span className={styles.annotationDot} style={{ background: "#f97316" }} />
+              去电访客户数 {formatNumber(overviewStats?.phone_customers ?? 0)}
+            </span>
+          </span>
+        </span>
+      ),
+      changeText: formatChange(growthStats?.planCustomersGrowth),
+      changeDirection: toChangeDirection(growthStats?.planCustomersGrowth),
       accentColor: METRIC_ACCENT_COLORS[4],
-      breakdown: mapBreakdown(overviewStats?.branch_breakdown?.skills),
-    },
-  ];
-}
-
-function buildDepthCards(
-  summary: DepthSummary | null,
-  growthStats: {
-    avgRoundsGrowth: number | null;
-    multiRoundRatioGrowth: number | null;
-    avgDurationGrowth: number | null;
-    avgSessionsPerUserGrowth: number | null;
-  },
-): DepthStatCard[] {
-  return [
-    {
-      key: "avg-rounds",
-      title: "单次会话平均轮数",
-      valueText: safeNumber(summary?.avg_rounds).toFixed(1),
-      changeText: formatChange(growthStats.avgRoundsGrowth),
-      changeDirection: toChangeDirection(growthStats.avgRoundsGrowth),
-    },
-    {
-      key: "multi-round",
-      title: "多轮会话占比(>3轮)",
-      valueText: formatPercent(safeNumber(summary?.multi_round_ratio)),
-      changeText: formatChange(growthStats.multiRoundRatioGrowth),
-      changeDirection: toChangeDirection(growthStats.multiRoundRatioGrowth),
-    },
-    {
-      key: "avg-duration",
-      title: "平均对话时长",
-      valueText: formatDuration(safeNumber(summary?.avg_duration_seconds)),
-      changeText: formatChange(growthStats.avgDurationGrowth),
-      changeDirection: toChangeDirection(growthStats.avgDurationGrowth),
-    },
-    {
-      key: "avg-sessions",
-      title: "人均会话数",
-      valueText: safeNumber(summary?.avg_sessions_per_user).toFixed(1),
-      changeText: formatChange(growthStats.avgSessionsPerUserGrowth),
-      changeDirection: toChangeDirection(growthStats.avgSessionsPerUserGrowth),
+      breakdown: mapBreakdown(overviewStats?.branch_breakdown?.customers),
     },
   ];
 }
@@ -234,16 +206,22 @@ function buildExecutionSummary(
       color: DONUT_COLORS[0],
     },
     {
+      key: "running",
+      label: "运行中",
+      value: safeNumber(summary?.running),
+      color: DONUT_COLORS[1],
+    },
+    {
       key: "failed",
       label: "失败",
       value: safeNumber(summary?.failed),
-      color: DONUT_COLORS[1],
+      color: DONUT_COLORS[2],
     },
     {
       key: "cancelled",
       label: "已取消/跳过",
       value: safeNumber(summary?.cancelled),
-      color: DONUT_COLORS[2],
+      color: DONUT_COLORS[3],
     },
   ];
 }
@@ -282,6 +260,31 @@ function buildDonutSegments(items: SummaryLegendItem[]) {
     offset += fraction * 283;
     return segment;
   });
+}
+
+function renderModelErrorCodeTooltip(summary: ErrorSummary | null) {
+  const rows = summary?.model_error_codes || [];
+
+  if (rows.length === 0) {
+    return (
+      <div className={styles.errorCodeTooltip}>
+        <div className={styles.errorCodeTooltipEmpty}>暂无可识别错误码</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={styles.errorCodeTooltip}>
+      {rows.map((row) => (
+        <div key={row.code} className={styles.errorCodeTooltipRow}>
+          <span className={styles.errorCodeTooltipCode}>{row.code}</span>
+          <span className={styles.errorCodeTooltipCount}>
+            {formatNumber(row.count)}个
+          </span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 /** 漏斗图组件：使用 echarts 展示任务执行转化率 */
@@ -455,214 +458,244 @@ function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummar
   );
 }
 
-function getLabelInterval(dataLength: number): number {
-  if (dataLength <= 7) return 1;
-  if (dataLength <= 14) return 2;
-  if (dataLength <= 24) return 3;
-  return 4;
-}
-
-function getBarWidth(dataLength: number, step: number): number {
-  const maxWidth = Math.floor(step * 0.6);
-  if (dataLength <= 7) return Math.min(20, maxWidth);
-  if (dataLength <= 14) return Math.min(12, maxWidth);
-  if (dataLength <= 24) return Math.min(8, maxWidth);
-  return Math.max(4, Math.min(5, maxWidth));
-}
-
-interface TrendAxisTick {
-  value: number;
-  label: string;
-}
-
-interface TrendHoverZone {
-  key: string;
-  label: string;
-  users: number;
-  calls: number;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  pointX: number;
-  pointY: number;
-}
-
-function getNiceAxisMax(value: number): number {
-  if (value <= 0) {
-    return 0;
-  }
-  const magnitude = 10 ** Math.floor(Math.log10(value));
-  const normalized = value / magnitude;
-  const candidates = [1, 1.5, 2, 2.5, 5, 10];
-  const candidate = candidates.find((item) => normalized <= item) ?? 10;
-  return candidate * magnitude;
-}
-
-function formatTrendAxisLabel(value: number, axisMax: number): string {
-  if (value === 0) {
-    return "0";
-  }
-  if (axisMax >= 10000) {
-    const scaled = value / 10000;
-    return `${scaled.toFixed(Number.isInteger(scaled) ? 0 : 1)}W`;
-  }
-  if (axisMax >= 1000) {
-    const scaled = value / 1000;
-    return `${scaled.toFixed(Number.isInteger(scaled) ? 0 : 1)}K`;
-  }
-  return formatNumber(value);
-}
-
-function buildTrendAxisTicks(axisMax: number): TrendAxisTick[] {
-  if (axisMax <= 0) {
-    return Array.from({ length: 6 }, () => ({
-      value: 0,
-      label: "0",
-    }));
-  }
-  const step = axisMax / 5;
-  return Array.from({ length: 6 }, (_, index) => {
-    const value = step * (5 - index);
-    return {
-      value,
-      label: formatTrendAxisLabel(value, axisMax),
-    };
-  });
-}
-
-export function buildTrendSvgData(trendData: TrendDatum[]) {
-  const width = 580;
-  const height = 244;
-  const chartLeft = 18;
-  const chartRight = 18;
-  const chartTop = 10;
-  const chartBottom = 36;
-  const chartWidth = width - chartLeft - chartRight;
-  const chartHeight = height - chartTop - chartBottom;
-  const rawMaxCalls = Math.max(
-    ...trendData.map((item) => safeNumber(item.calls)),
-    0,
-  );
-  const rawMaxUsers = Math.max(
-    ...trendData.map((item) => safeNumber(item.users)),
-    0,
-  );
-  const leftAxisMax = getNiceAxisMax(rawMaxUsers);
-  const rightAxisMax = getNiceAxisMax(rawMaxCalls);
-  const userScaleMax = Math.max(leftAxisMax, 1);
-  const callScaleMax = Math.max(rightAxisMax, 1);
-  const step = trendData.length > 1 ? chartWidth / (trendData.length - 1) : 0;
-  const labelInterval = getLabelInterval(trendData.length);
-  const barWidth = getBarWidth(trendData.length, step);
-
-  const bars = trendData.map((item, index) => {
-    const barHeight = (safeNumber(item.users) / userScaleMax) * chartHeight;
-    const x = chartLeft + index * step - barWidth / 2;
-    const label = item.date.includes(":")
+function buildTrendChartOption(
+  trendData: TrendDatum[],
+  showExtendedTrendMetrics: boolean,
+) {
+  const dates = trendData.map((item) =>
+    item.date.includes(":")
       ? dayjs(item.date).format("HH:mm")
-      : dayjs(item.date).format("MM-DD");
-    return {
-      key: item.date,
-      x,
-      y: chartTop + chartHeight - barHeight,
-      height: barHeight,
-      width: barWidth,
-      label,
-      showLabel: index % labelInterval === 0,
-    };
-  });
-
-  const points = trendData.map((item, index) => {
-    const x = chartLeft + index * step;
-    const y =
-      chartTop +
-      chartHeight -
-      (safeNumber(item.calls) / callScaleMax) * chartHeight;
-    return { x, y };
-  });
-
-  const hoverZones: TrendHoverZone[] = trendData.map((item, index) => {
-    const pointX = points[index]?.x ?? chartLeft;
-    const pointY = points[index]?.y ?? chartTop + chartHeight;
-    const zoneStart =
-      trendData.length === 1
-        ? chartLeft
-        : index === 0
-        ? chartLeft
-        : pointX - step / 2;
-    const zoneEnd =
-      trendData.length === 1
-        ? width - chartRight
-        : index === trendData.length - 1
-        ? width - chartRight
-        : pointX + step / 2;
-
-    return {
-      key: item.date,
-      label: bars[index]?.label ?? item.date,
-      users: safeNumber(item.users),
-      calls: safeNumber(item.calls),
-      x: zoneStart,
-      y: chartTop,
-      width: Math.max(zoneEnd - zoneStart, barWidth),
-      height: chartHeight,
-      pointX,
-      pointY,
-    };
-  });
+      : dayjs(item.date).format("MM-DD"),
+  );
+  const extendedLegend = [
+    "查看方案客户数",
+    "去洞察客户数",
+    "去电访客户数",
+  ];
+  const series = [
+    {
+      name: "调用量",
+      type: "bar" as const,
+      yAxisIndex: 0,
+      data: trendData.map((i) => i.calls),
+      barWidth: 16,
+      itemStyle: {
+        color: "#4f7cff",
+        borderRadius: [8, 8, 0, 0],
+      },
+      emphasis: {
+        itemStyle: {
+          color: "#2f5ff0",
+        },
+      },
+      z: 1,
+    },
+    {
+      name: "调用用户",
+      type: "line" as const,
+      yAxisIndex: 0,
+      data: trendData.map((i) => i.users),
+      smooth: true,
+      lineStyle: {
+        color: "#94a3b8",
+        width: 2,
+        opacity: 0.75,
+      },
+      symbol: "none" as const,
+      z: 2,
+    },
+    {
+      name: "已读任务数",
+      type: "line" as const,
+      yAxisIndex: 1,
+      data: trendData.map((i) => i.read_tasks),
+      smooth: true,
+      symbol: "none" as const,
+      lineStyle: {
+        color: "#c084fc",
+        width: 2,
+        opacity: 0.78,
+      },
+      z: 2,
+    },
+    ...(showExtendedTrendMetrics
+      ? [
+          {
+            name: "查看方案客户数",
+            type: "line" as const,
+            yAxisIndex: 1,
+            data: trendData.map((i) => i.plan_customers),
+            smooth: true,
+            symbol: "circle" as const,
+            symbolSize: 8,
+            lineStyle: {
+              color: "#f97316",
+              width: 3,
+            },
+            itemStyle: {
+              color: "#f97316",
+              borderColor: "#ffffff",
+              borderWidth: 2,
+            },
+            z: 4,
+          },
+          {
+            name: "去洞察客户数",
+            type: "line" as const,
+            yAxisIndex: 1,
+            data: trendData.map((i) => i.insight_customers),
+            smooth: true,
+            symbol: "none" as const,
+            lineStyle: {
+              color: "#fb7185",
+              width: 2,
+              opacity: 0.72,
+            },
+            z: 2,
+          },
+          {
+            name: "去电访客户数",
+            type: "line" as const,
+            yAxisIndex: 1,
+            data: trendData.map((i) => i.phone_customers),
+            smooth: true,
+            symbol: "circle" as const,
+            symbolSize: 8,
+            lineStyle: {
+              color: "#10b981",
+              width: 3,
+            },
+            itemStyle: {
+              color: "#10b981",
+              borderColor: "#ffffff",
+              borderWidth: 2,
+            },
+            z: 4,
+          },
+        ]
+      : []),
+  ];
 
   return {
-    width,
-    height,
-    chartLeft,
-    chartRight,
-    chartTop,
-    chartBottom,
-    chartHeight,
-    leftAxisTicks: buildTrendAxisTicks(leftAxisMax),
-    rightAxisTicks: buildTrendAxisTicks(rightAxisMax),
-    bars,
-    points,
-    hoverZones,
-    polyline: points.map((point) => `${point.x},${point.y}`).join(" "),
+    tooltip: {
+      trigger: "axis" as const,
+      axisPointer: {
+        type: "cross" as const,
+        crossStyle: {
+          color: "#94a3b8",
+        },
+      },
+      backgroundColor: "rgba(15, 23, 42, 0.94)",
+      borderColor: "rgba(148, 163, 184, 0.18)",
+      textStyle: {
+        color: "#f8fafc",
+      },
+    },
+    legend: {
+      show: true,
+      type: "scroll" as const,
+      data: [
+        "调用量",
+        "调用用户",
+        "已读任务数",
+        ...extendedLegend.filter(() => showExtendedTrendMetrics),
+      ],
+      bottom: 0,
+      left: "center" as const,
+      itemWidth: 12,
+      itemHeight: 8,
+      itemGap: 14,
+      textStyle: {
+        color: "#64748b",
+        fontSize: 12,
+        fontWeight: 600,
+      },
+      pageIconColor: "#2563eb",
+      pageIconInactiveColor: "#cbd5e1",
+      pageTextStyle: {
+        color: "#94a3b8",
+      },
+    },
+    grid: {
+      left: 60,
+      right: 60,
+      top: 28,
+      bottom: 52,
+    },
+    xAxis: {
+      type: "category" as const,
+      data: dates,
+      axisTick: { show: false },
+      axisLine: {
+        lineStyle: {
+          color: "#dbe3ef",
+        },
+      },
+      axisLabel: {
+        interval: "auto" as const,
+        color: "#64748b",
+      },
+    },
+    yAxis: [
+      {
+        type: "value" as const,
+        name: "调用量 / 用户",
+        position: "left" as const,
+        nameTextStyle: {
+          color: "#64748b",
+        },
+        splitLine: {
+          lineStyle: {
+            color: "#e9eff7",
+          },
+        },
+        axisLabel: {
+          color: "#94a3b8",
+        },
+      },
+      {
+        type: "value" as const,
+        name: showExtendedTrendMetrics ? "客户数/任务数" : "任务数",
+        position: "right" as const,
+        nameTextStyle: {
+          color: "#64748b",
+        },
+        splitLine: {
+          show: false,
+        },
+        axisLabel: {
+          color: "#94a3b8",
+        },
+      },
+    ],
+    series,
   };
 }
 
 export default function BusinessOverviewPage() {
   const navigate = useNavigate();
+  const sourceId = useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
+  const currentBbkId = useIframeStore((state) => state.bbk);
+  const branchScope = useMemo(
+    () => getScopedBranchFilter(currentBbkId),
+    [currentBbkId],
+  );
+  const branchOptions = useMemo(
+    () => ensureBranchOptions(branchScope.lockedBbkId),
+    [branchScope.lockedBbkId],
+  );
 
   const [timeRange, setTimeRange] = useState<TimeRange>("day");
   const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>([dayjs(), dayjs()]);
   // 管理员多选分行；非管理员使用用户所属分行
-  const [bbkIds, setBbkIds] = useState<string[]>([]);
+  const [bbkIds, setBbkIds] = useState<string[]>(
+    () => branchScope.lockedBbkId ? [branchScope.lockedBbkId] : [],
+  );
 
   const [overviewStats, setOverviewStats] = useState<OverviewStats | null>(
     null,
   );
-  const [growthStats, setGrowthStats] = useState<{
-    callsGrowth: number | null;
-    tokensGrowth: number | null;
-    sessionGrowth: number | null;
-    userGrowth: number | null;
-    skillGrowth: number | null;
-    cronGrowth: number | null;
-    avgRoundsGrowth: number | null;
-    multiRoundRatioGrowth: number | null;
-    avgDurationGrowth: number | null;
-    avgSessionsPerUserGrowth: number | null;
-  }>({
-    callsGrowth: null,
-    tokensGrowth: null,
-    sessionGrowth: null,
-    userGrowth: null,
-    skillGrowth: null,
-    cronGrowth: null,
-    avgRoundsGrowth: null,
-    multiRoundRatioGrowth: null,
-    avgDurationGrowth: null,
-    avgSessionsPerUserGrowth: null,
-  });
+  const [dashboardLoading, setDashboardLoading] = useState(false);
   const [trendData, setTrendData] = useState<TrendDatum[]>([]);
   const [activeUsers, setActiveUsers] = useState<UserRow[]>([]);
   const [activePage, setActivePage] = useState(1);
@@ -672,8 +705,6 @@ export default function BusinessOverviewPage() {
   const activeListRef = useRef<HTMLDivElement | null>(null);
   // 用户过滤类型：filtered(过滤IT人员) / all(全部用户)
   const [activeFilterType, setActiveFilterType] = useState<"filtered" | "all">("all");
-  // 使用深度卡片默认隐藏
-  const [hideDepthCard] = useState(true);
   const [skills, setSkills] = useState<SkillUsage[]>([]);
   const [skillsPage, setSkillsPage] = useState(1);
   const [skillsHasMore, setSkillsHasMore] = useState(true);
@@ -683,7 +714,7 @@ export default function BusinessOverviewPage() {
   const [errorSummaryData, setErrorSummaryData] = useState<ErrorSummary | null>(null);
   const [taskStatusSummary, setTaskStatusSummary] =
     useState<TaskStatusSummary | null>(null);
-  const [depthSummary, setDepthSummary] = useState<DepthSummary | null>(null);
+  const [taskStatusLoading, setTaskStatusLoading] = useState(false);
   const [htmlPreviewRefreshKey, setHtmlPreviewRefreshKey] = useState(0);
   const [errorLoading, setErrorLoading] = useState(false);
   const errorLoadingRef = useRef(false);
@@ -692,8 +723,10 @@ export default function BusinessOverviewPage() {
   const [selectedUserName, setSelectedUserName] = useState<string | null>(null);
   const [skillModalOpen, setSkillModalOpen] = useState(false);
   const [selectedSkillName, setSelectedSkillName] = useState("");
+  const [selectedSkillDisplayName, setSelectedSkillDisplayName] = useState<
+    string | null
+  >(null);
   const [errorModalOpen, setErrorModalOpen] = useState(false);
-  const [activeTrendIndex, setActiveTrendIndex] = useState<number | null>(null);
 
   const startDateText = useMemo(
     () => dateRange[0].format("YYYY-MM-DD"),
@@ -707,6 +740,17 @@ export default function BusinessOverviewPage() {
   const effectiveBbkIds = useMemo(() => {
     return bbkIds.length === 0 ? undefined : bbkIds;
   }, [bbkIds]);
+
+  useEffect(() => {
+    if (!branchScope.lockedBbkId) {
+      return;
+    }
+    setBbkIds((previous) =>
+      previous.length === 1 && previous[0] === branchScope.lockedBbkId
+        ? previous
+        : [branchScope.lockedBbkId],
+    );
+  }, [branchScope.lockedBbkId]);
   const cronJobOverviewPath = useMemo(() => {
     const params = new URLSearchParams();
     params.set("start_date", startDateText);
@@ -716,6 +760,7 @@ export default function BusinessOverviewPage() {
     }
     return `/analytics/cron-job-overview?${params.toString()}`;
   }, [effectiveBbkIds, endDateText, startDateText]);
+  const showExtendedTrendMetrics = sourceId === "RMASSIST";
 
   const transformUserData = useCallback(
     (items: Record<string, unknown>[]): UserRow[] =>
@@ -741,18 +786,14 @@ export default function BusinessOverviewPage() {
   const fetchDashboard = useCallback(async () => {
     const isSingleDay = dateRange[0].isSame(dateRange[1], "day");
 
+    setDashboardLoading(true);
     try {
-      const [overviewRes, growthRes, trendRes] = await Promise.allSettled([
+      const [overviewRes, trendRes] = await Promise.allSettled([
         tracingApi.getOverview(
           startDateText,
           endDateText,
           effectiveBbkIds?.join(","),
-        ),
-        tracingApi.getGrowthStats(
-          startDateText,
-          endDateText,
-          timeRange,
-          effectiveBbkIds?.join(","),
+          { detail: "summary", timeRange },
         ),
         isSingleDay
           ? tracingApi.getHourlyTrend(
@@ -770,15 +811,14 @@ export default function BusinessOverviewPage() {
       if (overviewRes.status === "fulfilled") {
         setOverviewStats(overviewRes.value);
       }
-      if (growthRes.status === "fulfilled") {
-        setGrowthStats(growthRes.value);
-      }
       if (trendRes.status === "fulfilled") {
         setTrendData(trendRes.value.trendData || []);
       }
     } catch (error) {
       console.error("Failed to fetch dashboard:", error);
       message.error("获取总览数据失败");
+    } finally {
+      setDashboardLoading(false);
     }
   }, [
     dateRange,
@@ -899,6 +939,7 @@ export default function BusinessOverviewPage() {
   );
 
   const fetchTaskStatusSummary = useCallback(async () => {
+    setTaskStatusLoading(true);
     try {
       const result = await tracingApi.getTaskStatusSummary({
         start_date: startDateText,
@@ -908,19 +949,8 @@ export default function BusinessOverviewPage() {
       setTaskStatusSummary(result);
     } catch (error) {
       console.error("Failed to fetch task status summary:", error);
-    }
-  }, [effectiveBbkIds, endDateText, startDateText]);
-
-  const fetchDepthSummary = useCallback(async () => {
-    try {
-      const result = await tracingApi.getDepthSummary({
-        start_date: startDateText,
-        end_date: endDateText,
-        bbk_ids: effectiveBbkIds?.join(","),
-      });
-      setDepthSummary(result);
-    } catch (error) {
-      console.error("Failed to fetch depth summary:", error);
+    } finally {
+      setTaskStatusLoading(false);
     }
   }, [effectiveBbkIds, endDateText, startDateText]);
 
@@ -932,11 +962,9 @@ export default function BusinessOverviewPage() {
     fetchSkills(1, false);
     fetchErrorSummary();
     fetchTaskStatusSummary();
-    fetchDepthSummary();
     // 活跃用户请求由独立的 useEffect 处理
   }, [
     fetchDashboard,
-    fetchDepthSummary,
     fetchErrorSummary,
     fetchSkills,
     fetchTaskStatusSummary,
@@ -951,10 +979,6 @@ export default function BusinessOverviewPage() {
   }, [
     fetchActiveUsers,
   ]);
-
-  useEffect(() => {
-    setActiveTrendIndex(null);
-  }, [trendData]);
 
   const handleModeChange = (nextRange: TimeRange) => {
     setTimeRange(nextRange);
@@ -1067,12 +1091,8 @@ export default function BusinessOverviewPage() {
     !!current && current.isAfter(dayjs().startOf("day"), "day");
 
   const metricCards = useMemo(
-    () => buildMetricCards(overviewStats, taskStatusSummary, growthStats),
-    [growthStats, overviewStats, taskStatusSummary],
-  );
-  const depthCards = useMemo(
-    () => buildDepthCards(depthSummary, growthStats),
-    [growthStats, depthSummary],
+    () => buildMetricCards(overviewStats, taskStatusSummary),
+    [overviewStats, taskStatusSummary],
   );
   const executionSummary = useMemo(
     () => buildExecutionSummary(taskStatusSummary),
@@ -1082,15 +1102,11 @@ export default function BusinessOverviewPage() {
     () => buildErrorSummary(errorSummaryData),
     [errorSummaryData],
   );
-  const trendSvg = useMemo(() => buildTrendSvgData(trendData), [trendData]);
-  const activeTrendZone =
-    activeTrendIndex === null ? null : trendSvg.hoverZones[activeTrendIndex] ?? null;
-  const trendTooltipStyle = activeTrendZone
-    ? {
-        left: `${Math.min(92, Math.max(8, (activeTrendZone.pointX / trendSvg.width) * 100))}%`,
-        top: `${Math.min(78, Math.max(10, (activeTrendZone.pointY / trendSvg.height) * 100))}%`,
-      }
-    : undefined;
+  const renderCardLoading = () => (
+    <div className={styles.listFootnote} data-testid="overview-panel-loading">
+      加载中...
+    </div>
+  );
   return (
     <div className={styles.businessOverviewPage}>
       <header className={styles.pageHeader}>
@@ -1150,22 +1166,31 @@ export default function BusinessOverviewPage() {
               className={styles.scopeSelect}
               mode="multiple"
               value={bbkIds}
-              onChange={setBbkIds}
+              onChange={(value) => {
+                if (!branchScope.lockedBbkId) {
+                  setBbkIds(value);
+                }
+              }}
               placeholder="全部分行"
-              maxTagCount="responsive"
-              maxTagPlaceholder={(omittedValues) => (
-                <Tooltip
-                  title={omittedValues
-                    .map((item) => {
-                      const value = String(item.value ?? "");
-                      return BBK_ID_TO_NAME_MAP[value] || value;
-                    })
-                    .join("、")}
-                >
-                  <span>+{omittedValues.length} 个分行</span>
-                </Tooltip>
-              )}
-              allowClear
+              disabled={!branchScope.isHeadOffice}
+              maxTagCount={branchScope.isHeadOffice ? "responsive" : 1}
+              maxTagPlaceholder={
+                branchScope.isHeadOffice
+                  ? (omittedValues) => (
+                      <Tooltip
+                        title={omittedValues
+                          .map((item) => {
+                            const value = String(item.value ?? "");
+                            return BBK_ID_TO_NAME_MAP[value] || value;
+                          })
+                          .join("、")}
+                      >
+                        <span>+{omittedValues.length} 个分行</span>
+                      </Tooltip>
+                    )
+                  : undefined
+              }
+              allowClear={branchScope.isHeadOffice}
               showSearch
               filterOption={(input, option) => {
                 const searchValue = input.toLowerCase();
@@ -1178,7 +1203,7 @@ export default function BusinessOverviewPage() {
                 );
               }}
             >
-              {BBK_ID_MAP.map((item) => (
+              {branchOptions.map((item) => (
                 <Option key={item.value} value={item.value}>
                   {item.label}
                 </Option>
@@ -1193,11 +1218,10 @@ export default function BusinessOverviewPage() {
                 fetchSkills();
                 fetchErrorSummary();
                 fetchTaskStatusSummary();
-                fetchDepthSummary();
                 setHtmlPreviewRefreshKey((value) => value + 1);
               }}
             >
-              <RotateCw size={16} />
+              <RotateCw size={14} />
               刷新
             </button>
           </div>
@@ -1215,65 +1239,71 @@ export default function BusinessOverviewPage() {
               className={styles.metricPanel}
               data-testid="overview-metric-card"
             >
-              <div className={styles.metricHeader}>
-                <span
-                  className={styles.metricIcon}
-                  style={{
-                    background: `linear-gradient(180deg, ${card.accentColor} 0%, ${card.accentColor}dd 100%)`,
-                  }}
-                >
-                  <MetricIcon size={20} strokeWidth={2.2} />
-                </span>
-                <div className={styles.metricText}>
-                  <div className={styles.metricTitle}>{card.title}</div>
-                  <div className={styles.metricValue}>{card.valueText}</div>
-                  <div
-                    className={
-                      card.changeDirection === "up"
-                        ? styles.metricChangeUp
-                        : card.changeDirection === "down"
-                        ? styles.metricChangeDown
-                        : styles.metricChangeFlat
-                    }
-                  >
-                    环比
-                    {card.changeDirection === "up" && <TrendingUp size={14} />}
-                    {card.changeDirection === "down" && <TrendingDown size={14} />}
-                    {card.changeText}
-                  </div>
-                </div>
-              </div>
-              <div className={styles.breakdownTitle}>Top5分行</div>
-              {card.breakdown && card.breakdown.length > 0 ? (
-                <div className={styles.breakdownList}>
-                  {card.breakdown.map((item) => (
-                    <div
-                      key={`${card.key}-${item.name}`}
-                      className={styles.breakdownRow}
-                    >
-                      <span className={styles.breakdownName}>
-                        {truncateName(item.name, 6)}
-                      </span>
-                      <div className={styles.breakdownTrack}>
-                        <div
-                          className={styles.breakdownBar}
-                          style={{
-                            width: `${Math.max(item.value, 10)}%`,
-                            background: card.accentColor,
-                          }}
-                        />
-                      </div>
-                      <span className={styles.breakdownValue}>
-                        {item.valueText}
-                      </span>
-                    </div>
-                  ))}
-                </div>
+              {dashboardLoading ? (
+                renderCardLoading()
               ) : (
-                <div className={styles.emptyBreakdown}>
-                  <Database className={styles.emptyBreakdownIcon} />
-                  <span className={styles.emptyBreakdownText}>暂无分行数据</span>
-                </div>
+                <>
+                  <div className={styles.metricHeader}>
+                    <span
+                      className={styles.metricIcon}
+                      style={{
+                        background: `linear-gradient(180deg, ${card.accentColor} 0%, ${card.accentColor}dd 100%)`,
+                      }}
+                    >
+                      <MetricIcon size={20} strokeWidth={2.2} />
+                    </span>
+                    <div className={styles.metricText}>
+                      <div className={styles.metricTitle}>{card.title}</div>
+                      <div className={styles.metricValue}>{card.valueText}</div>
+                      <div
+                        className={
+                          card.changeDirection === "up"
+                            ? styles.metricChangeUp
+                            : card.changeDirection === "down"
+                            ? styles.metricChangeDown
+                            : styles.metricChangeFlat
+                        }
+                      >
+                        环比
+                        {card.changeDirection === "up" && <TrendingUp size={14} />}
+                        {card.changeDirection === "down" && <TrendingDown size={14} />}
+                        {card.changeText}
+                      </div>
+                    </div>
+                  </div>
+                  <div className={styles.breakdownTitle}>Top5分行</div>
+                  {card.breakdown && card.breakdown.length > 0 ? (
+                    <div className={styles.breakdownList}>
+                      {card.breakdown.map((item) => (
+                        <div
+                          key={`${card.key}-${item.name}`}
+                          className={styles.breakdownRow}
+                        >
+                          <span className={styles.breakdownName}>
+                            {truncateName(item.name, 6)}
+                          </span>
+                          <div className={styles.breakdownTrack}>
+                            <div
+                              className={styles.breakdownBar}
+                              style={{
+                                width: `${Math.max(item.value, 10)}%`,
+                                background: card.accentColor,
+                              }}
+                            />
+                          </div>
+                          <span className={styles.breakdownValue}>
+                            {item.valueText}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className={styles.emptyBreakdown}>
+                      <Database className={styles.emptyBreakdownIcon} />
+                      <span className={styles.emptyBreakdownText}>暂无分行数据</span>
+                    </div>
+                  )}
+                </>
               )}
             </article>
           );
@@ -1281,163 +1311,24 @@ export default function BusinessOverviewPage() {
       </section>
 
       <section
-        className={hideDepthCard ? styles.analysisGrid : styles.analysisGridWithDepth}
+        className={styles.analysisGrid}
         data-testid="overview-analysis-grid"
       >
         <article className={styles.panelLarge}>
           <div className={styles.panelHeader}>
             <h3 className={styles.panelTitle}>调用量趋势</h3>
           </div>
-          <div className={styles.trendLegend}>
-            <span className={styles.legendItem}>
-              <i className={styles.legendBarMark} />
-              调用用户
-            </span>
-            <span className={styles.legendItem}>
-              <i className={styles.legendLineMark} />
-              调用次数
-            </span>
-          </div>
-          <div className={styles.trendChart}>
-            <div className={styles.axisLeft}>
-              {trendSvg.leftAxisTicks.map((tick, index) => (
-                <span key={`left-${tick.value}-${index}`}>{tick.label}</span>
-              ))}
+          {dashboardLoading ? (
+            renderCardLoading()
+          ) : (
+            <div className={styles.trendChart}>
+              <ReactECharts
+                className={styles.trendChartCanvas}
+                option={buildTrendChartOption(trendData, showExtendedTrendMetrics)}
+                style={{ height: 280, width: "100%", gridColumn: "1 / -1" }}
+              />
             </div>
-            <div
-              className={styles.trendPlotArea}
-              onMouseLeave={() => {
-                setActiveTrendIndex(null);
-              }}
-            >
-              <svg
-                viewBox={`0 0 ${trendSvg.width} ${trendSvg.height}`}
-                className={styles.trendSvg}
-                preserveAspectRatio="xMidYMid meet"
-              >
-                <defs>
-                  <linearGradient
-                    id="overviewBarGradient"
-                    x1="0%"
-                    y1="0%"
-                    x2="0%"
-                    y2="100%"
-                  >
-                    <stop offset="0%" stopColor="#4f7fff" />
-                    <stop offset="100%" stopColor="#2563eb" />
-                  </linearGradient>
-                </defs>
-
-                {[0, 1, 2, 3, 4, 5].map((row) => {
-                  const y = trendSvg.chartTop + (trendSvg.chartHeight / 5) * row;
-                  return (
-                    <line
-                      key={`grid-${row}`}
-                      x1={trendSvg.chartLeft}
-                      y1={y}
-                      x2={trendSvg.width - trendSvg.chartRight}
-                      y2={y}
-                      className={styles.gridLine}
-                    />
-                  );
-                })}
-
-                {activeTrendZone && (
-                  <line
-                    x1={activeTrendZone.pointX}
-                    y1={trendSvg.chartTop}
-                    x2={activeTrendZone.pointX}
-                    y2={trendSvg.chartTop + trendSvg.chartHeight}
-                    className={styles.trendGuideLine}
-                  />
-                )}
-
-                {trendSvg.bars.map((bar, index) => (
-                  <g key={bar.key}>
-                    <rect
-                      x={bar.x}
-                      y={bar.y}
-                      width={bar.width}
-                      height={bar.height}
-                      rx="4"
-                      fill="url(#overviewBarGradient)"
-                      className={
-                        activeTrendIndex === index
-                          ? styles.trendBarActive
-                          : styles.trendBar
-                      }
-                    />
-                    {bar.showLabel && (
-                      <text x={bar.x + bar.width / 2} y={trendSvg.height - trendSvg.chartBottom + 22} className={styles.axisLabel}>
-                        {bar.label}
-                      </text>
-                    )}
-                  </g>
-                ))}
-
-                <polyline
-                  points={trendSvg.polyline}
-                  className={styles.trendLine}
-                />
-
-                {trendSvg.points.map((point, index) => (
-                  <circle
-                    key={`${point.x}-${point.y}`}
-                    cx={point.x}
-                    cy={point.y}
-                    r={activeTrendIndex === index ? "5.5" : "4.5"}
-                    className={
-                      activeTrendIndex === index
-                        ? styles.trendPointActive
-                        : styles.trendPoint
-                    }
-                  />
-                ))}
-
-                {trendSvg.hoverZones.map((zone, index) => (
-                  <rect
-                    key={`hover-${zone.key}`}
-                    data-testid={`trend-hover-zone-${index}`}
-                    x={zone.x}
-                    y={zone.y}
-                    width={zone.width}
-                    height={zone.height}
-                    className={styles.trendHoverZone}
-                    onMouseEnter={() => {
-                      setActiveTrendIndex(index);
-                    }}
-                  />
-                ))}
-              </svg>
-
-              {activeTrendZone && (
-                <div
-                  data-testid="trend-tooltip"
-                  className={styles.trendTooltip}
-                  style={trendTooltipStyle}
-                >
-                  <div className={styles.trendTooltipDate}>{activeTrendZone.label}</div>
-                  <div className={styles.trendTooltipRow}>
-                    <span className={styles.trendTooltipLabel}>调用用户</span>
-                    <strong className={styles.trendTooltipValue}>
-                      {formatNumber(activeTrendZone.users)}
-                    </strong>
-                  </div>
-                  <div className={styles.trendTooltipRow}>
-                    <span className={styles.trendTooltipLabel}>调用次数</span>
-                    <strong className={styles.trendTooltipValue}>
-                      {formatNumber(activeTrendZone.calls)}
-                    </strong>
-                  </div>
-                </div>
-              )}
-            </div>
-            <div className={styles.axisRight}>
-              {trendSvg.rightAxisTicks.map((tick, index) => (
-                <span key={`right-${tick.value}-${index}`}>{tick.label}</span>
-              ))}
-            </div>
-          </div>
+          )}
         </article>
 
         <article className={styles.panelMedium}>
@@ -1552,45 +1443,6 @@ export default function BusinessOverviewPage() {
           </div>
         </article>
 
-        {!hideDepthCard && (
-          <article className={styles.panelMedium}>
-            <div className={styles.panelHeader}>
-              <h3 className={styles.panelTitle}>使用深度</h3>
-            </div>
-            <div className={styles.depthGrid}>
-              {depthCards.map((card) => (
-                <div key={card.key} className={styles.depthCard}>
-                  <div className={styles.depthIconWrap}>
-                    {card.key === "avg-rounds" && <MessageCircleMore size={15} />}
-                    {card.key === "multi-round" && <Users size={15} />}
-                    {card.key === "avg-duration" && <Clock3 size={15} />}
-                    {card.key === "avg-sessions" && <ArrowUpRight size={15} />}
-                  </div>
-                  <div className={styles.depthValue}>{card.valueText}</div>
-                  <Tooltip title={card.title} placement="top">
-                    <div className={styles.depthTitle}>{card.title}</div>
-                  </Tooltip>
-                  <div
-                    className={
-                      card.changeDirection === "up"
-                        ? styles.metricChangeUp
-                        : card.changeDirection === "down"
-                        ? styles.metricChangeDown
-                        : styles.metricChangeFlat
-                    }
-                  >
-                    环比
-                    {card.changeDirection === "up" && <TrendingUp size={12} />}
-                    {card.changeDirection === "down" && (
-                      <TrendingDown size={12} />
-                    )}
-                    {card.changeText}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </article>
-        )}
       </section>
 
       <section
@@ -1609,54 +1461,58 @@ export default function BusinessOverviewPage() {
               <ChevronRight size={14} />
             </button>
           </div>
-          <div className={styles.donutLayout}>
-            <div className={styles.donutColumn}>
-              <div className={styles.donutWrap}>
-                <svg viewBox="0 0 120 120" className={styles.donutSvg}>
-                  <circle cx="60" cy="60" r="45" className={styles.donutTrack} />
-                  {buildDonutSegments(executionSummary).map((item) => (
-                    <circle
-                      key={item.key}
-                      cx="60"
-                      cy="60"
-                      r="45"
-                      className={styles.donutSegment}
-                      style={{
-                        stroke: item.color,
-                        strokeDasharray: item.dasharray,
-                        strokeDashoffset: item.dashoffset,
-                      }}
-                    />
-                  ))}
-                </svg>
-                <div className={styles.donutCenter}>
-                  <strong>
-                    {formatNumber(taskStatusSummary?.total_tasks ?? 0)}
-                  </strong>
-                  <span>总任务数</span>
+          {taskStatusLoading ? (
+            renderCardLoading()
+          ) : (
+            <div className={styles.donutLayout}>
+              <div className={styles.donutColumn}>
+                <div className={styles.donutWrap}>
+                  <svg viewBox="0 0 120 120" className={styles.donutSvg}>
+                    <circle cx="60" cy="60" r="45" className={styles.donutTrack} />
+                    {buildDonutSegments(executionSummary).map((item) => (
+                      <circle
+                        key={item.key}
+                        cx="60"
+                        cy="60"
+                        r="45"
+                        className={styles.donutSegment}
+                        style={{
+                          stroke: item.color,
+                          strokeDasharray: item.dasharray,
+                          strokeDashoffset: item.dashoffset,
+                        }}
+                      />
+                    ))}
+                  </svg>
+                  <div className={styles.donutCenter}>
+                    <strong>
+                      {formatNumber(taskStatusSummary?.total_tasks ?? 0)}
+                    </strong>
+                    <span>总任务数</span>
+                  </div>
+                </div>
+                <div className={styles.donutLegend}>
+                  {executionSummary.map((item) => {
+                    const total = Math.max(
+                      executionSummary.reduce((sum, row) => sum + row.value, 0),
+                      1,
+                    );
+
+                    return (
+                      <div key={item.key} className={styles.donutLegendItem}>
+                        <span className={styles.donutLegendDot} style={{ background: item.color }} />
+                        <span>{item.label}</span>
+                        <span className={styles.donutLegendValue}>
+                          {formatNumber(item.value)}&nbsp;({formatPercent((item.value / total) * 100)})
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
-              <div className={styles.donutLegend}>
-                {executionSummary.map((item) => {
-                  const total = Math.max(
-                    executionSummary.reduce((sum, row) => sum + row.value, 0),
-                    1,
-                  );
-
-                  return (
-                    <div key={item.key} className={styles.donutLegendItem}>
-                      <span className={styles.donutLegendDot} style={{ background: item.color }} />
-                      <span>{item.label}</span>
-                      <span className={styles.donutLegendValue}>
-                        {formatNumber(item.value)}&nbsp;({formatPercent((item.value / total) * 100)})
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
+              <TaskFunnel taskStatusSummary={taskStatusSummary} />
             </div>
-            <TaskFunnel taskStatusSummary={taskStatusSummary} />
-          </div>
+          )}
         </article>
 
         <article className={styles.panelMedium}>
@@ -1690,6 +1546,7 @@ export default function BusinessOverviewPage() {
                     : styles.rankBadge;
                 const descLen = skill.skill_description?.length || 0;
                 const tooltipWidth = descLen <= 30 ? 240 : descLen <= 60 ? 320 : descLen <= 100 ? 400 : 520;
+                const skillLabel = displaySkillName(skill);
                 return (
                   <button
                     key={`${skill.skill_name}-${rank}`}
@@ -1697,6 +1554,7 @@ export default function BusinessOverviewPage() {
                     className={styles.skillRankRow}
                     onClick={() => {
                       setSelectedSkillName(skill.skill_name);
+                      setSelectedSkillDisplayName(skill.cn_name ?? null);
                       setSkillModalOpen(true);
                     }}
                   >
@@ -1708,19 +1566,19 @@ export default function BusinessOverviewPage() {
                         skill.skill_description ? (
                           <div className={styles.skillTooltip}>
                             <div className={styles.skillTooltipName}>
-                              {skill.skill_name}
+                              {skillLabel}
                             </div>
                             <div className={styles.skillTooltipDesc}>
                               {skill.skill_description}
                             </div>
                           </div>
                         ) : (
-                          skill.skill_name
+                          skillLabel
                         )
                       }
                     >
                       <span className={styles.rankUser}>
-                        {truncateName(skill.skill_name, 20)}
+                        {truncateName(skillLabel, 20)}
                       </span>
                     </Tooltip>
                     <span className={styles.skillRankCalls}>
@@ -1748,67 +1606,80 @@ export default function BusinessOverviewPage() {
               <ChevronRight size={14} />
             </button>
           </div>
-          <div className={styles.donutLayoutCompact}>
-            <div className={styles.donutCompact}>
-              <svg viewBox="0 0 120 120" className={styles.donutCompactSvg}>
-                <circle cx="60" cy="60" r="45" className={styles.donutTrack} />
-                {buildDonutSegments(errorSummaryItems).map((item) => (
-                  <circle
-                    key={item.key}
-                    cx="60"
-                    cy="60"
-                    r="45"
-                    className={styles.donutSegment}
-                    style={{
-                      stroke: item.color,
-                      strokeDasharray: item.dasharray,
-                      strokeDashoffset: item.dashoffset,
-                    }}
-                  />
-                ))}
-              </svg>
-              <div className={styles.donutCenter}>
-                <strong>
-                  {formatNumber(safeNumber(errorSummaryData?.total_errors))}
-                </strong>
-                <span>报错总数</span>
+          {errorLoading ? (
+            renderCardLoading()
+          ) : (
+            <div className={styles.donutLayoutCompact}>
+              <div className={styles.donutCompact}>
+                <svg viewBox="0 0 120 120" className={styles.donutCompactSvg}>
+                  <circle cx="60" cy="60" r="45" className={styles.donutTrack} />
+                  {buildDonutSegments(errorSummaryItems).map((item) => (
+                    <circle
+                      key={item.key}
+                      cx="60"
+                      cy="60"
+                      r="45"
+                      className={styles.donutSegment}
+                      style={{
+                        stroke: item.color,
+                        strokeDasharray: item.dasharray,
+                        strokeDashoffset: item.dashoffset,
+                      }}
+                    />
+                  ))}
+                </svg>
+                <div className={styles.donutCenter}>
+                  <strong>
+                    {formatNumber(safeNumber(errorSummaryData?.total_errors))}
+                  </strong>
+                  <span>报错总数</span>
+                </div>
               </div>
-            </div>
-            <div className={styles.legendHorizontal}>
-              <div className={styles.legendGroup}>
-                {errorSummaryItems.map((item) => {
-                  const total = Math.max(
-                    errorSummaryItems.reduce((sum, row) => sum + row.value, 0),
-                    1,
-                  );
-
-                  return (
-                    <div key={item.key} className={styles.legendRow}>
-                      <span className={styles.legendLabel}>
+              <div className={styles.legendHorizontal}>
+                <div className={styles.legendGroup}>
+                  {errorSummaryItems.map((item) => {
+                    const total = Math.max(
+                      errorSummaryItems.reduce((sum, row) => sum + row.value, 0),
+                      1,
+                    );
+                    const label = (
+                      <span
+                        className={`${styles.legendLabel} ${
+                          item.key === "model-error" && item.value > 0
+                            ? styles.legendLabelHoverable
+                            : ""
+                        }`}
+                      >
                         <i style={{ background: item.color }} />
                         {item.label}
                       </span>
-                      <span className={styles.legendValue}>
-                        {formatNumber(item.value)} (
-                        {formatPercent((item.value / total) * 100)})
-                      </span>
-                    </div>
-                  );
-                })}
+                    );
+
+                    return (
+                      <div key={item.key} className={styles.legendRow}>
+                        {item.key === "model-error" && item.value > 0 ? (
+                          <Tooltip
+                            placement="top"
+                            title={renderModelErrorCodeTooltip(errorSummaryData)}
+                          >
+                            {label}
+                          </Tooltip>
+                        ) : (
+                          label
+                        )}
+                        <span className={styles.legendValue}>
+                          {formatNumber(item.value)} (
+                          {formatPercent((item.value / total) * 100)})
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
-              {errorLoading && (
-                <div className={styles.listFootnote}>加载中...</div>
-              )}
             </div>
-          </div>
+          )}
         </article>
       </section>
-
-      <HtmlPreviewClickAnalysis
-        dateRange={dateRange}
-        effectiveBbkIds={effectiveBbkIds}
-        refreshKey={htmlPreviewRefreshKey}
-      />
 
       <UserDetailModal
         open={modalOpen}
@@ -1826,11 +1697,13 @@ export default function BusinessOverviewPage() {
       <SkillDetailModal
         open={skillModalOpen}
         skillName={selectedSkillName}
+        skillDisplayName={selectedSkillDisplayName ?? undefined}
         startDate={startDateText}
         endDate={endDateText}
         onClose={() => {
           setSkillModalOpen(false);
           setSelectedSkillName("");
+          setSelectedSkillDisplayName(null);
         }}
       />
 

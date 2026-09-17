@@ -8,6 +8,12 @@ export type SkillReadinessAggregateStatus = "normal" | "abnormal";
 
 export type SkillReadinessCheckStatus = "pass" | "fail" | "skip";
 
+export type SkillReadinessOwnerLookupStatus =
+  | "idle"
+  | "running"
+  | "completed"
+  | "failed";
+
 export interface SkillReadinessConfigCheckSummary {
   name: string;
   display_name: string;
@@ -69,12 +75,16 @@ export interface SkillReadinessOverview {
   config_checks: SkillReadinessConfigCheckSummary[];
   owner_summary: SkillReadinessOwnerSummary;
   owners: SkillReadinessOwner[];
+  owner_lookup_status: SkillReadinessOwnerLookupStatus;
+  owner_lookup_updated_at: string | null;
   latest_run: SkillReadinessRunSummary | null;
 }
 
 export interface SkillReadinessStartRunResponse {
-  run: SkillReadinessRunProgress;
+  run: SkillReadinessRunProgress | null;
   reused: boolean;
+  owner_lookup_only?: boolean;
+  owner_lookup_scheduled?: boolean;
 }
 
 export interface SkillReadinessCheckResult {

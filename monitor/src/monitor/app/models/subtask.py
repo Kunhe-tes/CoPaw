@@ -9,7 +9,7 @@ Defines models for:
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -41,6 +41,12 @@ class SubtaskModel(BaseModel):
     notification_content_zhaohu: Optional[str] = Field(
         default=None,
         description="招乎渠道通知消息内容",
+    )
+    need_notification: int = Field(
+        default=1,
+        ge=0,
+        le=1,
+        description="是否需要通知: 0-否, 1-是",
     )
     status: Optional[str] = Field(
         default=None,
@@ -107,6 +113,34 @@ class SubtaskCreateRequest(BaseModel):
         default=None,
         max_length=5000,
         description="招乎渠道通知消息内容",
+    )
+    need_notification: int = Field(
+        default=1,
+        ge=0,
+        le=1,
+        description="是否需要通知: 0-否, 1-是",
+    )
+    template_id: Optional[int] = Field(
+        default=None,
+        description="模板ID，用于html渲染",
+    )
+    result_id: Optional[str] = Field(
+        default=None,
+        max_length=100,
+        description="es数据doc_id",
+    )
+    bbk_org_id: Optional[str] = Field(
+        default=None,
+        max_length=10,
+        description="客户归属分行ID",
+    )
+    status: Optional[Literal["SUC", "FAIL", "TIMEOUT"]] = Field(
+        default=None,
+        description="子任务状态: SUC/FAIL/TIMEOUT",
+    )
+    info: str = Field(
+        default="",
+        description="预留扩展信息",
     )
 
 

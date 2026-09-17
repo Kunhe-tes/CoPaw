@@ -3,6 +3,7 @@
 # pylint: disable=line-too-long
 import asyncio
 from contextlib import suppress
+import json
 import logging
 import os
 from pathlib import Path
@@ -15,14 +16,16 @@ import aiofiles
 from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
 
+from swe.runtime_workers import run_runtime_state_work
+
 from ..tool_failure import ToolExecutionError
+from .office_text import detect_document_kind, extract_document_text
 from .utils import (
     truncate_text_output,
     read_file_safe,
     DEFAULT_MAX_BYTES,
 )
 from ...config.context import (
-    get_current_file_read_max_bytes,
     get_current_recent_max_bytes,
 )
 from ...constant import TRUNCATION_NOTICE_MARKER
@@ -33,6 +36,7 @@ from ...security.tenant_path_boundary import (
     get_current_tool_base_dir,
     get_current_tenant_root,
 )
+from ..skill_context_manager import get_skill_context_manager
 
 logger = logging.getLogger(__name__)
 _FILE_WRITE_LOCKS: dict[str, asyncio.Lock] = {}
@@ -49,6 +53,10 @@ except (TypeError, ValueError):
 
 def _raise_file_error(error_type: str, detail: str) -> None:
     raise ToolExecutionError(error_type=error_type, detail=detail)
+
+
+class _TextToReplaceNotFoundError(ValueError):
+    """Raised when edit_file cannot find the requested replacement text."""
 
 
 def _resolve_file_path(file_path: str) -> str:
@@ -80,25 +88,135 @@ def _resolve_file_path(file_path: str) -> str:
 def _resolve_writable_file_path(file_path: str) -> str:
     base_dir = get_current_tool_base_dir()
     try:
-        return _resolve_file_path(file_path)
+        resolved = Path(_resolve_file_path(file_path))
     except TenantPathBoundaryError:
         expanded_path = os.path.expanduser(file_path)
         path_obj = Path(expanded_path)
-        tenant_root = get_current_tenant_root().resolve()
         candidate = (
             path_obj if path_obj.is_absolute() else (base_dir / path_obj)
         ).resolve(strict=False)
 
         try:
-            candidate.relative_to(tenant_root)
+            candidate.relative_to(get_current_tenant_root().resolve())
         except ValueError as exc:
             raise TenantPathBoundaryError(
                 "Write target escapes the tenant workspace boundary.",
                 resolved_path=candidate,
             ) from exc
 
+        skill_parent_missing = not candidate.parent.exists() and any(
+            candidate.parent.is_relative_to(base_dir / root_name)
+            for root_name in ("skills", ".disabled_skills")
+        )
         candidate.parent.mkdir(parents=True, exist_ok=True)
-        return str(candidate)
+        resolved = candidate
+        if skill_parent_missing:
+            return str(resolved)
+    _raise_if_protected_skill_write_target(resolved, base_dir)
+    return str(resolved)
+
+
+def _is_created_workspace_skill_write_target(
+    target: Path,
+    workspace_dir: Path,
+    *,
+    current_skill: str | None = None,
+) -> bool:
+    relative_path = None
+    for root_name in ("skills", ".disabled_skills"):
+        try:
+            relative_path = target.relative_to(workspace_dir / root_name)
+            break
+        except ValueError:
+            continue
+    if relative_path is None or not relative_path.parts:
+        return False
+
+    skill_name = relative_path.parts[0]
+    skill_root = workspace_dir / root_name / skill_name
+    manifest_path = workspace_dir / "skill.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return current_skill == skill_name or not skill_root.exists()
+
+    skills = manifest.get("skills", {})
+    if skill_name not in skills:
+        if current_skill == skill_name or not skill_root.exists():
+            return True
+
+    entry = skills.get(skill_name)
+    return not isinstance(entry, dict) or entry.get("source") == "customized"
+
+
+def _is_safe_workspace_skill_name(skill_name: str) -> bool:
+    if "\x00" in skill_name or "/" in skill_name or "\\" in skill_name:
+        return False
+    return skill_name not in {".", ".."}
+
+
+def is_created_workspace_skill_write_target(
+    target: Path,
+    workspace_dir: Path,
+    *,
+    current_skill: str | None = None,
+) -> bool:
+    return _is_created_workspace_skill_write_target(
+        target.resolve(strict=False),
+        workspace_dir.resolve(strict=False),
+        current_skill=current_skill,
+    )
+
+
+def collect_created_workspace_skill_names(
+    workspace_dir: Path,
+) -> tuple[str, ...]:
+    manifest_path = workspace_dir.resolve(strict=False) / "skill.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ()
+
+    skills = manifest.get("skills", {})
+    if not isinstance(skills, dict):
+        return ()
+
+    return tuple(
+        skill_name
+        for skill_name, entry in skills.items()
+        if isinstance(skill_name, str)
+        and _is_safe_workspace_skill_name(skill_name)
+        and isinstance(entry, dict)
+        and entry.get("source") == "customized"
+    )
+
+
+def _raise_if_protected_skill_write_target(
+    target: Path,
+    workspace_dir: Path,
+) -> None:
+    resolved_target = target.resolve(strict=False)
+    resolved_workspace = workspace_dir.resolve(strict=False)
+    current_skill = get_skill_context_manager().current_skill
+    protected_roots = (
+        resolved_workspace / "skills",
+        resolved_workspace / ".disabled_skills",
+    )
+    if is_created_workspace_skill_write_target(
+        resolved_target,
+        resolved_workspace,
+        current_skill=current_skill,
+    ):
+        return
+    if any(
+        resolved_target == root or resolved_target.is_relative_to(root)
+        for root in protected_roots
+    ):
+        raise TenantPathBoundaryError(
+            "Direct writes to workspace skill directories are not allowed; "
+            "use the skill import or edit APIs so security scanning runs.",
+            resolved_path=resolved_target,
+        )
 
 
 def _get_encoding_for_file(file_path: str) -> str:
@@ -130,6 +248,97 @@ def _content_byte_length(content: str, encoding: str) -> int:
         return len(content.encode(encoding))
     except Exception:
         return len(content.encode("utf-8", errors="replace"))
+
+
+def _get_effective_file_read_max_bytes() -> int:
+    return get_current_recent_max_bytes() or DEFAULT_MAX_BYTES
+
+
+def _read_document_text_sync(file_path: str) -> str:
+    """Read a file as text, extracting plain text for Office documents.
+
+    Binary Office formats (docx/xlsx/pptx, legacy doc via antiword) are
+    detected by magic bytes and converted to plain text; everything else
+    falls back to the existing text reader.
+    """
+    kind = detect_document_kind(file_path)
+    if kind is None:
+        return read_file_safe(file_path)
+    return extract_document_text(file_path, kind)
+
+
+def _read_file_selection_sync(
+    file_path: str,
+    *,
+    start_line: Optional[int],
+    end_line: Optional[int],
+    max_bytes: int,
+) -> str:
+    content = _read_document_text_sync(file_path)
+    all_lines = content.split("\n")
+    total = len(all_lines)
+
+    # Determine read range
+    s = max(1, start_line if start_line is not None else 1)
+    e = min(total, end_line if end_line is not None else total)
+
+    if s > total:
+        last_start_line = max(total, 1)
+        return (
+            f"Requested start_line {s} exceeds file length ({total} lines). "
+            "No content was returned.\n"
+            f"Call `read_file` with file_path={file_path} "
+            f"start_line={last_start_line} to read the last available line, "
+            "or omit start_line to read from the beginning."
+        )
+
+    if s > e:
+        _raise_file_error(
+            "invalid_arguments",
+            f"Error: start_line ({s}) > end_line ({e}).",
+        )
+
+    # Extract selected lines
+    selected_content = "\n".join(all_lines[s - 1 : e])
+
+    # Apply smart truncation (consistent with shell output format)
+    text = truncate_text_output(
+        selected_content,
+        start_line=s,
+        total_lines=total,
+        file_path=file_path,
+        max_bytes=max_bytes,
+    )
+
+    # Add continuation hint if partial read without truncation.
+    # Use TRUNCATION_NOTICE_MARKER format so ToolResultCompactor can
+    # re-truncate with the correct start_line when compacting old messages.
+    if text == selected_content and e < total:
+        content_bytes = len(text.encode("utf-8"))
+        notice = (
+            TRUNCATION_NOTICE_MARKER + f"\nThe output above was truncated."
+            f"\nThe full content is saved to the file "
+            f"and contains {total} lines in total."
+            f"\nThis excerpt starts at line {s} and "
+            f"covers the next {content_bytes} bytes."
+            "\nIf the current content is not enough, "
+            f"call `read_file` with file_path={file_path} "
+            f"start_line={e + 1} to read more."
+        )
+        text = text + notice
+
+    return text
+
+
+def _replace_file_text_sync(
+    file_path: str,
+    old_text: str,
+    new_text: str,
+) -> str:
+    content = read_file_safe(file_path)
+    if old_text not in content:
+        raise _TextToReplaceNotFoundError
+    return content.replace(old_text, new_text)
 
 
 def _log_file_write_diagnostics(
@@ -324,8 +533,16 @@ async def read_file(  # pylint: disable=too-many-return-statements
     """Read a file. Relative paths resolve from the current agent workspace
     when available, otherwise the current tenant workspace root.
 
-    Use start_line/end_line to read a specific line range (output includes
-    line numbers). Omit both to read the full file.
+    Plain text files are read directly. Binary Office documents are detected
+    by their file signature and their text content is extracted on the fly:
+    .docx/.docm (Word), .xlsx/.xlsm (Excel) and .pptx/.pptm (PowerPoint)
+    are parsed in-memory, and legacy binary .doc files are decoded via
+    antiword when it is installed. Legacy .xls/.ppt and PDF are recognized
+    but not supported and return a clear error.
+
+    Use start_line/end_line to read a specific line range. Omit both to read
+    the full file. Output is truncated at the configured byte budget with a
+    continuation hint when the file is larger.
 
     Args:
         file_path (`str`):
@@ -377,60 +594,13 @@ async def read_file(  # pylint: disable=too-many-return-statements
         )
 
     try:
-        content = read_file_safe(file_path)
-        all_lines = content.split("\n")
-        total = len(all_lines)
-
-        # Determine read range
-        s = max(1, start_line if start_line is not None else 1)
-        e = min(total, end_line if end_line is not None else total)
-
-        if s > total:
-            _raise_file_error(
-                "invalid_arguments",
-                f"Error: start_line {s} exceeds file length ({total} lines).",
-            )
-
-        if s > e:
-            _raise_file_error(
-                "invalid_arguments",
-                f"Error: start_line ({s}) > end_line ({e}).",
-            )
-
-        # Extract selected lines
-        selected_content = "\n".join(all_lines[s - 1 : e])
-
-        # Apply smart truncation (consistent with shell output format)
-        file_read_max_bytes = get_current_file_read_max_bytes()
-        if file_read_max_bytes is not None:
-            max_bytes = file_read_max_bytes
-        else:
-            max_bytes = get_current_recent_max_bytes() or DEFAULT_MAX_BYTES
-        text = truncate_text_output(
-            selected_content,
-            start_line=s,
-            total_lines=total,
-            file_path=file_path,
-            max_bytes=max_bytes,
+        text = await run_runtime_state_work(
+            _read_file_selection_sync,
+            file_path,
+            start_line=start_line,
+            end_line=end_line,
+            max_bytes=_get_effective_file_read_max_bytes(),
         )
-
-        # Add continuation hint if partial read without truncation.
-        # Use TRUNCATION_NOTICE_MARKER format so ToolResultCompactor can
-        # re-truncate with the correct start_line when compacting old messages.
-        if text == selected_content and e < total:
-            content_bytes = len(text.encode("utf-8"))
-            notice = (
-                TRUNCATION_NOTICE_MARKER + f"\nThe output above was truncated."
-                f"\nThe full content is saved to the file "
-                f"and contains {total} lines in total."
-                f"\nThis excerpt starts at line {s} and "
-                f"covers the next {content_bytes} bytes."
-                "\nIf the current content is not enough, "
-                f"call `read_file` with file_path={file_path} "
-                f"start_line={e + 1} to read more."
-            )
-            text = text + notice
-
         return ToolResponse(
             content=[TextBlock(type="text", text=text)],
         )
@@ -548,20 +718,23 @@ async def edit_file(
         )
 
     try:
-        content = read_file_safe(resolved_path)
+        new_content = await run_runtime_state_work(
+            _replace_file_text_sync,
+            resolved_path,
+            old_text,
+            new_text,
+        )
+    except _TextToReplaceNotFoundError:
+        _raise_file_error(
+            "not_found",
+            f"Error: The text to replace was not found in {file_path}.",
+        )
     except Exception as e:
         _raise_file_error(
             "unexpected_tool_error",
             f"Error: Read file failed due to \n{e}",
         )
 
-    if old_text not in content:
-        _raise_file_error(
-            "not_found",
-            f"Error: The text to replace was not found in {file_path}.",
-        )
-
-    new_content = content.replace(old_text, new_text)
     await write_file(
         file_path=resolved_path,
         content=new_content,

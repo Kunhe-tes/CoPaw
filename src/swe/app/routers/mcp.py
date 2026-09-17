@@ -303,7 +303,20 @@ async def _distribute_mcp_clients_to_tenant(
     )
     was_bootstrapped = initializer.has_seeded_bootstrap()
     if not was_bootstrapped:
-        initializer.ensure_seeded_bootstrap()
+        pool = getattr(
+            getattr(getattr(request, "app", None), "state", request.state),
+            "tenant_workspace_pool",
+            None,
+        )
+        if pool is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Tenant pool not available",
+            )
+        await pool.ensure_bootstrap(
+            target_tenant_id,
+            source_id=_request_source_id(request),
+        )
 
     effective_target_tenant_id = getattr(
         initializer,

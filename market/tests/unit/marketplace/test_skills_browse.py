@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 import asyncio
+import io
 import json
 import pytest
+import zipfile
 from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
 
@@ -38,7 +40,21 @@ def _publish(svc, source_id, name, bbk_ids=None):
         skill_md="",
         bbk_ids=bbk_ids or [],
     )
-    return asyncio.run(svc.publish_skill(source_id, req))
+    item, _ = asyncio.run(svc.publish_skill(source_id, req))
+    return item
+
+
+def _skill_zip_bytes(entries: dict[str, bytes | str]) -> bytes:
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w") as zf:
+        for name, content in entries.items():
+            payload = (
+                content.encode("utf-8")
+                if isinstance(content, str)
+                else content
+            )
+            zf.writestr(name, payload)
+    return zip_buffer.getvalue()
 
 
 def test_list_skills_returns_active_items(tmp_path):
@@ -147,7 +163,10 @@ def test_get_my_skills_returns_list(tmp_path):
 
 
 def test_get_received_skills_returns_only_received(tmp_path):
-    from market.marketplace.fs import get_user_skills_dir
+    from market.marketplace.fs import (
+        get_user_skill_manifest_path,
+        get_user_skills_dir,
+    )
 
     skills_dir = get_user_skills_dir(
         tmp_path / "swe",
@@ -162,9 +181,30 @@ def test_get_received_skills_returns_only_received(tmp_path):
     )
     d2 = skills_dir / "received_skill"
     d2.mkdir(parents=True)
-    (d2 / "skill.json").write_text(
+    manifest_path = get_user_skill_manifest_path(
+        tmp_path / "swe",
+        "user2",
+        source_id="src_a",
+    )
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
         json.dumps(
-            {"source": "marketplace:item-1", "received_version": "1.0.0"},
+            {
+                "schema_version": "workspace-skill-manifest.v1",
+                "version": 1,
+                "skills": {
+                    "created_skill": {
+                        "source": "customized",
+                        "metadata": {},
+                    },
+                    "received_skill": {
+                        "source": "marketplace:item-1",
+                        "metadata": {
+                            "received_version": "1.0.0",
+                        },
+                    },
+                },
+            },
         ),
         encoding="utf-8",
     )
@@ -242,6 +282,101 @@ def test_extract_zip_with_chinese_filename(tmp_path):
     import shutil
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_extract_zip_skills_rejects_top_level_path_traversal():
+    from market.app.routers.skills_browse import _extract_zip_skills
+
+    zip_data = _skill_zip_bytes(
+        {
+            "../escape/SKILL.md": "---\nname: escape\n---\n# Escape\n",
+        },
+    )
+
+    with pytest.raises(ValueError, match="路径不安全|Unsafe path"):
+        _extract_zip_skills(zip_data)
+
+
+def test_upload_skill_rejects_ast_execution_risk(tmp_path):
+    app = _make_app(tmp_path)
+    client = TestClient(app)
+    zip_data = _skill_zip_bytes(
+        {
+            "eval_skill/SKILL.md": "---\nname: eval_skill\n---\n# Eval Skill\n",
+            "eval_skill/run.py": "def run(expr):\n    return eval(expr)\n",
+        },
+    )
+
+    resp = client.post(
+        "/api/market/skills/upload",
+        files={
+            "file": (
+                "eval_skill.zip",
+                io.BytesIO(zip_data),
+                "application/zip",
+            ),
+        },
+        headers={"X-Source-Id": "src_a", "X-User-Id": "user1"},
+    )
+
+    assert resp.status_code == 400
+    assert "Security scan" in resp.json()["detail"]
+
+
+def test_enable_skill_scan_failure_flushes_history_and_records_bbk(
+    tmp_path,
+    monkeypatch,
+):
+    from market.marketplace.fs import get_user_skills_dir
+    from market.security import skill_scanner
+
+    app = _make_app(tmp_path)
+    client = TestClient(app)
+    skill_dir = (
+        get_user_skills_dir(tmp_path / "swe", "user1", source_id="src_a")
+        / "eval_skill"
+    )
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Eval Skill\n", encoding="utf-8")
+    (skill_dir / "run.py").write_text(
+        "def run(expr):\n    return eval(expr)\n",
+        encoding="utf-8",
+    )
+    submitted = []
+
+    class _Recorder:
+        def __init__(self) -> None:
+            self.flushed = False
+
+        def submit(self, record):
+            submitted.append(record)
+            return True
+
+        async def flush(self):
+            self.flushed = True
+
+    recorder = _Recorder()
+    app.state.skill_scan_history_recorder = recorder
+    skill_scanner.install_skill_scan_history_recorder(recorder)
+    try:
+        resp = client.post(
+            "/api/market/skills/mine/eval_skill/enable",
+            headers={
+                "X-Source-Id": "src_a",
+                "X-User-Id": "user1",
+                "X-Bbk-Id": "bbk-a",
+            },
+        )
+    finally:
+        skill_scanner.install_skill_scan_history_recorder(None)
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason"] == "security_scan_failed"
+    assert recorder.flushed is True
+    assert len(submitted) == 1
+    assert submitted[0].source_id == "src_a"
+    assert submitted[0].user_id == "user1"
+    assert submitted[0].bbk_id == "bbk-a"
 
 
 def test_log_skill_operation_returns_200(tmp_path):

@@ -12,6 +12,11 @@ from ..agents.skills_manager import (
     SkillService,
     read_skill_manifest,
 )
+from ..agents.workspace_skill_layout_migration import (
+    SkillLayoutMigrationError,
+    apply_workspace_skill_layout_migration,
+    check_workspace_skill_layout_migration,
+)
 from ..constant import WORKING_DIR
 from ..config import load_config
 from .utils import prompt_checkbox, prompt_confirm
@@ -210,6 +215,35 @@ def configure_skills_interactive(
 @click.group("skills")
 def skills_group() -> None:
     """Manage skills (list / configure)."""
+
+
+@skills_group.command("migrate-layout")
+@click.option("--check", "check_only", is_flag=True)
+@click.option("--apply", "apply_changes", is_flag=True)
+@click.option(
+    "--working-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=WORKING_DIR,
+    show_default=True,
+)
+def migrate_layout_cmd(
+    check_only: bool,
+    apply_changes: bool,
+    working_dir: Path,
+) -> None:
+    """Check or migrate Workspace skills to layout v2."""
+    if check_only == apply_changes:
+        raise click.UsageError("choose exactly one of --check or --apply")
+    try:
+        report = (
+            check_workspace_skill_layout_migration(working_dir)
+            if check_only
+            else apply_workspace_skill_layout_migration(working_dir)
+        )
+    except SkillLayoutMigrationError as exc:
+        raise click.ClickException(str(exc)) from exc
+    for item in report.workspaces:
+        click.echo(f"{item.workspace}: {item.status}")
 
 
 @skills_group.command("list")

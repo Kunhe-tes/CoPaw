@@ -5,6 +5,8 @@ export interface ToolInfo {
   enabled: boolean;
   description: string;
   async_execution: boolean;
+  origin?: "builtin" | "source";
+  source_version?: number | null;
 }
 
 export const toolsApi = {

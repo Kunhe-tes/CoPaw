@@ -6,6 +6,7 @@ Provides methods for:
 - Computing execution async_status from subtask statuses
 """
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Optional, Tuple
@@ -17,6 +18,10 @@ from ....config.constant import (
     ASYNC_TASK_APP_KEY,
     ASYNC_TASK_ENV_TAG,
     ASYNC_TASK_API_KEY,
+    RESULT_INDEX_PUSH_PLUGIN_ID,
+    RESULT_INDEX_PUSH_PLUGIN_NAME,
+    RESULT_INDEX_PUSH_QUESTION,
+    RESULT_INDEX_PUSH_URL,
 )
 from .query_service import QueryService, get_query_service
 from ...models.subtask import (
@@ -31,14 +36,16 @@ logger = logging.getLogger(__name__)
 # 外部 API 超时
 API_TIMEOUT = 10.0
 
+RESULT_INDEX_PUSH_TIMEOUT = 10.0
+
 # 每批处理数量
-BATCH_SIZE = 50
+BATCH_SIZE = 100
 
 # 有效状态值
 VALID_SUBTASK_STATUSES = ("SUC", "FAIL", "PART_SUC")
 
 # 兜底超时小时数
-FALLBACK_TIMEOUT_HOURS = 24
+FALLBACK_TIMEOUT_HOURS = 2
 
 
 class SyncService:
@@ -74,6 +81,87 @@ class SyncService:
             await self._client.aclose()
             self._client = None
 
+    def _is_result_index_push_configured(self) -> bool:
+        """Check if result-index push API is configured."""
+        return bool(
+            RESULT_INDEX_PUSH_URL
+            and RESULT_INDEX_PUSH_PLUGIN_ID
+            and RESULT_INDEX_PUSH_PLUGIN_NAME
+            and RESULT_INDEX_PUSH_QUESTION,
+        )
+
+    @staticmethod
+    def _dedupe_result_index_users(
+        users: list[dict[str, str]],
+    ) -> list[dict[str, str]]:
+        """Deduplicate result-index users by custUid and bbkId."""
+        deduped = []
+        seen = set()
+        for user in users:
+            cust_uid = (user.get("custUid") or "").strip()
+            bbk_id = (user.get("bbkId") or "").strip()
+            if not cust_uid or not bbk_id:
+                continue
+            key = (cust_uid, bbk_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append({"custUid": cust_uid, "bbkId": bbk_id})
+        return deduped
+
+    async def _push_result_index_users(
+        self,
+        users: list[dict[str, str]],
+    ) -> None:
+        """Push successful result-index users to third party."""
+        user_info_list = self._dedupe_result_index_users(users)
+        if not user_info_list:
+            return
+        if not self._is_result_index_push_configured():
+            logger.info(
+                "Result-index push API not configured, skipped: users=%d",
+                len(user_info_list),
+            )
+            return
+
+        payload = {
+            "pluginId": RESULT_INDEX_PUSH_PLUGIN_ID,
+            "pluginName": RESULT_INDEX_PUSH_PLUGIN_NAME,
+            "question": RESULT_INDEX_PUSH_QUESTION,
+            "userInfoList": user_info_list,
+        }
+        try:
+            async with httpx.AsyncClient(
+                timeout=RESULT_INDEX_PUSH_TIMEOUT,
+            ) as client:
+                response = await client.post(
+                    RESULT_INDEX_PUSH_URL,
+                    headers={"Content-Type": "application/json"},
+                    json=payload,
+                )
+            if response.status_code >= 400:
+                logger.warning(
+                    "Result-index user push failed: status=%d users=%d",
+                    response.status_code,
+                    len(user_info_list),
+                )
+                return
+            logger.info(
+                "Result-index users pushed: users=%d",
+                len(user_info_list),
+            )
+        except Exception as e:
+            logger.warning("Result-index user push failed: %s", e)
+
+    def _schedule_result_index_user_push(
+        self,
+        users: list[dict[str, str]],
+    ) -> None:
+        """Schedule result-index user push without blocking sync response."""
+        if not users:
+            return
+        asyncio.create_task(self._push_result_index_users(users))
+
     def _build_api_url(self, task_id: str) -> str:
         """Build external API URL for task status query."""
         return (
@@ -95,11 +183,11 @@ class SyncService:
         """
         return_code = data.get("returnCode", "")
         if return_code != "SUC0000":
-            return None, f"returnCode={return_code}"
+            return "FAIL", f"returnCode={return_code}"
 
-        body = data.get("body", [])
+        body = data.get("body", {})
         if not body:
-            return None, "No body"
+            return "FAIL", "No body"
 
         status = body.get("status", "")
         if status not in VALID_SUBTASK_STATUSES:
@@ -190,7 +278,22 @@ class SyncService:
             old_status=subtask.status,
         )
 
-        # 兜底检查：超过24小时的pending子任务标记TIMEOUT
+        # 固定 task_id="default" 的子任务直接标记成功
+        if subtask.task_id == "default":
+            await self.query_service.update_subtask_status(
+                subtask.task_id,
+                subtask.trace_id,
+                "SUC",
+                "",
+            )
+            detail.new_status = "SUC"
+            logger.info(
+                "Auto-marked default subtask as SUC: trace_id=%s",
+                subtask.trace_id[:20],
+            )
+            return detail
+
+        # 兜底检查：超过2小时的pending子任务标记TIMEOUT
         if self._check_pending_timeout(subtask, now):
             hours_pending = int(
                 (now - subtask.created_at).total_seconds() / 3600,
@@ -205,6 +308,7 @@ class SyncService:
                 subtask.task_id,
                 subtask.trace_id,
                 "TIMEOUT",
+                "",
             )
             detail.new_status = "TIMEOUT"
             detail.error = (
@@ -222,6 +326,7 @@ class SyncService:
                 subtask.task_id,
                 subtask.trace_id,
                 status,
+                error or "",
             )
             detail.new_status = status
             logger.info(
@@ -245,7 +350,7 @@ class SyncService:
         """Sync subtask statuses from external API.
 
         只查询无状态的子任务，查询API并更新。
-        过24小时的pending子任务标记TIMEOUT（兜底）。
+        过2小时的pending子任务标记TIMEOUT（兜底）。
         FAIL/PART_SUC/TIMEOUT/SUC 视为终态，不再查询。
         """
         now = datetime.now()
@@ -283,106 +388,39 @@ class SyncService:
 
     async def sync_execution_async_status(
         self,
-        batch_size: int = 100,
+        batch_size: int = 200,  # noqa: ARG002 - 保留参数兼容性
     ) -> ExecutionAsyncStatusResponse:
         """Sync execution async_status from subtask statuses.
 
-        只要子任务都有状态，即可聚合更新主任务状态：
-        - 没有 subtasks → success
-        - 存在 FAIL/PART_SUC/TIMEOUT → error
-        - 全部 SUC → success
-        - 存在无状态子任务 → 跳过，等待下次同步
+        使用 JOIN 批量更新，高效处理大量数据：
+        - 没有 subtasks 或全部 SUC → success
+        - 存在 FAIL/PART_SUC/TIMEOUT 且没有 pending → error
+        - 存在 pending 子任务 → 不更新，等待下次同步
         """
-        logger.info("Starting execution async_status sync")
+        logger.info("Starting execution async_status sync (batch mode)")
 
-        executions = await self.query_service.get_pending_executions(
-            limit=batch_size,
+        (
+            success_count,
+            error_count,
+            indexed_count,
+            indexed_users,
+        ) = await self.query_service.batch_update_execution_async_status()
+        self._schedule_result_index_user_push(indexed_users)
+
+        total_updated = success_count + error_count
+        logger.info(
+            "Execution async_status sync completed: updated=%d indexed=%d",
+            total_updated,
+            indexed_count,
         )
-        if not executions:
-            logger.debug("No pending executions to sync")
-            return ExecutionAsyncStatusResponse(
-                success=True,
-                total_scanned=0,
-                total_updated=0,
-            )
 
-        response = ExecutionAsyncStatusResponse(
+        return ExecutionAsyncStatusResponse(
             success=True,
-            total_scanned=len(executions),
+            total_scanned=total_updated,
+            total_updated=total_updated,
+            total_success=success_count,
+            total_error=error_count,
         )
-
-        for execution in executions:
-            trace_id = execution.get("trace_id", "")
-            execution_id: int = execution.get("id") or 0
-
-            if execution_id == 0:
-                logger.warning("Execution has no id")
-                continue
-
-            if not trace_id:
-                logger.warning(
-                    "Execution has no trace_id: id=%s",
-                    execution_id,
-                )
-                await self.query_service.update_execution_async_status(
-                    execution_id,
-                    "success",
-                )
-                response.total_updated += 1
-                response.total_success += 1
-                continue
-
-            subtasks = await self.query_service.get_subtasks_by_trace_id(
-                trace_id,
-            )
-
-            # 没有 subtasks，标记 success
-            if not subtasks:
-                await self.query_service.update_execution_async_status(
-                    execution_id,
-                    "success",
-                )
-                response.total_updated += 1
-                response.total_success += 1
-                logger.info(
-                    "No subtasks, marked execution as success: id=%s",
-                    execution_id,
-                )
-                continue
-
-            # 检查是否有无状态子任务
-            has_pending = any(
-                s.status is None or s.status == "" for s in subtasks
-            )
-            if has_pending:
-                logger.debug(
-                    "Execution has pending subtasks, skip: id=%s trace_id=%s",
-                    execution_id,
-                    trace_id[:20],
-                )
-                continue
-
-            # 全部有状态，按规则聚合
-            has_error = any(
-                s.status in ("FAIL", "PART_SUC", "TIMEOUT") for s in subtasks
-            )
-            async_status = "error" if has_error else "success"
-            await self.query_service.update_execution_async_status(
-                execution_id,
-                async_status,
-            )
-            response.total_updated += 1
-            if async_status == "success":
-                response.total_success += 1
-            else:
-                response.total_error += 1
-            logger.info(
-                "Updated execution async_status: id=%s status=%s",
-                execution_id,
-                async_status,
-            )
-
-        return response
 
 
 # Global service instance

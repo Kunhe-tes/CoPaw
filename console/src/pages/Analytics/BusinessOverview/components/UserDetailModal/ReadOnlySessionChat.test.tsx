@@ -6,6 +6,9 @@ import ReadOnlySessionChat from "./ReadOnlySessionChat";
 const tracingApiMock = vi.hoisted(() => ({
   getUserChat: vi.fn(),
 }));
+const htmlPreviewTrackingValues = vi.hoisted(
+  () => [] as Array<{ disableEventRecording?: boolean }>,
+);
 
 vi.mock("../../../../../api/modules/tracing", () => ({
   tracingApi: tracingApiMock,
@@ -25,8 +28,23 @@ vi.mock("../../../../Chat/components/RuntimeResponseCard", () => ({
 
 vi.mock("../../../../../components/ConversationQuickNav", () => ({
   default: ({ messages }: { messages?: unknown[] }) => (
-    <div data-testid="conversation-quick-nav">{messages?.length ?? 0}</div>
+    <div data-testid="conversation-quick-nav">
+      {messages?.length ?? 0}
+    </div>
   ),
+}));
+
+vi.mock("@/components/agentscope-chat/HtmlPreviewTrackingContext", () => ({
+  HtmlPreviewTrackingProvider: ({
+    value,
+    children,
+  }: {
+    value: { disableEventRecording?: boolean };
+    children: ReactNode;
+  }) => {
+    htmlPreviewTrackingValues.push(value);
+    return <div data-testid="html-preview-tracking-provider">{children}</div>;
+  },
 }));
 
 vi.mock("@/components/agentscope-chat", () => ({
@@ -45,6 +63,7 @@ vi.mock("@/components/agentscope-chat", () => ({
 describe("ReadOnlySessionChat", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    htmlPreviewTrackingValues.length = 0;
   });
 
   it("loads history with mapped chat id", async () => {
@@ -66,7 +85,15 @@ describe("ReadOnlySessionChat", () => {
         "chat-uuid-1",
       );
     });
-    await screen.findByTestId("conversation-quick-nav");
+    expect(await screen.findByTestId("conversation-quick-nav")).toHaveTextContent(
+      "1",
+    );
+    expect(
+      screen.getByTestId("html-preview-tracking-provider"),
+    ).toBeInTheDocument();
+    expect(htmlPreviewTrackingValues).toContainEqual({
+      disableEventRecording: true,
+    });
   });
 
   it("does not call chat detail when mapping is missing", async () => {

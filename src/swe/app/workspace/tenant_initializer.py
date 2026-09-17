@@ -15,8 +15,42 @@ from typing import Any
 from ..migration import (
     ensure_default_agent_exists,
 )
+from .bootstrap_state import (
+    BootstrapRecoveryFailure,
+    inspect_bootstrap_readiness,
+    move_to_recovery_backup,
+    write_bootstrap_json,
+    write_bootstrap_ready_marker,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _inherit_zhaohu_from_template(
+    base_channels: dict[str, Any],
+    template_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """新租户 zhaohu 配置继承自 source 模板（default 用户）agent.json。
+
+    以 base_channels（config.json + env 默认）为基准，用模板 agent.json 的
+    zhaohu 非空字段覆盖同名字段；空值不覆盖，保留默认兜底。
+    """
+    channels = dict(base_channels)
+    template_channels = template_payload.get("channels") or {}
+    tpl_zhaohu = template_channels.get("zhaohu")
+    if not isinstance(tpl_zhaohu, dict) or not tpl_zhaohu:
+        return channels
+    merged = dict(channels.get("zhaohu") or {})
+    for key, value in tpl_zhaohu.items():
+        if (
+            value is None
+            or value == ""
+            or (isinstance(value, (list, dict)) and not value)
+        ):
+            continue
+        merged[key] = value
+    channels["zhaohu"] = merged
+    return channels
 
 
 class TenantInitializer:
@@ -60,7 +94,6 @@ class TenantInitializer:
         self.base_working_dir = Path(base_working_dir).expanduser().resolve()
         self.tenant_id = tenant_id
         self.source_id = source_id or None
-        self._template_created_from_default = False  # 标记模板是否动态创建
         self.scope_id = scope_id or None
         self.template_name = self._resolve_template_name()
         self.effective_tenant_id = (
@@ -74,123 +107,10 @@ class TenantInitializer:
         self.tenant_dir = self.base_working_dir / self.effective_tenant_id
 
     def _resolve_template_name(self) -> str:
-        """Determine which default_xxx template directory to use.
-
-        If source_id is provided and default_{source_id} doesn't exist,
-        automatically creates it from the default template.
-
-        Default tenant without source_id uses "default" directory directly.
-        Non-default tenants without source_id use the "default" template for initialization.
-
-        Returns:
-            Template directory name (e.g., "default_ruice" or "default").
-        """
+        """Return the explicitly provisioned source template name."""
         if not self.source_id:
-            # No source_id: use default template/directory
             return "default"
-        template_name = f"default_{self.source_id}"
-        template_dir = self.base_working_dir / template_name
-        if template_dir.exists():
-            logger.info(
-                f"Using template {template_name} for tenant {self.tenant_id} "
-                f"(source_id={self.source_id})",
-            )
-            return template_name
-
-        # Dynamic template creation: copy from default if not exists
-        default_dir = self.base_working_dir / "default"
-        if default_dir.exists():
-            logger.info(
-                f"Template dir {template_name} not found, "
-                f"creating from default for source_id={self.source_id}",
-            )
-            try:
-                self._create_source_template_from_default(template_dir)
-                self._template_created_from_default = (
-                    True  # 标记模板已动态创建
-                )
-                logger.info(
-                    f"Created template {template_name} from default, "
-                    f"using for tenant {self.tenant_id}",
-                )
-                return template_name
-            except Exception as e:
-                logger.warning(
-                    f"Failed to create template {template_name}: {e}, "
-                    f"falling back to default",
-                )
-                return "default"
-
-        logger.info(
-            f"Template dir {template_name} not found and no default template, "
-            f"falling back to default for tenant {self.tenant_id}",
-        )
-        return "default"
-
-    def _create_source_template_from_default(self, target_dir: Path) -> None:
-        """Create a source-specific template directory from default.
-
-        Also fixes workspace paths in config.json to reference the new
-        template directory instead of the original default directory.
-
-        Args:
-            target_dir: Path to the new template directory (e.g., default_ruice).
-        """
-        default_dir = self.base_working_dir / "default"
-        if not default_dir.exists():
-            return
-
-        if target_dir.exists():
-            return
-
-        try:
-            shutil.copytree(default_dir, target_dir)
-            self._fix_template_config_paths(target_dir)
-            logger.info(
-                f"Created source template directory: {target_dir}",
-            )
-        except OSError:
-            if not target_dir.exists():
-                raise
-            logger.debug(
-                f"Template {target_dir} created by concurrent request",
-            )
-
-    def _fix_template_config_paths(self, template_dir: Path) -> None:
-        """Fix workspace paths in template config.json after copying from default.
-
-        Updates workspace_dir paths from default/... to template_dir/...
-
-        Args:
-            template_dir: The newly created template directory.
-        """
-        config_path = template_dir / "config.json"
-        if not config_path.exists():
-            return
-
-        try:
-            source_content = config_path.read_text(encoding="utf-8")
-            config = json.loads(source_content)
-
-            old_prefix = str(self.base_working_dir / "default" / "workspaces")
-            new_prefix = str(template_dir / "workspaces")
-
-            if "agents" in config and "profiles" in config["agents"]:
-                for profile in config["agents"]["profiles"].values():
-                    if "workspace_dir" in profile:
-                        old_path = profile["workspace_dir"]
-                        if old_path.startswith(old_prefix):
-                            profile["workspace_dir"] = old_path.replace(
-                                old_prefix,
-                                new_prefix,
-                            )
-
-            config_path.write_text(
-                json.dumps(config, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except Exception as e:
-            logger.warning(f"Failed to fix template config paths: {e}")
+        return f"default_{self.source_id}"
 
     def ensure_directory_structure(self) -> None:
         """Create the tenant directory skeleton (minimal bootstrap)."""
@@ -211,27 +131,58 @@ class TenantInitializer:
         ensure_default_agent_exists(working_dir=self.tenant_dir)
 
     def has_seeded_bootstrap(self) -> bool:
-        """Return True when the tenant bootstrap scaffold is present."""
-        default_workspace = self.tenant_dir / "workspaces" / "default"
-        required_paths = [
-            self.tenant_dir / "config.json",
-            default_workspace,
-            default_workspace / "agent.json",
-            default_workspace / "chats.json",
-            default_workspace / "jobs.json",
-            default_workspace / "token_usage.json",
-            default_workspace / "sessions",
-            default_workspace / "memory",
-        ]
-        required_paths.extend(
-            default_workspace / filename
-            for filename in self._WORKSPACE_REQUIRED_FILES
-        )
+        """Return True only when real bootstrap artifacts are strictly ready."""
+        return inspect_bootstrap_readiness(self.tenant_dir).ready
 
-        return (
-            all(path.exists() for path in required_paths)
-            and self._has_skill_pool_state()
-        )
+    def recover_seeded_bootstrap(
+        self,
+        *,
+        enable_bootstrap_chat: bool = True,
+    ) -> dict[str, list[str]]:
+        """Repair missing or invalid bootstrap-owned artifacts.
+
+        Only JSON paths rejected by strict readiness are moved aside. Backups
+        from this recovery are removed immediately after final readiness.
+        """
+        readiness = inspect_bootstrap_readiness(self.tenant_dir)
+        if readiness.ready:
+            return {"recovered_paths": []}
+
+        backups: list[Path] = []
+        recovered_paths: list[str] = []
+        try:
+            for invalid_path in readiness.invalid_json_paths:
+                if invalid_path.is_file():
+                    backups.append(move_to_recovery_backup(invalid_path))
+                    recovered_paths.append(str(invalid_path))
+            self._reconcile_stale_workspace_skills()
+            self.ensure_seeded_bootstrap(
+                enable_bootstrap_chat=enable_bootstrap_chat,
+            )
+            final_readiness = inspect_bootstrap_readiness(self.tenant_dir)
+            if not final_readiness.ready:
+                raise BootstrapRecoveryFailure(
+                    f"tenant bootstrap remains {final_readiness.reason}",
+                )
+            write_bootstrap_ready_marker(self.tenant_dir)
+        except Exception as exc:
+            if isinstance(exc, BootstrapRecoveryFailure):
+                raise
+            raise BootstrapRecoveryFailure(
+                "tenant bootstrap recovery failed",
+            ) from exc
+        for backup_path in backups:
+            backup_path.unlink(missing_ok=True)
+        return {"recovered_paths": recovered_paths}
+
+    def _reconcile_stale_workspace_skills(self) -> None:
+        """Remove stale registered workspace skills before bootstrap seeding."""
+        from ...agents.skills_manager import reconcile_workspace_manifest
+
+        workspace_dir = self.tenant_dir / "workspaces" / "default"
+        manifest_path = workspace_dir / "skill.json"
+        if manifest_path.is_file():
+            reconcile_workspace_manifest(workspace_dir)
 
     def initialize_minimal(self) -> None:
         """Run minimal bootstrap sequence (idempotent).
@@ -245,7 +196,11 @@ class TenantInitializer:
         self.ensure_directory_structure()
         self.ensure_default_agent()
 
-    def ensure_seeded_bootstrap(self) -> dict[str, Any]:
+    def ensure_seeded_bootstrap(
+        self,
+        *,
+        enable_bootstrap_chat: bool = True,
+    ) -> dict[str, Any]:
         """Run seeded bootstrap sequence (idempotent, runtime-safe).
 
         This is called on first tenant access and ensures:
@@ -304,7 +259,9 @@ class TenantInitializer:
         )
 
         # Step 4: Ensure the default workspace scaffold is complete.
-        result["workspace_scaffold"] = self.ensure_default_workspace_scaffold()
+        result["workspace_scaffold"] = self.ensure_default_workspace_scaffold(
+            enable_bootstrap_chat=enable_bootstrap_chat,
+        )
 
         return result
 
@@ -373,38 +330,23 @@ class TenantInitializer:
         Returns:
             True if default workspace has skill manifest with skills, False otherwise.
         """
-        from ...agents.skills_manager import (
-            get_workspace_skills_dir,
-            get_workspace_skill_manifest_path,
-        )
+        from ...agents.skills_manager import get_workspace_skill_manifest_path
 
         default_workspace = self.tenant_dir / "workspaces" / "default"
-        skills_dir = get_workspace_skills_dir(default_workspace)
         manifest_path = get_workspace_skill_manifest_path(default_workspace)
 
-        # Primary check: manifest exists and has skills
-        # If manifest doesn't exist, we need seeding (even if directories exist)
-        if manifest_path.exists():
-            try:
-                manifest = json.loads(
-                    manifest_path.read_text(encoding="utf-8"),
-                )
-                if manifest.get("skills"):
-                    return True
-                # Manifest exists but is empty - check if skills were partially copied
-            except (json.JSONDecodeError, OSError):
-                pass
-
-            # Manifest exists (even if empty/corrupt), check for partial state
-            if skills_dir.exists():
-                for item in skills_dir.iterdir():
-                    if item.is_dir() and (item / "SKILL.md").exists():
-                        return True
-        else:
-            # No manifest - need seeding regardless of directory state
-            pass
-
-        return False
+        if not manifest_path.exists():
+            return False
+        manifest = json.loads(
+            manifest_path.read_text(encoding="utf-8"),
+        )
+        return (
+            bool(manifest.get("skills"))
+            and manifest.get(
+                "layout_version",
+            )
+            == 2
+        )
 
     def _copy_skill_directories(
         self,
@@ -504,11 +446,7 @@ class TenantInitializer:
                             )
 
             # Write the modified config
-            target_config_path.parent.mkdir(parents=True, exist_ok=True)
-            target_config_path.write_text(
-                json.dumps(source_config, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            write_bootstrap_json(target_config_path, source_config)
             result["seeded"] = True
             result["source"] = self.template_name
         except Exception as e:
@@ -548,31 +486,13 @@ class TenantInitializer:
         source_providers_dir = SECRET_DIR / self.template_name / "providers"
         result: dict[str, Any] = {"seeded": False, "source": None}
 
-        # Special case: when template_name == effective_tenant_id (default user via source),
-        # the template IS the target - no copying needed, just ensure it exists
+        # When template and target are identical, no copying is needed.
         if self.template_name == self.effective_tenant_id:
-            if not source_providers_dir.exists():
-                self._ensure_source_template_providers(
-                    SECRET_DIR,
-                    self.template_name,
-                )
             if source_providers_dir.exists():
                 result["seeded"] = True
                 result["source"] = self.template_name
             return result
 
-        # Dynamic creation: if source-specific providers template doesn't exist,
-        # create it from default
-        if (
-            not source_providers_dir.exists()
-            or not any(source_providers_dir.iterdir())
-        ) and self.template_name != "default":
-            self._ensure_source_template_providers(
-                SECRET_DIR,
-                self.template_name,
-            )
-
-        # Re-check after potential creation
         if not source_providers_dir.exists():
             return result
         if not any(source_providers_dir.iterdir()):
@@ -603,48 +523,11 @@ class TenantInitializer:
 
         return result
 
-    def _ensure_source_template_providers(
+    def ensure_default_workspace_scaffold(
         self,
-        secret_dir: Path,
-        template_name: str,
-    ) -> None:
-        """Ensure source-specific providers template exists, creating from default if needed.
-
-        Args:
-            secret_dir: Base secret directory (e.g., ~/.swe.secret).
-            template_name: Template directory name (e.g., "default_ruice").
-        """
-        default_providers = secret_dir / "default" / "providers"
-        target_providers = secret_dir / template_name / "providers"
-
-        if not default_providers.exists():
-            return
-
-        target_parent = target_providers.parent
-        try:
-            # Use exist_ok for concurrency safety
-            if not target_parent.exists():
-                shutil.copytree(
-                    secret_dir / "default",
-                    target_parent,
-                )
-                logger.info(
-                    f"Created source template providers: {target_parent}",
-                )
-            elif not target_providers.exists():
-                shutil.copytree(default_providers, target_providers)
-                logger.info(
-                    f"Created source template providers: {target_providers}",
-                )
-        except OSError:
-            if not target_providers.exists():
-                raise
-            logger.debug(
-                f"Source template providers {target_providers} "
-                f"created by concurrent request",
-            )
-
-    def ensure_default_workspace_scaffold(self) -> dict[str, Any]:
+        *,
+        enable_bootstrap_chat: bool = True,
+    ) -> dict[str, Any]:
         """Ensure runtime-required workspace files exist for default agent."""
         from ...agents.utils.setup_utils import copy_md_files
         from ...config.config import (
@@ -678,17 +561,16 @@ class TenantInitializer:
                 source_agent_config_path.read_text(encoding="utf-8"),
             )
             agent_payload["workspace_dir"] = str(default_workspace)
-            agent_payload["channels"] = tenant_config.channels.model_dump(
-                exclude_none=True,
+            channels = tenant_config.channels.model_dump(exclude_none=True)
+            # 继承 source 下 default 用户（模板）agent.json 的 zhaohu 配置
+            agent_payload["channels"] = _inherit_zhaohu_from_template(
+                channels,
+                agent_payload,
             )
             agent_config_model = AgentProfileConfig(**agent_payload)
-            target_agent_config_path.write_text(
-                json.dumps(
-                    agent_config_model.model_dump(exclude_none=True),
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
+            write_bootstrap_json(
+                target_agent_config_path,
+                agent_config_model.model_dump(exclude_none=True),
             )
         elif not target_agent_config_path.exists():
             save_agent_config(
@@ -739,10 +621,19 @@ class TenantInitializer:
                 workspace_dir=default_workspace,
             ),
         )
+        if not enable_bootstrap_chat:
+            bootstrap_path = default_workspace / "BOOTSTRAP.md"
+            if bootstrap_path.exists():
+                bootstrap_path.unlink()
+            copied_files = [
+                filename
+                for filename in copied_files
+                if filename != "BOOTSTRAP.md"
+            ]
 
         token_usage_path = default_workspace / "token_usage.json"
         if not token_usage_path.exists():
-            token_usage_path.write_text("{}", encoding="utf-8")
+            write_bootstrap_json(token_usage_path, {})
 
         return {
             "agent_json": (default_workspace / "agent.json").exists(),
@@ -1022,49 +913,149 @@ class TenantInitializer:
         Returns:
             Dict with skill states (enabled, channels, config, source).
         """
-        from ...agents.skills_manager import (
-            get_workspace_skills_dir,
-            get_workspace_skill_manifest_path,
-            reconcile_workspace_manifest,
-            _read_json_unlocked,
-            _default_workspace_manifest,
-        )
-
-        source_skills_state: dict[str, Any] = {}
-        default_skills_dir = get_workspace_skills_dir(default_workspace)
-        default_manifest_path = get_workspace_skill_manifest_path(
-            default_workspace,
-        )
-
-        if not default_skills_dir.exists():
-            return source_skills_state
+        from ...agents.skills_manager import reconcile_workspace_manifest
 
         try:
-            if default_manifest_path.exists():
-                source_manifest = _read_json_unlocked(
-                    default_manifest_path,
-                    _default_workspace_manifest(),
-                )
+            source_manifest = reconcile_workspace_manifest(default_workspace)
+            return {
+                skill_name: dict(skill_entry)
                 for skill_name, skill_entry in source_manifest.get(
                     "skills",
                     {},
-                ).items():
-                    source_skills_state[skill_name] = {
-                        field: skill_entry[field]
-                        for field in (
-                            "enabled",
-                            "channels",
-                            "config",
-                            "source",
-                        )
-                        if field in skill_entry
-                    }
-            reconcile_workspace_manifest(default_workspace)
+                ).items()
+            }
         except Exception as e:
             logger.warning(
                 f"Failed to reconcile source workspace for tenant {self.tenant_id}: {e}",
             )
-        return source_skills_state
+            return {}
+
+    def _seed_prepared_workspace_skills(
+        self,
+        template_workspace: Path,
+        source_skills_state: dict[str, Any],
+        existing_target_manifest: dict[str, Any],
+        original_target_manifest: bytes | None,
+    ) -> dict[str, Any]:
+        """Copy prepared skills under the workspace publication lock."""
+        from ...agents.skill_runtime_snapshot import (
+            workspace_skill_coordinator,
+        )
+
+        target_workspace = self.tenant_dir / "workspaces" / "default"
+        with workspace_skill_coordinator(target_workspace):
+            return self._seed_prepared_workspace_skills_locked(
+                template_workspace,
+                source_skills_state,
+                existing_target_manifest,
+                original_target_manifest,
+            )
+
+    def _seed_prepared_workspace_skills_locked(
+        self,
+        template_workspace: Path,
+        source_skills_state: dict[str, Any],
+        existing_target_manifest: dict[str, Any],
+        original_target_manifest: bytes | None,
+    ) -> dict[str, Any]:
+        """Copy prepared registered packages and publish target state."""
+        from ...agents.skills_manager import (
+            _default_workspace_manifest,
+            _write_json_atomic,
+            get_workspace_skill_manifest_path,
+            reconcile_workspace_manifest,
+            resolve_workspace_managed_skill_dir,
+        )
+
+        result: dict[str, Any] = {"seeded": False, "skills": []}
+        target_workspace = self.tenant_dir / "workspaces" / "default"
+        target_manifest_path = get_workspace_skill_manifest_path(
+            target_workspace,
+        )
+        attempted_target_dirs: list[Path] = []
+        try:
+            copied: list[str] = []
+            for skill_name, skill_entry in sorted(
+                source_skills_state.items(),
+            ):
+                enabled = bool(skill_entry.get("enabled", False))
+                source_dir = resolve_workspace_managed_skill_dir(
+                    template_workspace,
+                    skill_name,
+                    enabled=enabled,
+                )
+                if not source_dir.exists():
+                    continue
+                target_dir = resolve_workspace_managed_skill_dir(
+                    target_workspace,
+                    skill_name,
+                    enabled=enabled,
+                )
+                opposite_target_dir = resolve_workspace_managed_skill_dir(
+                    target_workspace,
+                    skill_name,
+                    enabled=not enabled,
+                )
+                if skill_name not in existing_target_manifest.get(
+                    "skills",
+                    {},
+                ) and (target_dir.exists() or opposite_target_dir.exists()):
+                    continue
+                attempted_target_dirs.append(target_dir)
+                target_dir.parent.mkdir(parents=True, exist_ok=True)
+                if target_dir.exists():
+                    shutil.rmtree(target_dir)
+                shutil.copytree(source_dir, target_dir)
+                copied.append(skill_name)
+
+            if not copied:
+                return result
+
+            target_manifest = _default_workspace_manifest()
+            target_manifest["version"] = 1
+            target_manifest["skills"] = {
+                skill_name: dict(source_skills_state[skill_name])
+                for skill_name in copied
+            }
+            _write_json_atomic(target_manifest_path, target_manifest)
+            reconciled = reconcile_workspace_manifest(target_workspace)
+            reconciled["version"] = 1
+            for skill_name in copied:
+                source_entry = source_skills_state[skill_name]
+                target_entry = reconciled["skills"][skill_name]
+                for field in (
+                    "enabled",
+                    "channels",
+                    "config",
+                    "source",
+                    "created_at",
+                    "updated_at",
+                ):
+                    if field in source_entry:
+                        target_entry[field] = source_entry[field]
+            _write_json_atomic(target_manifest_path, reconciled)
+
+            result["seeded"] = True
+            result["skills"] = sorted(copied)
+            return result
+        except Exception as e:
+            for attempted_dir in attempted_target_dirs:
+                if attempted_dir.exists():
+                    shutil.rmtree(attempted_dir, ignore_errors=True)
+            if original_target_manifest is None:
+                target_manifest_path.unlink(missing_ok=True)
+            else:
+                target_manifest_path.parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+                target_manifest_path.write_bytes(original_target_manifest)
+            logger.error(
+                f"Failed to seed workspace skills for tenant {self.tenant_id}: {e}",
+            )
+            raise RuntimeError(
+                f"Default workspace skill seeding failed for tenant {self.tenant_id}: {e}",
+            ) from e
 
     def seed_default_workspace_skills_from_default(self) -> dict[str, Any]:
         """Seed default workspace skills from default tenant (idempotent).
@@ -1082,15 +1073,32 @@ class TenantInitializer:
             - "skills": list of skill names copied (if any)
         """
         from ...agents.skills_manager import (
-            get_workspace_skills_dir,
-            reconcile_workspace_manifest,
+            _default_workspace_manifest,
+            get_workspace_skill_manifest_path,
         )
 
         result: dict[str, Any] = {"seeded": False, "skills": []}
 
+        target_workspace = self.tenant_dir / "workspaces" / "default"
+        target_manifest_path = get_workspace_skill_manifest_path(
+            target_workspace,
+        )
+        target_manifest_existed = target_manifest_path.exists()
+        original_target_manifest = (
+            target_manifest_path.read_bytes()
+            if target_manifest_existed
+            else None
+        )
+
         # Skip if default workspace already has skills
         if self._has_default_workspace_skills():
             return result
+
+        existing_target_manifest = (
+            json.loads(original_target_manifest.decode("utf-8"))
+            if original_target_manifest is not None
+            else _default_workspace_manifest()
+        )
 
         template_workspace = (
             self.base_working_dir
@@ -1098,61 +1106,18 @@ class TenantInitializer:
             / "workspaces"
             / "default"
         )
-        template_skills_dir = get_workspace_skills_dir(template_workspace)
-
-        # Prepare source state and reconcile
         source_skills_state = self._prepare_source_workspace_state(
             template_workspace,
         )
-
-        # Check if source has usable skills after reconciliation
-        source_skill_names = self._list_skill_directories(template_skills_dir)
-
-        if not source_skill_names:
-            # Source has no skills, check if target has existing skills
-            target_workspace = self.tenant_dir / "workspaces" / "default"
-            target_skills_dir = get_workspace_skills_dir(target_workspace)
-            existing_skills = self._list_skill_directories(target_skills_dir)
-            if existing_skills:
-                return self._reconcile_existing_workspace_skills(
-                    target_workspace,
-                    existing_skills,
-                )
+        if not source_skills_state:
             return result
 
-        try:
-            # Copy skill directories
-            target_workspace = self.tenant_dir / "workspaces" / "default"
-            target_skills_dir = get_workspace_skills_dir(target_workspace)
-            copied = self._copy_skill_directories(
-                template_skills_dir,
-                target_skills_dir,
-            )
-
-            if not copied:
-                return result
-
-            # Reconcile target to build proper manifest
-            reconcile_workspace_manifest(target_workspace)
-
-            # Preserve durable state from source manifest
-            if source_skills_state:
-                self._merge_workspace_manifest_state(
-                    target_workspace,
-                    source_skills_state,
-                )
-
-            result["seeded"] = True
-            result["skills"] = copied
-            return result
-
-        except Exception as e:
-            logger.error(
-                f"Failed to seed workspace skills for tenant {self.tenant_id}: {e}",
-            )
-            raise RuntimeError(
-                f"Default workspace skill seeding failed for tenant {self.tenant_id}: {e}",
-            ) from e
+        return self._seed_prepared_workspace_skills(
+            template_workspace,
+            source_skills_state,
+            existing_target_manifest,
+            original_target_manifest,
+        )
 
     def _merge_workspace_manifest_state(
         self,

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Config router source-scope distribution tests."""
 
+import asyncio
 import sys
 from types import SimpleNamespace
 from pathlib import Path
@@ -42,7 +43,7 @@ def test_prepare_target_tenant_uses_runtime_scope_for_target_tenant(
             raise AssertionError("should not bootstrap an existing tenant")
 
     monkeypatch.setattr(
-        "swe.config.utils.get_tenant_working_dir_strict",
+        "swe.config.utils.get_tenant_storage_working_dir",
         fake_get_tenant_working_dir_strict,
     )
     monkeypatch.setitem(
@@ -58,7 +59,9 @@ def test_prepare_target_tenant_uses_runtime_scope_for_target_tenant(
         ),
     )
 
-    resolved = config_router._prepare_target_tenant(request, "tenant-b")
+    resolved = asyncio.run(
+        config_router._prepare_target_tenant(request, "tenant-b"),
+    )
 
     assert observed["working_dir_tenant_id"] == scope_id
     assert observed["initializer_base_working_dir"] == tmp_path
@@ -99,7 +102,7 @@ def test_prepare_target_tenant_maps_default_to_template_dir(
             raise AssertionError("should not bootstrap an existing tenant")
 
     monkeypatch.setattr(
-        "swe.config.utils.get_tenant_working_dir_strict",
+        "swe.config.utils.get_tenant_storage_working_dir",
         fake_get_tenant_working_dir_strict,
     )
     monkeypatch.setitem(
@@ -115,7 +118,9 @@ def test_prepare_target_tenant_maps_default_to_template_dir(
         ),
     )
 
-    resolved = config_router._prepare_target_tenant(request, "default")
+    resolved = asyncio.run(
+        config_router._prepare_target_tenant(request, "default"),
+    )
 
     assert observed["working_dir_tenant_id"] == "default_ruice"
     assert observed["initializer_base_working_dir"] == tmp_path

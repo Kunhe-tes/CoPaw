@@ -95,4 +95,3 @@ The cron management UI SHALL let users choose either the tenant default model or
 - **THEN** the list SHALL display that the job uses the tenant default model
 - **WHEN** the list renders a job with `model_slot`
 - **THEN** the list SHALL display the selected provider/model or its friendly name
-

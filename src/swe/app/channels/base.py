@@ -40,6 +40,7 @@ from ..tenant_context import bind_tenant_context
 from ...config.llm_workload import LLM_WORKLOAD_CHAT, bind_llm_workload
 from ...config.context import resolve_runtime_identity
 from ...config.utils import load_config
+from ..answer_turn.models import TurnIdentity
 
 # Optional callback to enqueue payload (set by manager)
 EnqueueCallback = Optional[Callable[[Any], None]]
@@ -225,20 +226,27 @@ class BaseChannel(ABC):
         del payload
         del existing_items
 
+    @staticmethod
+    def _content_part_value(content: Any, key: str) -> Any:
+        """兼容运行时 Content 对象和 Console 原始 JSON dict。"""
+        if isinstance(content, dict):
+            return content.get(key)
+        return getattr(content, key, None)
+
     def _content_has_text(self, contents: List[Any]) -> bool:
         """True if contents has at least one TEXT or REFUSAL with non-empty."""
         if not contents:
             return False
         for c in contents:
-            t = getattr(c, "type", None)
+            t = self._content_part_value(c, "type")
             if (
                 t == ContentType.TEXT
-                and (getattr(c, "text", None) or "").strip()
+                and (self._content_part_value(c, "text") or "").strip()
             ):
                 return True
             if (
                 t == ContentType.REFUSAL
-                and (getattr(c, "refusal", None) or "").strip()
+                and (self._content_part_value(c, "refusal") or "").strip()
             ):
                 return True
         return False
@@ -246,7 +254,7 @@ class BaseChannel(ABC):
     def _content_has_audio(self, contents: List[Any]) -> bool:
         """True if contents has at least one AUDIO block."""
         return any(
-            getattr(c, "type", None) == ContentType.AUDIO
+            self._content_part_value(c, "type") == ContentType.AUDIO
             for c in (contents or [])
         )
 
@@ -401,22 +409,54 @@ class BaseChannel(ABC):
             name=self._extract_chat_name(payload),
         )
 
+        # Inject session channel into channel_meta for downstream use
+        # (e.g. session-end push needs to know the session's original channel)
+        channel_meta = getattr(request, "channel_meta", None)
+        if channel_meta is None:
+            channel_meta = {}
+            request.channel_meta = channel_meta
+        channel_meta["chat_id"] = chat.id
+        if isinstance(payload, dict):
+            payload_meta = payload.setdefault("meta", {})
+            if isinstance(payload_meta, dict):
+                payload_meta["chat_id"] = chat.id
+        if "session_channel" not in channel_meta:
+            channel_meta["session_channel"] = chat.channel
+
         logger.info(
             f"_consume_with_tracker: chat_id={chat.id} "
             f"session={session_id[:30]}",
         )
 
-        queue, is_new = await self._workspace.task_tracker.attach_or_start(
+        # Debug: verify runner.session is available for state persistence
+        if self._workspace is not None and self._workspace.runner is not None:
+            _sess = getattr(self._workspace.runner, "session", None)
+            logger.info(
+                "_consume_with_tracker: runner.session=%s save_dir=%s",
+                type(_sess).__name__ if _sess else None,
+                getattr(_sess, "save_dir", None) if _sess else None,
+            )
+
+        coordinator = self._workspace.answer_turn_coordinator
+        if coordinator is None:
+            raise RuntimeError("answer-turn coordinator is not configured")
+        proposed_msgid = (
+            channel_meta.get("msgid")
+            if isinstance(channel_meta.get("msgid"), str)
+            else None
+        )
+        lease = await coordinator.start_or_attach(
             chat.id,
             payload,
             self._stream_with_tracker,
+            msgid=proposed_msgid,
         )
 
-        if is_new:
+        if lease.is_new_run:
             try:
-                async for _ in self._workspace.task_tracker.stream_from_queue(
-                    queue,
-                    chat.id,
+                async for _ in self._workspace.task_tracker.stream(
+                    lease.identity,
+                    lease.queue,
                 ):
                     pass
             except asyncio.CancelledError:
@@ -432,8 +472,79 @@ class BaseChannel(ABC):
                 f"This should not happen with UnifiedQueueManager.",
             )
 
+    def _prepare_stream_context(
+        self,
+        identity: TurnIdentity,
+        payload: Any,
+    ) -> tuple["AgentRequest", dict[str, Any], str]:
+        """Normalize payload metadata before starting the process stream."""
+        if isinstance(payload, dict):
+            payload = {
+                **payload,
+                "meta": {
+                    **(payload.get("meta") or {}),
+                    "answer_turn_identity": identity,
+                    "msgid": identity.msgid,
+                },
+            }
+        else:
+            meta = dict(getattr(payload, "channel_meta", None) or {})
+            meta.update(answer_turn_identity=identity, msgid=identity.msgid)
+            setattr(payload, "channel_meta", meta)
+        request = self._payload_to_request(payload)
+        if isinstance(payload, dict):
+            send_meta = dict(payload.get("meta") or {})
+            if payload.get("session_webhook"):
+                send_meta["session_webhook"] = payload["session_webhook"]
+        else:
+            send_meta = getattr(request, "channel_meta", None) or {}
+        bot_prefix = getattr(self, "bot_prefix", None) or getattr(
+            self,
+            "_bot_prefix",
+            "",
+        )
+        if bot_prefix and "bot_prefix" not in send_meta:
+            send_meta = {**send_meta, "bot_prefix": bot_prefix}
+        return request, send_meta, self.get_to_handle_from_request(request)
+
+    @staticmethod
+    def _serialize_stream_event(event: Any) -> str:
+        """Serialize one process event to an SSE data payload."""
+        import json
+
+        if hasattr(event, "model_dump_json"):
+            return event.model_dump_json()
+        if hasattr(event, "json"):
+            return event.json()
+        return json.dumps({"text": str(event)})
+
+    async def _handle_stream_event(
+        self,
+        request: "AgentRequest",
+        event: Any,
+        *,
+        to_handle: str,
+        send_meta: dict[str, Any],
+    ) -> Any:
+        """Dispatch callbacks and return the latest response event."""
+        obj = getattr(event, "object", None)
+        status = getattr(event, "status", None)
+        if obj == "message" and status == RunStatus.Completed:
+            await self.on_event_message_completed(
+                request,
+                to_handle,
+                event,
+                send_meta,
+            )
+            return None
+        if obj == "response":
+            await self.on_event_response(request, event)
+            return event
+        return None
+
     async def _stream_with_tracker(
         self,
+        identity: TurnIdentity,
         payload: Any,
     ) -> AsyncGenerator[str, None]:
         """Stream events through TaskTracker for task tracking.
@@ -447,26 +558,10 @@ class BaseChannel(ABC):
         Yields:
             SSE-formatted event strings
         """
-        import json
-
-        request = self._payload_to_request(payload)
-
-        if isinstance(payload, dict):
-            send_meta = dict(payload.get("meta") or {})
-            if payload.get("session_webhook"):
-                send_meta["session_webhook"] = payload["session_webhook"]
-        else:
-            send_meta = getattr(request, "channel_meta", None) or {}
-
-        bot_prefix = getattr(self, "bot_prefix", None) or getattr(
-            self,
-            "_bot_prefix",
-            "",
+        request, send_meta, to_handle = self._prepare_stream_context(
+            identity,
+            payload,
         )
-        if bot_prefix and "bot_prefix" not in send_meta:
-            send_meta = {**send_meta, "bot_prefix": bot_prefix}
-
-        to_handle = self.get_to_handle_from_request(request)
 
         await self._before_consume_process(request)
 
@@ -475,28 +570,15 @@ class BaseChannel(ABC):
         try:
             process_iterator = self._process(request)
             async for event in process_iterator:
-                if hasattr(event, "model_dump_json"):
-                    data = event.model_dump_json()
-                elif hasattr(event, "json"):
-                    data = event.json()
-                else:
-                    data = json.dumps({"text": str(event)})
-
-                yield f"data: {data}\n\n"
-
-                obj = getattr(event, "object", None)
-                status = getattr(event, "status", None)
-
-                if obj == "message" and status == RunStatus.Completed:
-                    await self.on_event_message_completed(
-                        request,
-                        to_handle,
-                        event,
-                        send_meta,
-                    )
-                elif obj == "response":
-                    last_response = event
-                    await self.on_event_response(request, event)
+                yield f"data: {self._serialize_stream_event(event)}\n\n"
+                response = await self._handle_stream_event(
+                    request,
+                    event,
+                    to_handle=to_handle,
+                    send_meta=send_meta,
+                )
+                if response is not None:
+                    last_response = response
 
             err_msg = self._get_response_error_message(last_response)
             if err_msg:
@@ -577,6 +659,7 @@ class BaseChannel(ABC):
         session_id: str,
         content_parts: List[Any],
         channel_meta: Optional[Dict[str, Any]] = None,
+        message_id: str | None = None,
     ) -> "AgentRequest":
         """
         Build AgentRequest from runtime content parts (Message content list).
@@ -598,6 +681,8 @@ class BaseChannel(ABC):
             role=Role.USER,
             content=content_parts,
         )
+        if message_id:
+            msg.id = message_id
         return AgentRequest(
             session_id=session_id,
             user_id=sender_id,
@@ -1006,11 +1091,19 @@ class BaseChannel(ABC):
         """
         await self._try_session_end_push(request, to_handle)
 
-    def _should_session_end_push(self) -> bool:
-        """Check if zhaohu session-end push is enabled via config."""
+    def _should_session_end_push(self, request=None) -> bool:
+        """Check if zhaohu session-end push is enabled.
+
+        Push is skipped when the message originates from the zhaohu channel
+        itself (upstream callback) because the reply is already sent there.
+        When the message comes from another channel (e.g. console) targeting
+        a zhaohu session, push is enabled if the config flag is on.
+        """
         if self.channel == "zhaohu":
+            logger.info("session-end push skipped: self.channel is zhaohu")
             return False
         if self._workspace is None:
+            logger.info("session-end push skipped: no workspace")
             return False
         zhaohu_cfg = getattr(
             self._workspace._config.channels,
@@ -1018,8 +1111,14 @@ class BaseChannel(ABC):
             None,
         )
         if zhaohu_cfg is None:
+            logger.info("session-end push skipped: no zhaohu config")
             return False
-        return bool(getattr(zhaohu_cfg, "session_end_push_enabled", False))
+        enabled = bool(getattr(zhaohu_cfg, "session_end_push_enabled", False))
+        if not enabled:
+            logger.info(
+                "session-end push skipped: session_end_push_enabled=False",
+            )
+        return enabled
 
     async def _try_session_end_push(
         self,
@@ -1027,36 +1126,173 @@ class BaseChannel(ABC):
         to_handle: str,
         reply_text: str = "",
     ) -> None:
-        """If session-end push is enabled, send notification via zhaohu."""
-        if not self._should_session_end_push():
+        """If session-end push is enabled, send notification via zhaohu.
+
+        When session_end_push_link_prefix is configured, an extra jump link
+        is attached (using session_id or chat_id as configured).
+        Push rule by source_id:
+        - "ruice": only push when a link (file link or jump link) exists
+        - other sources: push without link requirement
+        """
+        if not self._should_session_end_push(request):
             return
         try:
-            cm = self._workspace.channel_manager
-            if cm is None:
-                return
-            zhaohu_ch = await cm.get_channel("zhaohu")
+            zhaohu_ch = await self._get_zhaohu_channel()
             if zhaohu_ch is None:
                 return
-            query = self._extract_user_query(request)
-            if len(query) > 30:
-                prefix = query[:30]
-                text = f"【{prefix}...】任务已完成请及时查看"
-            else:
-                text = (
-                    f"【{query}】任务已完成请及时查看"
-                    if query
-                    else "任务已完成请及时查看"
-                )
-            meta = {}
-            links = self._extract_file_links(reply_text)
-            if links:
-                meta["link_items"] = [
-                    {"url": url, "text": name} for name, url in links
-                ]
-                await zhaohu_ch.send(to_handle, text, meta or None)
+
+            zhaohu_cfg = self._get_zhaohu_config()
+            source_id = self._get_push_source_id(request)
+            session_channel = self._get_session_channel(request)
+            logger.info(
+                "session-end push check: channel=%s session_channel=%s source_id=%s",
+                self.channel,
+                session_channel,
+                source_id,
+            )
+
+            text = self._build_session_end_push_text(request)
+            meta = await self._build_session_end_push_meta(
+                zhaohu_cfg,
+                request,
+                reply_text,
+            )
+            # if self._should_skip_session_end_push(source_id, meta):
+            #     return
+            await zhaohu_ch.send(to_handle, text, meta or None)
             logger.info("session-end push sent via zhaohu to %s", to_handle)
         except Exception:
             logger.exception("session-end push failed for %s", to_handle)
+
+    async def _get_zhaohu_channel(self) -> Any:
+        """Return the zhaohu channel instance, or None if unavailable."""
+        cm = self._workspace.channel_manager
+        if cm is None:
+            return None
+        zhaohu_ch = await cm.get_channel("zhaohu")
+        if zhaohu_ch is None:
+            logger.info("session-end push skipped: zhaohu channel not found")
+        return zhaohu_ch
+
+    def _get_zhaohu_config(self) -> Any:
+        """Return the workspace zhaohu channel config (may be None)."""
+        return getattr(self._workspace._config.channels, "zhaohu", None)
+
+    def _get_push_source_id(self, request: "AgentRequest") -> str:
+        """Get the session's original source_id from request or channel_meta."""
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        return (
+            getattr(
+                request,
+                "source_id",
+                None,
+            )
+            or channel_meta.get("source_id")
+            or ""
+        )
+
+    def _build_session_end_push_text(self, request: "AgentRequest") -> str:
+        """Build the session-end push notification text from user query."""
+        query = self._extract_user_query(request)
+        if len(query) > 30:
+            prefix = query[:30]
+            return f"【{prefix}...】任务已完成请及时查看"
+        return (
+            f"【{query}】任务已完成请及时查看"
+            if query
+            else "任务已完成请及时查看"
+        )
+
+    async def _build_session_end_push_meta(
+        self,
+        zhaohu_cfg: Any,
+        request: "AgentRequest",
+        reply_text: str,
+    ) -> dict:
+        """Build push meta: file links and optional jump link."""
+        meta = {}
+        links = self._extract_file_links(reply_text)
+        if links:
+            meta["link_items"] = [
+                {"url": url, "text": name} for name, url in links
+            ]
+        link_url = await self._build_session_end_push_link(
+            zhaohu_cfg,
+            request,
+        )
+        if link_url:
+            meta["link_url"] = link_url
+            meta["link_text"] = "点击查看详情"
+        return meta
+
+    async def _build_session_end_push_link(
+        self,
+        zhaohu_cfg: Any,
+        request: "AgentRequest",
+    ) -> str:
+        """Build jump link from zhaohu config; empty when prefix is unset."""
+        if not zhaohu_cfg or not getattr(
+            zhaohu_cfg,
+            "session_end_push_link_prefix",
+            "",
+        ):
+            return ""
+        prefix = zhaohu_cfg.session_end_push_link_prefix
+        sep = "&" if "?" in prefix else "?"
+        id_type = (
+            getattr(zhaohu_cfg, "session_end_push_link_id_type", "")
+            or "session_id"
+        )
+        session_id = getattr(request, "session_id", "") or ""
+        if id_type == "chat_id":
+            chat_id = await self._resolve_chat_id(request)
+            if chat_id:
+                return f"{prefix}{sep}chatId={chat_id}"
+            if session_id:
+                logger.info(
+                    "session-end push: chat_id unavailable, fallback sessionId",
+                )
+                return f"{prefix}{sep}sessionId={session_id}"
+        if session_id:
+            return f"{prefix}{sep}sessionId={session_id}"
+        return ""
+
+    # def _should_skip_session_end_push(
+    #     self,
+    #     source_id: str,
+    #     meta: dict,
+    # ) -> bool:
+    #     """Skip push when ruice source has no file or jump link."""
+    #     has_link = bool(meta.get("link_items") or meta.get("link_url"))
+    #     if source_id == "ruice" and not has_link:
+    #         logger.info("session-end push skipped: ruice source and no links")
+    #         return True
+    #     return False
+
+    async def _resolve_chat_id(self, request: "AgentRequest") -> str:
+        """Get chat_id from workspace chat_manager.
+
+        Returns empty string on failure so the caller can fall back
+        to session_id, without aborting the whole push.
+        """
+        try:
+            session_id = getattr(request, "session_id", "") or ""
+            user_id = getattr(request, "user_id", "") or ""
+            channel_id = getattr(request, "channel", self.channel)
+            chat = await self._workspace.chat_manager.get_or_create_chat(
+                session_id,
+                user_id,
+                channel_id,
+            )
+            return getattr(chat, "id", "") or ""
+        except Exception:
+            logger.info("session-end push: get_or_create_chat failed")
+            return ""
+
+    def _get_session_channel(self, request: "AgentRequest") -> str:
+        """Get the session's original channel from channel_meta."""
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        return channel_meta.get("session_channel", "")
 
     def _extract_file_links(self, text: str) -> list[tuple[str, str]]:
         """Extract file links and names from reply text by matching FILE_URL prefix.
@@ -1142,7 +1378,7 @@ class BaseChannel(ABC):
         to_handle: str,
         message: Any,
         meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         """
         Send all content of a Message
         (text, image, video, audio, file, refusal).
@@ -1150,25 +1386,49 @@ class BaseChannel(ABC):
         multi-part sending.
         """
         parts = self._message_to_content_parts(message)
-        if not parts:
+        if not parts or not self._has_sendable_content(parts):
             logger.debug(
                 f"channel send_message_content: no parts for to_handle="
                 f"{to_handle}, skip send",
             )
-            return
+            return False
         logger.debug(
             f"channel send_message_content: to_handle={to_handle} "
             f"parts_count={len(parts)} "
             f"part_types={[getattr(p, 'type', None) for p in parts]}",
         )
-        await self.send_content_parts(to_handle, parts, meta)
+        return await self.send_content_parts(to_handle, parts, meta) is True
+
+    @staticmethod
+    def _has_sendable_content(parts: List[OutgoingContentPart]) -> bool:
+        """Return whether rendered parts have text or supported media."""
+        return any(
+            BaseChannel._is_sendable_content_part(part) for part in parts
+        )
+
+    @staticmethod
+    def _is_sendable_content_part(part: OutgoingContentPart) -> bool:
+        content_type = getattr(part, "type", None)
+        if content_type in (ContentType.TEXT, ContentType.REFUSAL):
+            field = "text" if content_type == ContentType.TEXT else "refusal"
+            return bool(str(getattr(part, field, "") or "").strip())
+        media_fields = {
+            ContentType.IMAGE: ("image_url",),
+            ContentType.VIDEO: ("video_url",),
+            ContentType.FILE: ("file_url", "file_id"),
+            ContentType.AUDIO: ("data",),
+        }
+        return any(
+            getattr(part, field, None)
+            for field in media_fields.get(content_type, ())
+        )
 
     async def send_content_parts(
         self,
         to_handle: str,
         parts: List[OutgoingContentPart],
         meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         """
         Send a list of content parts.
         Default: merge text/refusal into one text, append media URLs as
@@ -1206,15 +1466,17 @@ class BaseChannel(ABC):
                 body += f"\n[File: {m.file_url or m.file_id}]"
             elif t == ContentType.AUDIO and getattr(m, "data", None):
                 body += "\n[Audio]"
+        delivered = False
         if body.strip():
             logger.debug(
                 f"channel send_content_parts: to_handle={to_handle} "
                 f"body_len={len(body)} preview="
                 f"{body[:120] + '...' if len(body) > 120 else body}",
             )
-            await self.send(to_handle, body.strip(), meta)
+            delivered = await self.send(to_handle, body.strip(), meta) is True
         for m in media_parts:
             await self.send_media(to_handle, m, meta)
+        return delivered
 
     async def send_media(
         self,
@@ -1290,9 +1552,12 @@ class BaseChannel(ABC):
         to_handle: str,
         text: str,
         meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         """Subclass implements: send one text
         (and optional attachments) to to_handle.
+
+        Return True only after the destination has explicitly confirmed the
+        send. A missing return value is not a delivery acknowledgement.
         """
         raise NotImplementedError
 
@@ -1312,7 +1577,7 @@ class BaseChannel(ABC):
         session_id: str,
         event: "Event",
         meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         """Send a runner Event to this channel (non-stream).
 
         We only send when event is a completed message, then reuse
@@ -1324,10 +1589,10 @@ class BaseChannel(ABC):
         status = getattr(event, "status", None)
 
         if obj != "message" or status != RunStatus.Completed:
-            return
+            return False
 
         to_handle = self.to_handle_from_target(
             user_id=user_id,
             session_id=session_id,
         )
-        await self.send_message_content(to_handle, event, meta)
+        return await self.send_message_content(to_handle, event, meta)

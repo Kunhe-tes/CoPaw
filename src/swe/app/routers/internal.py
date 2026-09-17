@@ -1,19 +1,24 @@
 # -*- coding: utf-8 -*-
 """Internal API for service-to-service communication."""
 
+import asyncio
 import base64
 import json
 from datetime import datetime, timezone
 import logging
 import os
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import unquote, urlsplit
 
-from fastapi import APIRouter, Body, File, Header, HTTPException, Request
+from fastapi import APIRouter, Body, File, Form, Header, HTTPException, Request
 from fastapi import UploadFile
 from pydantic import BaseModel, Field
 
+from ..b3_headers import build_b3_dispatch_meta
+from ..async_tasks.db import get_or_create_async_task_db
+from ..async_tasks.store import AsyncTaskStore
 from ..identity_resolver import resolve_user_identity
 from ...config.context import (
     is_valid_identity_value,
@@ -27,7 +32,13 @@ from ...config.scope_conversion import (
 )
 from ...config.utils import list_all_tenant_ids
 from ...constant import WORKING_DIR
-from ..workspace.tenant_initializer import TenantInitializer
+from ..crons.manager import (
+    broadcast_dispatch_intents_enabled,
+    dispatch_intents_runtime_enabled,
+    is_batch_dispatch_managed_broadcast_child,
+)
+from ..workspace.bootstrap_state import SourceTemplateUnavailable
+from ..workspace.source_template_provisioner import SourceTemplateProvisioner
 
 router = APIRouter(prefix="/internal", tags=["internal"])
 public_router = APIRouter(prefix="/assets", tags=["assets"])
@@ -43,6 +54,20 @@ _ASSET_NOT_FOUND_DETAIL = "Asset file not found"
 _ASSET_INVALID_UTF8_DETAIL = "Asset file is not valid UTF-8"
 _CONTENT_INVALID_UTF8_DETAIL = "Content is not valid UTF-8"
 _INVALID_PREVIEW_TARGET_DETAIL = "Invalid preview target"
+_DISPATCH_CALLBACK_SOURCE = "dispatch_service"
+_CALLBACK_EXECUTION_IDENTITY_FIELDS = (
+    "cron_execution_key",
+    "execution_key",
+    "scheduled_fire_at",
+    "fire_time",
+    "trigger_time",
+    "fireTime",
+    "triggerTime",
+    "external_execution_id",
+    "execution_id",
+    "log_id",
+    "logId",
+)
 _PREVIEW_PLACEHOLDER_HTML = """<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -136,6 +161,397 @@ def _list_runtime_tenant_ids() -> list[str]:
     ]
 
 
+async def _get_cron_job_for_dispatch(mgr: Any, job_id: str) -> Any | None:
+    getter = getattr(mgr, "get_job", None)
+    if getter is None:
+        return None
+    return await getter(job_id)
+
+
+def _job_dispatch_intents_enabled(job: Any | None) -> bool:
+    if not dispatch_intents_runtime_enabled():
+        return False
+    if is_batch_dispatch_managed_broadcast_child(job):
+        return False
+    return broadcast_dispatch_intents_enabled(job)
+
+
+def _is_dispatch_service_callback(params: dict[str, Any]) -> bool:
+    return str(params.get("callback_source") or "").strip() == (
+        _DISPATCH_CALLBACK_SOURCE
+    )
+
+
+def _build_dispatch_callback_meta(
+    params: dict[str, Any],
+) -> dict[str, Any] | None:
+    context = _dispatch_callback_context(params)
+    if _is_dispatch_service_callback(params):
+        intent_id, batch_id, dispatch_attempt = _require_dispatch_callback_ids(
+            params,
+        )
+        return {
+            "source": _DISPATCH_CALLBACK_SOURCE,
+            "intent_id": intent_id,
+            "batch_id": batch_id,
+            "dispatch_attempt": dispatch_attempt,
+            **context,
+            **(_callback_execution_meta(params) or {}),
+        }
+    return _callback_execution_meta(params)
+
+
+def _require_dispatch_callback_ids(
+    params: dict[str, Any],
+) -> tuple[int, str, int]:
+    intent_id = _safe_int(
+        params.get("dispatch_intent_id") or params.get("intent_id"),
+    )
+    batch_id = str(
+        params.get("dispatch_batch_id") or params.get("batch_id") or "",
+    )
+    dispatch_attempt = _safe_int(params.get("dispatch_attempt", 1))
+    _validate_dispatch_callback_ids(intent_id, batch_id, dispatch_attempt)
+    return intent_id, batch_id, dispatch_attempt
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _validate_dispatch_callback_ids(
+    intent_id: int,
+    batch_id: str,
+    dispatch_attempt: int,
+) -> None:
+    if not intent_id or not batch_id.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="dispatch_service callback requires dispatch_intent_id and dispatch_batch_id",
+        )
+    if dispatch_attempt <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="dispatch_service callback requires positive dispatch_attempt",
+        )
+
+
+def _dispatch_callback_value(
+    params: dict[str, Any],
+    *keys: str,
+    default: str = "",
+) -> str:
+    for key in keys:
+        value = params.get(key)
+        if value:
+            return str(value)
+    return default
+
+
+def _dispatch_callback_context(params: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "tenant_id": _dispatch_callback_value(params, "tenant_id"),
+        "source_id": _dispatch_callback_value(params, "source_id"),
+        "scope_id": _dispatch_callback_value(params, "scope_id", "scopeId"),
+        "from_id": _dispatch_callback_value(params, "from_id", "fromId"),
+        "agent_id": _dispatch_callback_value(
+            params,
+            "agent_id",
+            default=_STATIC_AGENT_ID,
+        ),
+        "job_id": _dispatch_callback_value(params, "job_id"),
+        "parent_scheduled_fire_at": _dispatch_callback_value(
+            params,
+            "parent_scheduled_fire_at",
+        ),
+        "provider_id": _dispatch_callback_value(
+            params,
+            "provider_id",
+            default="default",
+        ),
+        "model_id": _dispatch_callback_value(
+            params,
+            "model_id",
+            default="default",
+        ),
+    }
+
+
+def _callback_execution_meta(params: dict[str, Any]) -> dict[str, Any] | None:
+    metadata = {
+        "cron_execution_key": _dispatch_callback_value(
+            params,
+            "cron_execution_key",
+            "execution_key",
+        ),
+        "scheduled_fire_at": _dispatch_callback_value(
+            params,
+            "scheduled_fire_at",
+            "fire_time",
+            "trigger_time",
+            "fireTime",
+            "triggerTime",
+        ),
+        "external_execution_id": _dispatch_callback_value(
+            params,
+            "external_execution_id",
+            "execution_id",
+            "log_id",
+            "logId",
+        ),
+    }
+    return {key: value for key, value in metadata.items() if value} or None
+
+
+def _has_callback_execution_identity(dispatch_meta: dict[str, Any]) -> bool:
+    """Match the CronManager scheduled execution identity contract."""
+    if dispatch_meta.get("cron_execution_key") or dispatch_meta.get(
+        "execution_key",
+    ):
+        return True
+    if dispatch_meta.get("intent_id") and dispatch_meta.get("batch_id"):
+        return True
+    return bool(
+        dispatch_meta.get("scheduled_fire_at")
+        or dispatch_meta.get("parent_scheduled_fire_at")
+        or dispatch_meta.get("external_execution_id"),
+    )
+
+
+def _decode_cron_callback_params(body: Dict[str, Any]) -> dict[str, Any]:
+    job_param = body.get("jobParam") or body.get("job_param") or ""
+    if not job_param:
+        return body
+    try:
+        params = json.loads(base64.urlsafe_b64decode(job_param))
+        if not isinstance(params, dict):
+            raise ValueError("jobParam payload must be an object")
+        for key in _CALLBACK_EXECUTION_IDENTITY_FIELDS:
+            if body.get(key):
+                params[key] = body[key]
+        return params
+    except Exception as exc:
+        logger.warning("Failed to decode jobParam: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid jobParam: {exc}",
+        )
+
+
+def _require_cron_callback_params(
+    params: dict[str, Any],
+) -> tuple[str, Any, str, str, str]:
+    try:
+        return (
+            params["tenant_id"],
+            params.get("source_id"),
+            params["agent_id"],
+            params["task_type"],
+            params.get("job_id", ""),
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing required param in callback body: {exc}",
+        )
+
+
+def _require_source_scheduler(
+    request: Request,
+    task_type: str,
+    source_id: Any,
+) -> Any:
+    if not source_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"source_id required for task_type={task_type}",
+        )
+    source_scheduler = getattr(
+        request.app.state,
+        "source_system_task_scheduler",
+        None,
+    )
+    if source_scheduler is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Source system task scheduler not available",
+        )
+    return source_scheduler
+
+
+async def _run_source_callback(
+    request: Request,
+    task_type: str,
+    source_id: Any,
+) -> bool:
+    if task_type not in {"cleanup", "archive_maintenance"}:
+        return False
+    source_scheduler = _require_source_scheduler(request, task_type, source_id)
+    if task_type == "cleanup":
+        result = await source_scheduler.run_task_session_cleanup(
+            source_id=source_id,
+        )
+        logger.info("Source task session cleanup result: %s", result)
+    else:
+        result = await source_scheduler.run_archive_maintenance(
+            source_id=source_id,
+        )
+        logger.info("Source archive maintenance result: %s", result)
+    return True
+
+
+async def _require_callback_cron_manager(
+    request: Request,
+    tenant_id: str,
+    source_id: Any,
+    agent_id: str,
+) -> Any:
+    manager = getattr(request.app.state, "multi_agent_manager", None)
+    if manager is None:
+        logger.warning("MultiAgentManager not initialized")
+        raise HTTPException(status_code=503, detail="Manager not available")
+    runtime_tenant_id = (
+        resolve_runtime_tenant_id(tenant_id, source_id) or tenant_id
+    )
+    mgr = await _get_cron_manager(manager, runtime_tenant_id, agent_id)
+    if mgr is None:
+        raise HTTPException(status_code=404, detail="CronManager not found")
+    return mgr
+
+
+def _batch_callback_skip_response(
+    job: Any | None,
+    params: dict[str, Any],
+    tenant_id: str,
+    agent_id: str,
+    task_type: str,
+    job_id: str,
+) -> dict[str, str] | None:
+    if _is_dispatch_service_callback(params):
+        return None
+    if is_batch_dispatch_managed_broadcast_child(job):
+        logger.info(
+            "Callback skipped for batch-managed broadcast child: "
+            "tenant=%s agent=%s job=%s",
+            tenant_id,
+            agent_id,
+            job_id,
+        )
+        return {
+            "status": "ok",
+            "task_type": task_type,
+            "skipped": "batch_managed_child",
+        }
+    if _job_dispatch_intents_enabled(job):
+        logger.info(
+            "Callback skipped for batch-managed broadcast parent: "
+            "tenant=%s agent=%s job=%s",
+            tenant_id,
+            agent_id,
+            job_id,
+        )
+        return {
+            "status": "ok",
+            "task_type": task_type,
+            "skipped": "batch_managed_external_callback",
+        }
+    return None
+
+
+async def _run_job_callback(
+    request: Request,
+    mgr: Any,
+    params: dict[str, Any],
+    tenant_id: str,
+    source_id: Any,
+    agent_id: str,
+    task_type: str,
+    job_id: str,
+) -> dict[str, str] | None:
+    if not job_id:
+        raise HTTPException(
+            status_code=400,
+            detail="job_id required for task_type=job",
+        )
+    job = await _get_cron_job_for_dispatch(mgr, job_id)
+    skip_response = _batch_callback_skip_response(
+        job,
+        params,
+        tenant_id,
+        agent_id,
+        task_type,
+        job_id,
+    )
+    if skip_response is not None:
+        return skip_response
+
+    dispatch_meta = _build_dispatch_callback_meta(params) or {}
+    if getattr(job, "task_type", None) in {
+        "agent",
+        "text",
+    } and not _has_callback_execution_identity(dispatch_meta):
+        dispatch_meta["cron_execution_key"] = f"legacy:{uuid.uuid4()}"
+    dispatch_meta.update(
+        build_b3_dispatch_meta(getattr(request, "headers", {})),
+    )
+    run_kwargs = {"is_manual": False, "source_id": source_id}
+    if dispatch_meta:
+        run_kwargs["dispatch_meta"] = dispatch_meta
+    try:
+        result = await mgr.run_job(job_id, **run_kwargs)
+    except KeyError as exc:
+        if exc.args != (f"Job not found: {job_id}",):
+            raise
+        logger.info(
+            "Callback skipped for missing job: "
+            "tenant=%s source=%s agent=%s job=%s",
+            tenant_id,
+            source_id,
+            agent_id,
+            job_id,
+        )
+        return {"status": "ok", "skipped": "job_not_found", "job_id": job_id}
+    if result is False:
+        return {"status": "ok", "skipped": "job_disabled", "job_id": job_id}
+    return None
+
+
+async def _run_agent_callback(
+    request: Request,
+    params: dict[str, Any],
+    tenant_id: str,
+    source_id: Any,
+    agent_id: str,
+    task_type: str,
+    job_id: str,
+) -> dict[str, str] | None:
+    mgr = await _require_callback_cron_manager(
+        request,
+        tenant_id,
+        source_id,
+        agent_id,
+    )
+    if task_type == "heartbeat":
+        await mgr.run_heartbeat()
+        return None
+    if task_type == "dream":
+        await mgr.run_dream()
+        return None
+    return await _run_job_callback(
+        request,
+        mgr,
+        params,
+        tenant_id,
+        source_id,
+        agent_id,
+        task_type,
+        job_id,
+    )
+
+
 class InternalErrorResponse(BaseModel):
     detail: str = Field(..., description="Error detail message.")
 
@@ -212,6 +628,10 @@ class InternalBatchInitializeTenantsRequest(BaseModel):
 
     tenant_ids: str = Field(..., description="逗号分隔的租户 ID 字符串")
     source_id: str = Field(..., min_length=1, description="来源标识")
+    enable_bootstrap_chat: bool = Field(
+        default=True,
+        description="是否为新租户保留 BOOTSTRAP.md 初始化聊天",
+    )
     fail_fast: bool = Field(
         default=False,
         description="单个租户失败时是否立即终止后续处理",
@@ -232,12 +652,28 @@ class InternalBatchInitializeTenantsResponse(BaseModel):
     """批量初始化租户响应。"""
 
     success: bool
+    task_id: Optional[str] = None
+    status: Optional[str] = None
     total: int
     success_count: int
     fail_count: int
     results: list[InternalBatchInitializeTenantResult] = Field(
         default_factory=list,
     )
+
+
+class InternalEnsureSourceTemplateRequest(BaseModel):
+    """Request for explicitly provisioning a source template."""
+
+    source_id: str = Field(..., min_length=1)
+
+
+class InternalEnsureSourceTemplateResponse(BaseModel):
+    """Safe source-template provisioning result."""
+
+    source_id: str
+    template_name: str
+    status: str
 
 
 def _verify_internal_token(token: Optional[str]) -> None:
@@ -270,25 +706,27 @@ def _parse_batch_tenant_ids(raw_tenant_ids: str) -> list[str]:
     return tenant_ids
 
 
-async def _is_tenant_already_bootstrapped(
-    pool: Any,
-    tenant_id: str,
-    source_id: str,
-) -> bool:
-    """判断租户目录是否已经完成 bootstrap。"""
-    base_working_dir = getattr(pool, "_base_working_dir", None)
-    if base_working_dir is None:
-        return False
+async def _request_db_connection(request: Request):
+    """读取或懒加载当前请求绑定的数据库连接。"""
+    return await get_or_create_async_task_db(request)
 
-    try:
-        initializer = TenantInitializer(
-            base_working_dir,
-            tenant_id,
-            source_id=source_id,
+
+def _request_actor(request: Request) -> tuple[str, str]:
+    """从请求头解析操作人信息，缺省保持为空。"""
+    actor_id = (request.headers.get("X-User-Id") or "").strip()
+    actor_name = unquote(request.headers.get("X-User-Name") or "").strip()
+    return actor_id, actor_name
+
+
+async def _make_async_task_store(request: Request) -> AsyncTaskStore:
+    """创建统一异步任务写入器。"""
+    db_connection = await _request_db_connection(request)
+    if db_connection is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Async task database connection is not available",
         )
-        return initializer.has_seeded_bootstrap()
-    except Exception:
-        return False
+    return AsyncTaskStore(db_connection)
 
 
 def _require_internal_token(
@@ -296,6 +734,43 @@ def _require_internal_token(
     x_internal_token: Optional[str],
 ) -> None:
     _verify_internal_token(authorization or x_internal_token)
+
+
+@router.post(
+    "/source-templates/ensure",
+    response_model=InternalEnsureSourceTemplateResponse,
+)
+async def ensure_source_template(
+    payload: InternalEnsureSourceTemplateRequest,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    x_internal_token: Optional[str] = Header(None),
+) -> InternalEnsureSourceTemplateResponse:
+    """Create or repair one source template outside tenant request traffic."""
+    _require_internal_token(authorization, x_internal_token)
+    if not is_valid_identity_value(payload.source_id):
+        raise _http_400("Invalid source_id")
+    try:
+        result = await SourceTemplateProvisioner(WORKING_DIR).ensure(
+            payload.source_id,
+        )
+    except SourceTemplateUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Source template unavailable",
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from exc
+    pool = getattr(request.app.state, "tenant_workspace_pool", None)
+    if pool is not None and result.status in {"created", "repaired"}:
+        scope = resolve_storage_tenant_id("default", payload.source_id) or (
+            f"default_{payload.source_id}"
+        )
+        await pool.invalidate_bootstrap(scope, reason="source_template_reload")
+    return InternalEnsureSourceTemplateResponse(
+        source_id=result.source_id,
+        template_name=result.template_name,
+        status=result.status,
+    )
 
 
 def _encode_scope_items_from_body(
@@ -364,6 +839,143 @@ def _decode_scope_items_from_body(
         return ((decode_canonical_scope_id(str(scope_id)),), True)
     except ValueError as exc:
         raise _http_400(str(exc)) from exc
+
+
+async def _run_internal_batch_initialize_task(
+    *,
+    task_id: str,
+    store: AsyncTaskStore,
+    pool: Any,
+    payload: InternalBatchInitializeTenantsRequest,
+    tenant_ids: list[str],
+    headers: dict[str, str],
+) -> None:
+    """后台执行批量租户初始化，并同步统一异步任务表。"""
+    try:
+        await store.mark_running(task_id)
+    except Exception as exc:  # pylint: disable=broad-except
+        error_message = str(exc)
+        logger.warning(
+            "Failed to mark tenant bootstrap task running: task_id=%s",
+            task_id,
+            exc_info=True,
+        )
+        for tenant_id in tenant_ids:
+            try:
+                await store.record_item_result(
+                    task_id=task_id,
+                    target_id=tenant_id,
+                    success=False,
+                    item_status="failed",
+                    error_message=error_message,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to record tenant bootstrap item failure: task_id=%s tenant_id=%s",
+                    task_id,
+                    tenant_id,
+                    exc_info=True,
+                )
+        try:
+            await store.finish_task(
+                task_id=task_id,
+                status="failed",
+                done_count=0,
+                failed_count=len(tenant_ids),
+                error_message=error_message,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to finish tenant bootstrap task: task_id=%s",
+                task_id,
+                exc_info=True,
+            )
+        return
+    success_count = 0
+    fail_count = 0
+    for tenant_id in tenant_ids:
+        try:
+            resolved_identity = await resolve_user_identity(
+                tenant_id=tenant_id,
+                source_id=payload.source_id,
+                user_name=None,
+                bbk_id=None,
+                headers=headers,
+                allow_remote_lookup=True,
+            )
+            if not resolved_identity.user_name or not resolved_identity.bbk_id:
+                fail_count += 1
+                await store.record_item_result(
+                    task_id=task_id,
+                    target_id=tenant_id,
+                    success=False,
+                    item_status="failed",
+                    result={
+                        "tenant_id": tenant_id,
+                        "tenant_name": resolved_identity.user_name,
+                        "bbk_id": resolved_identity.bbk_id,
+                        "status": "failed",
+                        "message": "user identity not resolved",
+                    },
+                    error_message="user identity not resolved",
+                )
+                if payload.fail_fast:
+                    break
+                continue
+
+            outcome = await pool.ensure_bootstrap(
+                tenant_id,
+                source_id=payload.source_id,
+                tenant_name=resolved_identity.user_name,
+                bbk_id=resolved_identity.bbk_id,
+                enable_bootstrap_chat=payload.enable_bootstrap_chat,
+            )
+            item_status = (
+                "skipped" if outcome.status == "already_ready" else "created"
+            )
+            success_count += 1
+            await store.record_item_result(
+                task_id=task_id,
+                target_id=tenant_id,
+                success=True,
+                item_status=item_status,
+                result={
+                    "tenant_id": tenant_id,
+                    "tenant_name": resolved_identity.user_name,
+                    "bbk_id": resolved_identity.bbk_id,
+                    "status": item_status,
+                    "message": item_status,
+                },
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            fail_count += 1
+            await store.record_item_result(
+                task_id=task_id,
+                target_id=tenant_id,
+                success=False,
+                item_status="failed",
+                result={
+                    "tenant_id": tenant_id,
+                    "status": "failed",
+                    "message": str(exc),
+                },
+                error_message=str(exc),
+            )
+            if payload.fail_fast:
+                break
+
+    status = "succeeded"
+    if fail_count > 0 and success_count > 0:
+        status = "partial_failed"
+    elif fail_count > 0:
+        status = "failed"
+    await store.finish_task(
+        task_id=task_id,
+        status=status,
+        done_count=success_count + fail_count,
+        failed_count=fail_count,
+        result=None,
+    )
 
 
 def _validate_asset_file_name(file_name: str) -> str:
@@ -533,6 +1145,8 @@ def _read_text_asset(file_name: str) -> InternalTextAssetReadResponse:
 
 async def _save_uploaded_asset_file(
     file: UploadFile,
+    *,
+    template_flag: Optional[str] = None,
 ) -> InternalAssetUploadResponse:
     safe_file_name = _validate_asset_file_name(file.filename or "")
     content = await file.read()
@@ -552,6 +1166,7 @@ async def _save_uploaded_asset_file(
             file_name=safe_file_name,
             file_size=file_size,
             asset_path=asset_path,
+            template_flag=template_flag,
         )
     except Exception:
         logger.warning(
@@ -714,99 +1329,43 @@ async def internal_batch_initialize_tenants(
             detail="Tenant pool not available",
         )
 
-    auth_header = request.headers.get("Authorization")
-    headers = {
-        key: value
-        for key, value in {
-            "Content-Type": "application/json",
-            "Authorization": auth_header,
-        }.items()
-        if value
-    }
-    results: list[InternalBatchInitializeTenantResult] = []
-    success_count = 0
-    fail_count = 0
-
-    for tenant_id in tenant_ids:
-        resolved_identity = await resolve_user_identity(
-            tenant_id=tenant_id,
-            source_id=payload.source_id,
-            user_name=None,
-            bbk_id=None,
-            headers=headers,
-            allow_remote_lookup=True,
-        )
-        if not resolved_identity.user_name or not resolved_identity.bbk_id:
-            fail_count += 1
-            results.append(
-                InternalBatchInitializeTenantResult(
-                    tenant_id=tenant_id,
-                    tenant_name=resolved_identity.user_name,
-                    bbk_id=resolved_identity.bbk_id,
-                    status="failed",
-                    message="user identity not resolved",
-                ),
-            )
-            if payload.fail_fast:
-                break
-            continue
-
-        if await _is_tenant_already_bootstrapped(
-            pool,
-            tenant_id,
-            payload.source_id,
-        ):
-            success_count += 1
-            results.append(
-                InternalBatchInitializeTenantResult(
-                    tenant_id=tenant_id,
-                    tenant_name=resolved_identity.user_name,
-                    bbk_id=resolved_identity.bbk_id,
-                    status="success",
-                    message="skipped",
-                ),
-            )
-            continue
-
-        try:
-            await pool.ensure_bootstrap(
-                tenant_id,
-                source_id=payload.source_id,
-                tenant_name=resolved_identity.user_name,
-                bbk_id=resolved_identity.bbk_id,
-            )
-        except Exception as exc:
-            fail_count += 1
-            results.append(
-                InternalBatchInitializeTenantResult(
-                    tenant_id=tenant_id,
-                    tenant_name=resolved_identity.user_name,
-                    bbk_id=resolved_identity.bbk_id,
-                    status="failed",
-                    message=str(exc),
-                ),
-            )
-            if payload.fail_fast:
-                break
-            continue
-
-        success_count += 1
-        results.append(
-            InternalBatchInitializeTenantResult(
-                tenant_id=tenant_id,
-                tenant_name=resolved_identity.user_name,
-                bbk_id=resolved_identity.bbk_id,
-                status="success",
-                message="initialized",
-            ),
-        )
-
+    task_id = str(uuid.uuid4())
+    store = await _make_async_task_store(request)
+    actor_user_id, actor_user_name = _request_actor(request)
+    await store.start_task(
+        task_id=task_id,
+        service="swe",
+        task_type="tenant.bootstrap",
+        source_id=payload.source_id,
+        actor_user_id=actor_user_id,
+        actor_user_name=actor_user_name,
+        target_ids=tenant_ids,
+    )
+    asyncio.create_task(
+        _run_internal_batch_initialize_task(
+            task_id=task_id,
+            store=store,
+            pool=pool,
+            payload=payload,
+            tenant_ids=tenant_ids,
+            headers={
+                key: value
+                for key, value in {
+                    "Content-Type": "application/json",
+                    "Authorization": request.headers.get("Authorization"),
+                }.items()
+                if value
+            },
+        ),
+    )
     return InternalBatchInitializeTenantsResponse(
-        success=fail_count == 0 and success_count == len(tenant_ids),
+        success=True,
+        task_id=task_id,
+        status="queued",
         total=len(tenant_ids),
-        success_count=success_count,
-        fail_count=fail_count,
-        results=results,
+        success_count=0,
+        fail_count=0,
+        results=[],
     )
 
 
@@ -819,9 +1378,10 @@ async def internal_batch_initialize_tenants(
 )
 async def upload_asset(
     file: UploadFile = File(...),
+    template_flag: Optional[str] = Form(None),
 ) -> InternalAssetUploadResponse:
     """公开上传 asset 文件，不校验内部服务 Token。"""
-    return await _save_uploaded_asset_file(file)
+    return await _save_uploaded_asset_file(file, template_flag=template_flag)
 
 
 @public_router.get(
@@ -1067,79 +1627,10 @@ async def refresh_external_cron_jobs(request: Request):
 
 
 @router.post("/cron/callback")
-async def _dispatch_cron_task(
-    request: Request,
-    task_type: str,
-    tenant_id: str,
-    source_id: Optional[str],
-    agent_id: str,
-    job_id: str,
-) -> None:
-    """根据 task_type 分发定时任务到对应处理器。"""
-    if task_type == "cleanup":
-        if not source_id:
-            raise HTTPException(
-                status_code=400,
-                detail="source_id required for task_type=cleanup",
-            )
-        source_scheduler = getattr(
-            request.app.state,
-            "source_system_task_scheduler",
-            None,
-        )
-        if source_scheduler is None:
-            raise HTTPException(
-                status_code=503,
-                detail="Source system task scheduler not available",
-            )
-        cleanup_result = await source_scheduler.run_task_session_cleanup(
-            source_id=source_id,
-        )
-        logger.info(
-            "Source task session cleanup result: %s",
-            cleanup_result,
-        )
-        return
-
-    manager = getattr(request.app.state, "multi_agent_manager", None)
-    if manager is None:
-        logger.warning("MultiAgentManager not initialized")
-        raise HTTPException(
-            status_code=503,
-            detail="Manager not available",
-        )
-    runtime_tenant_id = (
-        resolve_runtime_tenant_id(tenant_id, source_id) or tenant_id
-    )
-    mgr = await _get_cron_manager(manager, runtime_tenant_id, agent_id)
-    if mgr is None:
-        raise HTTPException(
-            status_code=404,
-            detail="CronManager not found",
-        )
-    if task_type == "heartbeat":
-        await mgr.run_heartbeat()
-    elif task_type == "dream":
-        await mgr.run_dream()
-    else:
-        if not job_id:
-            raise HTTPException(
-                status_code=400,
-                detail="job_id required for task_type=job",
-            )
-        await mgr.run_job(
-            job_id,
-            is_manual=False,
-            source_id=source_id,
-        )
-
-
+# Existing endpoint handles legacy and jobParam callback shapes in one handler.
+# pylint: disable=too-many-statements
 async def internal_cron_callback(
     request: Request,
-    x_internal_token: Optional[str] = Header(
-        default=None,
-        alias="X-Internal-Token",
-    ),
     body: Dict[str, Any] = Body(...),
 ):
     """外部调度平台统一回调端点。
@@ -1149,43 +1640,31 @@ async def internal_cron_callback(
     2. body 顶层直接携带 tenant_id / agent_id / task_type / job_id
 
     根据 task_type 分发到对应的 CronManager 方法。
+    不校验内部 token；部署必须将此执行入口隔离在可信内网。
     """
-    _verify_internal_token(x_internal_token)
-
-    job_param = body.get("jobParam") or body.get("job_param") or ""
-    if job_param:
-        try:
-            params = json.loads(base64.urlsafe_b64decode(job_param))
-        except Exception as e:
-            logger.warning("Failed to decode jobParam: %s", e)
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid jobParam: {e}",
-            )
-    else:
-        params = body
+    params = _decode_cron_callback_params(body)
+    tenant_id, source_id, agent_id, task_type, job_id = (
+        _require_cron_callback_params(params)
+    )
 
     try:
-        tenant_id = params["tenant_id"]
-        source_id = params.get("source_id")
-        agent_id = params["agent_id"]
-        task_type = params["task_type"]
-        job_id = params.get("job_id", "")
-    except KeyError as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Missing required param in callback body: {e}",
-        )
-
-    try:
-        await _dispatch_cron_task(
+        source_callback_handled = await _run_source_callback(
             request,
             task_type,
-            tenant_id,
             source_id,
-            agent_id,
-            job_id,
         )
+        if not source_callback_handled:
+            skip_response = await _run_agent_callback(
+                request,
+                params,
+                tenant_id,
+                source_id,
+                agent_id,
+                task_type,
+                job_id,
+            )
+            if skip_response is not None:
+                return skip_response
         logger.info(
             "Callback dispatched: type=%s tenant=%s agent=%s job=%s",
             task_type,

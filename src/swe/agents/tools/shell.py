@@ -5,15 +5,22 @@
 
 import asyncio
 import ast
+from contextlib import (
+    AbstractContextManager,
+    asynccontextmanager,
+    contextmanager,
+)
 import locale
 import os
+import re
 import shlex
 import signal
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Iterator, Optional
 
 from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
@@ -24,6 +31,7 @@ from ...app.runner.tool_output_frames import (
     emit_tool_output_text,
 )
 from ...envs.runtime import build_runtime_env
+from ...runtime_invocation_claims import apply_runtime_claim_env
 from ...security.tenant_path_boundary import (
     is_path_within_tenant_with_base,
     get_current_tenant_root,
@@ -31,7 +39,23 @@ from ...security.tenant_path_boundary import (
     TenantPathBoundaryError,
 )
 from ...security.python_runtime_path_guard import (
+    is_safe_active_skill_name,
     prepare_python_runtime_path_guard_env,
+)
+from ...security.process_limits import (
+    CurrentProcessLimitPolicy,
+    resolve_current_process_limit_policy,
+)
+from .file_io import (
+    is_created_workspace_skill_write_target,
+)
+from ..skill_context_manager import get_skill_context_manager
+
+_SHELL_PRESERVED_BOUNDARY_ENV_KEYS = frozenset(
+    {
+        "SWE_WORKING_DIR",
+        "SWE_SECRET_DIR",
+    },
 )
 
 # Commands that take string arguments which may look like paths
@@ -95,6 +119,14 @@ _PYTHON_COMMAND_BASENAMES = frozenset(
 
 _PYTHON_OPTIONS_WITH_VALUE = frozenset({"-W", "-X"})
 
+_SUBPROCESS_THREAD_LIMIT_DEFAULTS = {
+    "OPENBLAS_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1",
+}
+
 _PYTHON_PATH_CALL_ARG_INDICES = {
     "open": (0,),
     "io.open": (0,),
@@ -122,6 +154,43 @@ _PYTHON_PATH_CALL_ARG_INDICES = {
 
 _PYTHON_SCAN_MAX_FILES = 128
 _PYTHON_SCAN_MAX_BYTES = 512 * 1024
+_DISALLOWED_SHELL_ENV_PATH_VARS = frozenset(
+    {"HOME", "PWD", "OLDPWD", "TMPDIR", "TEMP", "TMP"},
+)
+_DISALLOWED_SHELL_ENV_PATH_PATTERN = re.compile(
+    r"(?<!\\)\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}|"
+    r"(?P<bare>[A-Za-z_][A-Za-z0-9_]*)\b)",
+)
+_RAW_WINDOWS_PATH_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_:])(?:[A-Za-z]:[\\/][^\s\"'`|;&<>]*|"
+    r"\\\\[^\s\"'`|;&<>]+)",
+)
+_DISALLOWED_SYSTEM_PATH_PREFIXES = (
+    "/opt/",
+    "/etc/",
+    "/root/",
+    "/proc/",
+    "/sys/",
+    "/dev/",
+)
+_ALLOWED_SYSTEM_PATH_TOKENS = frozenset({"/dev/null"})
+
+_SHELL_SLOT_CONDITION = asyncio.Condition()
+_SHELL_SLOT_COUNTS: dict[str, int] = {}
+
+_SHELL_WRITE_DESTINATION_COMMANDS = frozenset(
+    {
+        "cp",
+        "install",
+        "mkdir",
+        "mv",
+        "touch",
+        "unzip",
+    },
+)
+_SHELL_REDIRECT_OPERATORS = frozenset(
+    {">", ">>", "1>", "1>>", "2>", "2>>", "&>", "&>>"},
+)
 
 
 def _is_path_like(token: str) -> bool:
@@ -131,9 +200,35 @@ def _is_path_like(token: str) -> bool:
         token: The token to check.
 
     Returns:
-        True if the token looks like a path (starts with /, ./, ../, or ~).
+        True if the token looks like a path.
     """
-    return token.startswith(("/", "./", "../", "~"))
+    return token.startswith(("/", "\\", "./", "../", "~")) or bool(
+        re.match(
+            r"^[A-Za-z]:[\\/]",
+            token,
+        ),
+    )
+
+
+def _find_disallowed_shell_env_path_reference(command: str) -> Optional[str]:
+    """Return a disallowed shell path variable reference if one is present."""
+    for match in _DISALLOWED_SHELL_ENV_PATH_PATTERN.finditer(command):
+        var_name = match.group("braced") or match.group("bare") or ""
+        if var_name in _DISALLOWED_SHELL_ENV_PATH_VARS:
+            return match.group(0)
+    return None
+
+
+def _is_allowed_system_path_token(token: str) -> bool:
+    """Return True for narrow system path exceptions used as IO sinks."""
+    return token in _ALLOWED_SYSTEM_PATH_TOKENS
+
+
+def _extract_raw_windows_path_tokens(command: str) -> list[str]:
+    """Extract Windows absolute paths before POSIX shlex can drop backslashes."""
+    return [
+        match.group(0) for match in _RAW_WINDOWS_PATH_PATTERN.finditer(command)
+    ]
 
 
 def _has_code_exec_flag(token: str) -> bool:
@@ -197,6 +292,9 @@ def _extract_path_tokens(command: str) -> tuple[list[str], bool]:
     is_exempt_cmd = cmd_name in _STRING_ARG_COMMANDS
     is_interpreter = cmd_name in _INTERPRETER_COMMANDS
 
+    if not is_exempt_cmd:
+        file_paths.extend(_extract_raw_windows_path_tokens(command))
+
     i = 0
     while i < len(tokens):
         token = tokens[i]
@@ -224,7 +322,8 @@ def _extract_path_tokens(command: str) -> tuple[list[str], bool]:
                     pass
             else:
                 # Non-exempt command: any path-like token is a file path
-                file_paths.append(token)
+                if token not in file_paths:
+                    file_paths.append(token)
 
         i += 1
 
@@ -282,17 +381,39 @@ def _static_string_value(
     return None
 
 
-def _scan_python_source_for_outside_path(
-    source: str,
+def _find_disallowed_system_path_literal(
+    tree: ast.AST,
     base_dir: Path,
 ) -> Optional[str]:
-    """Find static Python file-access paths that escape tenant boundary."""
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return None
+    """查找源码中静态出现的系统路径字面量。"""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or not isinstance(
+            node.value,
+            str,
+        ):
+            continue
+        if node.value.startswith(("http://", "https://")):
+            continue
+        if _is_allowed_system_path_token(node.value):
+            continue
+        for prefix in _DISALLOWED_SYSTEM_PATH_PREFIXES:
+            if prefix in node.value:
+                if is_path_within_tenant_with_base(
+                    node.value,
+                    base_dir=base_dir,
+                ):
+                    continue
+                return node.value
 
-    constants = _collect_string_constants(tree)
+    return None
+
+
+def _find_outside_python_call_path(
+    tree: ast.AST,
+    constants: dict[str, str],
+    base_dir: Path,
+) -> Optional[str]:
+    """查找 Python 文件访问调用中越出租户边界的静态路径。"""
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -312,6 +433,28 @@ def _scan_python_source_for_outside_path(
                 base_dir=base_dir,
             ):
                 return path_value
+
+    return None
+
+
+def _scan_python_source_for_outside_path(
+    source: str,
+    base_dir: Path,
+) -> Optional[str]:
+    """Find static Python file-access paths that escape tenant boundary."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+
+    system_path = _find_disallowed_system_path_literal(tree, base_dir)
+    if system_path:
+        return system_path
+
+    constants = _collect_string_constants(tree)
+    outside_path = _find_outside_python_call_path(tree, constants, base_dir)
+    if outside_path:
+        return outside_path
 
     return None
 
@@ -401,7 +544,8 @@ def _validate_python_script_contents(
         outside_path = _scan_python_source_for_outside_path(source, base_dir)
         if outside_path:
             return (
-                "Error: Python code contains path outside the allowed workspace: "
+                "Error: Python code contains path outside the allowed "
+                "workspace or system path string: "
                 f"'{outside_path}'"
             )
         return None
@@ -438,10 +582,203 @@ def _validate_python_script_contents(
         )
         if outside_path:
             return (
-                "Error: Python script contains path outside the allowed workspace: "
+                "Error: Python script contains path outside the allowed "
+                "workspace or system path string: "
                 f"'{outside_path}'"
             )
 
+    return None
+
+
+def _resolve_shell_path_token(token: str, base_dir: Path) -> Path:
+    path_obj = Path(os.path.expanduser(token))
+    if not path_obj.is_absolute():
+        path_obj = base_dir / path_obj
+    return path_obj.resolve(strict=False)
+
+
+def _active_workspace_skill_write_roots(base_dir: Path) -> tuple[Path, ...]:
+    current_skill = get_skill_context_manager().current_skill
+    if not current_skill:
+        return ()
+
+    workspace_dir = get_current_tool_base_dir().resolve(strict=False)
+    try:
+        workspace_dir.relative_to(get_current_tenant_root().resolve())
+    except ValueError:
+        workspace_dir = base_dir.resolve(strict=False)
+
+    if not is_safe_active_skill_name(current_skill):
+        return (
+            workspace_dir / "skills",
+            workspace_dir / ".disabled_skills",
+        )
+
+    return (
+        workspace_dir / "skills" / current_skill,
+        workspace_dir / ".disabled_skills" / current_skill,
+    )
+
+
+def _append_shell_redirect_targets(
+    tokens: list[str],
+    destinations: list[str],
+) -> None:
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token in _SHELL_REDIRECT_OPERATORS:
+            if i + 1 < len(tokens):
+                destinations.append(tokens[i + 1])
+            i += 2
+            continue
+        for op in sorted(_SHELL_REDIRECT_OPERATORS, key=len, reverse=True):
+            if token.startswith(op) and len(token) > len(op):
+                destinations.append(token[len(op) :])
+                break
+        i += 1
+
+
+def _append_unzip_destinations(
+    tokens: list[str],
+    destinations: list[str],
+) -> None:
+    i = 1
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "-d" and i + 1 < len(tokens):
+            destinations.append(tokens[i + 1])
+            i += 2
+            continue
+        if token.startswith("-d") and len(token) > 2:
+            destinations.append(token[2:])
+        i += 1
+
+
+def _append_copy_move_destinations(
+    tokens: list[str],
+    destinations: list[str],
+) -> None:
+    operands = [
+        token for token in tokens[1:] if token and not token.startswith("-")
+    ]
+    if len(operands) >= 2:
+        destinations.append(operands[-1])
+
+
+def _append_multi_target_destinations(
+    tokens: list[str],
+    destinations: list[str],
+) -> None:
+    destinations.extend(
+        token for token in tokens[1:] if token and not token.startswith("-")
+    )
+
+
+def _append_paths_after_first_operand(
+    tokens: list[str],
+    destinations: list[str],
+) -> None:
+    seen_first_operand = False
+    for token in tokens[1:]:
+        if not token or token.startswith("-"):
+            continue
+        if not seen_first_operand:
+            seen_first_operand = True
+            continue
+        destinations.append(token)
+
+
+def _append_remove_destinations(
+    tokens: list[str],
+    destinations: list[str],
+) -> None:
+    _append_multi_target_destinations(tokens, destinations)
+
+
+def _extract_shell_write_destinations(command: str) -> list[str]:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    if not tokens:
+        return []
+
+    destinations: list[str] = []
+    command_name = Path(tokens[0]).name
+    if command_name == "unzip":
+        _append_unzip_destinations(tokens, destinations)
+    elif command_name in {"cp", "mv", "install"}:
+        if command_name == "mv":
+            _append_multi_target_destinations(tokens, destinations)
+        else:
+            _append_copy_move_destinations(tokens, destinations)
+    elif command_name in {"chmod", "chown", "lchown"}:
+        _append_paths_after_first_operand(tokens, destinations)
+    elif command_name in {"mkdir", "touch"}:
+        _append_multi_target_destinations(tokens, destinations)
+    elif command_name in {"rm", "rmdir"}:
+        _append_remove_destinations(tokens, destinations)
+    elif command_name in _SHELL_WRITE_DESTINATION_COMMANDS:
+        _append_copy_move_destinations(tokens, destinations)
+    _append_shell_redirect_targets(tokens, destinations)
+    return destinations
+
+
+def _validate_workspace_skill_write_targets(
+    command: str,
+    base_dir: Path,
+) -> Optional[str]:
+    workspace_dir = get_current_tool_base_dir().resolve(strict=False)
+    try:
+        workspace_dir.relative_to(get_current_tenant_root().resolve())
+    except ValueError:
+        workspace_dir = base_dir.resolve(strict=False)
+
+    current_skill = get_skill_context_manager().current_skill
+    active_skill_roots = _active_workspace_skill_write_roots(base_dir)
+    for destination in _extract_shell_write_destinations(command):
+        if not destination or destination in {".", ".."}:
+            continue
+        resolved = _resolve_shell_path_token(destination, base_dir)
+        if any(
+            resolved == root or resolved.is_relative_to(root)
+            for root in active_skill_roots
+        ):
+            if not is_safe_active_skill_name(current_skill):
+                return (
+                    "Error: Shell command writes directly into the workspace "
+                    "skill directory. Use the skill import or edit APIs so "
+                    f"security scanning runs: '{destination}'"
+                )
+            if is_created_workspace_skill_write_target(
+                resolved,
+                workspace_dir,
+                current_skill=current_skill,
+            ):
+                continue
+            return (
+                "Error: Shell command writes directly into the workspace "
+                "skill directory. Use the skill import or edit APIs so "
+                f"security scanning runs: '{destination}'"
+            )
+        if not any(
+            resolved == workspace_dir / root_name
+            or resolved.is_relative_to(workspace_dir / root_name)
+            for root_name in ("skills", ".disabled_skills")
+        ):
+            continue
+        if is_created_workspace_skill_write_target(
+            resolved,
+            workspace_dir,
+            current_skill=current_skill,
+        ):
+            continue
+        return (
+            "Error: Shell command writes directly into the workspace "
+            "skill directory. Use the skill import or edit APIs so "
+            f"security scanning runs: '{destination}'"
+        )
     return None
 
 
@@ -455,6 +792,14 @@ def _validate_shell_paths(command: str, base_dir: Path) -> Optional[str]:
     Returns:
         Error message if any path escapes the tenant boundary, None otherwise.
     """
+    env_path_ref = _find_disallowed_shell_env_path_reference(command)
+    if env_path_ref:
+        return (
+            "Error: Shell command references disallowed environment path "
+            f"variable: '{env_path_ref}'. Use an explicit workspace-relative "
+            "path instead."
+        )
+
     file_paths, has_code_exec = _extract_path_tokens(command)
 
     # Reject commands with code execution flags (-c, -e, etc.)
@@ -468,6 +813,8 @@ def _validate_shell_paths(command: str, base_dir: Path) -> Optional[str]:
         # Skip checking if it's clearly not a path
         if not token or token in (".", ".."):
             continue
+        if _is_allowed_system_path_token(token):
+            continue
 
         # Check if the path is within tenant boundary, using base_dir for relative paths
         if not is_path_within_tenant_with_base(token, base_dir=base_dir):
@@ -479,6 +826,13 @@ def _validate_shell_paths(command: str, base_dir: Path) -> Optional[str]:
     python_error = _validate_python_script_contents(command, base_dir)
     if python_error:
         return python_error
+
+    skill_write_error = _validate_workspace_skill_write_targets(
+        command,
+        base_dir,
+    )
+    if skill_write_error:
+        return skill_write_error
 
     return None
 
@@ -720,20 +1074,132 @@ def _raise_shell_error(error_type: str, detail: str) -> None:
     raise ToolExecutionError(error_type=error_type, detail=detail)
 
 
+def _is_shell_timeout_failure(returncode: int, stderr_lower: str) -> bool:
+    timeout_markers = (
+        "timeouterror",
+        "connecttimeout",
+        "read timed out",
+        "connection timed out",
+    )
+    return returncode in {-1, 28} or any(
+        marker in stderr_lower for marker in timeout_markers
+    )
+
+
+def _is_process_limit_signal(
+    returncode: int,
+    process_limits_enforced: bool,
+) -> bool:
+    if not process_limits_enforced or returncode >= 0:
+        return False
+    process_limit_signals = {
+        getattr(signal, signal_name)
+        for signal_name in ("SIGKILL", "SIGXCPU")
+        if hasattr(signal, signal_name)
+    }
+    return abs(returncode) in process_limit_signals
+
+
+def _is_memory_limit_failure(
+    stderr_str: str,
+    memory_limit_enforced: bool,
+) -> bool:
+    memory_limit_markers = (
+        "MemoryError",
+        "Cannot allocate memory",
+        "Killed",
+    )
+    return memory_limit_enforced and any(
+        marker in stderr_str for marker in memory_limit_markers
+    )
+
+
 def _classify_shell_failure(
     returncode: int,
     stderr_str: str,
+    *,
+    process_limits_enforced: bool = False,
+    memory_limit_enforced: bool = False,
 ) -> str:
-    if returncode == -1 or "TimeoutError:" in stderr_str:
+    stderr_lower = stderr_str.lower()
+    if _is_shell_timeout_failure(returncode, stderr_lower):
         return "tool_timeout"
     if "outside the allowed workspace" in stderr_str:
         return "permission_denied"
+    if _is_process_limit_signal(returncode, process_limits_enforced):
+        return "process_limit_exceeded"
+    if _is_memory_limit_failure(stderr_str, memory_limit_enforced):
+        return "process_limit_exceeded"
     return "shell_command_failed"
+
+
+def _format_process_limit_diagnostic(
+    response_text: str,
+    policy: CurrentProcessLimitPolicy,
+) -> str:
+    if not policy.diagnostic or policy.should_enforce:
+        return response_text
+    return (
+        f"{response_text}\n" f"[process-limit diagnostic]\n{policy.diagnostic}"
+    )
+
+
+def _shell_slot_key(policy: CurrentProcessLimitPolicy) -> str:
+    return policy.tenant_id or "default"
+
+
+@asynccontextmanager
+async def _tenant_shell_execution_slot(
+    policy: CurrentProcessLimitPolicy,
+) -> AsyncIterator[None]:
+    """Hold one process-local tenant shell execution slot when configured."""
+    max_concurrent = policy.shell_max_concurrent
+    if not policy.enabled or policy.scope != "shell" or max_concurrent is None:
+        yield
+        return
+
+    key = _shell_slot_key(policy)
+    timeout = policy.shell_acquire_timeout_seconds
+    acquired = False
+    try:
+        async with _SHELL_SLOT_CONDITION:
+            try:
+                await asyncio.wait_for(
+                    _SHELL_SLOT_CONDITION.wait_for(
+                        lambda: _SHELL_SLOT_COUNTS.get(key, 0)
+                        < max_concurrent,
+                    ),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                _raise_shell_error(
+                    "shell_concurrency_limit_exceeded",
+                    (
+                        f"Tenant {key} has no available shell execution "
+                        f"slots (max {max_concurrent}) within {timeout} "
+                        "seconds."
+                    ),
+                )
+            _SHELL_SLOT_COUNTS[key] = _SHELL_SLOT_COUNTS.get(key, 0) + 1
+            acquired = True
+        yield
+    finally:
+        if acquired:
+            async with _SHELL_SLOT_CONDITION:
+                current = _SHELL_SLOT_COUNTS.get(key, 0)
+                if current <= 1:
+                    _SHELL_SLOT_COUNTS.pop(key, None)
+                else:
+                    _SHELL_SLOT_COUNTS[key] = current - 1
+                _SHELL_SLOT_CONDITION.notify_all()
 
 
 def _prepare_subprocess_env() -> dict[str, str]:
     """Prepare subprocess environment with tenant env and active Python PATH."""
-    env = build_runtime_env()
+    env = build_runtime_env(
+        preserve_boundary_env_keys=_SHELL_PRESERVED_BOUNDARY_ENV_KEYS,
+    )
+    env = apply_runtime_claim_env(env)
     python_bin_dir = str(Path(sys.executable).parent)
     existing_path = env.get("PATH", "")
     env["PATH"] = (
@@ -741,7 +1207,75 @@ def _prepare_subprocess_env() -> dict[str, str]:
         if existing_path
         else python_bin_dir
     )
+    for key, value in _SUBPROCESS_THREAD_LIMIT_DEFAULTS.items():
+        env.setdefault(key, value)
     return env
+
+
+@dataclass(frozen=True)
+class PreparedShellCommand:
+    """Shell 工具共享的已校验启动参数。"""
+
+    command: str
+    working_dir: Path
+    env: dict[str, str]
+    python_runtime_guard: AbstractContextManager[None]
+
+
+@contextmanager
+def _python_runtime_guard_context(
+    guard: AbstractContextManager[str],
+) -> Iterator[None]:
+    with guard:
+        yield
+
+
+def prepare_shell_command(
+    command: str,
+    cwd: Optional[Path | str] = None,
+) -> PreparedShellCommand:
+    """归一化并校验 Shell 命令，生成可执行启动参数。"""
+    raw_cmd = (command or "").strip()
+    cmd = (
+        _collapse_embedded_newlines(raw_cmd)
+        if sys.platform == "win32"
+        else raw_cmd
+    )
+
+    from .shell_interceptor import intercept_command
+
+    cmd, _was_intercepted = intercept_command(cmd)
+
+    try:
+        working_dir = _resolve_cwd(cwd)
+    except TenantPathBoundaryError as e:
+        _raise_shell_error("permission_denied", f"Error: {e}")
+
+    path_error = _validate_shell_paths(cmd, base_dir=working_dir)
+    if path_error:
+        error_type = (
+            "permission_denied"
+            if "outside the allowed workspace" in path_error
+            else "invalid_arguments"
+        )
+        _raise_shell_error(error_type, path_error)
+
+    env = _prepare_subprocess_env()
+    python_runtime_guard = prepare_python_runtime_path_guard_env(
+        env,
+        tenant_root=get_current_tenant_root(),
+        base_dir=working_dir,
+        active_skill_base_dir=get_current_tool_base_dir(),
+    )
+
+    return PreparedShellCommand(
+        command=cmd,
+        working_dir=working_dir,
+        env=env,
+        python_runtime_guard=_python_runtime_guard_context(
+            python_runtime_guard,
+        ),
+    )
 
 
 def _format_shell_response(
@@ -768,12 +1302,14 @@ def _format_shell_response(
 
 async def _terminate_unix_process_group(
     proc: asyncio.subprocess.Process,
+    pgid: int | None = None,
 ) -> None:
     """Terminate a Unix subprocess group, escalating to SIGKILL if needed."""
-    try:
-        pgid = os.getpgid(proc.pid)
-    except ProcessLookupError:
-        pgid = proc.pid
+    if pgid is None:
+        try:
+            pgid = os.getpgid(proc.pid)
+        except ProcessLookupError:
+            pgid = proc.pid
     try:
         os.killpg(pgid, signal.SIGTERM)
     except ProcessLookupError:
@@ -791,6 +1327,8 @@ def _unix_process_group_exists(pgid: int) -> bool:
     try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
+        return False
+    except PermissionError:
         return False
     return True
 
@@ -816,6 +1354,20 @@ async def _wait_for_unix_process_group_exit(
         else:
             await asyncio.sleep(delay)
     return True
+
+
+async def _wait_for_unix_process_exit(
+    proc: asyncio.subprocess.Process,
+    timeout: float,
+) -> None:
+    """Wait until the shell process exits without waiting for pipe EOF."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while proc.returncode is None:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        await asyncio.sleep(min(0.05, remaining))
 
 
 async def _drain_unix_subprocess_output(
@@ -863,6 +1415,7 @@ async def _execute_unix_subprocess(
     working_dir: Path,
     timeout: int,
     env: dict[str, str],
+    preexec_fn: Callable[[], None] | None = None,
 ) -> tuple[int, str, str]:
     """Execute a shell command on Unix-like platforms."""
     stdout_chunks: list[bytes] = []
@@ -896,6 +1449,7 @@ async def _execute_unix_subprocess(
         bufsize=0,
         cwd=str(working_dir),
         env=env,
+        preexec_fn=preexec_fn,
         start_new_session=True,
     )
 
@@ -907,6 +1461,11 @@ async def _execute_unix_subprocess(
         returncode = proc.returncode if proc.returncode is not None else -1
         return returncode, smart_decode(stdout), smart_decode(stderr)
 
+    try:
+        process_group_id = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        process_group_id = proc.pid
+
     stdout_task = asyncio.create_task(
         _read_stream(proc.stdout, "stdout", stdout_chunks),
     )
@@ -916,19 +1475,23 @@ async def _execute_unix_subprocess(
     wait_task: asyncio.Task[int] | None = None
 
     try:
-        wait_task = asyncio.create_task(proc.wait())
-        tasks = (wait_task, stdout_task, stderr_task)
-        done, pending = await asyncio.wait(tasks, timeout=timeout)
-        if pending:
-            raise asyncio.TimeoutError
+        await _wait_for_unix_process_exit(proc, timeout=timeout)
         returncode = proc.returncode if proc.returncode is not None else -1
-        for task in done:
-            task.result()
-        return (
-            returncode,
-            smart_decode(b"".join(stdout_chunks)),
-            smart_decode(b"".join(stderr_chunks)),
-        )
+        await _terminate_unix_process_group(proc, process_group_id)
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(
+                    stdout_task,
+                    stderr_task,
+                    return_exceptions=True,
+                ),
+                timeout=1,
+            )
+        except asyncio.TimeoutError:
+            pass
+        stdout_str = smart_decode(b"".join(stdout_chunks))
+        stderr_str = smart_decode(b"".join(stderr_chunks))
+        return returncode, stdout_str, stderr_str
     except asyncio.TimeoutError:
         stderr_suffix = (
             f"⚠️ TimeoutError: The command execution exceeded "
@@ -937,7 +1500,7 @@ async def _execute_unix_subprocess(
             f"requires more time to complete."
         )
         try:
-            await _terminate_unix_process_group(proc)
+            await _terminate_unix_process_group(proc, process_group_id)
         except (ProcessLookupError, OSError):
             try:
                 proc.kill()
@@ -945,8 +1508,8 @@ async def _execute_unix_subprocess(
             except (ProcessLookupError, OSError):
                 pass
         timeout_tasks: list[Awaitable[Any]] = [stdout_task, stderr_task]
-        if wait_task is not None:
-            timeout_tasks.append(wait_task)
+        wait_task = asyncio.create_task(proc.wait())
+        timeout_tasks.append(wait_task)
         try:
             await asyncio.wait_for(
                 asyncio.gather(*timeout_tasks, return_exceptions=True),
@@ -973,6 +1536,7 @@ async def _execute_platform_subprocess(
     working_dir: Path,
     timeout: int,
     env: dict[str, str],
+    preexec_fn: Callable[[], None] | None = None,
 ) -> tuple[int, str, str]:
     """Execute a shell command on the active platform."""
     if sys.platform == "win32":
@@ -984,7 +1548,13 @@ async def _execute_platform_subprocess(
             timeout,
             env,
         )
-    return await _execute_unix_subprocess(cmd, working_dir, timeout, env)
+    return await _execute_unix_subprocess(
+        cmd,
+        working_dir,
+        timeout,
+        env,
+        preexec_fn=preexec_fn,
+    )
 
 
 # pylint: disable=too-many-branches, too-many-statements
@@ -1017,57 +1587,46 @@ async def execute_shell_command(
             return code will be -1 and stderr will contain timeout information.
     """
 
-    cmd = _collapse_embedded_newlines((command or "").strip())
-
-    # Intercept command and inject tenant isolation params if applicable
-    from .shell_interceptor import intercept_command
-
-    cmd, _was_intercepted = intercept_command(cmd)
-
-    # Validate and resolve the working directory against tenant boundary
-    try:
-        working_dir = _resolve_cwd(cwd)
-    except TenantPathBoundaryError as e:
-        _raise_shell_error("permission_denied", f"Error: {e}")
-
-    # Validate explicit path tokens in the command, using working_dir as base for relative paths
-    path_error = _validate_shell_paths(cmd, base_dir=working_dir)
-    if path_error:
-        error_type = (
-            "permission_denied"
-            if "outside the allowed workspace" in path_error
-            else "invalid_arguments"
-        )
-        _raise_shell_error(error_type, path_error)
-
-    env = _prepare_subprocess_env()
-    python_runtime_guard = prepare_python_runtime_path_guard_env(
-        env,
-        tenant_root=get_current_tenant_root(),
-        base_dir=working_dir,
-    )
+    prepared = prepare_shell_command(command, cwd)
+    process_limit_policy = resolve_current_process_limit_policy("shell")
+    preexec_fn = process_limit_policy.build_preexec_fn()
 
     try:
-        with python_runtime_guard:
-            (
-                returncode,
-                stdout_str,
-                stderr_str,
-            ) = await _execute_platform_subprocess(
-                cmd,
-                working_dir,
-                timeout,
-                env,
-            )
+        async with _tenant_shell_execution_slot(process_limit_policy):
+            with prepared.python_runtime_guard:
+                (
+                    returncode,
+                    stdout_str,
+                    stderr_str,
+                ) = await _execute_platform_subprocess(
+                    prepared.command,
+                    prepared.working_dir,
+                    timeout,
+                    prepared.env,
+                    preexec_fn=preexec_fn,
+                )
 
         response_text = _format_shell_response(
             returncode,
             stdout_str,
             stderr_str,
         )
+        response_text = _format_process_limit_diagnostic(
+            response_text,
+            process_limit_policy,
+        )
         if returncode != 0:
             _raise_shell_error(
-                _classify_shell_failure(returncode, stderr_str),
+                _classify_shell_failure(
+                    returncode,
+                    stderr_str,
+                    process_limits_enforced=(
+                        process_limit_policy.should_enforce
+                    ),
+                    memory_limit_enforced=(
+                        process_limit_policy.should_enforce_memory_limit
+                    ),
+                ),
                 response_text,
             )
 

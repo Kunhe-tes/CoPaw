@@ -15,6 +15,7 @@ class AssetUploadRecord(BaseModel):
     file_size: int = Field(..., ge=0)
     asset_path: str = Field(..., min_length=1, max_length=512)
     source_id: Optional[str] = Field(default=None, max_length=64)
+    template_flag: Optional[str] = Field(default=None, max_length=64)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -26,6 +27,7 @@ class AssetUploadRecordCreate(BaseModel):
     file_size: int = Field(..., ge=0)
     asset_path: str = Field(..., min_length=1, max_length=512)
     source_id: Optional[str] = Field(default=None, max_length=64)
+    template_flag: Optional[str] = Field(default=None, max_length=64)
 
 
 class PaginatedAssetUploadRecords(BaseModel):
@@ -42,6 +44,7 @@ class TemplateItem(BaseModel):
 
     templateId: int
     templateName: str
+    templateFlag: Optional[str] = None
 
 
 class AssetUploadFileNameList(BaseModel):
@@ -74,3 +77,28 @@ class TemplateResultResponse(BaseModel):
     message: str = Field(default="OK")
     result: bool = True
     data: Optional[dict] = None
+
+
+class QueryIdKeyRequest(BaseModel):
+    """查询ID Key的请求体。"""
+
+    templateName: str = Field(..., min_length=1, max_length=512)
+    userId: str = Field(..., min_length=1, max_length=128)
+    bbkOrgId: str = Field(..., min_length=1, max_length=64)
+    idKey: str = Field(..., min_length=1, max_length=128)
+
+
+class QueryIdKeyData(BaseModel):
+    """查询ID Key返回的数据。"""
+
+    templateId: int
+    resultId: str
+    fileName: str
+
+
+class QueryIdKeyResponse(BaseModel):
+    """查询ID Key的响应。"""
+
+    code: int = Field(default=200)
+    error: Optional[str] = Field(default=None)
+    data: Optional[QueryIdKeyData] = None

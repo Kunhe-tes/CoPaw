@@ -15,6 +15,7 @@ class MarketItem(BaseModel):
     item_id: str
     item_type: str = "skill"
     name: str
+    skill_id: str = ""  # 技能唯一标识符，跨租户共享
     chinese_name: str = ""
     description: str = ""
     guidance: str = ""
@@ -27,6 +28,9 @@ class MarketItem(BaseModel):
     status: str = "active"
     created_at: Optional[str] = None  # ISO8601 string from index.json
     updated_at: Optional[str] = None
+
+    # 新增字段：是否纳入统计（仅对 skill 类型生效）
+    include_in_statistics: bool = False  # 默认不纳入统计
 
 
 class CategoryItem(BaseModel):
@@ -45,3 +49,23 @@ class SkillManifest(BaseModel):
     source: str = "customized"
     distributed_by: Optional[str] = None
     received_version: Optional[str] = None
+
+
+class ExpertVersion(BaseModel):
+    """社区专家版本快照."""
+
+    version_id: str
+    created_at: str
+    created_by: str = ""
+    created_by_name: str = ""
+    description: str = ""
+    signature: str = ""
+    is_current: bool = False
+    is_initial: bool = False
+
+
+class ExpertVersionsManifest(BaseModel):
+    """社区专家版本清单."""
+
+    expert_name: str = ""
+    versions: list[ExpertVersion] = Field(default_factory=list)

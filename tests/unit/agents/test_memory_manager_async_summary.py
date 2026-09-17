@@ -45,6 +45,33 @@ class _ConcreteMemoryManager(BaseMemoryManager):
         del messages, kwargs
         return ""
 
+    async def archive_checkpoint_messages(
+        self,
+        **kwargs,
+    ) -> Any:  # pragma: no cover
+        del kwargs
+
+    async def schedule_precompaction(
+        self,
+        **kwargs,
+    ) -> bool:  # pragma: no cover
+        del kwargs
+        return False
+
+    async def install_ready_precompaction(
+        self,
+        **kwargs,
+    ) -> bool:  # pragma: no cover
+        del kwargs
+        return False
+
+    async def recover_evidence(self, **kwargs) -> Any:  # pragma: no cover
+        del kwargs
+        return []
+
+    async def reset_context_epoch(self, **kwargs) -> Any:  # pragma: no cover
+        del kwargs
+
     async def dream_memory(
         self,
         tenant_id: str | None = None,
