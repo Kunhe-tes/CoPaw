@@ -113,6 +113,27 @@ def _fresh(snapshot: WorkspaceSkillSnapshot, manifest_path: Path) -> bool:
     )
 
 
+def _read_workspace_skill_manifest(
+    workspace_dir: Path,
+    *,
+    reconcile: bool,
+    fail_closed: bool,
+) -> tuple[dict[str, Any], bool]:
+    from .skills_manager import read_skill_manifest
+
+    try:
+        return read_skill_manifest(workspace_dir, reconcile=reconcile), True
+    except Exception as exc:  # noqa: BLE001
+        if not fail_closed:
+            raise
+        logger.warning(
+            "Workspace skill manifest unavailable; continuing without "
+            "workspace skills: %s",
+            exc,
+        )
+        return {"skills": {}}, False
+
+
 # pylint: disable-next=too-many-statements
 def get_workspace_skill_snapshot(
     workspace_dir: Path,
@@ -148,22 +169,11 @@ def get_workspace_skill_snapshot(
                 )
                 return previous
         reconcile_started_at = time.monotonic()
-        manifest_available = True
-        try:
-            manifest = read_skill_manifest(workspace_dir, reconcile=reconcile)
-        except Exception as exc:  # noqa: BLE001
-            if not fail_closed:
-                raise
-            # Query startup is fail-closed: an unreadable or malformed
-            # manifest must not prevent the query from running, and must not
-            # allow any workspace skill whose state cannot be confirmed.
-            logger.warning(
-                "Workspace skill manifest unavailable; continuing without "
-                "workspace skills: %s",
-                exc,
-            )
-            manifest_available = False
-            manifest = {"skills": {}}
+        manifest, manifest_available = _read_workspace_skill_manifest(
+            workspace_dir,
+            reconcile=reconcile,
+            fail_closed=fail_closed,
+        )
         logger.debug(
             "skill_manifest_reconcile_ms=%.1f skill_manifest_cache_hit=false",
             (time.monotonic() - reconcile_started_at) * 1000,
