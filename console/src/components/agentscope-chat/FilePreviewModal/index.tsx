@@ -42,6 +42,7 @@ import type { FilePreviewPresentation } from "../FilePreviewPresentationContext"
 import styles from "./index.module.less";
 import { useHtmlAnnotations } from "../HtmlAnnotations/context";
 import { useHtmlAnnotationController } from "../HtmlAnnotations/useHtmlAnnotationController";
+import { cronJobApi } from "@/api/modules/cronjob";
 
 let splitPreviewCount = 0;
 
@@ -100,7 +101,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     enableAnnotations = false,
   } = props;
   const iframeState = useIframeStore((state) => state);
-  const { userId, bbk, pageSource, plantformSource } = iframeState;
+  const { userId, bbk, pageSource, platformSource } = iframeState;
   const [copied, setCopied] = useState(false);
   const [fullscreen, setFullscreen] = useState(presentation === "modal");
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
@@ -161,6 +162,11 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     () => extractTemplateIdFromUrl(fileUrl) || "",
     [fileUrl],
   );
+  useEffect(() => {
+    if (templateResult?.CRON_JOB_ID){
+      cronJobApi.markTaskRead(templateResult.CRON_JOB_ID, true).catch(() => {});
+    }
+  }, [templateResult]);
   // 计算有效的 templateId 和 resultId（当 custUid 存在时使用 activeTemplate 的值）
   // 若 clawPlanFailed 为 true（接口失败或返回空），则回退到 URL 中的 templateId/resultId
   const effectiveTemplateId = custUid
@@ -501,12 +507,12 @@ function FilePreviewModal(props: FilePreviewModalProps) {
         event_type: "button_click" as const,
         template_id: templateInfo?.templateId ?? null,
         result_id: effectiveResultId,
-        page_source: pageSource || null,
-        plantform_source: plantformSource || null,
+        page_source: pageSource || 'default',
+        platform_source: platformSource || 'default',
       };
       htmlPreviewEventsApi.recordClick(payload);
     }
-  }, [templateResult, templateInfo, htmlPreviewEventsApi, effectiveResultId, pageSource, plantformSource]);
+  }, [templateResult, templateInfo, htmlPreviewEventsApi, effectiveResultId, pageSource, platformSource]);
 
   const handleCopy = useCallback(async () => {
     try {
@@ -657,7 +663,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       rootResultId,
       rootTemplateId,
       pageSource,
-      plantformSource,
+      platformSource,
     }),
     [
       fileName,
@@ -671,7 +677,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       effectiveResultId,
       effectiveTemplateId,
       pageSource,
-      plantformSource,
+      platformSource,
     ],
   );
 

@@ -1,13 +1,11 @@
 /**
- * 智能财富工作台 —— 数据访问层
- *
- * 规划、场景与客户名单走真实后端接口（/wealth/plans、/wealth/scene-skills、
- * /wealth/name-list），不做假数据回退：接口不可达时读路径返回空、写路径直接
- * 抛错，避免联调期被 mock 掩盖问题。
- * 草稿仍为会话级内存实现；触达登记功能已下线，待外部触达接口就绪后重新接入。
+ * ！！！！注意：此页面需要单独评估
+ * ！！！！！！！
  */
 import { parseCron, serializeCron } from "@/utils/parseCron";
 import { request } from "../../api/request";
+import { buildAuthHeaders } from "../../api/authHeaders";
+// import { Base64 } from "js-base64";
 import { SCENE_CATEGORIES } from "./mock/data";
 import { DEFAULT_SCHEDULE, sceneStatKey } from "./utils";
 import type {
@@ -89,6 +87,7 @@ interface SceneSkillItem {
   cronExample?: string | null;
   mcpRelationList: string[];
   skillBbkLabel?: string | null;
+  bbkId?: string | null;
 }
 
 interface SceneSkillListResponse {
@@ -318,7 +317,15 @@ export interface TodayTaskRef {
   skillId: string;
   sceneName: string;
   category: string;
+  /** 所属规划来源：我的关注 / 行长关注 / 分行关注 */
+  source: string;
 }
+
+const CUSTOMER_LABEL_BY_PLAN_SOURCE: Record<string, string> = {
+  行长关注: "行长指派",
+  分行关注: "分行重点",
+  我的关注: "我的关注",
+};
 
 /**
  * 拉取今日任务对应的客户经营清单。
@@ -366,6 +373,7 @@ export async function fetchTodayCustomers(
         time: item.strongContactTime ?? "",
         note: "",
         opportunities: reason ? [reason] : [],
+        bbkOrgId: item.bbkOrgId ?? undefined,
         link: item.filename ?? undefined,
       });
     }
@@ -399,8 +407,8 @@ export async function fetchDoneCustomers(
 
 /**
  * 客户视角名单：一次查询（不带 skillId），直接映射外部已聚合的 data.list。
- * 重点标签列展示客户命中的场景名（skillId → 今日任务树场景名映射，
- * 不在今日树中的技能不产生标签）。
+ * 重点标签列按命中技能所属规划的创建角色展示；不在今日任务树中的
+ * 技能无法关联本地规划来源，因此不产生标签。
  */
 async function fetchCustomerViewCustomers(
   tasks: TodayTaskRef[],
@@ -418,13 +426,20 @@ async function fetchCustomerViewCustomers(
     const scenes = skillIds
       .map((sid) => sceneBySkill.get(sid))
       .filter((t): t is TodayTaskRef => Boolean(t));
+    const labels = [
+      ...new Set(
+        scenes
+          .map((scene) => CUSTOMER_LABEL_BY_PLAN_SOURCE[scene.source])
+          .filter(Boolean),
+      ),
+    ];
     const reason = item.recomReason ?? "";
     return {
       id: item.custUid,
       custUid: item.custUid,
       skillId: scenes[0]?.skillId ?? skillIds[0] ?? "",
       name: item.custNm,
-      label: scenes.map((t) => t.sceneName).join("、"),
+      label: labels.join("、"),
       reason,
       category: scenes[0]?.category ?? "",
       task: opts.done
@@ -434,10 +449,116 @@ async function fetchCustomerViewCustomers(
       channel: item.touchMethod ?? "",
       time: item.strongContactTime ?? "",
       note: "",
+      bbkOrgId: item.bbkOrgId ?? undefined,
       opportunities: reason ? [reason] : [],
       link: item.filename ?? undefined,
     };
   });
+};
+
+// ---------------------------------------------------------------------------
+// 电访 / 客户洞察外链（get-sign 签名 + base64 拼接）
+// ---------------------------------------------------------------------------
+
+interface GetSignResponse {
+  code?: string;
+  message?: string;
+  data?: string;
+  success?: boolean;
+}
+
+function isDevEnv(): boolean {
+  const href = typeof window !== "undefined" ? window.location.href : "";
+  return (
+    href.includes(".xxx.") ||
+    href.includes("localhost") ||
+    href.includes("127.0.0.1")
+  );
+}
+
+function signBaseUrl(): string {
+  return isDevEnv()
+    ? "https://xxx.st.xxxx.cn"
+    : "https://xxx.as.xxxx.cn";
+}
+
+function insightBaseUrl(): string {
+  return isDevEnv()
+    ? "https://xxx.st.xxxx.cn/#"
+    : "https://xxx.oa.xxxx.cn/#";
+}
+
+function telBaseUrl(): string {
+  return isDevEnv()
+    ? "https://xxx.st.xxxx.cn"
+    : "https://xxx.oa.xxxx.cn";
+}
+
+/**
+ * 调用 /expert/get-sign 获取签名校验串。
+ * header 通过自定义头 x-header-cookie 透传登录态 cookie（取 buildAuthHeaders 的
+ * x-header-cookie），入参为 bbkOrgId 与 custUid；出参 data 字段即为 signature。
+ *
+ * 注意：不能直接设置标准 Cookie 头——Cookie 属于浏览器禁止 JS 修改的
+ * forbidden header name，跨域请求中会被剥离。项目后端惯例是从
+ * `Cookie` 或 `x-header-cookie` 中读取，故这里用自定义头透传。
+ */
+export async function fetchSchemeSignature(
+  custUid: string,
+  bbkOrgId: string,
+): Promise<string> {
+  const auth = buildAuthHeaders();
+  console.log("auth", auth);
+  const resp = await fetch(`${signBaseUrl()}/expert/get-sign`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      "x-header-cookie": auth["x-header-cookie"] ?? "",
+      "Cookie": auth["x-header-cookie"] ?? ""
+    },
+    body: JSON.stringify({ bbkOrgId, custUid }),
+  });
+  if (!resp.ok) {
+    throw new Error(`get-sign 接口请求失败：HTTP ${resp.status}`);
+  }
+  const json = (await resp.json()) as GetSignResponse;
+  if (!json.success) {
+    throw new Error(json.message || "get-sign 接口返回失败");
+  }
+  return json.data || "";
+}
+
+/**
+ * 构建电访外链：`{tel域名}?custUid=..&bbkOrgId=..&signature=../wpcontactpanelv2/`
+ * query 值经 URL 编码，结构便于对端按 custUid/bbkOrgId 解析。
+ */
+export function buildTelUrl(
+  custUid: string,
+  bbkOrgId: string,
+  signature: string,
+): string {
+  const params = new URLSearchParams({ custUid, bbkOrgId, signature });
+  return `${telBaseUrl()}?${params.toString()}#/wpcontactpanelv2`;
+}
+
+/**
+ * 构建客户洞察外链：query 串（key/value 均 URL 编码）整体 base64 后拼接到 `/homepage/`。
+ * base64 采用标准 Base64，与对端 atob 解码/示例格式一致。
+ */
+export function buildInsightUrl(
+  custUid: string,
+  bbkOrgId: string,
+  signature: string,
+): string {
+  const parts = [
+    encodeURIComponent("custUid") + "=" + encodeURIComponent(custUid),
+    encodeURIComponent("bbkOrgId") + "=" + encodeURIComponent(bbkOrgId),
+    encodeURIComponent("signature") + "=" + encodeURIComponent(signature),
+  ];
+  const queryString = parts.join("&");
+  // const base64Str = Base64.encode(queryString);
+  return `${insightBaseUrl()}/homepage/${queryString}`;
 }
 
 // ---------------------------------------------------------------------------
