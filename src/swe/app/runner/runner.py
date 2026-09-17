@@ -4100,107 +4100,30 @@ class AgentRunner(Runner):
         workspace_skill_snapshot: Any | None = None,
     ) -> SWEAgent:
         """创建 SWEAgent，并注入本轮请求上下文。"""
-        request_enable_subagents = getattr(request, "enable_subagents", False)
-        if isinstance(request_enable_subagents, str):
-            request_enable_subagents = (
-                request_enable_subagents.strip().lower()
-                in {
-                    "true",
-                    "1",
-                    "yes",
-                }
-            )
-        request_context = {
+        request_details = {
             "session_id": session_id,
             "user_id": user_id,
             "channel": channel,
             "chat_id": chat.id if chat is not None else "",
             "turn_id": turn_id,
-            "msgid": (getattr(request, "channel_meta", None) or {}).get(
-                "msgid",
-            ),
-            "agent_id": self.agent_id,
-            "tenant_id": self.tenant_id or "",
-            "agent_role": "main",
-            "enable_subagents": bool(request_enable_subagents),
-            "source_id": _request_source_id(request),
-            "user_name": _request_user_name(request),
-            "bbk_id": _request_bbk_id(request),
-            "trace_id": getattr(request, "trace_id", None),
-            "execution_origin": getattr(request, "execution_origin", None),
-            "_task_tracker": self._task_tracker,
-            "cron_execution_key": getattr(
-                request,
-                "cron_execution_key",
-                None,
-            ),
-            "cron_persistence_key": getattr(
-                request,
-                "cron_persistence_key",
-                None,
-            ),
-            "cron_job_id": getattr(request, "cron_job_id", None),
             "current_user_text": current_user_text,
-            "channel_manager": getattr(
-                getattr(self, "_workspace", None),
-                "channel_manager",
-                None,
-            ),
             "transcript_path": (
                 self.session._get_save_path(session_id, user_id)
                 if hasattr(self.session, "_get_save_path")
                 else ""
             ),
-            "hook_overlay": hook_overlay.model_dump(
-                mode="json",
-                by_alias=True,
-            ),
-            "_hook_overlay_model": hook_overlay,
         }
+        request_context = self._build_query_request_context(
+            request=request,
+            request_details=request_details,
+            hook_overlay=hook_overlay,
+        )
         channel_meta = getattr(request, "channel_meta", None) or {}
-        annotation_context = channel_meta.get(
-            "_document_annotation_context",
+        selected_expert_id = self._apply_query_mode_context(
+            request_context=request_context,
+            request=request,
+            channel_meta=channel_meta,
         )
-        if isinstance(annotation_context, dict):
-            request_context["_document_annotation_context"] = (
-                annotation_context
-            )
-        goal_id = channel_meta.get("goal_id")
-        goal_mode_enabled = bool(channel_meta.get("goal_mode_enabled", False))
-        goal_request = bool(goal_id) or goal_mode_enabled
-        if isinstance(goal_id, str) and goal_id:
-            request_context["goal_id"] = goal_id
-        request_context["goal_mode_enabled"] = goal_mode_enabled
-        plan_mode_enabled = (
-            False
-            if (
-                goal_request
-                or request_context.get("execution_origin") == "scheduled"
-            )
-            else bool(channel_meta.get(_PLAN_MODE_META_KEY, False))
-        )
-        request_context[_PLAN_MODE_META_KEY] = plan_mode_enabled
-        request_context[_PLAN_REQUEST_MODE_KEY] = (
-            "plan" if plan_mode_enabled else "normal"
-        )
-        plan_response = channel_meta.get(_PLAN_INTERACTION_RESPONSE_KEY)
-        if isinstance(plan_response, dict):
-            request_context[_PLAN_INTERACTION_RESPONSE_KEY] = plan_response
-        accepted_plan = channel_meta.get("accepted_plan")
-        if (
-            isinstance(accepted_plan, dict)
-            and channel_meta.get(_ACCEPTED_PLAN_SOURCE_META_KEY)
-            == _ACCEPTED_PLAN_SERVER_SOURCE
-        ):
-            request_context["accepted_plan"] = accepted_plan
-            request_context[_ACCEPTED_PLAN_SOURCE_META_KEY] = (
-                _ACCEPTED_PLAN_SERVER_SOURCE
-            )
-        selected_expert_id = (
-            None if goal_request else _request_selected_expert_id(request)
-        )
-        if plan_mode_enabled:
-            selected_expert_id = None
         self._apply_selected_expert_context(
             request_context=request_context,
             selected_expert_id=selected_expert_id,
@@ -4230,6 +4153,118 @@ class AgentRunner(Runner):
             task_tracker=self._task_tracker,
             source_tool_versions=source_tool_versions,
         )
+
+    def _build_query_request_context(
+        self,
+        *,
+        request: AgentRequest,
+        request_details: dict[str, Any],
+        hook_overlay: HookSessionOverlay,
+    ) -> dict[str, Any]:
+        return {
+            **request_details,
+            "msgid": (getattr(request, "channel_meta", None) or {}).get(
+                "msgid",
+            ),
+            "agent_id": self.agent_id,
+            "tenant_id": self.tenant_id or "",
+            "agent_role": "main",
+            "enable_subagents": self._request_allows_subagents(request),
+            "source_id": _request_source_id(request),
+            "user_name": _request_user_name(request),
+            "bbk_id": _request_bbk_id(request),
+            "trace_id": getattr(request, "trace_id", None),
+            "execution_origin": getattr(request, "execution_origin", None),
+            "_task_tracker": self._task_tracker,
+            "cron_execution_key": getattr(
+                request,
+                "cron_execution_key",
+                None,
+            ),
+            "cron_persistence_key": getattr(
+                request,
+                "cron_persistence_key",
+                None,
+            ),
+            "cron_job_id": getattr(request, "cron_job_id", None),
+            "channel_manager": getattr(
+                getattr(self, "_workspace", None),
+                "channel_manager",
+                None,
+            ),
+            "hook_overlay": hook_overlay.model_dump(
+                mode="json",
+                by_alias=True,
+            ),
+            "_hook_overlay_model": hook_overlay,
+        }
+
+    @staticmethod
+    def _request_allows_subagents(request: AgentRequest) -> bool:
+        enabled = getattr(request, "enable_subagents", False)
+        if isinstance(enabled, str):
+            return enabled.strip().lower() in {"true", "1", "yes"}
+        return bool(enabled)
+
+    def _apply_query_mode_context(
+        self,
+        *,
+        request_context: dict[str, Any],
+        request: AgentRequest,
+        channel_meta: dict[str, Any],
+    ) -> str | None:
+        annotation_context = channel_meta.get(
+            "_document_annotation_context",
+        )
+        if isinstance(annotation_context, dict):
+            request_context["_document_annotation_context"] = (
+                annotation_context
+            )
+        goal_request = self._apply_goal_request_context(
+            request_context,
+            channel_meta,
+        )
+        plan_mode_enabled = (
+            False
+            if (
+                goal_request
+                or request_context.get("execution_origin") == "scheduled"
+            )
+            else bool(channel_meta.get(_PLAN_MODE_META_KEY, False))
+        )
+        request_context[_PLAN_MODE_META_KEY] = plan_mode_enabled
+        request_context[_PLAN_REQUEST_MODE_KEY] = (
+            "plan" if plan_mode_enabled else "normal"
+        )
+        plan_response = channel_meta.get(_PLAN_INTERACTION_RESPONSE_KEY)
+        if isinstance(plan_response, dict):
+            request_context[_PLAN_INTERACTION_RESPONSE_KEY] = plan_response
+        accepted_plan = channel_meta.get("accepted_plan")
+        if (
+            isinstance(accepted_plan, dict)
+            and channel_meta.get(_ACCEPTED_PLAN_SOURCE_META_KEY)
+            == _ACCEPTED_PLAN_SERVER_SOURCE
+        ):
+            request_context["accepted_plan"] = accepted_plan
+            request_context[_ACCEPTED_PLAN_SOURCE_META_KEY] = (
+                _ACCEPTED_PLAN_SERVER_SOURCE
+            )
+        selected_expert_id = None
+        if not goal_request and not plan_mode_enabled:
+            selected_expert_id = _request_selected_expert_id(request)
+        return selected_expert_id
+
+    @staticmethod
+    def _apply_goal_request_context(
+        request_context: dict[str, Any],
+        channel_meta: dict[str, Any],
+    ) -> bool:
+        goal_id = channel_meta.get("goal_id")
+        goal_mode_enabled = bool(channel_meta.get("goal_mode_enabled", False))
+        if isinstance(goal_id, str) and goal_id:
+            request_context["goal_id"] = goal_id
+        request_context["goal_mode_enabled"] = goal_mode_enabled
+        return bool(goal_id) or goal_mode_enabled
 
     def _apply_selected_expert_context(
         self,
