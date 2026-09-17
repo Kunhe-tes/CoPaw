@@ -14,7 +14,7 @@ from swe.app.wealth_plans import router as wealth_router
 from swe.app.wealth_plans.models import PlanUpsertRequest, SceneSkillItem
 from swe.app.wealth_plans.store import WealthPlanStore
 
-VIEWER = {"X-User-Id": "zhangwl"}
+VIEWER = {"X-User-Id": "zhangwl", "X-Bbk-Id": "100"}
 
 
 @pytest.fixture()
@@ -237,7 +237,9 @@ async def test_update_plan_applies_scene_branch_validation(
     assert resp.status_code == 403
 
 
-def test_list_visible_to_creator_and_target_only(client: TestClient) -> None:
+def test_list_visible_to_everyone_in_same_branch_only(
+    client: TestClient,
+) -> None:
     created = client.post(
         "/api/wealth/plans",
         json=plan_payload(),
@@ -247,11 +249,15 @@ def test_list_visible_to_creator_and_target_only(client: TestClient) -> None:
     creator_items = client.get("/api/wealth/plans", headers=VIEWER).json()
     target_items = client.get(
         "/api/wealth/plans",
-        headers={"X-User-Id": "chenjy"},
+        headers={"X-User-Id": "chenjy", "X-Bbk-Id": "100"},
     ).json()
     outsider_items = client.get(
         "/api/wealth/plans",
-        headers={"X-User-Id": "wangly"},
+        headers={"X-User-Id": "wangly", "X-Bbk-Id": "100"},
+    ).json()
+    other_branch_items = client.get(
+        "/api/wealth/plans",
+        headers={"X-User-Id": "zhangwl", "X-Bbk-Id": "200"},
     ).json()
 
     assert [p["id"] for p in creator_items["items"]] == [created["id"]]
@@ -263,7 +269,9 @@ def test_list_visible_to_creator_and_target_only(client: TestClient) -> None:
     )
     assert [p["id"] for p in target_items["items"]] == [created["id"]]
     assert target_items["items"][0]["editable"] is False
-    assert outsider_items["items"] == []
+    assert [p["id"] for p in outsider_items["items"]] == [created["id"]]
+    assert outsider_items["items"][0]["editable"] is False
+    assert other_branch_items["items"] == []
 
 
 def test_list_branch_wide_for_president_and_middle(client: TestClient) -> None:
@@ -290,37 +298,45 @@ def test_list_branch_wide_for_president_and_middle(client: TestClient) -> None:
         ]
         assert [p["id"] for p in items] == [created["id"]]
         assert items[0]["editable"] is False  # 可见但只读
-    assert (
-        client.get("/api/wealth/plans", headers=former_middle).json()["items"]
-        == []
-    )
-    assert client.get("/api/wealth/plans", headers=rm).json()["items"] == []
+    assert [
+        p["id"]
+        for p in client.get(
+            "/api/wealth/plans",
+            headers=former_middle,
+        ).json()["items"]
+    ] == [created["id"]]
+    assert [
+        p["id"]
+        for p in client.get("/api/wealth/plans", headers=rm).json()["items"]
+    ] == [created["id"]]
     assert (
         client.get("/api/wealth/plans", headers=other_branch).json()["items"]
         == []
     )
 
 
-def test_detail_visible_to_branch_peer_readonly(client: TestClient) -> None:
+def test_detail_visible_to_same_branch_peer_readonly(
+    client: TestClient,
+) -> None:
     created = client.post(
         "/api/wealth/plans",
         json=plan_payload(),
         headers={**VIEWER, "X-Bbk-Id": "100"},
     ).json()
-    president = {
+    branch_peer = {
         "X-User-Id": "wangly",
         "X-Bbk-Id": "100",
-        "X-Position-Id": "RB0306",
+        "X-Position-Id": "unknown",
     }
 
     detail = client.get(
         f"/api/wealth/plans/{created['id']}",
-        headers=president,
+        headers=branch_peer,
     )
     assert detail.status_code == 200
     assert detail.json()["editable"] is False
 
-    outsider = {**president, "X-Bbk-Id": "200"}
+    outsider = {**branch_peer, "X-Bbk-Id": "200"}
     resp = client.get(f"/api/wealth/plans/{created['id']}", headers=outsider)
     assert resp.status_code == 403
 
@@ -334,7 +350,7 @@ def test_get_detail_forbidden_for_outsider(client: TestClient) -> None:
 
     resp = client.get(
         f"/api/wealth/plans/{created['id']}",
-        headers={"X-User-Id": "wangly"},
+        headers={"X-User-Id": "zhangwl", "X-Bbk-Id": "200"},
     )
 
     assert resp.status_code == 403
@@ -728,7 +744,7 @@ async def test_board_status_aggregates_broadcast(
     creator_view = client.get("/api/wealth/plans", headers=VIEWER).json()
     target_view = client.get(
         "/api/wealth/plans",
-        headers={"X-User-Id": "chenjy"},
+        headers={"X-User-Id": "chenjy", "X-Bbk-Id": "100"},
     ).json()
 
     assert creator_view["items"][0]["board_status"] == "已自动下发"
@@ -770,11 +786,11 @@ async def test_board_status_recipient_failure(
     creator_view = client.get("/api/wealth/plans", headers=VIEWER).json()
     chenjy_view = client.get(
         "/api/wealth/plans",
-        headers={"X-User-Id": "chenjy"},
+        headers={"X-User-Id": "chenjy", "X-Bbk-Id": "100"},
     ).json()
     liuxt_view = client.get(
         "/api/wealth/plans",
-        headers={"X-User-Id": "liuxt"},
+        headers={"X-User-Id": "liuxt", "X-Bbk-Id": "100"},
     ).json()
 
     assert creator_view["items"][0]["board_status"] == "分发失败"

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from swe.app.wealth_plans.models import (
@@ -19,10 +21,12 @@ def make_plan(
     plan_id: str = "plan-1",
     sap_id: str = "zhangwl",
     targets: list[str] | None = None,
+    bbk_id: str = "100",
 ) -> WealthPlanRecord:
     return WealthPlanRecord(
         id=plan_id,
         sap_id=sap_id,
+        bbk_id=bbk_id,
         name="九月重点客户经营计划",
         source_label="行长关注",
         scenes=[
@@ -60,20 +64,30 @@ async def test_create_and_get_roundtrip() -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_for_viewer_covers_creator_and_target() -> None:
+async def test_list_for_viewer_is_scoped_only_by_branch() -> None:
     store = WealthPlanStore()
     await store.create(
         make_plan("plan-1", sap_id="zhangwl", targets=["chenjy"]),
     )
     await store.create(make_plan("plan-2", sap_id="liuxt", targets=[]))
+    await store.create(
+        make_plan(
+            "plan-3",
+            sap_id="waibu",
+            targets=["zhangwl", "chenjy"],
+            bbk_id="200",
+        ),
+    )
 
-    creator_view = await store.list_for_viewer("zhangwl", "rm", None)
-    target_view = await store.list_for_viewer("chenjy", "rm", None)
-    outsider_view = await store.list_for_viewer("wangly", "rm", None)
+    rm_view = await store.list_for_viewer("wangly", "rm", "100")
+    unknown_view = await store.list_for_viewer("wangly", "unknown", "100")
+    other_branch_view = await store.list_for_viewer("zhangwl", "rm", "200")
+    no_bbk_view = await store.list_for_viewer("zhangwl", "rm", None)
 
-    assert {r.id for r in creator_view} == {"plan-1"}
-    assert {r.id for r in target_view} == {"plan-1"}
-    assert outsider_view == []
+    assert {r.id for r in rm_view} == {"plan-1", "plan-2"}
+    assert {r.id for r in unknown_view} == {"plan-1", "plan-2"}
+    assert {r.id for r in other_branch_view} == {"plan-3"}
+    assert no_bbk_view == []
 
 
 @pytest.mark.asyncio
@@ -83,14 +97,14 @@ async def test_list_for_viewer_branch_wide_for_president_and_middle() -> None:
         make_plan("plan-1", sap_id="zhangwl", targets=["chenjy"]),
     )
     await store.create(make_plan("plan-2", sap_id="liuxt", targets=[]))
-    other_branch = make_plan("plan-3", sap_id="waibu", targets=[])
-    other_branch.bbk_id = "200"
+    other_branch = make_plan(
+        "plan-3",
+        sap_id="waibu",
+        targets=[],
+        bbk_id="200",
+    )
     await store.create(other_branch)
 
-    # 行长/中台看本行全部规划（fixture 默认 bbk_id=None，需显式补上）
-    for record in store._plans.values():
-        if record.id != "plan-3":
-            record.bbk_id = "100"
     president_view = await store.list_for_viewer("wangly", "president", "100")
     middle_view = await store.list_for_viewer("wangly", "middle", "100")
     rm_view = await store.list_for_viewer("wangly", "rm", "100")
@@ -98,8 +112,21 @@ async def test_list_for_viewer_branch_wide_for_president_and_middle() -> None:
 
     assert {r.id for r in president_view} == {"plan-1", "plan-2"}
     assert {r.id for r in middle_view} == {"plan-1", "plan-2"}
-    assert rm_view == []  # 客户经理不看本行全部
-    assert no_bbk_view == []  # bbk 缺失时退化为个人口径
+    assert {r.id for r in rm_view} == {"plan-1", "plan-2"}
+    assert no_bbk_view == []
+
+
+@pytest.mark.asyncio
+async def test_list_for_viewer_database_query_uses_only_branch() -> None:
+    db = AsyncMock()
+    db.fetch_all.return_value = []
+    store = WealthPlanStore(db)
+
+    assert await store.list_for_viewer("wangly", "unknown", "100") == []
+
+    sql, params = db.fetch_all.await_args.args
+    assert "WHERE p.bbk_id = %s" in " ".join(sql.split())
+    assert params == ("100",)
 
 
 @pytest.mark.asyncio

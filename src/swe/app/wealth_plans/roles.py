@@ -4,9 +4,7 @@
 岗位编号 → 角色映射必须与前端 console/src/pages/WealthWorkbench/permissions.ts
 的 POSITION_ROLE_MAP 保持一致；未识别岗位按最少权限处理（同客户经理口径）。
 
-可见范围（与产品确认）：
-- 客户经理：自己创建的规划 + 分发给自己的规划；
-- 支行行长 / 分行中台：本行（同 bbk_id）全部规划，不论分发给谁。
+规划可见范围统一按 bbk_id 隔离：所有角色只能查看本行规划。
 """
 
 from __future__ import annotations
@@ -24,17 +22,9 @@ POSITION_ROLE_MAP: dict[str, str] = {
     "RB0305": ROLE_MIDDLE,
 }
 
-# 可看本行全部规划的角色
-BRANCH_WIDE_ROLES = (ROLE_PRESIDENT, ROLE_MIDDLE)
-
 
 def resolve_role(position_id: str | None) -> str:
     """按岗位编号解析角色；缺失或未命中返回 unknown（最少权限）。"""
     if not position_id:
         return ROLE_UNKNOWN
     return POSITION_ROLE_MAP.get(position_id, ROLE_UNKNOWN)
-
-
-def can_view_branch_wide(role: str) -> bool:
-    """该角色是否可看本行全部规划。"""
-    return role in BRANCH_WIDE_ROLES
