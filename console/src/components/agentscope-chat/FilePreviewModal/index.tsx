@@ -502,7 +502,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
         template_id: templateInfo?.templateId ?? null,
         result_id: effectiveResultId,
         page_source: pageSource || null,
-        plantform_source: platformSource || null,
+        platform_source: platformSource || null,
       };
       htmlPreviewEventsApi.recordClick(payload);
     }
