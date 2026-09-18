@@ -486,6 +486,13 @@ def test_scene_skills_empty_when_external_absent(
     assert resp.json() == {"items": []}
 
 
+def test_scene_skills_accepts_other_category(client: TestClient) -> None:
+    resp = client.get("/api/wealth/scene-skills?category=other")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"items": []}
+
+
 def test_scene_skills_allows_empty_category(client: TestClient) -> None:
     """category 为空串表示查询全部大类，不再 400。"""
     resp = client.get("/api/wealth/scene-skills?category=")
