@@ -419,7 +419,7 @@ describe("WealthWorkbench store", () => {
     ).toContain("请设置");
   });
 
-  it("validateDraft 校验每周执行日与自定义 cron 表达式", () => {
+  it("validateDraft 校验每周执行日与自定义执行规则", () => {
     expect(
       validateDraft({
         name: "x",
@@ -431,7 +431,7 @@ describe("WealthWorkbench store", () => {
         name: "x",
         items: [makeItem({ schedule: { type: "custom", rawCron: "abc" } })],
       }),
-    ).toContain("cron");
+    ).toContain("自定义执行规则");
   });
 
   it("publishPlan 校验失败时不发请求并提示", async () => {

@@ -1,7 +1,13 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import styles from "../index.module.less";
-import { SceneDescription, StepIndicator } from "./index";
+import type { PlanItem, Scene } from "../types";
+import {
+  SceneDescription,
+  ScheduleEditor,
+  StepIndicator,
+  TaskSchedule,
+} from "./index";
 
 describe("SceneDescription", () => {
   it("用两行截断样式展示描述，并保留完整文本供悬停查看", () => {
@@ -31,5 +37,72 @@ describe("StepIndicator", () => {
     rerender(<StepIndicator active={false} completed={false} number={2} />);
     expect(screen.getByText("2")).not.toHaveClass(styles.stepActive);
     expect(screen.getByText("2")).not.toHaveClass(styles.stepComplete);
+  });
+});
+
+describe("ScheduleEditor", () => {
+  it("用执行频率下拉框展示可选周期，不暴露 cron 输入框", () => {
+    const item: PlanItem = {
+      id: "scene-1",
+      sceneName: "保障潜客经营",
+      categoryLabel: "保险",
+      categoryCode: "insurance",
+      mcpRelations: [],
+      direction: "优先触达高潜客户",
+      cycle: "本月",
+      start: "2026-09-01",
+      end: "2026-09-30",
+      schedule: { type: "custom", rawCron: "*/15 * * * *" },
+    };
+
+    render(<ScheduleEditor item={item} sceneName={item.sceneName} />);
+
+    const repeatRule = screen.getByLabelText("保障潜客经营执行频率");
+    expect(repeatRule).toHaveValue("custom");
+    expect(repeatRule).toHaveTextContent("每日");
+    expect(repeatRule).toHaveTextContent("每周");
+    expect(repeatRule).toHaveTextContent("每月");
+    expect(repeatRule).toHaveTextContent("每年");
+    expect(repeatRule).toHaveTextContent("自定义频率");
+    expect(screen.getByLabelText("保障潜客经营自定义频率单位")).toHaveValue(
+      "minutes",
+    );
+    expect(screen.getByText("每隔 15 分钟")).toBeInTheDocument();
+    expect(screen.queryByLabelText(/cron/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/cron/i)).not.toBeInTheDocument();
+  });
+});
+
+describe("TaskSchedule", () => {
+  it("点击自定义周期的日期数字区域会打开统一样式的日期面板", () => {
+    const item: PlanItem = {
+      id: "scene-1",
+      sceneName: "保障潜客经营",
+      categoryLabel: "保险",
+      categoryCode: "insurance",
+      mcpRelations: [],
+      direction: "优先触达高潜客户",
+      cycle: "自定义",
+      start: "2026-09-01",
+      end: "2026-09-30",
+      schedule: { type: "daily", hour: 9, minute: 0 },
+    };
+    const scene: Scene = {
+      id: "scene-1",
+      name: "保障潜客经营",
+      category: "保险",
+      categoryCode: "insurance",
+      icon: "shield",
+      desc: "挖掘高潜保险客户",
+      source: "总部预置",
+      mcpRelations: [],
+    };
+
+    const { container } = render(<TaskSchedule item={item} scene={scene} />);
+    const startDate = screen.getByLabelText("保障潜客经营任务开始日期");
+
+    expect(container.querySelector('input[type="date"]')).toBeNull();
+    fireEvent.click(startDate);
+    expect(document.querySelector(".ant-picker-dropdown")).toBeInTheDocument();
   });
 });

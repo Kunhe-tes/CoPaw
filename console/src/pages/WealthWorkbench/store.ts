@@ -209,7 +209,7 @@ function validateSchedule(item: PlanItem): string | null {
     return `请选择「${item.sceneName}」的每周执行日`;
   }
   if (schedule.type === "custom" && !validCronExpr(schedule.rawCron)) {
-    return `请填写「${item.sceneName}」的正确 cron 表达式（5 段式）`;
+    return `请重新配置「${item.sceneName}」的自定义执行规则`;
   }
   return null;
 }
