@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_CUSTOM_SCHEDULE,
   buildCustomCron,
   customScheduleLabel,
   parseCustomSchedule,
@@ -15,6 +16,7 @@ describe("customSchedule", () => {
         dayOfMonth: 1,
         hour: 9,
         minute: 0,
+        daysOfWeek: ["mon"],
       }),
     ).toBe("*/15 * * * *");
   });
@@ -28,6 +30,7 @@ describe("customSchedule", () => {
         dayOfMonth: 1,
         hour: 9,
         minute: 0,
+        daysOfWeek: ["mon"],
       }),
     ).toBe("0 */4 * * *");
   });
@@ -41,6 +44,7 @@ describe("customSchedule", () => {
         dayOfMonth: 10,
         hour: 14,
         minute: 30,
+        daysOfWeek: ["mon"],
       }),
     ).toBe("30 14 10 * *");
   });
@@ -54,8 +58,29 @@ describe("customSchedule", () => {
         dayOfMonth: 10,
         hour: 14,
         minute: 30,
+        daysOfWeek: ["mon"],
       }),
     ).toBe("30 14 10 6 *");
+  });
+
+  it("将自定义区的每日和每周规则转换为 cron", () => {
+    expect(
+      buildCustomCron({
+        ...DEFAULT_CUSTOM_SCHEDULE,
+        mode: "daily",
+        hour: 9,
+        minute: 15,
+      }),
+    ).toBe("15 9 * * *");
+    expect(
+      buildCustomCron({
+        ...DEFAULT_CUSTOM_SCHEDULE,
+        mode: "weekly",
+        hour: 9,
+        minute: 15,
+        daysOfWeek: ["mon", "fri"],
+      }),
+    ).toBe("15 9 * * mon,fri");
   });
 
   it("能解析可视化编辑器生成的规则并展示可读摘要", () => {

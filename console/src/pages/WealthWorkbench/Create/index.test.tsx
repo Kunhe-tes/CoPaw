@@ -41,7 +41,7 @@ describe("StepIndicator", () => {
 });
 
 describe("ScheduleEditor", () => {
-  it("用执行频率下拉框展示可选周期，不暴露 cron 输入框", () => {
+  it("保留原执行频率按钮，只在自定义区展示可读规则", () => {
     const item: PlanItem = {
       id: "scene-1",
       sceneName: "保障潜客经营",
@@ -57,8 +57,16 @@ describe("ScheduleEditor", () => {
 
     render(<ScheduleEditor item={item} sceneName={item.sceneName} />);
 
-    const repeatRule = screen.getByLabelText("保障潜客经营执行频率");
-    expect(repeatRule).toHaveValue("custom");
+    expect(screen.getByRole("button", { name: "每小时" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "每日" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "每周" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "自定义" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    const repeatRule = screen.getByLabelText("保障潜客经营自定义重复规则");
+    expect(repeatRule).toHaveValue("frequency");
     expect(repeatRule).toHaveTextContent("每日");
     expect(repeatRule).toHaveTextContent("每周");
     expect(repeatRule).toHaveTextContent("每月");

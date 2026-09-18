@@ -9,6 +9,7 @@ import { useNavigate } from "react-router-dom";
 import { DatePicker } from "antd";
 import cx from "classnames";
 import dayjs from "dayjs";
+import type { CronType } from "@/utils/parseCron";
 import styles from "../index.module.less";
 import { Icon } from "../components/Icon";
 import { TargetPicker } from "../components/TargetPicker";
@@ -63,14 +64,21 @@ const TARGET_STEP = {
 
 const CYCLES = ["本月", "本季", "今日", "T+1日", "自定义"];
 
-type RepeatMode = "daily" | "weekly" | "monthly" | "yearly" | "custom";
+type CustomRepeatMode = "daily" | "weekly" | "monthly" | "yearly" | "frequency";
 
-const REPEAT_OPTIONS: { value: RepeatMode; label: string }[] = [
+const SCHEDULE_TYPES: { value: CronType; label: string }[] = [
+  { value: "hourly", label: "每小时" },
+  { value: "daily", label: "每日" },
+  { value: "weekly", label: "每周" },
+  { value: "custom", label: "自定义" },
+];
+
+const CUSTOM_REPEAT_OPTIONS: { value: CustomRepeatMode; label: string }[] = [
   { value: "daily", label: "每日" },
   { value: "weekly", label: "每周" },
   { value: "monthly", label: "每月" },
   { value: "yearly", label: "每年" },
-  { value: "custom", label: "自定义频率" },
+  { value: "frequency", label: "自定义频率" },
 ];
 
 const WEEKDAYS: { value: string; label: string }[] = [
@@ -173,9 +181,7 @@ export function StepIndicator({
   );
 }
 
-/**
- * 单个场景的排程配置块：使用可读的重复规则配置，提交时仍序列化为 cron。
- */
+/** 单个场景的排程配置块；仅自定义排程使用可读规则编辑并转换为 cron。 */
 export function ScheduleEditor({
   item,
   sceneName,
@@ -186,28 +192,16 @@ export function ScheduleEditor({
   const updateSchedule = useWealthStore((s) => s.updateSchedule);
   const schedule = item.schedule;
   const type = schedule.type;
-  const parsedCustomConfig =
-    type === "custom" ? parseCustomSchedule(schedule.rawCron) : null;
   const customConfig =
-    type === "hourly"
-      ? { ...DEFAULT_CUSTOM_SCHEDULE, mode: "hours" as const, interval: 1 }
-      : parsedCustomConfig;
-  const repeatMode: RepeatMode | "" =
-    type === "daily"
-      ? "daily"
-      : type === "weekly"
-      ? "weekly"
-      : type === "hourly"
-      ? "custom"
-      : customConfig?.mode === "monthly"
-      ? "monthly"
-      : customConfig?.mode === "yearly"
-      ? "yearly"
+    type === "custom" ? parseCustomSchedule(schedule.rawCron) : null;
+  const customRepeatMode: CustomRepeatMode | "" =
+    customConfig?.mode === "daily" || customConfig?.mode === "weekly"
+      ? customConfig.mode
+      : customConfig?.mode === "monthly" || customConfig?.mode === "yearly"
+      ? customConfig.mode
       : customConfig
-      ? "custom"
+      ? "frequency"
       : "";
-  const configuredHour = customConfig?.hour ?? schedule.hour ?? 9;
-  const configuredMinute = customConfig?.minute ?? schedule.minute ?? 0;
 
   const updateCustomSchedule = (next: CustomScheduleConfig) => {
     updateSchedule(item.id, {
@@ -216,23 +210,8 @@ export function ScheduleEditor({
     });
   };
 
-  const selectRepeatMode = (mode: RepeatMode) => {
-    if (mode === "daily" || mode === "weekly") {
-      updateSchedule(item.id, {
-        type: mode,
-        hour: configuredHour,
-        minute: configuredMinute,
-        ...(mode === "weekly"
-          ? {
-              daysOfWeek: schedule.daysOfWeek?.length
-                ? schedule.daysOfWeek
-                : ["mon"],
-            }
-          : {}),
-      });
-      return;
-    }
-    if (mode === "custom") {
+  const selectCustomRepeatMode = (mode: CustomRepeatMode) => {
+    if (mode === "frequency") {
       const intervalConfig =
         customConfig?.mode === "minutes" || customConfig?.mode === "hours"
           ? customConfig
@@ -243,190 +222,260 @@ export function ScheduleEditor({
     updateCustomSchedule({
       ...(customConfig ?? DEFAULT_CUSTOM_SCHEDULE),
       mode,
-      hour: configuredHour,
-      minute: configuredMinute,
     });
   };
 
   return (
     <div className={styles.scheduleBlock}>
-      <label className={styles.scheduleField}>
+      <div className={styles.cycle}>
         <span>执行频率</span>
-        <select
-          aria-label={`${sceneName}执行频率`}
-          value={repeatMode}
-          onChange={(e) => selectRepeatMode(e.target.value as RepeatMode)}
-        >
-          {repeatMode === "" && (
-            <option value="" disabled>
-              旧版自定义规则
-            </option>
-          )}
-          {REPEAT_OPTIONS.map((option) => (
-            <option key={option.value} value={option.value}>
+        <div className={styles.cycleGroup}>
+          {SCHEDULE_TYPES.map((option) => (
+            <button
+              key={option.value}
+              className={type === option.value ? styles.active : ""}
+              aria-pressed={type === option.value}
+              onClick={() =>
+                updateSchedule(
+                  item.id,
+                  option.value === "custom"
+                    ? {
+                        type: "custom",
+                        rawCron:
+                          schedule.rawCron ??
+                          buildCustomCron(DEFAULT_CUSTOM_SCHEDULE),
+                      }
+                    : { type: option.value },
+                )
+              }
+            >
               {option.label}
-            </option>
+            </button>
           ))}
-        </select>
-      </label>
-      {repeatMode === "custom" && customConfig && (
-        <div className={styles.scheduleField}>
-          <span>执行间隔</span>
-          <div className={styles.customFrequencyControls}>
-            <span>每</span>
-            <input
-              className={styles.scheduleNumber}
-              type="number"
-              min={1}
-              max={customConfig.mode === "minutes" ? 59 : 23}
-              value={customConfig.interval}
-              aria-label={`${sceneName}自定义频率间隔`}
-              onChange={(e) =>
-                updateCustomSchedule({
-                  ...customConfig,
-                  interval: Number(e.target.value),
-                })
-              }
-            />
-            <select
-              aria-label={`${sceneName}自定义频率单位`}
-              value={customConfig.mode}
-              onChange={(e) =>
-                updateCustomSchedule({
-                  ...customConfig,
-                  mode: e.target.value as Extract<
-                    CustomScheduleMode,
-                    "minutes" | "hours"
-                  >,
-                })
-              }
-            >
-              <option value="minutes">分钟</option>
-              <option value="hours">小时</option>
-            </select>
-          </div>
         </div>
-      )}
-      {repeatMode === "monthly" && customConfig?.mode === "monthly" && (
-        <label className={styles.scheduleField}>
-          <span>执行日期</span>
-          <select
-            aria-label={`${sceneName}每月执行日期`}
-            value={customConfig.dayOfMonth}
-            onChange={(e) =>
-              updateCustomSchedule({
-                ...customConfig,
-                dayOfMonth: Number(e.target.value),
-              })
-            }
-          >
-            {Array.from({ length: 31 }, (_, index) => index + 1).map((day) => (
-              <option key={day} value={day}>
-                {day} 日
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
-      {repeatMode === "yearly" && customConfig?.mode === "yearly" && (
-        <div className={styles.scheduleField}>
-          <span>执行日期</span>
-          <div className={styles.scheduleDateParts}>
-            <select
-              aria-label={`${sceneName}每年执行月份`}
-              value={customConfig.month}
-              onChange={(e) =>
-                updateCustomSchedule({
-                  ...customConfig,
-                  month: Number(e.target.value),
-                })
-              }
-            >
-              {Array.from({ length: 12 }, (_, index) => index + 1).map(
-                (month) => (
-                  <option key={month} value={month}>
-                    {month} 月
-                  </option>
-                ),
-              )}
-            </select>
-            <select
-              aria-label={`${sceneName}每年执行日期`}
-              value={customConfig.dayOfMonth}
-              onChange={(e) =>
-                updateCustomSchedule({
-                  ...customConfig,
-                  dayOfMonth: Number(e.target.value),
-                })
-              }
-            >
-              {Array.from({ length: 31 }, (_, index) => index + 1).map(
-                (day) => (
-                  <option key={day} value={day}>
-                    {day} 日
-                  </option>
-                ),
-              )}
-            </select>
-          </div>
-        </div>
-      )}
-      {repeatMode !== "custom" && repeatMode !== "" && (
+      </div>
+      {(type === "daily" || type === "weekly") && (
         <div className={styles.scheduleField}>
           <span>执行时刻</span>
           <TimeField
-            hour={configuredHour}
-            minute={configuredMinute}
-            onChange={(hour, minute) => {
-              if (repeatMode === "monthly" || repeatMode === "yearly") {
-                if (customConfig) {
-                  updateCustomSchedule({ ...customConfig, hour, minute });
-                }
-                return;
-              }
-              updateSchedule(item.id, { hour, minute });
-            }}
+            hour={schedule.hour ?? 9}
+            minute={schedule.minute ?? 0}
+            onChange={(hour, minute) =>
+              updateSchedule(item.id, { hour, minute })
+            }
             ariaLabel={`${sceneName}执行时刻`}
           />
         </div>
       )}
-      {repeatMode === "weekly" && (
+      {type === "weekly" && (
         <div className={styles.scheduleField}>
           <span>执行日</span>
           <div className={styles.cycleGroup}>
-            {WEEKDAYS.map((d) => {
-              const active = schedule.daysOfWeek?.includes(d.value) ?? false;
+            {WEEKDAYS.map((day) => {
+              const active = schedule.daysOfWeek?.includes(day.value) ?? false;
               return (
                 <button
-                  key={d.value}
+                  key={day.value}
                   className={active ? styles.active : ""}
                   aria-pressed={active}
                   onClick={() => {
                     const current = schedule.daysOfWeek ?? [];
                     updateSchedule(item.id, {
                       daysOfWeek: active
-                        ? current.filter((x) => x !== d.value)
-                        : [...current, d.value],
+                        ? current.filter((value) => value !== day.value)
+                        : [...current, day.value],
                     });
                   }}
                 >
-                  {d.label}
+                  {day.label}
                 </button>
               );
             })}
           </div>
         </div>
       )}
-      {!customConfig && type === "custom" && schedule.rawCron && (
-        <p className={styles.customScheduleHint}>
-          这是旧版创建的复杂规则，请重新选择一种执行频率后再编辑。
-        </p>
+      {type === "custom" && (
+        <div className={styles.customScheduleFields}>
+          <label className={styles.scheduleField}>
+            <span>重复规则</span>
+            <select
+              aria-label={`${sceneName}自定义重复规则`}
+              value={customRepeatMode}
+              onChange={(event) =>
+                selectCustomRepeatMode(event.target.value as CustomRepeatMode)
+              }
+            >
+              {customRepeatMode === "" && (
+                <option value="" disabled>
+                  旧版自定义规则
+                </option>
+              )}
+              {CUSTOM_REPEAT_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {(customConfig?.mode === "daily" ||
+            customConfig?.mode === "weekly" ||
+            customConfig?.mode === "monthly" ||
+            customConfig?.mode === "yearly") && (
+            <div className={styles.scheduleField}>
+              <span>执行时刻</span>
+              <TimeField
+                hour={customConfig.hour}
+                minute={customConfig.minute}
+                onChange={(hour, minute) =>
+                  updateCustomSchedule({ ...customConfig, hour, minute })
+                }
+                ariaLabel={`${sceneName}自定义执行时刻`}
+              />
+            </div>
+          )}
+          {customConfig?.mode === "weekly" && (
+            <div className={styles.scheduleField}>
+              <span>执行日</span>
+              <div className={styles.cycleGroup}>
+                {WEEKDAYS.map((day) => {
+                  const active = customConfig.daysOfWeek.includes(day.value);
+                  return (
+                    <button
+                      key={day.value}
+                      className={active ? styles.active : ""}
+                      aria-pressed={active}
+                      onClick={() =>
+                        updateCustomSchedule({
+                          ...customConfig,
+                          daysOfWeek: active
+                            ? customConfig.daysOfWeek.filter(
+                                (value) => value !== day.value,
+                              )
+                            : [...customConfig.daysOfWeek, day.value],
+                        })
+                      }
+                    >
+                      {day.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {customRepeatMode === "frequency" && customConfig && (
+            <div className={styles.scheduleField}>
+              <span>执行间隔</span>
+              <div className={styles.customFrequencyControls}>
+                <span>每</span>
+                <input
+                  className={styles.scheduleNumber}
+                  type="number"
+                  min={1}
+                  max={customConfig.mode === "minutes" ? 59 : 23}
+                  value={customConfig.interval}
+                  aria-label={`${sceneName}自定义频率间隔`}
+                  onChange={(event) =>
+                    updateCustomSchedule({
+                      ...customConfig,
+                      interval: Number(event.target.value),
+                    })
+                  }
+                />
+                <select
+                  aria-label={`${sceneName}自定义频率单位`}
+                  value={customConfig.mode}
+                  onChange={(event) =>
+                    updateCustomSchedule({
+                      ...customConfig,
+                      mode: event.target.value as Extract<
+                        CustomScheduleMode,
+                        "minutes" | "hours"
+                      >,
+                    })
+                  }
+                >
+                  <option value="minutes">分钟</option>
+                  <option value="hours">小时</option>
+                </select>
+              </div>
+            </div>
+          )}
+          {customConfig?.mode === "monthly" && (
+            <label className={styles.scheduleField}>
+              <span>执行日期</span>
+              <select
+                aria-label={`${sceneName}每月执行日期`}
+                value={customConfig.dayOfMonth}
+                onChange={(event) =>
+                  updateCustomSchedule({
+                    ...customConfig,
+                    dayOfMonth: Number(event.target.value),
+                  })
+                }
+              >
+                {Array.from({ length: 31 }, (_, index) => index + 1).map(
+                  (day) => (
+                    <option key={day} value={day}>
+                      {day} 日
+                    </option>
+                  ),
+                )}
+              </select>
+            </label>
+          )}
+          {customConfig?.mode === "yearly" && (
+            <div className={styles.scheduleField}>
+              <span>执行日期</span>
+              <div className={styles.scheduleDateParts}>
+                <select
+                  aria-label={`${sceneName}每年执行月份`}
+                  value={customConfig.month}
+                  onChange={(event) =>
+                    updateCustomSchedule({
+                      ...customConfig,
+                      month: Number(event.target.value),
+                    })
+                  }
+                >
+                  {Array.from({ length: 12 }, (_, index) => index + 1).map(
+                    (month) => (
+                      <option key={month} value={month}>
+                        {month} 月
+                      </option>
+                    ),
+                  )}
+                </select>
+                <select
+                  aria-label={`${sceneName}每年执行日期`}
+                  value={customConfig.dayOfMonth}
+                  onChange={(event) =>
+                    updateCustomSchedule({
+                      ...customConfig,
+                      dayOfMonth: Number(event.target.value),
+                    })
+                  }
+                >
+                  {Array.from({ length: 31 }, (_, index) => index + 1).map(
+                    (day) => (
+                      <option key={day} value={day}>
+                        {day} 日
+                      </option>
+                    ),
+                  )}
+                </select>
+              </div>
+            </div>
+          )}
+          {!customConfig && schedule.rawCron && (
+            <p className={styles.customScheduleHint}>
+              这是旧版创建的复杂规则，请重新选择一种重复规则后再编辑。
+            </p>
+          )}
+        </div>
       )}
       <div className={styles.taskRangeLabel}>
         {type === "custom"
           ? customScheduleLabel(schedule.rawCron)
-          : type === "hourly"
-          ? "每隔 1 小时"
           : scheduleLabel(schedule)}
       </div>
     </div>
