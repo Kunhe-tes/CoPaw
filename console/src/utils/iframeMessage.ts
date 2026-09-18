@@ -65,10 +65,16 @@ function isWealthOriginEntry(): boolean {
   const isWealthPath = /^\/(?:console\/)?wealth(?:\/|$)/.test(
     window.location.pathname,
   );
-  return (
-    isWealthPath &&
-    new URLSearchParams(window.location.search).get("origin") === "Y"
-  );
+  return isWealthPath && getIframeContext().isOriginY;
+}
+
+function decodeCookieValue(value: string | null): string | null {
+  if (!value) return null;
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 /**
@@ -622,9 +628,12 @@ export async function fetchAndSetUserName(): Promise<boolean> {
   }
 
   if (isWealthOriginEntry()) {
-    const userName = getWPlusCookie("username");
-    store.setContext({ userName });
-    return Boolean(userName);
+    const cookieUserId = decodeCookieValue(getWPlusCookie("userid"));
+    const cookieUserName = decodeCookieValue(getWPlusCookie("username"));
+    if (store.bbk && cookieUserId === userId && cookieUserName) {
+      store.setContext({ userName: cookieUserName });
+      return true;
+    }
   }
 
   if (pendingUserInfoRequest && pendingUserInfoUserId === userId) {
