@@ -386,9 +386,10 @@ export default function Board() {
           <Icon name="calendar" />
           {range.map((x) => x.replace(/-/g, ".")).join(" — ")}
         </div>
-        <div className={styles.role}>
+        {/* 暂不需要展示岗位 */}
+        {/* <div className={styles.role}>
           当前角色：{account?.role} <Icon name="building" />
-        </div>
+        </div> */}
       </div>
 
       <section className={`${styles.panel} ${styles.overview}`}>
