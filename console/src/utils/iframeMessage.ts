@@ -60,6 +60,17 @@ let pendingUserInfoRequest: Promise<boolean> | null = null;
 /** 正在执行初始化的用户，避免同一用户在接口返回前被重复初始化 */
 const pendingUserInitUserIds = new Set<string>();
 
+/** Wealth 在 W+ 入口下直接使用 Cookie 中的用户名，不再发起用户信息查询。 */
+function isWealthOriginEntry(): boolean {
+  const isWealthPath = /^\/(?:console\/)?wealth(?:\/|$)/.test(
+    window.location.pathname,
+  );
+  return (
+    isWealthPath &&
+    new URLSearchParams(window.location.search).get("origin") === "Y"
+  );
+}
+
 /**
  * 将值转换为布尔值，用于处理父窗口可能传递的字符串 "true"/"false"
  * @param value - 值
@@ -608,6 +619,12 @@ export async function fetchAndSetUserName(): Promise<boolean> {
 
   if (!userId) {
     return false;
+  }
+
+  if (isWealthOriginEntry()) {
+    const userName = getWPlusCookie("username");
+    store.setContext({ userName });
+    return Boolean(userName);
   }
 
   if (pendingUserInfoRequest && pendingUserInfoUserId === userId) {
