@@ -3080,6 +3080,18 @@
   .customerTable .reason .opportunityList {
     min-width: 0;
   }
+  .opportunityPreview {
+    display: -webkit-box;
+    overflow: hidden;
+    line-height: 1.65;
+    white-space: normal;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+  .opportunityPreview:focus-visible {
+    outline: 2px solid var(--blue);
+    outline-offset: 2px;
+  }
   @media (max-width: 650px) {
     .taskLabelFilter {
       gap: 8px;
@@ -3096,6 +3108,25 @@
       font-size: 10px;
     }
   }
+}
+
+.opportunityTooltipContent {
+  max-width: 360px;
+  max-height: 320px;
+  overflow: auto;
+  white-space: normal;
+  line-height: 1.65;
+}
+
+.opportunityTooltipContent ul,
+.opportunityTooltipContent ol {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+
+.opportunityTooltipContent p,
+.opportunityTooltipContent div {
+  margin: 3px 0;
 }
 
 /* 账号卡片下拉与表头重点标签筛选 */

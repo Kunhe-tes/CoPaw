@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { Customer } from "../types";
 import { CustomerLabel, Opportunities } from "./index";
@@ -38,6 +38,20 @@ describe("Opportunities", () => {
     render(<Opportunities customer={customer("普通经营机会")} />);
 
     expect(screen.getByText("普通经营机会")).toBeInTheDocument();
+  });
+
+  it("省略预览并在悬停时展示完整 HTML 内容", async () => {
+    const reason = "<p>第一段经营机会</p><p><b>第二段完整内容</b></p>";
+    const { container } = render(<Opportunities customer={customer(reason)} />);
+
+    const preview = container.querySelector('[tabindex="0"]');
+    expect(preview).toBeInTheDocument();
+
+    fireEvent.mouseEnter(preview!);
+
+    const tooltip = await screen.findByRole("tooltip");
+    expect(tooltip).toHaveTextContent("第一段经营机会");
+    expect(tooltip.querySelector("b")).toHaveTextContent("第二段完整内容");
   });
 
   it("保留常规块级 HTML 元素", () => {
