@@ -5,6 +5,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
+import { Tooltip } from "antd";
 import cx from "classnames";
 import DOMPurify from "dompurify";
 import styles from "../index.module.less";
@@ -88,6 +89,27 @@ function OpportunityHtml({ value }: { value: string }) {
   );
 }
 
+function OpportunityContent({
+  items,
+  multiple,
+}: {
+  items: string[];
+  multiple?: boolean;
+}) {
+  if (multiple && items.length > 1) {
+    return (
+      <ul className={styles.opportunityList}>
+        {items.map((item, index) => (
+          <li key={index}>
+            <OpportunityHtml value={item} />
+          </li>
+        ))}
+      </ul>
+    );
+  }
+  return <OpportunityHtml value={items[0]} />;
+}
+
 /** 经营机会单元格：支持外部接口返回的简单 HTML 列表。 */
 export function Opportunities({
   customer,
@@ -100,18 +122,21 @@ export function Opportunities({
     (item) => item.trim().length > 0,
   );
   if (!items.length) return <>--</>;
-  if (multiple && items.length > 1) {
-    return (
-      <ul className={styles.opportunityList}>
-        {items.map((t, i) => (
-          <li key={i}>
-            <OpportunityHtml value={t} />
-          </li>
-        ))}
-      </ul>
-    );
-  }
-  return <OpportunityHtml value={items[0]} />;
+  return (
+    <Tooltip
+      placement="topLeft"
+      trigger={["hover", "focus"]}
+      title={
+        <div className={styles.opportunityTooltipContent}>
+          <OpportunityContent items={items} multiple={multiple} />
+        </div>
+      }
+    >
+      <div className={styles.opportunityPreview} tabIndex={0}>
+        <OpportunityContent items={items} multiple={multiple} />
+      </div>
+    </Tooltip>
+  );
 }
 
 /**
