@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import { useIframeStore } from "../../../stores/iframeStore";
@@ -163,6 +163,7 @@ describe("Create", () => {
     useIframeStore.setState({ positionId: "RB0101", userId: "rm-1" });
     useWealthStore.setState({
       accountId: "rm",
+      plansLoaded: true,
       draft: { name: "客户经理规划", items: [item] },
       plans: [otherRmPlan, occupiedPlan],
       scenesByCategory: { "": [] },
@@ -189,5 +190,65 @@ describe("Create", () => {
     expect(alert).toHaveTextContent("保障潜客经营");
     expect(alert).toHaveTextContent("行长重点经营规划");
     expect(screen.queryByText(/其他客户经理规划/)).not.toBeInTheDocument();
+  });
+
+  it("规划数据未就绪时禁用发布，避免跳过已有规划冲突检查", () => {
+    useIframeStore.setState({ positionId: "RB0101", userId: "rm-1" });
+    useWealthStore.setState({
+      accountId: "rm",
+      plansLoaded: false,
+      draft: { name: "客户经理规划", items: [] },
+      plans: [],
+      scenesByCategory: { "": [] },
+      scenesLoading: false,
+      editingId: null,
+      dialog: null,
+      acting: false,
+    });
+
+    const { container } = render(
+      <MemoryRouter>
+        <Create />
+      </MemoryRouter>,
+    );
+
+    const publishButtons = within(container).getAllByRole("button", {
+      name: "规划加载中…",
+    });
+    expect(publishButtons).toHaveLength(2);
+    publishButtons.forEach((button) => expect(button).toBeDisabled());
+    expect(useWealthStore.getState().dialog).toBeNull();
+  });
+
+  it("规划数据未就绪时不允许编辑表单，但仍可取消返回", () => {
+    useIframeStore.setState({ positionId: "RB0101", userId: "rm-1" });
+    useWealthStore.setState({
+      accountId: "rm",
+      plansLoaded: false,
+      draft: { name: "", items: [] },
+      plans: [],
+      scenesByCategory: { "": [] },
+      scenesLoading: false,
+      editingId: null,
+      dialog: null,
+      acting: false,
+    });
+
+    const { container } = render(
+      <MemoryRouter>
+        <Create />
+      </MemoryRouter>,
+    );
+
+    expect(
+      within(container).getByRole("button", { name: "全部" }),
+    ).toBeDisabled();
+    expect(screen.getByLabelText("规划名称")).toBeDisabled();
+    expect(
+      within(container).getByRole("button", { name: "上一步" }),
+    ).toBeDisabled();
+    expect(
+      within(container).getByRole("button", { name: "取消" }),
+    ).toBeEnabled();
   });
 });
