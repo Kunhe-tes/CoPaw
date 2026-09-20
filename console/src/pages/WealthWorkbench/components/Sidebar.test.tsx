@@ -64,10 +64,10 @@ describe("Sidebar", () => {
     });
   });
 
-  it("规划数据就绪前不提前查询依赖规划的客户名单", () => {
+  it("规划数据就绪前不查询名单，就绪后补发请求", async () => {
     mocks.state.plansLoaded = false;
 
-    render(
+    const { rerender } = render(
       <MemoryRouter initialEntries={["/wealth/board"]}>
         <Sidebar collapsed={false} onToggleCollapse={vi.fn()} />
       </MemoryRouter>,
@@ -75,5 +75,17 @@ describe("Sidebar", () => {
 
     expect(mocks.loadPendingCustomers).not.toHaveBeenCalled();
     expect(mocks.loadDoneCustomers).not.toHaveBeenCalled();
+
+    mocks.state.plansLoaded = true;
+    rerender(
+      <MemoryRouter initialEntries={["/wealth/board"]}>
+        <Sidebar collapsed={false} onToggleCollapse={vi.fn()} />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(mocks.loadPendingCustomers).toHaveBeenCalledOnce();
+      expect(mocks.loadDoneCustomers).toHaveBeenCalledOnce();
+    });
   });
 });
