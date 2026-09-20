@@ -19,6 +19,7 @@ export function Sidebar({
   onToggleCollapse: () => void;
 }) {
   const plans = useWealthStore((s) => s.plans);
+  const plansLoaded = useWealthStore((s) => s.plansLoaded);
   const pendingCustomers = useWealthStore((s) => s.pendingCustomers);
   const doneCustomers = useWealthStore((s) => s.doneCustomers);
   const loadPendingCustomers = useWealthStore((s) => s.loadPendingCustomers);
@@ -34,9 +35,9 @@ export function Sidebar({
   ).length;
 
   useEffect(() => {
-    if (!hasTasks) return;
+    if (!hasTasks || !plansLoaded) return;
     void Promise.all([loadPendingCustomers(), loadDoneCustomers()]);
-  }, [hasTasks, loadPendingCustomers, loadDoneCustomers]);
+  }, [hasTasks, plansLoaded, loadPendingCustomers, loadDoneCustomers]);
 
   const navClass = (path: string) =>
     cx(styles.nav, current === path && styles.active);

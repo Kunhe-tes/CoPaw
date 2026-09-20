@@ -241,6 +241,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   const doneCustomers = useWealthStore((s) => s.doneCustomers);
   const doneLoading = useWealthStore((s) => s.doneLoading);
   const plans = useWealthStore((s) => s.plans);
+  const plansLoaded = useWealthStore((s) => s.plansLoaded);
   const loadTodayCustomers = useWealthStore((s) => s.loadTodayCustomers);
   const loadPendingCustomers = useWealthStore((s) => s.loadPendingCustomers);
   const loadDoneCustomers = useWealthStore((s) => s.loadDoneCustomers);
@@ -323,10 +324,18 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
 
   // 进入任务页加载名单：今日任务按当前视角查询；待触达/已完成按 touched 口径各查一次
   useEffect(() => {
+    if (!plansLoaded) return;
     if (page === "today") void loadTodayCustomers(view);
     if (page === "pending") void loadPendingCustomers();
     if (page === "done") void loadDoneCustomers();
-  }, [page, view, loadTodayCustomers, loadPendingCustomers, loadDoneCustomers]);
+  }, [
+    page,
+    view,
+    plansLoaded,
+    loadTodayCustomers,
+    loadPendingCustomers,
+    loadDoneCustomers,
+  ]);
 
   const doneToday = customers.filter(
     (c) => c.done && (taskLabel === "全部" || matchLabel(c.label, taskLabel)),
