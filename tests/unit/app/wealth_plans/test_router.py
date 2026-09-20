@@ -136,6 +136,70 @@ def test_create_plan_applies_scene_branch_validation(
     assert resp.status_code == 403
 
 
+@pytest.mark.parametrize(
+    ("owner_headers", "source_label"),
+    [
+        ({"X-User-Id": "president", "X-Position-Id": "RB1101"}, "行长关注"),
+        ({"X-User-Id": "middle", "X-Position-Id": "RB0301"}, "分行关注"),
+        ({"X-User-Id": "rm-1", "X-Position-Id": "RB0101"}, "我的关注"),
+    ],
+)
+def test_rm_cannot_publish_scene_reserved_by_management_or_self(
+    client: TestClient,
+    owner_headers: dict[str, str],
+    source_label: str,
+) -> None:
+    owner_payload = plan_payload(
+        name=f"{source_label}规划",
+        source_label=source_label,
+    )
+    created = client.post(
+        "/api/wealth/plans",
+        json=owner_payload,
+        headers={**owner_headers, "X-Bbk-Id": "100"},
+    )
+    assert created.status_code == 200
+
+    response = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(source_label="我的关注"),
+        headers={
+            "X-User-Id": "rm-1",
+            "X-Bbk-Id": "100",
+            "X-Position-Id": "RB0101",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "保障潜客经营" in response.json()["detail"]
+    assert f"{source_label}规划" in response.json()["detail"]
+
+
+def test_other_rm_plan_does_not_reserve_scene(client: TestClient) -> None:
+    created = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(source_label="我的关注"),
+        headers={
+            "X-User-Id": "rm-2",
+            "X-Bbk-Id": "100",
+            "X-Position-Id": "RB0101",
+        },
+    )
+    assert created.status_code == 200
+
+    response = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(source_label="我的关注"),
+        headers={
+            "X-User-Id": "rm-1",
+            "X-Bbk-Id": "100",
+            "X-Position-Id": "RB0101",
+        },
+    )
+
+    assert response.status_code == 200
+
+
 async def test_scene_branch_validation_accepts_current_branch_skill(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
