@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   loadDoneCustomers: vi.fn(),
   state: {
     plans: [],
+    plansLoaded: true,
     pendingCustomers: [{ id: "pending-1" }, { id: "pending-2" }],
     doneCustomers: [{ id: "done-1" }],
   },
@@ -37,6 +38,7 @@ vi.mock("../utils", () => ({
 describe("Sidebar", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.state.plansLoaded = true;
   });
 
   it("显示今日、待触达和已完成数量角标", async () => {
@@ -60,5 +62,18 @@ describe("Sidebar", () => {
       expect(mocks.loadPendingCustomers).toHaveBeenCalledOnce();
       expect(mocks.loadDoneCustomers).toHaveBeenCalledOnce();
     });
+  });
+
+  it("规划数据就绪前不提前查询依赖规划的客户名单", () => {
+    mocks.state.plansLoaded = false;
+
+    render(
+      <MemoryRouter initialEntries={["/wealth/board"]}>
+        <Sidebar collapsed={false} onToggleCollapse={vi.fn()} />
+      </MemoryRouter>,
+    );
+
+    expect(mocks.loadPendingCustomers).not.toHaveBeenCalled();
+    expect(mocks.loadDoneCustomers).not.toHaveBeenCalled();
   });
 });
