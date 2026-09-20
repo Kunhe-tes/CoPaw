@@ -644,18 +644,15 @@ export default function Create() {
         <>
           <p>请确认以下规划配置：</p>
           {conflicts.length > 0 && (
-            <p className={styles.pageNote}>
-              <b className={styles.red}>
-                以下经营场景已发布过：
-                {conflicts
-                  .map(
-                    (c) =>
-                      `「${c.scene.sceneName}」（见规划「${c.planName}」）`,
-                  )
-                  .join("、")}
-                。请前往规划看板编辑对应规划，无需新建。
-              </b>
-            </p>
+            <div className={styles.sceneConflictAlert} role="alert">
+              <strong>以下经营场景已被选用：</strong>
+              {conflicts
+                .map(
+                  (c) => `「${c.scene.sceneName}」（见规划「${c.planName}」）`,
+                )
+                .join("、")}
+              。请前往规划看板编辑对应规划，无需新建。
+            </div>
           )}
           <div className={styles.detailGrid}>
             <div>
