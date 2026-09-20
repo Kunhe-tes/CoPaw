@@ -662,11 +662,21 @@ def test_skill_stats_requires_non_empty_skills(client: TestClient) -> None:
     assert resp.status_code == 422
 
 
-def test_skill_stats_forwards_bbk_and_skills(
+@pytest.mark.parametrize(
+    ("position_id", "expected_sap_id"),
+    [
+        ("RB0101", "zhangwl"),
+        ("RB1101", None),
+        ("RB0301", None),
+    ],
+)
+def test_skill_stats_forwards_role_scope(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
+    position_id: str,
+    expected_sap_id: str | None,
 ) -> None:
-    """代理层注入 bbkId 并原样转发 skills，响应项透传。"""
+    """代理层注入机构范围，客户经理额外注入本人 sapId。"""
     captured: dict = {}
 
     class FakeResponse:
@@ -713,7 +723,11 @@ def test_skill_stats_forwards_bbk_and_skills(
                 },
             ],
         },
-        headers={**VIEWER, "X-Bbk-Id": "755"},
+        headers={
+            **VIEWER,
+            "X-Bbk-Id": "755",
+            "X-Position-Id": position_id,
+        },
     )
 
     assert resp.status_code == 200
@@ -721,6 +735,10 @@ def test_skill_stats_forwards_bbk_and_skills(
     assert captured["url"].endswith("/api/agent/workspace/skill-stats")
     assert captured["json"]["bbkId"] == "755"
     assert captured["json"]["skills"][0]["skillId"] == "s1"
+    if expected_sap_id is None:
+        assert "sapId" not in captured["json"]
+    else:
+        assert captured["json"]["sapId"] == expected_sap_id
 
 
 async def _make_broadcast_store(
