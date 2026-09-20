@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { Customer } from "../types";
-import { Opportunities } from "./index";
+import { CustomerLabel, Opportunities } from "./index";
 
 function customer(reason: string): Customer {
   return {
@@ -54,5 +54,19 @@ describe("Opportunities", () => {
     render(<Opportunities customer={customer("")} />);
 
     expect(screen.getByText("--")).toBeInTheDocument();
+  });
+});
+
+describe("CustomerLabel", () => {
+  it("空标签展示暂无标签占位", () => {
+    render(<CustomerLabel label="" />);
+
+    expect(screen.getByText("暂无标签")).toBeInTheDocument();
+  });
+
+  it("非空标签保持原文展示", () => {
+    render(<CustomerLabel label="行长指派" />);
+
+    expect(screen.getByText("行长指派")).toBeInTheDocument();
   });
 });
