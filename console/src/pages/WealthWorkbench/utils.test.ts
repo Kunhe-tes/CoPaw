@@ -9,6 +9,7 @@ import {
   collectSkillStatQueries,
   cycleRange,
   DEFAULT_SCHEDULE,
+  filterSceneConflictPlans,
   findSceneConflicts,
   planItemScheduledOn,
 } from "./utils";
@@ -208,6 +209,36 @@ describe("findSceneConflicts", () => {
     const draft = { name: "x", items: [makeItem()] };
 
     expect(findSceneConflicts([plan], draft, null)).toEqual([]);
+  });
+});
+
+describe("filterSceneConflictPlans", () => {
+  const middle = makePlan({ id: "middle", source: "分行关注" });
+  const president = makePlan({ id: "president", source: "行长关注" });
+  const ownRm = makePlan({
+    id: "own-rm",
+    source: "我的关注",
+    editable: true,
+  });
+  const otherRm = makePlan({
+    id: "other-rm",
+    source: "我的关注",
+    editable: false,
+  });
+
+  it("按中台、行长、客户经理的逐级规则筛选占用规划", () => {
+    const plans = [middle, president, ownRm, otherRm];
+
+    expect(filterSceneConflictPlans(plans, "middle")).toEqual([middle]);
+    expect(filterSceneConflictPlans(plans, "president")).toEqual([
+      middle,
+      president,
+    ]);
+    expect(filterSceneConflictPlans(plans, "rm")).toEqual([
+      middle,
+      president,
+      ownRm,
+    ]);
   });
 });
 

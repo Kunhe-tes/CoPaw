@@ -200,6 +200,76 @@ def test_other_rm_plan_does_not_reserve_scene(client: TestClient) -> None:
     assert response.status_code == 200
 
 
+@pytest.mark.parametrize(
+    ("owner_position", "actor_position", "expected_status"),
+    [
+        ("RB0301", "RB0301", 409),  # 中台受中台规划约束
+        ("RB1101", "RB0301", 200),  # 中台不受行长规划约束
+        ("RB0101", "RB0301", 200),  # 中台不受客户经理规划约束
+        ("RB0301", "RB1101", 409),  # 行长受中台规划约束
+        ("RB1101", "RB1101", 409),  # 行长受行长规划约束
+        ("RB0101", "RB1101", 200),  # 行长不受客户经理规划约束
+    ],
+)
+def test_management_scene_reservation_matrix(
+    client: TestClient,
+    owner_position: str,
+    actor_position: str,
+    expected_status: int,
+) -> None:
+    created = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(name="已占用规划"),
+        headers={
+            "X-User-Id": "owner",
+            "X-Bbk-Id": "100",
+            "X-Position-Id": owner_position,
+        },
+    )
+    assert created.status_code == 200
+
+    response = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(name="新规划"),
+        headers={
+            "X-User-Id": "actor",
+            "X-Bbk-Id": "100",
+            "X-Position-Id": actor_position,
+        },
+    )
+
+    assert response.status_code == expected_status
+    if expected_status == 409:
+        assert "保障潜客经营" in response.json()["detail"]
+        assert "已占用规划" in response.json()["detail"]
+
+
+def test_create_plan_derives_source_label_from_request_role(
+    client: TestClient,
+) -> None:
+    response = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(source_label="分行关注"),
+        headers={
+            "X-User-Id": "rm-1",
+            "X-Bbk-Id": "100",
+            "X-Position-Id": "RB0101",
+        },
+    )
+    assert response.status_code == 200
+
+    plans = client.get(
+        "/api/wealth/plans",
+        headers={
+            "X-User-Id": "rm-1",
+            "X-Bbk-Id": "100",
+            "X-Position-Id": "RB0101",
+        },
+    ).json()["items"]
+
+    assert plans[0]["source_label"] == "我的关注"
+
+
 async def test_scene_branch_validation_accepts_current_branch_skill(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

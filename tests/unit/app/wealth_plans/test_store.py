@@ -187,6 +187,42 @@ async def test_find_rm_scene_conflicts_excludes_plan_being_edited() -> None:
 
 
 @pytest.mark.asyncio
+async def test_find_rm_scene_conflicts_database_query_scopes_reservations() -> (
+    None
+):
+    db = AsyncMock()
+    db.fetch_all.return_value = [
+        {"scene_id": "scene-1", "plan_name": "行长重点规划"},
+    ]
+    store = WealthPlanStore(db)
+
+    conflicts = await store.find_rm_scene_conflicts(
+        "rm-1",
+        "100",
+        {"scene-1"},
+        exclude_plan_id="plan-self",
+    )
+
+    assert conflicts == {"scene-1": "行长重点规划"}
+    sql, params = db.fetch_all.await_args.args
+    normalized_sql = " ".join(sql.split())
+    assert "p.bbk_id = %s" in normalized_sql
+    assert "p.status <> %s" in normalized_sql
+    assert "p.sap_id = %s OR p.source_label IN (%s, %s)" in normalized_sql
+    assert "s.scene_id IN (%s)" in normalized_sql
+    assert "p.id <> %s" in normalized_sql
+    assert params == (
+        "100",
+        PUBLISH_STATUS_FAILED,
+        "rm-1",
+        "分行关注",
+        "行长关注",
+        "scene-1",
+        "plan-self",
+    )
+
+
+@pytest.mark.asyncio
 async def test_list_for_viewer_branch_wide_for_president_and_middle() -> None:
     store = WealthPlanStore()
     await store.create(

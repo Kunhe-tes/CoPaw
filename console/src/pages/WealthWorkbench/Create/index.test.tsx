@@ -1,13 +1,20 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { MemoryRouter } from "react-router-dom";
+import { describe, expect, it, vi } from "vitest";
+import { useIframeStore } from "../../../stores/iframeStore";
 import styles from "../index.module.less";
-import type { PlanItem, Scene } from "../types";
-import {
+import { useWealthStore } from "../store";
+import type { Plan, PlanItem, Scene } from "../types";
+import Create, {
   SceneDescription,
   ScheduleEditor,
   StepIndicator,
   TaskSchedule,
 } from "./index";
+
+vi.mock("../../../api/request", () => ({
+  request: vi.fn().mockResolvedValue({ items: [] }),
+}));
 
 describe("SceneDescription", () => {
   it("用两行截断样式展示描述，并保留完整文本供悬停查看", () => {
@@ -112,5 +119,80 @@ describe("TaskSchedule", () => {
     expect(container.querySelector('input[type="date"]')).toBeNull();
     fireEvent.click(startDate);
     expect(document.querySelector(".ant-picker-dropdown")).toBeInTheDocument();
+  });
+});
+
+describe("Create", () => {
+  it("客户经理选择已被规划占用的场景时列出冲突并禁止发布", () => {
+    const item: PlanItem = {
+      id: "scene-1",
+      sceneName: "保障潜客经营",
+      categoryLabel: "保险",
+      categoryCode: "insurance",
+      mcpRelations: [],
+      direction: "优先触达高潜客户",
+      cycle: "本月",
+      start: "2026-09-01",
+      end: "2026-09-30",
+      schedule: { type: "daily", hour: 9, minute: 0 },
+    };
+    const occupiedPlan: Plan = {
+      id: "plan-president",
+      name: "行长重点经营规划",
+      source: "行长关注",
+      desc: "",
+      customers: 0,
+      tasks: 0,
+      rate: 0,
+      status: "已自动下发",
+      publishStatus: "published",
+      period: "本月",
+      start: "2026-09-01",
+      end: "2026-09-30",
+      items: [item],
+      editable: false,
+      targetSapIds: ["rm-1"],
+    };
+    const otherRmPlan: Plan = {
+      ...occupiedPlan,
+      id: "plan-other-rm",
+      name: "其他客户经理规划",
+      source: "我的关注",
+      editable: false,
+    };
+    useIframeStore.setState({ positionId: "RB0101", userId: "rm-1" });
+    useWealthStore.setState({
+      accountId: "rm",
+      draft: { name: "客户经理规划", items: [item] },
+      plans: [otherRmPlan, occupiedPlan],
+      scenesByCategory: { "": [] },
+      scenesLoading: false,
+      editingId: null,
+      dialog: null,
+      acting: false,
+    });
+
+    render(
+      <MemoryRouter>
+        <Create />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getAllByRole("button", { name: "发布规划" })[0]);
+
+    const dialog = useWealthStore.getState().dialog;
+    expect(dialog?.buttons.find((button) => button.primary)?.disabled).toBe(
+      true,
+    );
+    render(<>{dialog?.body}</>);
+    expect(
+      screen.getByText((_, element) =>
+        Boolean(
+          element?.tagName === "B" &&
+            element.textContent?.includes("保障潜客经营") &&
+            element.textContent?.includes("行长重点经营规划"),
+        ),
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/其他客户经理规划/)).not.toBeInTheDocument();
   });
 });
