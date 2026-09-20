@@ -104,7 +104,7 @@ async def test_list_for_viewer_scopes_personal_roles_by_branch_and_relation() ->
 
 
 @pytest.mark.asyncio
-async def test_find_rm_scene_conflicts_reserves_management_and_own_plans() -> (
+async def test_find_scene_conflicts_reserves_management_and_own_plans() -> (
     None
 ):
     store = WealthPlanStore()
@@ -144,7 +144,8 @@ async def test_find_rm_scene_conflicts_reserves_management_and_own_plans() -> (
         await store.create(plan)
     await store.set_publish_status("failed", PUBLISH_STATUS_FAILED)
 
-    conflicts = await store.find_rm_scene_conflicts(
+    conflicts = await store.find_scene_conflicts(
+        "rm",
         "rm-1",
         "100",
         {
@@ -165,7 +166,7 @@ async def test_find_rm_scene_conflicts_reserves_management_and_own_plans() -> (
 
 
 @pytest.mark.asyncio
-async def test_find_rm_scene_conflicts_excludes_plan_being_edited() -> None:
+async def test_find_scene_conflicts_excludes_plan_being_edited() -> None:
     store = WealthPlanStore()
     await store.create(
         make_plan(
@@ -176,7 +177,8 @@ async def test_find_rm_scene_conflicts_excludes_plan_being_edited() -> None:
         ),
     )
 
-    conflicts = await store.find_rm_scene_conflicts(
+    conflicts = await store.find_scene_conflicts(
+        "rm",
         "rm-1",
         "100",
         {"scene-self"},
@@ -187,7 +189,7 @@ async def test_find_rm_scene_conflicts_excludes_plan_being_edited() -> None:
 
 
 @pytest.mark.asyncio
-async def test_find_rm_scene_conflicts_database_query_scopes_reservations() -> (
+async def test_find_scene_conflicts_database_query_scopes_reservations() -> (
     None
 ):
     db = AsyncMock()
@@ -196,7 +198,8 @@ async def test_find_rm_scene_conflicts_database_query_scopes_reservations() -> (
     ]
     store = WealthPlanStore(db)
 
-    conflicts = await store.find_rm_scene_conflicts(
+    conflicts = await store.find_scene_conflicts(
+        "rm",
         "rm-1",
         "100",
         {"scene-1"},
