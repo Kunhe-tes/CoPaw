@@ -432,11 +432,15 @@ export async function handleUrlOriginParam(): Promise<void> {
 
 /**
  * 从 URL 参数初始化时的异步处理
- * 调用客户信息接口和用户初始化
+ * 调用客户信息接口；非财富入口同时执行 Agent 用户初始化
  */
 async function initFromUrlParams(userId: string): Promise<void> {
-  // 首次进入时客户信息接口可能较慢或被嵌入环境阻塞，用户初始化不能依赖它完成。
-  initializeUser(userId);
+  const shouldInitializeAgent = !isWealthOriginEntry();
+
+  // 非财富入口的用户初始化不能依赖可能较慢的客户信息接口完成。
+  if (shouldInitializeAgent) {
+    initializeUser(userId);
+  }
 
   // 调用客户信息接口（使用 cookie 中的参数）
   await fetchAndApplyCustomerInfoFromCookie(userId);
@@ -444,7 +448,7 @@ async function initFromUrlParams(userId: string): Promise<void> {
   // 客户信息接口可能修正 userId，修正后的用户仍需要初始化。
   const latestStore = useIframeStore.getState();
   const currentUserId = latestStore.userId;
-  if (currentUserId && currentUserId !== userId) {
+  if (shouldInitializeAgent && currentUserId && currentUserId !== userId) {
     initializeUser(currentUserId);
   }
 

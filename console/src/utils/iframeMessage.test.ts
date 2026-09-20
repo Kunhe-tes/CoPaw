@@ -288,6 +288,18 @@ describe("fetchAndSetUserName", () => {
     expect(useIframeStore.getState().userName).toBe("张三");
   });
 
+  it.each([
+    "/wealth/board?origin=Y",
+    "/console/wealth/board?origin=Y",
+  ])("%s 时不初始化 Agent", async (path) => {
+    window.history.pushState({}, "", path);
+    document.cookie = "userid=80000002; path=/";
+
+    await handleUrlOriginParam();
+
+    expect(mockedFetchUserInit).not.toHaveBeenCalled();
+  });
+
   it("/console/wealth + origin=Y 时也不请求用户信息接口", async () => {
     window.history.pushState({}, "", "/console/wealth/board?origin=Y");
     document.cookie = "userid=80000002; path=/";
