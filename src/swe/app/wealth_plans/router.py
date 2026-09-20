@@ -57,7 +57,7 @@ from .publish import (
     delete_removed_scene_jobs,
     launch_publish,
 )
-from .roles import can_view_branch_wide, resolve_role
+from .roles import ROLE_RM, can_view_branch_wide, resolve_role
 from .store import WealthPlanStore, new_plan_id
 
 logger = logging.getLogger(__name__)
@@ -194,6 +194,8 @@ async def _fetch_external_skill_stats(
         "bbkId": bbk_id,
         "skills": [s.model_dump() for s in skills],
     }
+    if _request_role(request) == ROLE_RM:
+        body["sapId"] = _request_sap_id(request)
     try:
         async with httpx.AsyncClient(
             timeout=_SKILL_CONFIG_TIMEOUT_SECONDS,
