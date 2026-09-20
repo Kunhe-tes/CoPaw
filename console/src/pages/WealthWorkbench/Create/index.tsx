@@ -30,7 +30,7 @@ import {
   useWealthStore,
   validateDraft,
 } from "../store";
-import { findSceneConflicts } from "../utils";
+import { filterSceneConflictPlans, findSceneConflicts } from "../utils";
 import type { PlanItem, Scene } from "../types";
 
 const STEP_DEFS = [
@@ -632,10 +632,12 @@ export default function Create() {
       return;
     }
     const currentId = editingId;
-    // 行长/中台：草稿场景若已被其他已发布/发布中的规划占用，禁止重复新建发布
-    const conflicts = needsTargets
-      ? findSceneConflicts(plans, draft, currentId)
-      : [];
+    // 前端按角色矩阵预判；后端会再次检查本行完整数据，防止绕过页面发布。
+    const conflictPlans = filterSceneConflictPlans(
+      plans,
+      account?.id ?? "unknown",
+    );
+    const conflicts = findSceneConflicts(conflictPlans, draft, currentId);
     openDialog({
       title: currentId ? "保存规划修改" : "发布工作规划",
       body: (
