@@ -192,6 +192,21 @@ function labelTagClass(label: string) {
       : "";
 }
 
+/** 重点标签单元格：空值使用低强调度占位标签，避免表格出现空洞。 */
+export function CustomerLabel({ label }: { label: string }) {
+  const value = label.trim();
+  return (
+    <span
+      className={cx(
+        styles.tag,
+        value ? labelTagClass(value) : styles.emptyTag,
+      )}
+    >
+      {value || "暂无标签"}
+    </span>
+  );
+}
+
 export default function Tasks({ page }: { page: TaskPageKind }) {
   const canViewTasks = useCanAccess("tasks");
   const customers = useWealthStore((s) => s.customers);
@@ -682,11 +697,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                     <td className={styles.name}>{c.name}</td>
                     {!isBiz && (
                       <td>
-                        <span
-                          className={cx(styles.tag, labelTagClass(c.label))}
-                        >
-                          {c.label}
-                        </span>
+                        <CustomerLabel label={c.label} />
                       </td>
                     )}
                     <td className={styles.reason}>
