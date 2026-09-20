@@ -184,15 +184,10 @@ describe("Create", () => {
       true,
     );
     render(<>{dialog?.body}</>);
-    expect(
-      screen.getByText((_, element) =>
-        Boolean(
-          element?.tagName === "B" &&
-            element.textContent?.includes("保障潜客经营") &&
-            element.textContent?.includes("行长重点经营规划"),
-        ),
-      ),
-    ).toBeInTheDocument();
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveClass(styles.sceneConflictAlert);
+    expect(alert).toHaveTextContent("保障潜客经营");
+    expect(alert).toHaveTextContent("行长重点经营规划");
     expect(screen.queryByText(/其他客户经理规划/)).not.toBeInTheDocument();
   });
 });
