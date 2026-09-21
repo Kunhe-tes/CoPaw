@@ -204,6 +204,22 @@ describe("findSceneConflicts", () => {
     expect(findSceneConflicts([self], draft, "p2")).toEqual([]);
   });
 
+  it("编辑时仅检查新增场景，保留的历史场景不因其他规划占用而阻断", () => {
+    const retained = makeItem({ id: "scene-retained" });
+    const added = makeItem({ id: "scene-added" });
+    const self = makePlan({ id: "self", items: [retained] });
+    const other = makePlan({
+      id: "other",
+      name: "其他规划",
+      items: [retained, added],
+    });
+    const draft = { name: "编辑规划", items: [retained, added] };
+
+    expect(findSceneConflicts([self, other], draft, "self")).toEqual([
+      { scene: added, planName: "其他规划" },
+    ]);
+  });
+
   it("场景均未被占用时无冲突", () => {
     const plan = makePlan({ items: [makeItem({ id: "skill-other" })] });
     const draft = { name: "x", items: [makeItem()] };

@@ -192,6 +192,71 @@ describe("Create", () => {
     expect(screen.queryByText(/其他客户经理规划/)).not.toBeInTheDocument();
   });
 
+  it("编辑自身已有规划时排除当前规划，修改执行周期后仍可确认", () => {
+    const item: PlanItem = {
+      id: "scene-1",
+      sceneName: "保障潜客经营",
+      categoryLabel: "保险",
+      categoryCode: "insurance",
+      mcpRelations: [],
+      direction: "优先触达高潜客户",
+      cycle: "本月",
+      start: "2026-09-01",
+      end: "2026-09-30",
+      schedule: { type: "daily", hour: 10, minute: 0 },
+    };
+    const ownPlan: Plan = {
+      id: "plan-self",
+      name: "客户经理已有规划",
+      source: "我的关注",
+      desc: "",
+      customers: 0,
+      tasks: 0,
+      rate: 0,
+      status: "已自动下发",
+      publishStatus: "published",
+      period: "本月",
+      start: "2026-09-01",
+      end: "2026-09-30",
+      items: [item],
+      editable: true,
+      targetSapIds: ["rm-1"],
+    };
+    const managementPlan: Plan = {
+      ...ownPlan,
+      id: "plan-president",
+      name: "行长历史规划",
+      source: "行长关注",
+      editable: false,
+    };
+    useIframeStore.setState({ positionId: "RB0101", userId: "rm-1" });
+    useWealthStore.setState({
+      accountId: "rm",
+      plansLoaded: true,
+      draft: { name: ownPlan.name, items: [item] },
+      plans: [ownPlan, managementPlan],
+      scenesByCategory: { "": [] },
+      scenesLoading: false,
+      editingId: ownPlan.id,
+      dialog: null,
+      acting: false,
+    });
+
+    render(
+      <MemoryRouter>
+        <Create />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getAllByRole("button", { name: "保存修改" })[0]);
+
+    const dialog = useWealthStore.getState().dialog;
+    expect(dialog?.buttons.find((button) => button.primary)?.disabled).toBe(
+      false,
+    );
+    const confirmation = render(<>{dialog?.body}</>);
+    expect(within(confirmation.container).queryByRole("alert")).toBeNull();
+  });
+
   it("规划数据未就绪时禁用发布，避免跳过已有规划冲突检查", () => {
     useIframeStore.setState({ positionId: "RB0101", userId: "rm-1" });
     useWealthStore.setState({
