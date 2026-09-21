@@ -361,13 +361,19 @@ async def _validate_scene_conflicts(
     body: PlanUpsertRequest,
     *,
     exclude_plan_id: str | None = None,
+    scene_ids: set[str] | None = None,
 ) -> None:
     """按发布角色矩阵校验本行已被占用的经营场景。"""
+    checked_scene_ids = (
+        scene_ids
+        if scene_ids is not None
+        else {scene.scene_id for scene in body.scenes}
+    )
     conflicts = await store.find_scene_conflicts(
         _request_role(request),
         _request_sap_id(request),
         getattr(request.state, "bbk_id", None),
-        {scene.scene_id for scene in body.scenes},
+        checked_scene_ids,
         exclude_plan_id=exclude_plan_id,
     )
     if not conflicts:
@@ -447,6 +453,8 @@ async def update_plan(
         store,
         body,
         exclude_plan_id=plan_id,
+        scene_ids={scene.scene_id for scene in body.scenes}
+        - {scene.scene_id for scene in old.scenes},
     )
     record = _build_record(request, body, plan_id=plan_id)
     _carry_scene_links(old, record)

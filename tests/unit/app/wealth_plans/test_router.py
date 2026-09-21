@@ -550,6 +550,93 @@ async def test_update_relaunches_after_published(
     assert record is not None and record.name == "十月计划"
 
 
+async def test_rm_can_update_own_published_plan_schedule(
+    client: TestClient,
+    store: WealthPlanStore,
+) -> None:
+    headers = {
+        "X-User-Id": "rm-1",
+        "X-Bbk-Id": "100",
+        "X-Position-Id": "RB0101",
+    }
+    created = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(source_label="我的关注"),
+        headers=headers,
+    ).json()
+    await store.set_publish_status(created["id"], "published")
+    occupied = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(name="行长历史规划"),
+        headers={
+            "X-User-Id": "president",
+            "X-Bbk-Id": "100",
+            "X-Position-Id": "RB1101",
+        },
+    )
+    assert occupied.status_code == 200
+    payload = plan_payload(source_label="我的关注")
+    payload["scenes"][0]["cron_expr"] = "0 10 * * *"
+
+    response = client.put(
+        f"/api/wealth/plans/{created['id']}",
+        json=payload,
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+
+
+async def test_rm_update_still_rejects_new_scene_reserved_by_management(
+    client: TestClient,
+    store: WealthPlanStore,
+) -> None:
+    rm_headers = {
+        "X-User-Id": "rm-1",
+        "X-Bbk-Id": "100",
+        "X-Position-Id": "RB0101",
+    }
+    own_payload = plan_payload(source_label="我的关注")
+    own_payload["scenes"][0]["scene_id"] = "scene-own"
+    created = client.post(
+        "/api/wealth/plans",
+        json=own_payload,
+        headers=rm_headers,
+    ).json()
+    await store.set_publish_status(created["id"], "published")
+
+    management_payload = plan_payload(name="行长规划")
+    management_payload["scenes"][0]["scene_id"] = "scene-management"
+    occupied = client.post(
+        "/api/wealth/plans",
+        json=management_payload,
+        headers={
+            "X-User-Id": "president",
+            "X-Bbk-Id": "100",
+            "X-Position-Id": "RB1101",
+        },
+    )
+    assert occupied.status_code == 200
+
+    update_payload = plan_payload(source_label="我的关注")
+    retained_scene = {**update_payload["scenes"][0], "scene_id": "scene-own"}
+    added_scene = {
+        **update_payload["scenes"][0],
+        "scene_id": "scene-management",
+        "scene_name": "新增经营场景",
+    }
+    update_payload["scenes"] = [retained_scene, added_scene]
+
+    response = client.put(
+        f"/api/wealth/plans/{created['id']}",
+        json=update_payload,
+        headers=rm_headers,
+    )
+
+    assert response.status_code == 409
+    assert "新增经营场景" in response.json()["detail"]
+
+
 def test_update_forbidden_for_target(client: TestClient) -> None:
     created = client.post(
         "/api/wealth/plans",

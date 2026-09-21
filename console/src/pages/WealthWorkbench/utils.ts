@@ -256,6 +256,11 @@ export function findSceneConflicts(
   draft: Draft,
   editingId: string | null,
 ): SceneConflict[] {
+  const retainedSceneIds = new Set(
+    plans
+      .find((plan) => plan.id === editingId)
+      ?.items?.map((item) => item.id) ?? [],
+  );
   const ownerBySceneId = new Map<string, string>();
   for (const p of plans) {
     if (p.id === editingId) continue;
@@ -267,7 +272,9 @@ export function findSceneConflicts(
     }
   }
   return draft.items
-    .filter((x) => ownerBySceneId.has(x.id))
+    .filter(
+      (item) => !retainedSceneIds.has(item.id) && ownerBySceneId.has(item.id),
+    )
     .map((x) => ({
       scene: x,
       planName: ownerBySceneId.get(x.id) ?? "",
