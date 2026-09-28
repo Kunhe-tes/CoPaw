@@ -481,6 +481,7 @@ export interface CronJobOverviewBranchRankingRow {
   totalTasks: string;
   successCount: string;
   readTasks: string;
+  readRate: string;
   involvedManagers: string;
   resultViewManagers: string;
   resultViewManagerRate: string;
@@ -893,6 +894,7 @@ export function mapCronBranchRanking(
       totalTasks: formatInteger(item.total_tasks),
       successCount: formatInteger(item.success_count),
       readTasks: formatInteger(item.read_tasks),
+      readRate: formatDivisionPercentText(item.read_tasks, item.success_count),
       involvedManagers: formatInteger(item.involved_managers),
       resultViewManagers: formatInteger(item.result_view_managers),
       resultViewManagerRate: formatDivisionPercentText(
