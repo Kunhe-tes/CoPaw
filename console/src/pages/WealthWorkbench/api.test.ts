@@ -58,7 +58,7 @@ describe("WealthWorkbench api", () => {
         {
           ...NAME_LIST_FIXTURE[0],
           touched: 1,
-          fieldListfieldList: [
+          fieldList: [
             { filedName: "age", filedNameCn: "旧年龄名称", filedValue: 0 },
             { filedName: "risk", filedNameCn: "风险等级", filedValue: null },
             {

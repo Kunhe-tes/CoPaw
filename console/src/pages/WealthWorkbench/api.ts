@@ -290,7 +290,7 @@ interface NameListItemView {
   strongContactTime?: string | null;
   touchMethod?: string | null;
   touched?: number | null;
-  fieldListfieldList?: NameListFieldValue[];
+  fieldList?: NameListFieldValue[];
 }
 
 interface NameListResponse {
@@ -338,7 +338,7 @@ function customerFields(
   skillId?: string,
 ): Pick<Customer, "dynamicFields" | "groupFields"> {
   const values = new Map(
-    (item.fieldListfieldList ?? []).map((field) => [field.filedName, field]),
+    (item.fieldList ?? []).map((field) => [field.filedName, field]),
   );
   const labels = new Map(
     (response.allFields ?? []).map((field) => [

@@ -594,6 +594,72 @@ describe("WealthWorkbench store", () => {
     });
   });
 
+  it("刷新先等待最新规划，再用新技能查询名单，期间拦截重复刷新", async () => {
+    const day = todayKey();
+    const latest = makeView({
+      period_start: day,
+      period_end: day,
+      scenes: [
+        {
+          scene_id: LOAN,
+          scene_name: "新发布的信贷任务",
+          category: "loan",
+          category_label: "贷款",
+          start_date: day,
+          end_date: day,
+          cron_expr: "0 9 * * *",
+          mcp_relations: [],
+        },
+      ],
+    });
+    useWealthStore.setState({ plans: [], customersLoading: false });
+    let finishPlans!: (value: unknown) => void;
+    mockRequest.mockClear();
+    mockRequest.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishPlans = resolve;
+        }),
+    );
+    const refresh = useWealthStore.getState().refreshTodayCustomers("business");
+    expect(useWealthStore.getState().customersLoading).toBe(true);
+    expect(mockRequest.mock.calls.map(([path]) => path)).toEqual([
+      "/wealth/plans",
+    ]);
+    await useWealthStore.getState().refreshTodayCustomers("business");
+    expect(mockRequest).toHaveBeenCalledTimes(1);
+    finishPlans({ items: [latest] });
+    await refresh;
+    expect(String(mockRequest.mock.calls[1]?.[0])).toContain(
+      `skill_id=${LOAN}`,
+    );
+    expect(useWealthStore.getState().customers[0].task).toBe(
+      "新发布的信贷任务",
+    );
+    expect(useWealthStore.getState().customersLoading).toBe(false);
+  });
+
+  it("客户视角刷新规划后只查询一次聚合名单", async () => {
+    useWealthStore.setState({ customersLoading: false });
+    mockRequest.mockClear();
+    await useWealthStore.getState().refreshTodayCustomers("customer");
+    expect(mockRequest.mock.calls).toHaveLength(2);
+    expect(mockRequest.mock.calls[0][0]).toBe("/wealth/plans");
+    expect(String(mockRequest.mock.calls[1][0])).toContain("/wealth/name-list");
+    expect(String(mockRequest.mock.calls[1][0])).not.toContain("skill_id=");
+    expect(useWealthStore.getState().customersLoading).toBe(false);
+  });
+
+  it("无任务权限时刷新不发送请求", async () => {
+    useWealthStore.setState({
+      accountId: "president",
+      customersLoading: false,
+    });
+    mockRequest.mockClear();
+    await useWealthStore.getState().refreshTodayCustomers("business");
+    expect(mockRequest).not.toHaveBeenCalled();
+  });
+
   it("loadPendingCustomers / loadDoneCustomers 按 touched 拉取各自名单", async () => {
     useIframeStore.setState({ userId: "10086" });
     useWealthStore.setState({ plans: [makeTodayPlan()] });

@@ -294,7 +294,7 @@ class NameListItem(BaseModel):
     strongContactTime: str | None = None
     touchMethod: str | None = None
     touched: int | None = None
-    fieldListfieldList: list[NameListFieldValue] = Field(default_factory=list)
+    fieldList: list[NameListFieldValue] = Field(default_factory=list)
 
 
 class NameListResponse(BaseModel):
