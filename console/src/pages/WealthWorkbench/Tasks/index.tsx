@@ -6,6 +6,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { Tooltip } from "antd";
+import { RotateCw } from "lucide-react";
 import cx from "classnames";
 import DOMPurify from "dompurify";
 import styles from "../index.module.less";
@@ -245,6 +246,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   const plans = useWealthStore((s) => s.plans);
   const plansLoaded = useWealthStore((s) => s.plansLoaded);
   const refreshTodayCustomers = useWealthStore((s) => s.refreshTodayCustomers);
+  const loadTodayCustomers = useWealthStore((s) => s.loadTodayCustomers);
   const loadPendingCustomers = useWealthStore((s) => s.loadPendingCustomers);
   const loadDoneCustomers = useWealthStore((s) => s.loadDoneCustomers);
   const openDialog = useWealthStore((s) => s.openDialog);
@@ -261,6 +263,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   const [tagFilterPos, setTagFilterPos] = useState({ left: 10, top: 10 });
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
+  const lastLoadedPageRef = useRef<TaskPageKind | null>(null);
   /**
    * 经营方案 iframe 自增序列：作为 _t 时间戳附加到 URL 强制刷新加载，
    * 同时用作 <CustomerSchemePreview> 的 key 强制重挂载，从而重置内部的
@@ -329,17 +332,33 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   const groups = useMemo(() => buildCustomerGroups(list, isBiz), [list, isBiz]);
   const columnCount = (doneView ? 6 : isBiz ? 4 : 5) + 1;
 
-  // 今日任务先更新规划，再按当前视角查名单；待触达/已完成按 touched 查询。
+  // 进入今日任务或切回经营视角更新规划；页内切到客户视角仅查询聚合名单。
   useEffect(() => {
-    if (!plansLoaded) return;
-    if (page === "today") void refreshTodayCustomers(view);
-    if (page === "pending") void loadPendingCustomers();
-    if (page === "done") void loadDoneCustomers();
+    if (!plansLoaded) {
+      return;
+    }
+    const enteringToday =
+      page === "today" && lastLoadedPageRef.current !== "today";
+    lastLoadedPageRef.current = page;
+    if (page === "today") {
+      if (enteringToday || view === "business") {
+        void refreshTodayCustomers(view);
+      } else {
+        void loadTodayCustomers(view);
+      }
+    }
+    if (page === "pending") {
+      void loadPendingCustomers();
+    }
+    if (page === "done") {
+      void loadDoneCustomers();
+    }
   }, [
     page,
     view,
     plansLoaded,
     refreshTodayCustomers,
+    loadTodayCustomers,
     loadPendingCustomers,
     loadDoneCustomers,
   ]);
@@ -527,7 +546,32 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
     <div className={cx(styles.tasksLayout, isBiz && styles.business)}>
       {isBiz && (
         <aside className={`${styles.panel} ${styles.taskTree}`}>
-          <h2>工作任务</h2>
+          <div className={styles.taskTreeHeading}>
+            <h2>工作任务</h2>
+            <Tooltip
+              trigger={["hover", "focus"]}
+              title={customersLoading ? "正在刷新工作任务" : "刷新工作任务"}
+            >
+              <span>
+                <button
+                  type="button"
+                  className={styles.taskRefresh}
+                  aria-label="刷新工作任务"
+                  disabled={!plansLoaded || customersLoading}
+                  aria-busy={customersLoading}
+                  onClick={() => void refreshTodayCustomers("business")}
+                >
+                  <RotateCw
+                    size={16}
+                    aria-hidden="true"
+                    className={
+                      customersLoading ? styles.taskRefreshBusy : undefined
+                    }
+                  />
+                </button>
+              </span>
+            </Tooltip>
+          </div>
           {taskTree.length ? (
             taskTree.map((g) => (
               <details className={styles.treeGroup} key={g.category} open>
@@ -571,38 +615,27 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
         <div className={styles.sectionHead}>
           <h2>{title}</h2>
           {page === "today" ? (
-            <div className={styles.taskHeadingActions}>
+            <div className={styles.switch} aria-label="任务视角">
               <button
-                type="button"
-                className={`${styles.btn} ${styles.soft} ${styles.sm} ${styles.taskRefresh}`}
-                disabled={!plansLoaded || customersLoading}
-                aria-busy={customersLoading}
-                onClick={() => void refreshTodayCustomers(view)}
+                disabled={customersLoading}
+                className={view === "business" ? styles.active : ""}
+                onClick={() => {
+                  setView("business");
+                  setTaskLabel("全部");
+                }}
               >
-                {customersLoading ? "刷新中…" : "刷新"}
+                经营视角
               </button>
-              <div className={styles.switch} aria-label="任务视角">
-                <button
-                  disabled={customersLoading}
-                  className={view === "business" ? styles.active : ""}
-                  onClick={() => {
-                    setView("business");
-                    setTaskLabel("全部");
-                  }}
-                >
-                  经营视角
-                </button>
-                <button
-                  disabled={customersLoading}
-                  className={view === "customer" ? styles.active : ""}
-                  onClick={() => {
-                    setView("customer");
-                    setTaskLabel("全部");
-                  }}
-                >
-                  客户视角
-                </button>
-              </div>
+              <button
+                disabled={customersLoading}
+                className={view === "customer" ? styles.active : ""}
+                onClick={() => {
+                  setView("customer");
+                  setTaskLabel("全部");
+                }}
+              >
+                客户视角
+              </button>
             </div>
           ) : (
             <button
