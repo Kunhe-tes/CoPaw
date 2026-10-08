@@ -78,12 +78,11 @@ def branch_values(item: CronBranchRankingItem) -> list[int | float]:
             value = value / divisor if divisor else 0
         if denominator or key == "contactRate":
             # Decimal.from_float preserves JS Number/toFixed tie behavior.
-            value = float(
-                Decimal.from_float(value * 100).quantize(
-                    Decimal("0.01"),
-                    rounding=ROUND_HALF_UP,
-                ),
+            rounded = Decimal.from_float(value * 100).quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
             )
+            value = float(rounded)
         values.append(value)
     return values
 

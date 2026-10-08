@@ -7,7 +7,10 @@ from openpyxl import load_workbook
 import pytest
 
 from monitor.app.models.cron import CronBranchRankingItem
-from monitor.app.services.cron.branch_export import export_branch_dimension
+from monitor.app.services.cron.branch_export import (
+    branch_values,
+    export_branch_dimension,
+)
 
 
 def item(name="分行", **values):
@@ -88,6 +91,27 @@ def test_metrics_and_formats_follow_console():
     ]
     assert sheet["C3"].number_format == "#,##0"
     assert all(sheet[f"{c}3"].number_format == "0.00%" for c in "GJLNPSW")
+
+
+def test_percentage_values_are_plain_numbers():
+    values = branch_values(
+        item(
+            success_count=4,
+            read_tasks=1,
+            involved_managers=4,
+            result_view_managers=2,
+            plan_managers=1,
+            insight_managers=1,
+            phone_managers=1,
+            recommended_customers=4,
+            viewed_customers=1,
+            contact_rate=0.125,
+        ),
+    )
+    percentage_indexes = (4, 7, 9, 11, 13, 16, 20)
+    assert all(
+        isinstance(values[index], (int, float)) for index in percentage_indexes
+    )
 
 
 @pytest.mark.parametrize(
