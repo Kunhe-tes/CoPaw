@@ -248,8 +248,7 @@ async def list_name_list(
     """
     if touched is not None and touched not in (0, 1, 2):
         raise HTTPException(status_code=400, detail="invalid touched")
-    items = await _fetch_external_name_list(request, skill_id, sap_id, touched)
-    return NameListResponse(items=items)
+    return await _fetch_external_name_list(request, skill_id, sap_id, touched)
 
 
 async def _fetch_external_name_list(
@@ -257,10 +256,10 @@ async def _fetch_external_name_list(
     skill_id: str,
     sap_id: str,
     touched: int | None,
-) -> list[NameListItem]:
+) -> NameListResponse:
     base = os.environ.get(_SKILL_CONFIG_API_BASE_ENV, "").strip().rstrip("/")
     if not base:
-        return []
+        return NameListResponse()
     bbk_id = getattr(request.state, "bbk_id", None) or ""
     body: dict[str, Any] = {
         "bbkId": bbk_id,
@@ -295,16 +294,20 @@ async def _fetch_external_name_list(
             payload = resp.json()
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("name-list request failed: %s", exc)
-        return []
+        return NameListResponse()
     if str(payload.get("code")) != "200":
         logger.warning("name-list rejected: %s", payload.get("code"))
-        return []
+        return NameListResponse()
     data = payload.get("data") or {}
     items: list[NameListItem] = []
     for row in data.get("list") or []:
         if (item := _parse_name_list_item(row)) is not None:
             items.append(item)
-    return items
+    return NameListResponse(
+        items=items,
+        skillFieldList=data.get("skillFieldList") or [],
+        allFields=data.get("allFields") or [],
+    )
 
 
 def _parse_name_list_item(row: Any) -> NameListItem | None:

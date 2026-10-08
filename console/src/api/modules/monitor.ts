@@ -142,7 +142,7 @@ export interface CronOverviewResponse {
 }
 
 export type CronScheduleBucketMinutes = 5 | 10 | 15 | 30 | 60;
-export type CronScheduleTaskType = "text" | "agent";
+export type CronScheduleTaskType = "text" | "agent" | "workflow";
 
 export interface CronScheduleDistributionDiagnostics {
   invalid_cron_jobs: number;
@@ -157,6 +157,7 @@ export interface CronScheduleDistributionBucket {
   end_time: string;
   text_count: number;
   agent_count: number;
+  workflow_count?: number;
   total_count: number;
 }
 
@@ -169,6 +170,7 @@ export interface CronScheduleDistributionResponse {
   eligible_job_count: number;
   text_count: number;
   agent_count: number;
+  workflow_count?: number;
   total_count: number;
   buckets: CronScheduleDistributionBucket[];
   diagnostics: CronScheduleDistributionDiagnostics;
