@@ -244,7 +244,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   const doneLoading = useWealthStore((s) => s.doneLoading);
   const plans = useWealthStore((s) => s.plans);
   const plansLoaded = useWealthStore((s) => s.plansLoaded);
-  const loadTodayCustomers = useWealthStore((s) => s.loadTodayCustomers);
+  const refreshTodayCustomers = useWealthStore((s) => s.refreshTodayCustomers);
   const loadPendingCustomers = useWealthStore((s) => s.loadPendingCustomers);
   const loadDoneCustomers = useWealthStore((s) => s.loadDoneCustomers);
   const openDialog = useWealthStore((s) => s.openDialog);
@@ -329,17 +329,17 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   const groups = useMemo(() => buildCustomerGroups(list, isBiz), [list, isBiz]);
   const columnCount = (doneView ? 6 : isBiz ? 4 : 5) + 1;
 
-  // 进入任务页加载名单：今日任务按当前视角查询；待触达/已完成按 touched 口径各查一次
+  // 今日任务先更新规划，再按当前视角查名单；待触达/已完成按 touched 查询。
   useEffect(() => {
     if (!plansLoaded) return;
-    if (page === "today") void loadTodayCustomers(view);
+    if (page === "today") void refreshTodayCustomers(view);
     if (page === "pending") void loadPendingCustomers();
     if (page === "done") void loadDoneCustomers();
   }, [
     page,
     view,
     plansLoaded,
-    loadTodayCustomers,
+    refreshTodayCustomers,
     loadPendingCustomers,
     loadDoneCustomers,
   ]);
@@ -571,25 +571,38 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
         <div className={styles.sectionHead}>
           <h2>{title}</h2>
           {page === "today" ? (
-            <div className={styles.switch} aria-label="任务视角">
+            <div className={styles.taskHeadingActions}>
               <button
-                className={view === "business" ? styles.active : ""}
-                onClick={() => {
-                  setView("business");
-                  setTaskLabel("全部");
-                }}
+                type="button"
+                className={`${styles.btn} ${styles.soft} ${styles.sm} ${styles.taskRefresh}`}
+                disabled={!plansLoaded || customersLoading}
+                aria-busy={customersLoading}
+                onClick={() => void refreshTodayCustomers(view)}
               >
-                经营视角
+                {customersLoading ? "刷新中…" : "刷新"}
               </button>
-              <button
-                className={view === "customer" ? styles.active : ""}
-                onClick={() => {
-                  setView("customer");
-                  setTaskLabel("全部");
-                }}
-              >
-                客户视角
-              </button>
+              <div className={styles.switch} aria-label="任务视角">
+                <button
+                  disabled={customersLoading}
+                  className={view === "business" ? styles.active : ""}
+                  onClick={() => {
+                    setView("business");
+                    setTaskLabel("全部");
+                  }}
+                >
+                  经营视角
+                </button>
+                <button
+                  disabled={customersLoading}
+                  className={view === "customer" ? styles.active : ""}
+                  onClick={() => {
+                    setView("customer");
+                    setTaskLabel("全部");
+                  }}
+                >
+                  客户视角
+                </button>
+              </div>
             </div>
           ) : (
             <button
