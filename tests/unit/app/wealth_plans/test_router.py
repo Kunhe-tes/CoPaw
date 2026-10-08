@@ -727,7 +727,7 @@ def test_name_list_allows_empty_skill_id(client: TestClient) -> None:
     resp = client.get("/api/wealth/name-list?sap_id=10086")
 
     assert resp.status_code == 200
-    assert resp.json() == {"items": []}
+    assert resp.json() == {"items": [], "skillFieldList": [], "allFields": []}
 
 
 def test_name_list_empty_when_external_absent(client: TestClient) -> None:
@@ -735,7 +735,7 @@ def test_name_list_empty_when_external_absent(client: TestClient) -> None:
     resp = client.get("/api/wealth/name-list?skill_id=loan_verify")
 
     assert resp.status_code == 200
-    assert resp.json() == {"items": []}
+    assert resp.json() == {"items": [], "skillFieldList": [], "allFields": []}
 
 
 def test_name_list_allows_empty_sap_id(client: TestClient) -> None:
@@ -743,7 +743,7 @@ def test_name_list_allows_empty_sap_id(client: TestClient) -> None:
     resp = client.get("/api/wealth/name-list?skill_id=loan_verify&sap_id=")
 
     assert resp.status_code == 200
-    assert resp.json() == {"items": []}
+    assert resp.json() == {"items": [], "skillFieldList": [], "allFields": []}
 
 
 def test_name_list_rejects_invalid_touched(client: TestClient) -> None:
@@ -785,8 +785,26 @@ def test_name_list_forwards_touch_filter_context(
                             ],
                             "strongContactTime": "2026-09-16 10:30:00",
                             "touchMethod": "电话",
+                            "touched": 1,
+                            "fieldListfieldList": [
+                                {
+                                    "filedName": "age",
+                                    "filedNameCn": "年龄",
+                                    "filedValue": 0,
+                                },
+                            ],
                         },
                     ],
+                    "skillFieldList": [
+                        {
+                            "skillId": "SKILL0001",
+                            "groupField": ["age"],
+                            "fields": [
+                                {"filedName": "age", "filedNameCn": "年龄"},
+                            ],
+                        },
+                    ],
+                    "allFields": [{"filedName": "age", "filedNameCn": "年龄"}],
                 },
             }
 
@@ -849,7 +867,16 @@ def test_name_list_forwards_touch_filter_context(
             "skillList": [{"skillId": "SKILL0001", "skillName": "贷款经营"}],
             "strongContactTime": "2026-09-16 10:30:00",
             "touchMethod": "电话",
+            "touched": 1,
+            "fieldListfieldList": [
+                {"filedName": "age", "filedNameCn": "年龄", "filedValue": 0},
+            ],
         },
+    ]
+
+    assert resp.json()["skillFieldList"][0]["groupField"] == ["age"]
+    assert resp.json()["allFields"] == [
+        {"filedName": "age", "filedNameCn": "年龄"},
     ]
 
 
