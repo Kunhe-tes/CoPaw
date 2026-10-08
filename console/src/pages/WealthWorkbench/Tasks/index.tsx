@@ -3,7 +3,7 @@
  * 对应原型 tasksHTML：经营/客户双视角、任务树、重点标签表头筛选、
  * 经营方案/触达记录两类弹窗，执行列外链跳转电访与客户洞察。
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { Tooltip } from "antd";
 import cx from "classnames";
@@ -11,6 +11,8 @@ import DOMPurify from "dompurify";
 import styles from "../index.module.less";
 import { Icon } from "../components/Icon";
 import { CustomerSchemePreview } from "../components/CustomerSchemePreview";
+import { CustomerMetrics } from "../components/CustomerMetrics";
+import { buildCustomerGroups } from "./customerGroups";
 import { buildInsightUrl, buildTelUrl, fetchSchemeSignature } from "../api";
 import { useCanAccess, useWealthStore } from "../store";
 import type { Customer } from "../types";
@@ -253,6 +255,9 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   const [selectedTask, setSelectedTask] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("");
   const [tagFilterOpen, setTagFilterOpen] = useState(false);
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
+    new Set(),
+  );
   const [tagFilterPos, setTagFilterPos] = useState({ left: 10, top: 10 });
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -321,6 +326,8 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [page, pool, isBiz, selectedTask, selectedCategory, search, taskLabel],
   );
+  const groups = useMemo(() => buildCustomerGroups(list, isBiz), [list, isBiz]);
+  const columnCount = (doneView ? 6 : isBiz ? 4 : 5) + 1;
 
   // 进入任务页加载名单：今日任务按当前视角查询；待触达/已完成按 touched 口径各查一次
   useEffect(() => {
@@ -638,11 +645,6 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                 </>
               )}
             </div>
-            {isBiz && (
-              <p className={styles.pageNote}>
-                客户清单为演示数据，待任务实例接口接入后由定时任务执行结果生成
-              </p>
-            )}
           </div>
         </div>
 
@@ -668,6 +670,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
             className={cx(
               styles.customerTable,
               doneView ? styles.completedTable : styles.opportunityTable,
+              styles.metricsTable,
             )}
           >
             <thead>
@@ -717,6 +720,9 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                 <th className={styles.opportunityCol}>
                   {doneView ? "经营任务" : "经营机会"}
                 </th>
+                <th scope="col" className={styles.metricsCol}>
+                  客户指标
+                </th>
                 <th>{doneView ? "触达方式" : "经营方案"}</th>
                 <th className={styles.executionCol}>
                   {doneView ? "完成时间" : "执行"}
@@ -726,82 +732,132 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
             </thead>
             <tbody>
               {list.length ? (
-                list.map((c) => (
-                  <tr key={c.id}>
-                    <td className={styles.name}>{c.name}</td>
-                    {!isBiz && (
-                      <td>
-                        <CustomerLabel label={c.label} />
-                      </td>
-                    )}
-                    <td className={styles.reason}>
-                      {doneView ? (
-                        c.task
-                      ) : (
-                        <Opportunities customer={c} multiple={!isBiz} />
+                groups.map((group) => {
+                  const groupKey = `${selectedCategory}|${selectedTask}|${group.key}`;
+                  const collapsed = collapsedGroups.has(groupKey);
+                  return (
+                    <Fragment key={groupKey}>
+                      {group.fields.length > 0 && (
+                        <tr className={styles.customerGroupRow}>
+                          <th colSpan={columnCount} scope="rowgroup">
+                            <button
+                              type="button"
+                              className={styles.customerGroupToggle}
+                              aria-expanded={!collapsed}
+                              onClick={() =>
+                                setCollapsedGroups((current) => {
+                                  const next = new Set(current);
+                                  if (next.has(groupKey)) next.delete(groupKey);
+                                  else next.add(groupKey);
+                                  return next;
+                                })
+                              }
+                            >
+                              <span aria-hidden="true">
+                                {collapsed ? "▸" : "▾"}
+                              </span>
+                              <span className={styles.customerGroupTitle}>
+                                {group.fields
+                                  .map(
+                                    (field) => `${field.label}：${field.value}`,
+                                  )
+                                  .join(" · ")}
+                              </span>
+                              <span className={styles.customerGroupCount}>
+                                {group.customers.length} 人
+                              </span>
+                            </button>
+                          </th>
+                        </tr>
                       )}
-                    </td>
-                    <td>
-                      {doneView ? (
-                        <>
-                          <Icon
-                            name={
-                              c.channel === "电话"
-                                ? "phone"
-                                : c.channel === "企微"
-                                  ? "chat"
-                                  : "user"
-                            }
-                          />
-                          {"　"}
-                          {c.channel}
-                        </>
-                      ) : (
-                        <button
-                          className={styles.link}
-                          onClick={() => showScheme(c.id)}
-                        >
-                          查看经营方案
-                        </button>
-                      )}
-                    </td>
-                    <td className={styles.executionCol}>
-                      {doneView ? (
-                        c.time
-                      ) : (
-                        <div className={styles.contactActions}>
-                          <button
-                            className={`${styles.btn} ${styles.primary}`}
-                            onClick={() => openOutboundLink("dial", c)}
-                          >
-                            <Icon name="phone" />
-                            电访
-                          </button>
-                          <button
-                            className={styles.btn}
-                            onClick={() => openOutboundLink("insight", c)}
-                          >
-                            <Icon name="user" />
-                            客户洞察
-                          </button>
-                        </div>
-                      )}
-                    </td>
-                    {doneView && (
-                      <td>
-                        <button
-                          className={styles.link}
-                          onClick={() => showResult(c.id)}
-                        >
-                          查看记录
-                        </button>
-                      </td>
-                    )}
-                  </tr>
-                ))
+                      {!collapsed &&
+                        group.customers.map((c) => (
+                          <tr key={c.id}>
+                            <td className={styles.name}>{c.name}</td>
+                            {!isBiz && (
+                              <td>
+                                <CustomerLabel label={c.label} />
+                              </td>
+                            )}
+                            <td className={styles.reason}>
+                              {doneView ? (
+                                c.task
+                              ) : (
+                                <Opportunities customer={c} multiple={!isBiz} />
+                              )}
+                            </td>
+                            <td className={styles.metricsCol}>
+                              <CustomerMetrics
+                                key={c.id}
+                                fields={c.dynamicFields}
+                              />
+                            </td>
+                            <td>
+                              {doneView ? (
+                                <>
+                                  <Icon
+                                    name={
+                                      c.channel === "电话"
+                                        ? "phone"
+                                        : c.channel === "企微"
+                                        ? "chat"
+                                        : "user"
+                                    }
+                                  />
+                                  {"　"}
+                                  {c.channel}
+                                </>
+                              ) : (
+                                <button
+                                  className={styles.link}
+                                  onClick={() => showScheme(c.id)}
+                                >
+                                  查看经营方案
+                                </button>
+                              )}
+                            </td>
+                            <td className={styles.executionCol}>
+                              {doneView ? (
+                                c.time
+                              ) : (
+                                <div className={styles.contactActions}>
+                                  <button
+                                    className={`${styles.btn} ${styles.primary}`}
+                                    onClick={() => openOutboundLink("dial", c)}
+                                  >
+                                    <Icon name="phone" />
+                                    电访
+                                  </button>
+                                  <button
+                                    className={styles.btn}
+                                    onClick={() =>
+                                      openOutboundLink("insight", c)
+                                    }
+                                  >
+                                    <Icon name="user" />
+                                    客户洞察
+                                  </button>
+                                </div>
+                              )}
+                            </td>
+                            {doneView && (
+                              <td>
+                                <button
+                                  className={styles.link}
+                                  onClick={() => showResult(c.id)}
+                                >
+                                  查看记录
+                                </button>
+                              </td>
+                            )}
+                          </tr>
+                        ))}
+                    </Fragment>
+                  );
+                })
               ) : (
                 <tr>
-                  <td colSpan={doneView ? 6 : isBiz ? 4 : 5}>
+                  <td colSpan={columnCount}>
                     <div className={styles.empty}>
                       {(
                         page === "pending"
