@@ -295,6 +295,10 @@ async def _fetch_external_name_list(
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("name-list request failed: %s", exc)
         return NameListResponse()
+    return _parse_name_list_response(payload)
+
+
+def _parse_name_list_response(payload: dict[str, Any]) -> NameListResponse:
     if str(payload.get("code")) != "200":
         logger.warning("name-list rejected: %s", payload.get("code"))
         return NameListResponse()
