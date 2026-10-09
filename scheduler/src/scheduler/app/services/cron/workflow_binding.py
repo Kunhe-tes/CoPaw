@@ -33,29 +33,35 @@ async def resolve_workflow_batch_jobs(
     )
     bindings = {str(row["binding_id"]): row for row in rows}
     for job in workflow_jobs:
-        binding_id = str(job["workflow_binding_id"])
-        binding = bindings.get(binding_id)
-        if (
-            binding is None
-            or not binding.get("enabled")
-            or str(binding.get("source_id") or "")
-            != str(job.get("source_id") or "")
-        ):
-            raise RuntimeError(f"workflow binding unavailable: {binding_id}")
-        raw_config = binding["config_json"]
-        if isinstance(raw_config, bytes):
-            raw_config = raw_config.decode("utf-8")
-        config = (
-            json.loads(raw_config)
-            if isinstance(raw_config, str)
-            else raw_config
+        _apply_workflow_binding(
+            job, bindings.get(str(job["workflow_binding_id"]))
         )
-        if not isinstance(config, dict):
-            raise RuntimeError("workflow binding config is invalid")
-        provider_id = str(config.get("provider_id") or "").strip()
-        model_id = str(config.get("model_id") or "").strip()
-        if not provider_id or not model_id:
-            raise RuntimeError("workflow binding dispatch model is missing")
-        job["provider_id"] = provider_id
-        job["model_id"] = model_id
-        job["workflow_config_version"] = int(binding["current_version"])
+
+
+def _apply_workflow_binding(
+    job: dict[str, Any],
+    binding: dict[str, Any] | None,
+) -> None:
+    binding_id = str(job["workflow_binding_id"])
+    if (
+        binding is None
+        or not binding.get("enabled")
+        or str(binding.get("source_id") or "")
+        != str(job.get("source_id") or "")
+    ):
+        raise RuntimeError(f"workflow binding unavailable: {binding_id}")
+    raw_config = binding["config_json"]
+    if isinstance(raw_config, bytes):
+        raw_config = raw_config.decode("utf-8")
+    config = (
+        json.loads(raw_config) if isinstance(raw_config, str) else raw_config
+    )
+    if not isinstance(config, dict):
+        raise RuntimeError("workflow binding config is invalid")
+    provider_id = str(config.get("provider_id") or "").strip()
+    model_id = str(config.get("model_id") or "").strip()
+    if not provider_id or not model_id:
+        raise RuntimeError("workflow binding dispatch model is missing")
+    job["provider_id"] = provider_id
+    job["model_id"] = model_id
+    job["workflow_config_version"] = int(binding["current_version"])
