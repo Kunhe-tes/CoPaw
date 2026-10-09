@@ -3427,10 +3427,16 @@
     color: var(--console-management-text-secondary, #4b5563);
     font-size: 13px;
   }
-  .customerTable .customerGroupRow th {
-    padding: 0;
+  .customerGroups {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .customerGroupHeading {
+    margin: 0 0 8px;
     background: var(--console-management-surface-subtle, #f7f9fc);
-    border-top: 1px solid var(--console-management-border, #e5e7eb);
+    border-radius: 6px;
+    font-size: 14px;
   }
   .customerGroupToggle {
     display: flex;
