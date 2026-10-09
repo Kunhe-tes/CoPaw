@@ -189,6 +189,8 @@ class WorkflowCronExecutor:
                     target_user_id=target.user_id,
                     runtime={
                         "job_id": job.id,
+                        "cron_job_id": job.id,
+                        "trace_id": trace_id,
                         "tenant_id": job.tenant_id,
                         "source_id": job.source_id,
                         "user_id": target.user_id,
