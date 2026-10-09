@@ -2451,7 +2451,7 @@ function ChatPageContent() {
             <span style={{ flex: 1 }} />
             {!isContentOnly && (
               <FileManager
-                enableSessionAnnotations={!feedbackTask?.cronTaskId}
+                enableSessionAnnotations={false}
               />
             )}
             {!isContentOnly && <ChatActionGroup chatId={chatId} />}
