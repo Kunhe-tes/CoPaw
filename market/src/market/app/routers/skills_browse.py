@@ -661,17 +661,17 @@ async def list_bbk_ids(
     source_id = require_source_id(x_source_id)
     svc = request.app.state.marketplace
     is_head_office = x_bbk_id == "100"
+    if not svc.db.is_connected:
+        raise HTTPException(status_code=503, detail="Database unavailable")
     visible_category_ids = None
     if not is_head_office:
-        if not svc.db.is_connected:
-            raise HTTPException(status_code=503, detail="Database unavailable")
         category_rows = await svc.db.fetch_all(
             "SELECT id FROM swe_marketplace_categories "
             "WHERE source_id = %s AND COALESCE(branch_visible, 1) = 1",
             (source_id,),
         )
         visible_category_ids = {int(row["id"]) for row in category_rows}
-    all_branches = svc.list_all_bbk_ids(
+    all_branches = await svc.list_all_bbk_ids(
         source_id,
         visible_category_ids=visible_category_ids,
     )
@@ -718,10 +718,10 @@ async def list_skills(
     if bbk_ids:
         parsed_bbk_ids = [b.strip() for b in bbk_ids.split(",") if b.strip()]
     svc = request.app.state.marketplace
+    if not svc.db.is_connected:
+        raise HTTPException(status_code=503, detail="Database unavailable")
     visible_category_ids = None
     if not is_head_office:
-        if not svc.db.is_connected:
-            raise HTTPException(status_code=503, detail="Database unavailable")
         category_rows = await svc.db.fetch_all(
             "SELECT id FROM swe_marketplace_categories "
             "WHERE source_id = %s AND COALESCE(branch_visible, 1) = 1",
@@ -808,9 +808,11 @@ async def get_skill_detail(
     log_params(logger, request.method, request.url.path, item_id=item_id)
 
     svc = request.app.state.marketplace
+    if not svc.db.is_connected:
+        raise HTTPException(status_code=503, detail="Database unavailable")
     is_head_office = x_bbk_id == "100"
     visible_category_ids = None
-    if not is_head_office and svc.db.is_connected:
+    if not is_head_office:
         category_rows = await svc.db.fetch_all(
             "SELECT id FROM swe_marketplace_categories "
             "WHERE source_id = %s AND COALESCE(branch_visible, 1) = 1",

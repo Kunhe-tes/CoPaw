@@ -56,6 +56,9 @@ from .fs import (
     normalize_skill_name,
 )
 from .skill_registry import SkillRegistry
+from .market_skill_registry import MarketSkillRegistry
+from .mcp_market_registry import MCPMarketRegistry
+from .errors import MarketplaceMetadataSyncError
 from ..runtime.context import decode_scope_id
 from ..runtime.config_store import MCPClientConfig
 from .mcp_registry import MCPRegistry
@@ -942,6 +945,8 @@ class MarketplaceService:
         self.marketplace_root = marketplace_root
         self.swe_root = swe_root
         self.skill_registry = SkillRegistry(db)
+        self.market_skill_registry = MarketSkillRegistry(db)
+        self.mcp_market_registry = MCPMarketRegistry(db)
         self.skill_scan_history_recorder: Any | None = None
 
     def _get_expert_version_service(self) -> ExpertVersionService:
@@ -1576,28 +1581,43 @@ class MarketplaceService:
             except Exception as e:
                 logger.warning("Failed to log publish operation: %s", e)
 
-        # 同步写入 swe_marketplace_skills 表
-        if self.db.is_connected:
-            try:
-                from market.marketplace.market_skill_registry import (
-                    MarketSkillRegistry,
-                )
-
-                registry = MarketSkillRegistry(self.db)
-                await registry.upsert_market_skill(
-                    source_id=source_id,
-                    item_id=item.item_id,
-                    skill_id=item.skill_id,
-                    skill_name=item.name,
-                    cn_name=item.chinese_name,
-                    include_in_statistics=item.include_in_statistics,
-                    creator_id=item.creator_id,
-                    creator_name=item.creator_name,
-                    updator_id=operator_id or item.creator_id,
-                    updator_name=operator_name or item.creator_name,
-                )
-            except Exception as e:
-                logger.warning("Failed to upsert market skill: %s", e)
+        # 同步写入 swe_marketplace_skills 表。NAS 已落盘时保留内容，
+        # 但不能把 TDSQL 同步失败伪装成发布成功。
+        if not self.db.is_connected:
+            raise MarketplaceMetadataSyncError("Database unavailable")
+        try:
+            success = await self.market_skill_registry.upsert_market_skill(
+                source_id=source_id,
+                item_id=item.item_id,
+                skill_id=item.skill_id,
+                skill_name=item.name,
+                cn_name=item.chinese_name,
+                description=item.description,
+                version=item.version,
+                status=item.status,
+                category_id=item.category_id,
+                bbk_ids=item.bbk_ids,
+                content_path=str(
+                    self.marketplace_root
+                    / source_id
+                    / "skills"
+                    / item.item_id,
+                ),
+                include_in_statistics=item.include_in_statistics,
+                creator_id=item.creator_id,
+                creator_name=item.creator_name,
+                updator_id=operator_id or item.creator_id,
+                updator_name=operator_name or item.creator_name,
+            )
+        except Exception as exc:
+            logger.warning("Failed to upsert market skill: %s", exc)
+            raise MarketplaceMetadataSyncError(
+                "Failed to synchronize market skill metadata",
+            ) from exc
+        if not success:
+            raise MarketplaceMetadataSyncError(
+                "Failed to synchronize market skill metadata",
+            )
 
         return item, version_unchanged
 
@@ -3014,21 +3034,43 @@ class MarketplaceService:
 
         return True
 
-    def list_all_bbk_ids(
+    async def list_market_metadata(
+        self,
+        source_id: str,
+        resource_type: str,
+    ) -> list[MarketItem]:
+        """Return all active market metadata for browse facet calculation."""
+        if resource_type == "skill":
+            return await self.market_skill_registry.list_market_skills(
+                source_id=source_id,
+                user_bbk_id="100",
+                is_manager=True,
+            )
+        if resource_type == "mcp":
+            return await self.mcp_market_registry.list_market_mcps(
+                source_id=source_id,
+                user_bbk_id="100",
+                is_manager=True,
+            )
+        raise ValueError(f"Unsupported market resource type: {resource_type}")
+
+    async def list_all_bbk_ids(
         self,
         source_id: str,
         visible_category_ids: set[int] | None = None,
     ) -> list[dict]:
-        """获取所有有数据的分行 ID 列表（含技能和 MCP 数量，去重、排序）。
-
-        从 index.json 中提取所有活跃条目的 bbk_ids 字段，
-        同时统计每个分行的 skill 和 MCP 数量，
-        用于前端分行菜单的固定渲染。
-
-        ``visible_category_ids`` 仅用于普通用户的技能可见性过滤；
-        MCP 和未分类技能不受该参数影响。
-        """
-        items = load_index(self.marketplace_root, source_id)
+        """获取所有有数据的分行 ID 列表（从 TDSQL 元数据读取）。"""
+        skill_items = await self.market_skill_registry.list_market_skills(
+            source_id=source_id,
+            user_bbk_id="100",
+            is_manager=True,
+        )
+        mcp_items = await self.mcp_market_registry.list_market_mcps(
+            source_id=source_id,
+            user_bbk_id="100",
+            is_manager=True,
+        )
+        items = skill_items + mcp_items
         all_bbk_ids: set[str] = set()
         skill_counts: dict[str, int] = {}
         mcp_counts: dict[str, int] = {}
@@ -3040,7 +3082,13 @@ class MarketplaceService:
             if (
                 item.status != "active"
                 or not item.bbk_ids
-                or not _is_visible_market_skill(item, visible_category_ids)
+                or (
+                    item.item_type == "skill"
+                    and not _is_visible_market_skill(
+                        item,
+                        visible_category_ids,
+                    )
+                )
             ):
                 continue
             _accumulate_branch_counts(
@@ -3086,7 +3134,11 @@ class MarketplaceService:
             bbk_ids: 可选的分行 ID 过滤（交集匹配）。
             is_manager: 是否为管理员，管理员可查看所有技能。
         """
-        items = load_index(self.marketplace_root, source_id)
+        items = await self.market_skill_registry.list_market_skills(
+            source_id=source_id,
+            user_bbk_id=user_bbk_id,
+            is_manager=is_manager,
+        )
         if not bbk_ids or len(bbk_ids) == 1:
             visible = filter_market_items(
                 items,
@@ -3150,14 +3202,25 @@ class MarketplaceService:
         visible_category_ids: set[int] | None = None,
     ) -> Optional[MarketSkillDetail]:
         """获取技能详情（含调用客户明细）。"""
-        item = self._get_visible_skill_item(
+        item = await self.market_skill_registry.get_market_skill(
             source_id,
             item_id,
-            user_bbk_id,
-            is_manager=is_manager,
-            visible_category_ids=visible_category_ids,
         )
         if item is None:
+            return None
+        if not is_manager and user_bbk_id != "100":
+            if (
+                item.bbk_ids
+                and user_bbk_id not in item.bbk_ids
+                and "100" not in item.bbk_ids
+            ):
+                return None
+        if (
+            not is_manager
+            and visible_category_ids is not None
+            and item.category_id is not None
+            and item.category_id not in visible_category_ids
+        ):
             return None
 
         call_count, user_count = await self._get_stats(item.name, source_id)
@@ -4901,6 +4964,32 @@ class MarketplaceService:
         # 更新索引（在快照创建之后，以便 item.version 反映最终值）
         save_index(self.marketplace_root, source_id, items)
 
+        if not self.db.is_connected:
+            raise MarketplaceMetadataSyncError("Database unavailable")
+        try:
+            success = await self.mcp_market_registry.upsert_market_mcp(
+                source_id=source_id,
+                item=item,
+                content_path=str(
+                    self.marketplace_root
+                    / source_id
+                    / "mcp"
+                    / item.item_id
+                    / "mcp.json",
+                ),
+                updator_id=operator_id or item.creator_id,
+                updator_name=operator_name or item.creator_name,
+            )
+        except Exception as exc:
+            logger.warning("Failed to upsert market MCP metadata: %s", exc)
+            raise MarketplaceMetadataSyncError(
+                "Failed to synchronize market MCP metadata",
+            ) from exc
+        if not success:
+            raise MarketplaceMetadataSyncError(
+                "Failed to synchronize market MCP metadata",
+            )
+
         # 记录操作日志
         if self.db.is_connected:
             try:
@@ -4980,7 +5069,11 @@ class MarketplaceService:
         Returns:
             MCP 条目列表（含调用统计）。
         """
-        items = load_index(self.marketplace_root, source_id)
+        items = await self.mcp_market_registry.list_market_mcps(
+            source_id=source_id,
+            user_bbk_id=user_bbk_id,
+            is_manager=is_manager,
+        )
         is_head_office = is_manager or user_bbk_id == "100"
         mcp_items = _filter_mcp_items_for_request(
             items,
@@ -5015,14 +5108,9 @@ class MarketplaceService:
         Returns:
             MCP 详情，不存在或无权限返回 None。
         """
-        items = load_index(self.marketplace_root, source_id)
-        item = next(
-            (
-                i
-                for i in items
-                if i.item_id == item_id and i.item_type == "mcp"
-            ),
-            None,
+        item = await self.mcp_market_registry.get_market_mcp(
+            source_id,
+            item_id,
         )
         if item is None or not _item_visible(item, user_bbk_id):
             return None
@@ -5382,6 +5470,20 @@ class MarketplaceService:
         if mcp_dir.exists():
             shutil.rmtree(mcp_dir)
 
+        if self.db.is_connected:
+            try:
+                await self.mcp_market_registry.mark_deleted(
+                    source_id=source_id,
+                    item_id=item_id,
+                    updator_id=operator_id,
+                    updator_name=operator_name,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to soft-delete market MCP metadata: %s",
+                    e,
+                )
+
         # 记录删除日志
         if self.db.is_connected:
             try:
@@ -5455,6 +5557,29 @@ class MarketplaceService:
             guidance=guidance,
             bbk_ids=bbk_ids,
         )
+        if not self.db.is_connected:
+            raise MarketplaceMetadataSyncError("Database unavailable")
+        try:
+            success = await self.mcp_market_registry.upsert_market_mcp(
+                source_id=source_id,
+                item=item,
+                content_path=str(
+                    self.marketplace_root
+                    / source_id
+                    / "mcp"
+                    / item.item_id
+                    / "mcp.json",
+                ),
+            )
+        except Exception as exc:
+            logger.warning("Failed to sync market MCP metadata: %s", exc)
+            raise MarketplaceMetadataSyncError(
+                "Failed to synchronize market MCP metadata",
+            ) from exc
+        if not success:
+            raise MarketplaceMetadataSyncError(
+                "Failed to synchronize market MCP metadata",
+            )
         # 同步 cn_name 到所有已分发用户的数据库记录
         if self.db.is_connected and item.chinese_name is not None:
             try:
@@ -5787,15 +5912,41 @@ class MarketplaceService:
         item.category_id = category_id
         item.bbk_ids = bbk_ids
         item.updated_at = datetime.now(timezone.utc).isoformat()
-        save_index(self.marketplace_root, source_id, items)
 
-        if self.db.is_connected:
-            await self.db.execute(
-                """UPDATE swe_marketplace_skills
-                SET cn_name = %s, updated_at = NOW()
-                WHERE source_id = %s AND item_id = %s""",
-                (chinese_name, source_id, item_id),
+        if not self.db.is_connected:
+            raise MarketplaceMetadataSyncError("Database unavailable")
+        try:
+            success = await self.market_skill_registry.upsert_market_skill(
+                source_id=source_id,
+                item_id=item.item_id,
+                skill_id=item.skill_id,
+                skill_name=item.name,
+                cn_name=item.chinese_name,
+                description=item.description,
+                version=item.version,
+                status=item.status,
+                category_id=item.category_id,
+                bbk_ids=item.bbk_ids,
+                content_path=str(
+                    self.marketplace_root
+                    / source_id
+                    / "skills"
+                    / item.item_id,
+                ),
+                include_in_statistics=item.include_in_statistics,
+                creator_id=item.creator_id,
+                creator_name=item.creator_name,
             )
+        except Exception as exc:
+            logger.warning("Failed to sync market skill metadata: %s", exc)
+            raise MarketplaceMetadataSyncError(
+                "Failed to synchronize market skill metadata",
+            ) from exc
+        if not success:
+            raise MarketplaceMetadataSyncError(
+                "Failed to synchronize market skill metadata",
+            )
+        save_index(self.marketplace_root, source_id, items)
 
         distributions = await self.get_distributions(
             source_id,

@@ -31,6 +31,7 @@ class MarketItem(BaseModel):
 
     # 新增字段：是否纳入统计（仅对 skill 类型生效）
     include_in_statistics: bool = False  # 默认不纳入统计
+    content_path: str = ""
 
 
 class CategoryItem(BaseModel):

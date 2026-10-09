@@ -4,19 +4,280 @@ import shutil
 import pytest
 from unittest.mock import AsyncMock, Mock
 
+from market.marketplace.errors import MarketplaceMetadataSyncError
+
 
 def _make_service(tmp_path, mock_db=None):
     from market.marketplace.service import MarketplaceService
+    from market.marketplace.fs import load_index
 
     if mock_db is None:
         mock_db = AsyncMock()
         mock_db.is_connected = True
         mock_db.fetch_one = AsyncMock(return_value=None)
         mock_db.fetch_all = AsyncMock(return_value=[])
-    return MarketplaceService(
+    svc = MarketplaceService(
         db=mock_db,
         marketplace_root=tmp_path / "market",
         swe_root=tmp_path / "swe",
+    )
+
+    async def list_skills_from_index(source_id, **_kwargs):
+        return [
+            item
+            for item in load_index(svc.marketplace_root, source_id)
+            if item.item_type == "skill"
+        ]
+
+    async def get_skill_from_index(source_id, item_id):
+        return next(
+            (
+                item
+                for item in load_index(svc.marketplace_root, source_id)
+                if item.item_type == "skill" and item.item_id == item_id
+            ),
+            None,
+        )
+
+    async def list_mcps_from_index(source_id, **_kwargs):
+        return [
+            item
+            for item in load_index(svc.marketplace_root, source_id)
+            if item.item_type == "mcp"
+        ]
+
+    async def get_mcp_from_index(source_id, item_id):
+        return next(
+            (
+                item
+                for item in load_index(svc.marketplace_root, source_id)
+                if item.item_type == "mcp" and item.item_id == item_id
+            ),
+            None,
+        )
+
+    svc.market_skill_registry.list_market_skills = list_skills_from_index
+    svc.market_skill_registry.get_market_skill = get_skill_from_index
+    svc.mcp_market_registry.list_market_mcps = list_mcps_from_index
+    svc.mcp_market_registry.get_market_mcp = get_mcp_from_index
+    return svc
+
+
+@pytest.mark.asyncio
+async def test_list_skills_reads_market_metadata_from_tdsql_without_index(
+    tmp_path,
+):
+    from market.marketplace.models import MarketItem
+
+    svc = _make_service(tmp_path)
+    svc.market_skill_registry.list_market_skills = AsyncMock(
+        return_value=[
+            MarketItem(
+                item_id="item-1",
+                item_type="skill",
+                name="risk_check",
+                skill_id="skill-1",
+                description="desc",
+                creator_id="u1",
+                bbk_ids=[],
+                status="active",
+            ),
+        ],
+    )
+
+    items = await svc.list_skills(
+        "src-1",
+        user_bbk_id="100",
+        is_manager=True,
+    )
+
+    assert [item.item_id for item in items] == ["item-1"]
+    svc.market_skill_registry.list_market_skills.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_publish_skill_fails_when_tdsql_metadata_sync_returns_false(
+    tmp_path,
+):
+    from market.marketplace.schemas import PublishSkillRequest
+
+    svc = _make_service(tmp_path)
+    svc.market_skill_registry.upsert_market_skill = AsyncMock(
+        return_value=False,
+    )
+
+    with pytest.raises(MarketplaceMetadataSyncError):
+        await svc.publish_skill(
+            "src_a",
+            PublishSkillRequest(
+                name="sync-failure",
+                creator_id="u1",
+                creator_name="User",
+                skill_json={},
+                skill_md="",
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_publish_skill_fails_when_database_is_unavailable(tmp_path):
+    from market.marketplace.schemas import PublishSkillRequest
+
+    mock_db = AsyncMock()
+    mock_db.is_connected = False
+    svc = _make_service(tmp_path, mock_db)
+
+    with pytest.raises(MarketplaceMetadataSyncError):
+        await svc.publish_skill(
+            "src_a",
+            PublishSkillRequest(
+                name="db-down",
+                creator_id="u1",
+                creator_name="User",
+                skill_json={},
+                skill_md="",
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_publish_mcp_fails_when_database_is_unavailable(tmp_path):
+    from market.marketplace.schemas import PublishMCPRequest
+
+    mock_db = AsyncMock()
+    mock_db.is_connected = False
+    svc = _make_service(tmp_path, mock_db)
+
+    with pytest.raises(MarketplaceMetadataSyncError):
+        await svc.publish_mcp(
+            "src_a",
+            PublishMCPRequest(
+                client_key="mcp-1",
+                name="db-down-mcp",
+                creator_id="u1",
+                creator_name="User",
+                config={
+                    "name": "db-down-mcp",
+                    "transport": "stdio",
+                    "command": "echo",
+                },
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_list_mcp_items_reads_market_metadata_from_tdsql_without_index(
+    tmp_path,
+):
+    from market.marketplace.models import MarketItem
+
+    svc = _make_service(tmp_path)
+    svc.mcp_market_registry.list_market_mcps = AsyncMock(
+        return_value=[
+            MarketItem(
+                item_id="mcp-1",
+                item_type="mcp",
+                client_key="weather",
+                name="Weather",
+                creator_id="u1",
+                bbk_ids=[],
+                status="active",
+            ),
+        ],
+    )
+
+    items = await svc.list_mcp_items(
+        "src-1",
+        user_bbk_id="100",
+        is_manager=True,
+    )
+
+    assert [item.item_id for item in items] == ["mcp-1"]
+    svc.mcp_market_registry.list_market_mcps.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_skill_detail_reads_market_metadata_from_tdsql_without_index(
+    tmp_path,
+):
+    from market.marketplace.models import MarketItem
+
+    svc = _make_service(tmp_path)
+    svc.market_skill_registry.get_market_skill = AsyncMock(
+        return_value=MarketItem(
+            item_id="item-1",
+            item_type="skill",
+            name="risk_check",
+            skill_id="skill-1",
+            description="desc",
+            creator_id="u1",
+            bbk_ids=[],
+            status="active",
+        ),
+    )
+    svc._get_stats = AsyncMock(return_value=(2, 1))
+    svc._get_user_stats = AsyncMock(return_value=[])
+
+    detail = await svc.get_skill_detail(
+        "src-1",
+        "item-1",
+        user_bbk_id="100",
+        is_manager=True,
+    )
+
+    assert detail is not None
+    assert detail.name == "risk_check"
+    svc.market_skill_registry.get_market_skill.assert_awaited_once_with(
+        "src-1",
+        "item-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_mcp_detail_reads_market_metadata_from_tdsql_without_index(
+    tmp_path,
+):
+    from market.marketplace.fs import save_mcp_config
+    from market.marketplace.models import MarketItem
+
+    svc = _make_service(tmp_path)
+    svc.mcp_market_registry.get_market_mcp = AsyncMock(
+        return_value=MarketItem(
+            item_id="mcp-1",
+            item_type="mcp",
+            client_key="weather",
+            name="Weather",
+            creator_id="u1",
+            bbk_ids=[],
+            status="active",
+        ),
+    )
+    save_mcp_config(
+        svc.marketplace_root,
+        "src-1",
+        "mcp-1",
+        {
+            "client_key": "weather",
+            "config": {
+                "transport": "stdio",
+                "command": "weather",
+                "env": {"TOKEN": "secret"},
+            },
+        },
+    )
+
+    detail = await svc.get_mcp_detail(
+        "src-1",
+        "mcp-1",
+        user_bbk_id="100",
+    )
+
+    assert detail is not None
+    assert detail.name == "Weather"
+    assert detail.config.env["TOKEN"] != "secret"
+    svc.mcp_market_registry.get_market_mcp.assert_awaited_once_with(
+        "src-1",
+        "mcp-1",
     )
 
 

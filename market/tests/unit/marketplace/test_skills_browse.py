@@ -15,13 +15,78 @@ def _make_app(tmp_path):
     from market.database.connection import DatabaseConnection
 
     mock_db = AsyncMock(spec=DatabaseConnection)
-    mock_db.is_connected = False  # no DB needed for fs-only tests
+    mock_db.is_connected = True
+    mock_db.fetch_all = AsyncMock(return_value=[])
 
     svc = MarketplaceService(
         db=mock_db,
         marketplace_root=tmp_path / "market",
         swe_root=tmp_path / "swe",
     )
+    from market.marketplace.fs import load_index
+    from market.marketplace.service import (
+        _accumulate_branch_counts,
+        _is_visible_market_skill,
+    )
+
+    async def list_skills_from_index(source_id, **_kwargs):
+        return [
+            item
+            for item in load_index(svc.marketplace_root, source_id)
+            if item.item_type == "skill"
+        ]
+
+    async def get_skill_from_index(source_id, item_id):
+        return next(
+            (
+                item
+                for item in load_index(svc.marketplace_root, source_id)
+                if item.item_type == "skill" and item.item_id == item_id
+            ),
+            None,
+        )
+
+    async def list_all_bbk_ids_from_index(
+        source_id,
+        visible_category_ids=None,
+    ):
+        all_bbk_ids = set()
+        skill_counts = {}
+        mcp_counts = {}
+        unique_skill_ids = set()
+        unique_mcp_ids = set()
+        for item in load_index(svc.marketplace_root, source_id):
+            if (
+                item.status != "active"
+                or not item.bbk_ids
+                or not _is_visible_market_skill(item, visible_category_ids)
+            ):
+                continue
+            _accumulate_branch_counts(
+                item,
+                all_bbk_ids,
+                skill_counts,
+                mcp_counts,
+                unique_skill_ids,
+                unique_mcp_ids,
+            )
+        return [
+            {
+                "bbk_id": bbk_id,
+                "skill_count": skill_counts.get(bbk_id, 0),
+                "mcp_count": mcp_counts.get(bbk_id, 0),
+                "total_unique_skill_count": len(unique_skill_ids),
+                "total_unique_mcp_count": len(unique_mcp_ids),
+            }
+            for bbk_id in sorted(all_bbk_ids)
+        ]
+
+    svc.market_skill_registry.list_market_skills = list_skills_from_index
+    svc.market_skill_registry.get_market_skill = get_skill_from_index
+    svc.market_skill_registry.upsert_market_skill = AsyncMock(
+        return_value=True,
+    )
+    svc.list_all_bbk_ids = list_all_bbk_ids_from_index
     app = FastAPI()
     app.state.marketplace = svc
     app.include_router(router, prefix="/api")
