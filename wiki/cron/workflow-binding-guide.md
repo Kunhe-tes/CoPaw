@@ -80,9 +80,31 @@
 | `timeout_seconds` | 单次接口调用超时，范围 1～7200 秒，默认 60 秒 |
 
 除示例中的来源外，还可以使用 `{"source":"runtime","key":"user_id"}`；
-运行时可用键为 `job_id`、`tenant_id`、`source_id`、`user_id`、
+运行时可用键为 `job_id`、`cron_job_id`、`trace_id`、`tenant_id`、`source_id`、`user_id`、
 `scheduled_fire_at`、`batch_id`、`dispatch_attempt`。映射对象可加
 `prefix`，例如把令牌映射到 Header 时设置 `"prefix":"Bearer "`。
+
+### 按需传入 traceId 和定时任务 ID
+
+如果 workflow 接口接收这两个字段，可在 `body.inputParams` 中增加：
+
+```json
+{
+  "traceId": {"source": "runtime", "key": "trace_id"},
+  "cronJobId": {"source": "runtime", "key": "cron_job_id"}
+}
+```
+
+左侧 `traceId`、`cronJobId` 是接口入参名，可按接口协议改名。
+`trace_id` 来自本次执行实际创建的 trace，与执行结果和 Cron 执行记录中的 trace ID
+一致；`cron_job_id` 直接来自当前任务的 `job.id`，与 MCP Header 的 `cron_job_id`
+含义相同，原有 `job_id` 也是同一个值。分发子任务传入的是子任务自己的 ID。
+这些字段不会自动发出，只有配置映射后才传入。
+
+同样可在 `headers` 中配置 `traceid` 和 `cron_job_id`，使用相同的 runtime key。
+如果配置了 `trace_id` 映射，需要启用 SWE tracing（`SWE_TRACING_ENABLED=true`）；
+未启用或创建 trace 失败时，本次执行会因缺少该映射值而在发请求前失败，不会编造
+一个无法关联执行记录的 trace ID。
 
 ## 3. 发布绑定
 

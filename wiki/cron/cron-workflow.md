@@ -56,6 +56,8 @@ Manager/Admin 可调用 `PUT /api/cron/workflow-bindings/{skill_id}` 发布配�
 URL 路径中的 `{name}` 与 `path_params.name` 对应；JSON 请求体也可为顶层数组。
 `path` 是 JSON 字段/数组索引组成的列表。`renderer_key=direct` 直接展示提取
 结果；特制渲染器必须先由服务端代码注册，不从数据库执行脚本。
+接口入参可按需映射 `runtime.trace_id` 和 `runtime.cron_job_id`，分别取本次
+执行的 trace ID 和当前任务 ID；配置示例见 [绑定操作手册](workflow-binding-guide.md)。
 
 ## 任务定义和执行
 
