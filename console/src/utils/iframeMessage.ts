@@ -19,7 +19,6 @@ import {
 } from "../api/externalToken";
 import { getWPlusCookie } from "./cookie-utils";
 import { authApi } from "../api/modules/auth";
-import { envApi } from "../api/modules/env";
 import { buildAuthHeaders as buildCookieHeaders } from "../api/authHeaders";
 // import mmjTrack from 'xxxx'
 
@@ -53,10 +52,6 @@ export interface ReportRequestHandler {
 
 /** 当前注册的报告下载请求处理器（同一时刻只有一个 ReportView 实例注册） */
 let reportRequestHandler: ReportRequestHandler | null = null;
-/** 当前正在同步 origin=Y 环境变量的任务 */
-let pendingOriginYEnvSync: Promise<void> | null = null;
-
-
 /**
  * 注册报告下载请求处理器
  *
@@ -635,49 +630,7 @@ async function fetchAndApplyCustomerInfoFromCookie(userId: string): Promise<void
     }
   } catch (error) {
     console.error("[IframeMessage] Customer info fetch error:", error);
-  } finally {
-    void syncOriginYEnvFromCurrentContext();
   }
-}
-
-/**
- * 将 origin=Y 场景下的用户上下文合并到后端环境变量。
- */
-function syncOriginYEnvFromCurrentContext(): Promise<void> {
-  if (pendingOriginYEnvSync) {
-    return pendingOriginYEnvSync;
-  }
-
-
-  pendingOriginYEnvSync = (async () => {
-    const store = useIframeStore.getState();
-    const headers = buildCookieHeaders();
-    const cookieValue = headers["x-header-cookie"] || document.cookie;
-    const token = store.token || getWPlusCookie("token") || "";
-
-
-    await envApi.patchEnvs({
-      values: {
-        token,
-        bbkOrgId: store.bbk ?? "",
-        brnOrgId: store.orgCode ?? "",
-        sapId: store.userId ?? "",
-        rtlPstId: store.positionId ?? "",
-        sourceId: "RMASSIST",
-        cookie: cookieValue,
-      },
-      delete: [],
-    });
-  })()
-    .catch((error) => {
-      console.error("[IframeMessage] Env sync error:", error);
-    })
-    .finally(() => {
-      pendingOriginYEnvSync = null;
-    });
-
-
-  return pendingOriginYEnvSync;
 }
 
 /**
