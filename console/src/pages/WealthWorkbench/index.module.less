@@ -3392,8 +3392,7 @@
     margin: 0;
   }
   .metricItem {
-    display: flex;
-    align-items: baseline;
+    display: block;
     min-width: 0;
     padding: 3px 7px;
     border-radius: 6px;
@@ -3401,18 +3400,15 @@
     font-size: 13px;
     line-height: 22px;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     dt {
-      flex-shrink: 0;
-      max-width: 52%;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      display: inline;
       color: var(--console-management-text-secondary, #4b5563);
     }
     dd {
-      min-width: 0;
+      display: inline;
       margin: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
       color: var(--console-management-text, #111827);
       font-weight: 500;
     }
