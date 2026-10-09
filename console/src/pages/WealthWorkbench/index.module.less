@@ -1337,6 +1337,19 @@
   .treeItem .tag {
     font-size: 11px;
     padding: 2px 5px;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .treeSkillName {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .taskTreeTooltip {
+    max-width: 360px;
+    overflow-wrap: anywhere;
   }
   .treeItem.active {
     border-left-color: var(--blue);

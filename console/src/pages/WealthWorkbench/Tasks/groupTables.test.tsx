@@ -74,6 +74,31 @@ beforeEach(() => {
 });
 
 describe("经营分类独立表格", () => {
+  it("长技能名称的提示同时保留完整名称和来源规划，兼容键盘聚焦", async () => {
+    const scene = state.plans[0].items[0];
+    const originalName = scene.sceneName;
+    const fullName = "高价值动账客户经营".repeat(8);
+    scene.sceneName = fullName;
+    try {
+      render(
+        <MemoryRouter>
+          <Tasks page="today" />
+        </MemoryRouter>,
+      );
+      const button = screen.getByRole("button", { name: new RegExp(fullName) });
+      expect(button).not.toHaveAttribute("title");
+      fireEvent.mouseEnter(button);
+      const tooltip = await screen.findByRole("tooltip");
+      expect(tooltip).toHaveTextContent(`技能名称：${fullName}`);
+      expect(tooltip).toHaveTextContent("来源规划：经营规划");
+      fireEvent.mouseLeave(button);
+      fireEvent.focus(button);
+      expect(await screen.findByRole("tooltip")).toHaveTextContent(fullName);
+    } finally {
+      scene.sceneName = originalName;
+    }
+  });
+
   it("每个分类有独立表头，分类栏位于表格外并显示人数", () => {
     render(
       <MemoryRouter>

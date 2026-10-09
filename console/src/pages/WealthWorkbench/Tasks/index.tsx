@@ -585,25 +585,39 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                   <Icon name="up" className={styles.arrow} />
                 </summary>
                 {g.nodes.map((n) => (
-                  <button
+                  <Tooltip
                     key={n.sceneId}
-                    className={cx(
-                      styles.treeItem,
-                      selectedTask === n.sceneName &&
-                      selectedCategory === g.category &&
-                      styles.active,
-                    )}
-                    title={`来源规划：${n.planName}`}
-                    onClick={() => {
-                      setSelectedTask(n.sceneName);
-                      setSelectedCategory(g.category);
-                    }}
+                    placement="right"
+                    trigger={["hover", "focus"]}
+                    title={
+                      <div className={styles.taskTreeTooltip}>
+                        <div>技能名称：{n.sceneName}</div>
+                        <div>来源规划：{n.planName}</div>
+                      </div>
+                    }
                   >
-                    <span className={cx(styles.tag, sourceTagClass(n.source))}>
-                      {n.source}
-                    </span>
-                    {n.sceneName}
-                  </button>
+                    <button
+                      className={cx(
+                        styles.treeItem,
+                        selectedTask === n.sceneName &&
+                          selectedCategory === g.category &&
+                          styles.active,
+                      )}
+                      onClick={() => {
+                        setSelectedTask(n.sceneName);
+                        setSelectedCategory(g.category);
+                      }}
+                    >
+                      <span
+                        className={cx(styles.tag, sourceTagClass(n.source))}
+                      >
+                        {n.source}
+                      </span>
+                      <span className={styles.treeSkillName}>
+                        {n.sceneName}
+                      </span>
+                    </button>
+                  </Tooltip>
                 ))}
               </details>
             ))
