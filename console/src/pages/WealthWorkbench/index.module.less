@@ -3455,13 +3455,28 @@
     min-width: 0;
     overflow-wrap: anywhere;
     color: var(--console-management-primary-hover, #2957dc);
+    font-size: 15px;
+    line-height: 24px;
+  }
+  .customerGroupChevron {
+    flex-shrink: 0;
+    color: var(--console-management-primary-hover, #2957dc);
+    transition: transform 160ms ease;
+  }
+  .customerGroupChevronCollapsed {
+    transform: rotate(-90deg);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .customerGroupChevron {
+      transition: none;
+    }
   }
   .customerGroupCount {
     flex-shrink: 0;
     margin-left: auto;
-    color: var(--console-management-text-secondary, #4b5563);
-    font-size: 13px;
-    font-weight: 400;
+    color: var(--console-management-primary-hover, #2957dc);
+    font-size: 14px;
+    font-weight: 500;
   }
   @media (max-width: 1600px) {
     .customerTable.metricsTable {

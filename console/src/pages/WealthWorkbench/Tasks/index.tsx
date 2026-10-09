@@ -6,7 +6,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { Tooltip } from "antd";
-import { RotateCw } from "lucide-react";
+import { ChevronDown, RotateCw } from "lucide-react";
 import cx from "classnames";
 import DOMPurify from "dompurify";
 import styles from "../index.module.less";
@@ -745,7 +745,14 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                         })
                       }
                     >
-                      <span aria-hidden="true">{collapsed ? "▸" : "▾"}</span>
+                      <ChevronDown
+                        size={18}
+                        aria-hidden="true"
+                        className={cx(
+                          styles.customerGroupChevron,
+                          collapsed && styles.customerGroupChevronCollapsed,
+                        )}
+                      />
                       <span className={styles.customerGroupTitle}>
                         {groupTitle}
                       </span>
