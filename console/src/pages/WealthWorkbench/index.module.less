@@ -3392,8 +3392,7 @@
     margin: 0;
   }
   .metricItem {
-    display: flex;
-    align-items: baseline;
+    display: block;
     min-width: 0;
     padding: 3px 7px;
     border-radius: 6px;
@@ -3401,18 +3400,15 @@
     font-size: 13px;
     line-height: 22px;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     dt {
-      flex-shrink: 0;
-      max-width: 52%;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      display: inline;
       color: var(--console-management-text-secondary, #4b5563);
     }
     dd {
-      min-width: 0;
+      display: inline;
       margin: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
       color: var(--console-management-text, #111827);
       font-weight: 500;
     }
@@ -3431,10 +3427,16 @@
     color: var(--console-management-text-secondary, #4b5563);
     font-size: 13px;
   }
-  .customerTable .customerGroupRow th {
-    padding: 0;
+  .customerGroups {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .customerGroupHeading {
+    margin: 0 0 8px;
     background: var(--console-management-surface-subtle, #f7f9fc);
-    border-top: 1px solid var(--console-management-border, #e5e7eb);
+    border-radius: 6px;
+    font-size: 14px;
   }
   .customerGroupToggle {
     display: flex;
@@ -3452,6 +3454,7 @@
   .customerGroupTitle {
     min-width: 0;
     overflow-wrap: anywhere;
+    color: var(--console-management-primary-hover, #2957dc);
   }
   .customerGroupCount {
     flex-shrink: 0;

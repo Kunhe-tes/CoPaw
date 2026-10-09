@@ -31,10 +31,10 @@ async def list_market_mcp(
     if bbk_ids:
         parsed_bbk_ids = [b.strip() for b in bbk_ids.split(",") if b.strip()]
     svc = request.app.state.marketplace
+    if not svc.db.is_connected:
+        raise HTTPException(status_code=503, detail="Database unavailable")
     visible_category_ids = None
     if not is_head_office:
-        if not svc.db.is_connected:
-            raise HTTPException(status_code=503, detail="Database unavailable")
         category_rows = await svc.db.fetch_all(
             "SELECT id FROM swe_marketplace_categories "
             "WHERE source_id = %s AND COALESCE(branch_visible, 1) = 1",
@@ -62,10 +62,10 @@ async def get_market_mcp_detail(
     source_id = require_source_id(x_source_id)
     user_bbk_id = x_bbk_id or "100"
     svc = request.app.state.marketplace
+    if not svc.db.is_connected:
+        raise HTTPException(status_code=503, detail="Database unavailable")
     visible_category_ids = None
     if user_bbk_id != "100":
-        if not svc.db.is_connected:
-            raise HTTPException(status_code=503, detail="Database unavailable")
         category_rows = await svc.db.fetch_all(
             "SELECT id FROM swe_marketplace_categories "
             "WHERE source_id = %s AND COALESCE(branch_visible, 1) = 1",

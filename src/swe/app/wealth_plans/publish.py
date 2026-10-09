@@ -179,7 +179,7 @@ def _build_job_spec(
         plan_id=plan.id,
         tenant_name=getattr(state, "user_name", None),
         schedule=ScheduleSpec(cron=scene.cron_expr, timezone=WEALTH_TIMEZONE),
-        task_type="agent",
+        task_type="agent" if scene.mcp_relations else "workflow",
         text=task_text,
         request=CronJobRequest(
             input=_build_request_input(plan, scene),
