@@ -19,6 +19,12 @@
   }
 }
 
+@keyframes wealth-task-refresh {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .root {
   --blue: #0867ff;
   --blue2: #2190ff;
@@ -1279,8 +1285,15 @@
     align-self: stretch;
   }
   .taskTree h2 {
-    margin: 0 7px 16px;
+    margin: 0;
     font-size: 21px;
+  }
+  .taskTreeHeading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 0 7px 16px;
   }
   .treeGroup summary {
     display: flex;
@@ -1334,6 +1347,30 @@
   .taskPanel {
     padding: 16px;
     min-width: 0;
+  }
+  .taskRefresh {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--console-management-text-secondary, #4b5563);
+    &:hover:not(:disabled) {
+      background: var(--console-management-primary-soft, #eef4ff);
+      color: var(--console-management-primary, #3769fc);
+    }
+  }
+  .taskRefreshBusy {
+    animation: wealth-task-refresh 900ms linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .taskRefreshBusy {
+      animation: none;
+    }
   }
   .switch {
     display: flex;
@@ -2569,7 +2606,7 @@
     max-height: 70vh;
   }
   // —— plain 弹窗（无标题、无正文内边距，内容铺满；经营方案 iframe 预览） ——
-  .plainDialog {
+    .plainDialog {
     // 铺满可用屏幕宽高，让 iframe 有足够展示空间
     width: min(1368px, calc(100vw - 40px));
     height: 90vh;
@@ -3321,6 +3358,129 @@
   }
   .tasksLayout.business .customerTable {
     min-width: 920px;
+  }
+  .customerTable.metricsTable {
+    table-layout: fixed;
+    min-width: 1140px;
+  }
+  .customerTable.metricsTable .metricsCol {
+    width: 520px;
+    white-space: normal;
+  }
+  .customerTable.metricsTable.opportunityTable .executionCol {
+    position: sticky;
+    right: 0;
+    width: 220px;
+    background: var(--console-management-surface, #fff);
+    border-left: 1px solid var(--console-management-border, #e5e7eb);
+    z-index: 1;
+  }
+  .customerTable.metricsTable.opportunityTable th.executionCol {
+    background: var(--console-management-surface-subtle, #f7f9fc);
+  }
+  .customerTable.metricsTable .reason {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .customerMetrics {
+    width: 100%;
+  }
+  .metricGrid {
+    display: grid;
+    grid-template-columns: repeat(3, 156px);
+    gap: 8px 10px;
+    margin: 0;
+  }
+  .metricItem {
+    display: flex;
+    align-items: baseline;
+    min-width: 0;
+    padding: 3px 7px;
+    border-radius: 6px;
+    background: var(--console-management-primary-soft, #eef4ff);
+    font-size: 13px;
+    line-height: 22px;
+    white-space: nowrap;
+    dt {
+      flex-shrink: 0;
+      max-width: 52%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: var(--console-management-text-secondary, #4b5563);
+    }
+    dd {
+      min-width: 0;
+      margin: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: var(--console-management-text, #111827);
+      font-weight: 500;
+    }
+  }
+  .metricsToggle {
+    display: block;
+    margin-top: 6px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--console-management-primary, #3769fc);
+    font-size: 13px;
+    line-height: 24px;
+  }
+  .metricEmpty {
+    color: var(--console-management-text-secondary, #4b5563);
+    font-size: 13px;
+  }
+  .customerTable .customerGroupRow th {
+    padding: 0;
+    background: var(--console-management-surface-subtle, #f7f9fc);
+    border-top: 1px solid var(--console-management-border, #e5e7eb);
+  }
+  .customerGroupToggle {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 12px 14px;
+    border: 0;
+    background: transparent;
+    color: var(--console-management-text, #111827);
+    text-align: left;
+    font-weight: 600;
+    white-space: normal;
+  }
+  .customerGroupTitle {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .customerGroupCount {
+    flex-shrink: 0;
+    margin-left: auto;
+    color: var(--console-management-text-secondary, #4b5563);
+    font-size: 13px;
+    font-weight: 400;
+  }
+  @media (max-width: 1600px) {
+    .customerTable.metricsTable {
+      min-width: 960px;
+    }
+    .tasksLayout.business .customerTable.metricsTable {
+      min-width: 960px;
+    }
+    .customerTable.metricsTable .metricsCol {
+      width: 356px;
+    }
+    .metricGrid {
+      grid-template-columns: repeat(2, 156px);
+    }
+  }
+  @media (max-width: 1000px) {
+    .customerTable.metricsTable .metricsCol {
+      width: 190px;
+    }
+    .metricGrid {
+      grid-template-columns: 156px;
+    }
   }
   @media (max-width: 1250px) {
     .accountSwitcher .switcherTrigger {
