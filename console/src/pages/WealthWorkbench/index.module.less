@@ -19,6 +19,12 @@
   }
 }
 
+@keyframes wealth-task-refresh {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .root {
   --blue: #0867ff;
   --blue2: #2190ff;
@@ -1279,8 +1285,15 @@
     align-self: stretch;
   }
   .taskTree h2 {
-    margin: 0 7px 16px;
+    margin: 0;
     font-size: 21px;
+  }
+  .taskTreeHeading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 0 7px 16px;
   }
   .treeGroup summary {
     display: flex;
@@ -1334,6 +1347,30 @@
   .taskPanel {
     padding: 16px;
     min-width: 0;
+  }
+  .taskRefresh {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--console-management-text-secondary, #4b5563);
+    &:hover:not(:disabled) {
+      background: var(--console-management-primary-soft, #eef4ff);
+      color: var(--console-management-primary, #3769fc);
+    }
+  }
+  .taskRefreshBusy {
+    animation: wealth-task-refresh 900ms linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .taskRefreshBusy {
+      animation: none;
+    }
   }
   .switch {
     display: flex;
@@ -3355,24 +3392,23 @@
     margin: 0;
   }
   .metricItem {
-    display: flex;
-    align-items: baseline;
+    display: block;
     min-width: 0;
+    padding: 3px 7px;
+    border-radius: 6px;
+    background: var(--console-management-primary-soft, #eef4ff);
     font-size: 13px;
     line-height: 22px;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     dt {
-      flex-shrink: 0;
-      max-width: 52%;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      display: inline;
       color: var(--console-management-text-secondary, #4b5563);
     }
     dd {
-      min-width: 0;
+      display: inline;
       margin: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
       color: var(--console-management-text, #111827);
       font-weight: 500;
     }

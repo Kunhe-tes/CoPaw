@@ -107,6 +107,7 @@ interface WealthState {
    * 客户视角（customer）不带 skillId 一次查全。仅客户经理可访问任务页。
    */
   loadTodayCustomers: (view: "business" | "customer") => Promise<void>;
+  refreshTodayCustomers: (view: "business" | "customer") => Promise<void>;
   /** 加载待触达客户名单（仅客户经理；touched=0） */
   loadPendingCustomers: () => Promise<void>;
   /** 加载已完成客户名单（仅客户经理；touched=1） */
@@ -288,6 +289,25 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
   refreshPlans: async () => {
     const plans = await api.fetchPlanList();
     set({ plans });
+  },
+
+  refreshTodayCustomers: async (view) => {
+    const state = get();
+    if (!canAccessPage(state.accountId, "tasks") || state.customersLoading)
+      return;
+    set({ customersLoading: true });
+    try {
+      await get().refreshPlans();
+      await get().loadTodayCustomers(view);
+    } catch (error) {
+      get().toast(
+        error instanceof Error
+          ? `刷新失败：${error.message}`
+          : "刷新失败，请重试",
+      );
+    } finally {
+      set({ customersLoading: false });
+    }
   },
 
   loadTodayCustomers: async (view) => {

@@ -786,7 +786,7 @@ def test_name_list_forwards_touch_filter_context(
                             "strongContactTime": "2026-09-16 10:30:00",
                             "touchMethod": "电话",
                             "touched": 1,
-                            "fieldListfieldList": [
+                            "fieldList": [
                                 {
                                     "filedName": "age",
                                     "filedNameCn": "年龄",
@@ -868,7 +868,7 @@ def test_name_list_forwards_touch_filter_context(
             "strongContactTime": "2026-09-16 10:30:00",
             "touchMethod": "电话",
             "touched": 1,
-            "fieldListfieldList": [
+            "fieldList": [
                 {"filedName": "age", "filedNameCn": "年龄", "filedValue": 0},
             ],
         },
