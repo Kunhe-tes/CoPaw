@@ -40,6 +40,55 @@ def _make_app(tmp_path):
         marketplace_root=tmp_path / "market",
         swe_root=tmp_path / "swe",
     )
+
+    from market.marketplace.fs import load_index
+
+    async def list_skills_from_index(source_id, **_kwargs):
+        return [
+            item
+            for item in load_index(svc.marketplace_root, source_id)
+            if item.item_type == "skill"
+        ]
+
+    async def list_mcps_from_index(source_id, **_kwargs):
+        return [
+            item
+            for item in load_index(svc.marketplace_root, source_id)
+            if item.item_type == "mcp"
+        ]
+
+    async def get_skill_from_index(source_id, item_id):
+        return next(
+            (
+                item
+                for item in load_index(svc.marketplace_root, source_id)
+                if item.item_type == "skill" and item.item_id == item_id
+            ),
+            None,
+        )
+
+    async def get_mcp_from_index(source_id, item_id):
+        return next(
+            (
+                item
+                for item in load_index(svc.marketplace_root, source_id)
+                if item.item_type == "mcp" and item.item_id == item_id
+            ),
+            None,
+        )
+
+    async def list_metadata_from_index(source_id, resource_type):
+        return [
+            item
+            for item in load_index(svc.marketplace_root, source_id)
+            if item.item_type == resource_type
+        ]
+
+    svc.market_skill_registry.list_market_skills = list_skills_from_index
+    svc.market_skill_registry.get_market_skill = get_skill_from_index
+    svc.mcp_market_registry.list_market_mcps = list_mcps_from_index
+    svc.mcp_market_registry.get_market_mcp = get_mcp_from_index
+    svc.list_market_metadata = list_metadata_from_index
     app = FastAPI()
     app.state.marketplace = svc
     app.include_router(router, prefix="/api")
@@ -100,6 +149,38 @@ def test_head_office_browse_facets_use_the_same_resource_set(tmp_path):
         "110": 2,
         "120": 1,
     }
+
+
+def test_browse_uses_tdsql_metadata_when_index_is_missing(tmp_path):
+    from market.marketplace.models import MarketItem
+
+    app = _make_app(tmp_path)
+    item = MarketItem(
+        item_id="tdsql-item",
+        item_type="skill",
+        name="tdsql-skill",
+        skill_id="skill-1",
+        creator_id="u1",
+        category_id=1,
+        bbk_ids=[],
+        status="active",
+    )
+    svc = app.state.marketplace
+    svc.market_skill_registry.list_market_skills = AsyncMock(
+        return_value=[item],
+    )
+    svc.list_market_metadata = AsyncMock(return_value=[item])
+
+    response = TestClient(app).get(
+        "/api/market/browse?resource_type=skill",
+        headers={"X-Source-Id": "src_a", "X-Bbk-Id": "100"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 1
+    assert data["items"][0]["item_id"] == "tdsql-item"
+    svc.list_market_metadata.assert_awaited_once_with("src_a", "skill")
 
 
 def test_browse_can_select_uncategorized_resources(tmp_path):

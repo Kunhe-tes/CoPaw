@@ -13,7 +13,6 @@ from ...marketplace.browse import (
     filter_market_items,
     is_orphaned_item,
 )
-from ...marketplace.fs import load_index
 from ...marketplace.schemas import (
     MarketBrowseBranch,
     MarketBrowseCategory,
@@ -212,9 +211,9 @@ async def browse_market(
         visible_ids,
         known_category_ids,
     )
-    raw_items = load_index(
-        request.app.state.marketplace.marketplace_root,
+    raw_items = await request.app.state.marketplace.list_market_metadata(
         source_id,
+        resource_type,
     )
     base_items = filter_market_items(
         raw_items,

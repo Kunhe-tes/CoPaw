@@ -38,6 +38,7 @@ from ...marketplace.service import (
     MCPNameConflictError,
     MCPVersionConflictError,
 )
+from ...marketplace.errors import MarketplaceMetadataSyncError
 from ...marketplace.fs import (
     load_mcp_config,
     load_index,
@@ -349,6 +350,8 @@ async def publish_mcp(
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
     svc = request.app.state.marketplace
+    if not svc.db.is_connected:
+        raise HTTPException(status_code=503, detail="Database unavailable")
 
     log_params(
         logger,
@@ -386,6 +389,8 @@ async def publish_mcp(
                 "hint": "本次同步内容与已有版本撞车，请稍后重试或联系管理员",
             },
         ) from exc
+    except MarketplaceMetadataSyncError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return MarketMCPItem(
         item_id=item.item_id,
         client_key=item.client_key,
@@ -494,6 +499,8 @@ async def _do_upload_publish(
             success=False,
             error=f"版本冲突：{exc}",
         )
+    except MarketplaceMetadataSyncError:
+        raise
     except Exception as e:
         return UploadMCPResponse(success=False, error=str(e))
 
@@ -519,6 +526,9 @@ async def upload_mcp(
     """
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
+    svc = request.app.state.marketplace
+    if not svc.db.is_connected:
+        raise HTTPException(status_code=503, detail="Database unavailable")
 
     log_params(
         logger,
@@ -557,8 +567,10 @@ async def upload_mcp(
         x_user_name,
     )
 
-    svc = request.app.state.marketplace
-    return await _do_upload_publish(svc, source_id, req)
+    try:
+        return await _do_upload_publish(svc, source_id, req)
+    except MarketplaceMetadataSyncError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post(
@@ -711,6 +723,8 @@ async def update_market_mcp_metadata(
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except MarketplaceMetadataSyncError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     detail = await svc.get_mcp_detail(source_id, item_id, user_bbk_id)
     if detail is None:

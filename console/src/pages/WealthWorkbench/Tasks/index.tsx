@@ -3,7 +3,7 @@
  * 对应原型 tasksHTML：经营/客户双视角、任务树、重点标签表头筛选、
  * 经营方案/触达记录两类弹窗，执行列外链跳转电访与客户洞察。
  */
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { Tooltip } from "antd";
 import { RotateCw } from "lucide-react";
@@ -264,6 +264,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const lastLoadedPageRef = useRef<TaskPageKind | null>(null);
+  const groupTablesId = useId();
   /**
    * 经营方案 iframe 自增序列：作为 _t 时间戳附加到 URL 强制刷新加载，
    * 同时用作 <CustomerSchemePreview> 的 key 强制重挂载，从而重置内部的
@@ -331,6 +332,9 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   );
   const groups = useMemo(() => buildCustomerGroups(list, isBiz), [list, isBiz]);
   const columnCount = (doneView ? 6 : isBiz ? 4 : 5) + 1;
+  const tableGroups = groups.length
+    ? groups
+    : [{ key: "empty", fields: [], customers: [] }];
 
   // 进入今日任务或切回经营视角更新规划；页内切到客户视角仅查询聚合名单。
   useEffect(() => {
@@ -711,112 +715,120 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
           </div>
         )}
 
-        <div className={styles.tableWrap}>
-          <table
-            className={cx(
-              styles.customerTable,
-              doneView ? styles.completedTable : styles.opportunityTable,
-              styles.metricsTable,
-            )}
-          >
-            <thead>
-              <tr>
-                <th>客户姓名</th>
-                {!isBiz && (
-                  <th scope="col" className={styles.tagFilterHeading}>
+        <div className={styles.customerGroups}>
+          {tableGroups.map((group, index) => {
+            const groupKey = `${selectedCategory}|${selectedTask}|${group.key}`;
+            const collapsed = collapsedGroups.has(groupKey);
+            const tableId = `${groupTablesId}-${index}`;
+            const groupTitle = group.fields
+              .map((field) => `${field.label}：${field.value}`)
+              .join(" / ");
+            return (
+              <div key={groupKey} className={styles.customerGroup}>
+                {group.fields.length > 0 && (
+                  <h3 className={styles.customerGroupHeading}>
                     <button
                       type="button"
-                      ref={triggerRef}
-                      className={cx(
-                        styles.tagFilterTrigger,
-                        filterActive && styles.filtered,
-                      )}
-                      aria-label={
-                        "筛选重点标签" +
-                        (filterActive ? `，当前：${taskLabel}` : "")
+                      className={styles.customerGroupToggle}
+                      aria-expanded={!collapsed}
+                      aria-controls={tableId}
+                      aria-label={`${groupTitle}，${group.customers.length} 人`}
+                      onClick={() =>
+                        setCollapsedGroups((current) => {
+                          const next = new Set(current);
+                          if (next.has(groupKey)) {
+                            next.delete(groupKey);
+                          } else {
+                            next.add(groupKey);
+                          }
+                          return next;
+                        })
                       }
-                      aria-haspopup="dialog"
-                      aria-expanded={tagFilterOpen}
-                      aria-controls="wealthTagFilterPopover"
-                      onClick={toggleTagFilter}
                     >
-                      <span>重点标签</span>
-                      <span className={styles.tagFilterIcon}>
-                        <svg viewBox="0 0 20 20" aria-hidden="true">
-                          <path d="M3 4h14l-5.5 6v5l-3 1v-6Z" />
-                        </svg>
-                        {filterActive && <i></i>}
+                      <span aria-hidden="true">{collapsed ? "▸" : "▾"}</span>
+                      <span className={styles.customerGroupTitle}>
+                        {groupTitle}
+                      </span>
+                      <span className={styles.customerGroupCount}>
+                        {group.customers.length} 人
                       </span>
                     </button>
-                    {filterActive && (
-                      <div className={styles.tagFilterApplied}>
-                        <span>{taskLabel}</span>
-                        <button
-                          type="button"
-                          aria-label="清除重点标签筛选"
-                          title="清除筛选"
-                          onClick={() => applyTagFilter("全部")}
-                        >
-                          ×
-                        </button>
-                      </div>
-                    )}
-                  </th>
+                  </h3>
                 )}
-                <th className={styles.opportunityCol}>
-                  {doneView ? "经营任务" : "经营机会"}
-                </th>
-                <th scope="col" className={styles.metricsCol}>
-                  客户指标
-                </th>
-                <th>{doneView ? "触达方式" : "经营方案"}</th>
-                <th className={styles.executionCol}>
-                  {doneView ? "完成时间" : "执行"}
-                </th>
-                {doneView && <th>经营结果</th>}
-              </tr>
-            </thead>
-            <tbody>
-              {list.length ? (
-                groups.map((group) => {
-                  const groupKey = `${selectedCategory}|${selectedTask}|${group.key}`;
-                  const collapsed = collapsedGroups.has(groupKey);
-                  return (
-                    <Fragment key={groupKey}>
-                      {group.fields.length > 0 && (
-                        <tr className={styles.customerGroupRow}>
-                          <th colSpan={columnCount} scope="rowgroup">
+                <div
+                  id={tableId}
+                  className={styles.tableWrap}
+                  hidden={collapsed}
+                >
+                  <table
+                    aria-label={group.fields.length > 0 ? groupTitle : undefined}
+                    className={cx(
+                      styles.customerTable,
+                      doneView
+                        ? styles.completedTable
+                        : styles.opportunityTable,
+                      styles.metricsTable,
+                    )}
+                  >
+                    <thead>
+                      <tr>
+                        <th>客户姓名</th>
+                        {!isBiz && (
+                          <th scope="col" className={styles.tagFilterHeading}>
                             <button
                               type="button"
-                              className={styles.customerGroupToggle}
-                              aria-expanded={!collapsed}
-                              onClick={() =>
-                                setCollapsedGroups((current) => {
-                                  const next = new Set(current);
-                                  if (next.has(groupKey)) next.delete(groupKey);
-                                  else next.add(groupKey);
-                                  return next;
-                                })
+                              ref={triggerRef}
+                              className={cx(
+                                styles.tagFilterTrigger,
+                                filterActive && styles.filtered,
+                              )}
+                              aria-label={
+                                "筛选重点标签" +
+                                (filterActive ? `，当前：${taskLabel}` : "")
                               }
+                              aria-haspopup="dialog"
+                              aria-expanded={tagFilterOpen}
+                              aria-controls="wealthTagFilterPopover"
+                              onClick={toggleTagFilter}
                             >
-                              <span aria-hidden="true">
-                                {collapsed ? "▸" : "▾"}
-                              </span>
-                              <span className={styles.customerGroupTitle}>
-                                {group.fields
-                                  .map(
-                                    (field) => `${field.label}：${field.value}`,
-                                  )
-                                  .join(" · ")}
-                              </span>
-                              <span className={styles.customerGroupCount}>
-                                {group.customers.length} 人
+                              <span>重点标签</span>
+                              <span className={styles.tagFilterIcon}>
+                                <svg viewBox="0 0 20 20" aria-hidden="true">
+                                  <path d="M3 4h14l-5.5 6v5l-3 1v-6Z" />
+                                </svg>
+                                {filterActive && <i></i>}
                               </span>
                             </button>
+                            {filterActive && (
+                              <div className={styles.tagFilterApplied}>
+                                <span>{taskLabel}</span>
+                                <button
+                                  type="button"
+                                  aria-label="清除重点标签筛选"
+                                  title="清除筛选"
+                                  onClick={() => applyTagFilter("全部")}
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            )}
                           </th>
-                        </tr>
-                      )}
-                      {!collapsed &&
+                        )}
+                        <th className={styles.opportunityCol}>
+                          {doneView ? "经营任务" : "经营机会"}
+                        </th>
+                        <th scope="col" className={styles.metricsCol}>
+                          客户指标
+                        </th>
+                        <th>{doneView ? "触达方式" : "经营方案"}</th>
+                        <th className={styles.executionCol}>
+                          {doneView ? "完成时间" : "执行"}
+                        </th>
+                        {doneView && <th>经营结果</th>}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {group.customers.length ? (
                         group.customers.map((c) => (
                           <tr key={c.id}>
                             <td className={styles.name}>{c.name}</td>
@@ -897,31 +909,32 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                               </td>
                             )}
                           </tr>
-                        ))}
-                    </Fragment>
-                  );
-                })
-              ) : (
-                <tr>
-                  <td colSpan={columnCount}>
-                    <div className={styles.empty}>
-                      {(
-                        page === "pending"
-                          ? pendingLoading
-                          : page === "done"
-                            ? doneLoading
-                            : customersLoading
-                      )
-                        ? "客户清单加载中…"
-                        : isBiz && selectedTask && !search.trim()
-                          ? `「${selectedTask}」暂无客户名单，待定时任务执行后生成`
-                          : "暂无符合条件的客户"}
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={columnCount}>
+                            <div className={styles.empty}>
+                              {(
+                                page === "pending"
+                                  ? pendingLoading
+                                  : page === "done"
+                                  ? doneLoading
+                                  : customersLoading
+                              )
+                                ? "客户清单加载中…"
+                                : isBiz && selectedTask && !search.trim()
+                                ? `「${selectedTask}」暂无客户名单，待定时任务执行后生成`
+                                : "暂无符合条件的客户"}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            );
+          })}
         </div>
 
         <div className={styles.pagination}>
