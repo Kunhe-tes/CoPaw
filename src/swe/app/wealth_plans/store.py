@@ -282,29 +282,14 @@ class WealthPlanStore:
             return {}
         ranges = scene_ranges or {}
         if not self.is_available:
-            records = sorted(
-                self._plans.values(),
-                key=lambda record: record.created_at or datetime.min,
-                reverse=True,
+            return self._find_scene_conflicts_in_memory(
+                role,
+                sap_id,
+                bbk_id,
+                scene_ids,
+                exclude_plan_id,
+                ranges,
             )
-            conflicts: dict[str, str] = {}
-            for record in records:
-                if not self._reserves_scene(
-                    record,
-                    role,
-                    sap_id,
-                    bbk_id,
-                    exclude_plan_id,
-                ):
-                    continue
-                for scene in record.scenes:
-                    if scene.scene_id in scene_ids and _scene_dates_overlap(
-                        ranges.get(scene.scene_id, (None, None)),
-                        scene.start_date,
-                        scene.end_date,
-                    ):
-                        conflicts.setdefault(scene.scene_id, record.name)
-            return conflicts
 
         ordered_scene_ids = sorted(scene_ids)
         scene_placeholders = ", ".join(["%s"] * len(ordered_scene_ids))
@@ -345,6 +330,40 @@ class WealthPlanStore:
                 row.get("end_date"),
             ):
                 conflicts.setdefault(row["scene_id"], row["plan_name"])
+        return conflicts
+
+    def _find_scene_conflicts_in_memory(
+        self,
+        role: str,
+        sap_id: str,
+        bbk_id: str,
+        scene_ids: set[str],
+        exclude_plan_id: str | None,
+        ranges: dict[str, tuple[str | None, str | None]],
+    ) -> dict[str, str]:
+        """内存模式按创建时间倒序查找日期重叠的占用规划。"""
+        records = sorted(
+            self._plans.values(),
+            key=lambda record: record.created_at or datetime.min,
+            reverse=True,
+        )
+        conflicts: dict[str, str] = {}
+        for record in records:
+            if not self._reserves_scene(
+                record,
+                role,
+                sap_id,
+                bbk_id,
+                exclude_plan_id,
+            ):
+                continue
+            for scene in record.scenes:
+                if scene.scene_id in scene_ids and _scene_dates_overlap(
+                    ranges.get(scene.scene_id, (None, None)),
+                    scene.start_date,
+                    scene.end_date,
+                ):
+                    conflicts.setdefault(scene.scene_id, record.name)
         return conflicts
 
     async def update(self, record: WealthPlanRecord) -> None:

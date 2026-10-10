@@ -2,6 +2,12 @@
 
 本文档只收录仓库中已经出现过、且有明确入口可追的高频报错。
 
+## 财富工作台确认发布后提示被弹窗遮住
+
+- 原因：`DialogHost` 使用原生 `dialog.showModal()` 进入浏览器顶层；普通页面 Toast 会被弹窗遮罩覆盖，提高页面 `z-index` 无法解决。发布失败时弹窗保留，因此失败信息容易被遮住。
+- 处理：`DialogHost` 承载单个 `Toast` 实例，弹窗打开时通过 React Portal 保持提示位于弹窗 DOM 内，再使用原生 `popover="manual"`、`showPopover()` 将悬浮提示提升到弹窗上方的浏览器顶层；关闭弹窗后恢复页面挂载，保留同一次提示的自动消失计时。弹窗使用 layout effect 打开，保证提示随后进入顶层。
+- 排查入口：`console/src/pages/WealthWorkbench/components/DialogHost.tsx`、`Toast.tsx` 及 `index.module.less` 的 `.toast`。浏览器验证需覆盖接口返回 409 后悬浮反馈、成功关闭弹窗后的页面反馈、`:popover-open` 状态和较小嵌入视口。
+
 ## 财富工作台发布提示“以下经营场景已被选用”
 
 - 触发条件：所选场景 ID（外部 `skillId`，落库为 `scene_id`）与本分行已有规划重复，且已有规划符合当前发布人的角色占用规则。中台检查“分行关注”；行长检查“分行关注”和“行长关注”；客户经理检查这两类及本人创建的规划，不受其他客户经理个人规划限制。
