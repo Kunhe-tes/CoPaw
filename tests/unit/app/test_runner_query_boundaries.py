@@ -17,8 +17,6 @@ from swe.agents.hook_runtime.models import (
     HookEventName,
     HookMatcherGroupConfig,
     CommandHookHandlerConfig,
-    HookOverlayEntry,
-    LoadedSkillHookSource,
     HookSessionOverlay,
     MergedHookResult,
 )
@@ -29,7 +27,6 @@ from swe.app.runner.runner import (
     _QueryRuntimeInputs,
 )
 from swe.app.runner.query_contracts import _RuntimeStartResult
-from swe.app.runner.query_runtime import _drop_invalid_workspace_skill_hooks
 from swe.agents.skill_runtime_snapshot import (
     ManifestStat,
     WorkspaceSkillSnapshot,
@@ -95,49 +92,12 @@ def test_scheduled_agent_context_keeps_cron_persistence_key(monkeypatch):
     assert captured["cron_persistence_key"] == "receipt-1"
 
 
-def test_final_snapshot_validation_removes_invalid_skill_hooks() -> None:
-    source = LoadedSkillHookSource(
-        source_id="skill:stale",
-        skill_name="stale",
-        skill_root="/workspace/skills/stale",
-        source_path="/workspace/skills/stale/hooks/hooks.json",
-        hook_config=HookConfig(
-            enabled=True,
-            events={
-                HookEventName.POST_TOOL_USE: [
-                    HookMatcherGroupConfig(
-                        id="skill:stale:post",
-                        hooks=[
-                            CommandHookHandlerConfig(
-                                id="skill:stale:handler",
-                                command="echo ok",
-                            ),
-                        ],
-                    ),
-                ],
-            },
-        ),
-    )
-    overlay = HookSessionOverlay(
-        loaded_skill_sources=[source],
-        entries=[
-            HookOverlayEntry(hook_id="skill:stale:handler"),
-            HookOverlayEntry(hook_id="tenant:always", enabled=True),
-        ],
-    )
-
-    filtered = _drop_invalid_workspace_skill_hooks(overlay, {"stale"})
-
-    assert filtered.loaded_skill_sources == []
-    assert [entry.hook_id for entry in filtered.entries] == ["tenant:always"]
-
-
 @pytest.mark.asyncio
-async def test_final_snapshot_validation_failure_keeps_query_without_skills(
+async def test_final_query_assembly_keeps_starting_snapshot_without_validation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    """A transient final-check error must not abort an ordinary query."""
+    """Final assembly reuses the Query's original observation."""
     from swe.app.runner import query_runtime
 
     snapshot = WorkspaceSkillSnapshot(
@@ -164,11 +124,11 @@ async def test_final_snapshot_validation_failure_keeps_query_without_skills(
         workspace_skill_snapshot=snapshot,
     )
 
-    async def fail_validation(_snapshot):
-        raise PermissionError("workspace temporarily unreadable")
+    def fail_validation(*_args, **_kwargs):
+        pytest.fail("Query snapshot was revalidated during final assembly")
 
     monkeypatch.setattr(
-        "swe.agents.skill_runtime_snapshot.validate_workspace_skill_snapshot",
+        "swe.agents.skills_manager.get_skill_freshness_token",
         fail_validation,
     )
     captured: dict[str, Any] = {}
@@ -210,9 +170,11 @@ async def test_final_snapshot_validation_failure_keeps_query_without_skills(
     )
 
     assert runtime.agent is not None
-    assert captured["workspace_skill_snapshot"].skills == {}
-    assert inputs.selected_skill_directives == []
-    assert inputs.selected_context_directives == []
+    assert captured["workspace_skill_snapshot"] is snapshot
+    assert [
+        directive.name for directive in inputs.selected_skill_directives
+    ] == ["stale"]
+    assert inputs.selected_context_directives == ["use stale"]
 
 
 @pytest.mark.asyncio

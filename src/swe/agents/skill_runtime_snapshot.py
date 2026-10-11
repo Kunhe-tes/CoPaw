@@ -7,7 +7,7 @@ import asyncio
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import copy_context
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import partial, wraps
 import logging
 from pathlib import Path
@@ -459,40 +459,3 @@ def _forget_shared_refresh(
     with _LOCK:
         if _INFLIGHT.get(workspace_dir) is future:
             _INFLIGHT.pop(workspace_dir)
-
-
-def _filter_changed_skills(
-    snapshot: WorkspaceSkillSnapshot,
-) -> WorkspaceSkillSnapshot:
-    """Drop skills whose content changed after the snapshot was captured."""
-    from .skills_manager import _build_signature, get_skill_freshness_token
-
-    valid: dict[str, SkillRuntimeSnapshot] = {}
-    changed = False
-    for name, skill in snapshot.skills.items():
-        # The recursive stat token is the cheap admission check. Hash the
-        # directory only when metadata/size/timestamps changed.
-        current_freshness = get_skill_freshness_token(skill.directory)
-        if current_freshness == skill.freshness_token:
-            valid[name] = skill
-            continue
-        if _build_signature(skill.directory) == skill.content_signature:
-            # A metadata-only touch is still the same content, but update the
-            # token so subsequent query admissions stay on the stat-only path.
-            valid[name] = replace(skill, freshness_token=current_freshness)
-            changed = True
-    if not changed and len(valid) == len(snapshot.skills):
-        return snapshot
-    return WorkspaceSkillSnapshot(
-        workspace_dir=snapshot.workspace_dir,
-        generation=snapshot.generation,
-        manifest_stat=snapshot.manifest_stat,
-        skills=MappingProxyType(valid),
-    )
-
-
-async def validate_workspace_skill_snapshot(
-    snapshot: WorkspaceSkillSnapshot,
-) -> WorkspaceSkillSnapshot:
-    """Recheck content signatures off-loop immediately before consumption."""
-    return await asyncio.to_thread(_filter_changed_skills, snapshot)

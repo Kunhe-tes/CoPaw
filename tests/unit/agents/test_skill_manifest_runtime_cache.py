@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 from pathlib import Path
@@ -157,38 +156,6 @@ def test_snapshot_build_failure_replaces_expired_cached_snapshot(
     assert cached is not first
     assert not cached.manifest_available
     assert cached.skills == {}
-
-
-def test_snapshot_validation_refreshes_stat_token_without_rehashing_forever(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    from swe.agents import skills_manager
-    from swe.agents import skill_runtime_snapshot as snapshots
-
-    _write_workspace(tmp_path)
-    first = snapshots.get_workspace_skill_snapshot(tmp_path)
-    skill_md = tmp_path / "skills" / "demo" / "SKILL.md"
-    stat = skill_md.stat()
-    os.utime(
-        skill_md,
-        ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000),
-    )
-
-    validated = snapshots._filter_changed_skills(first)
-    assert (
-        validated.skills["demo"].freshness_token
-        != first.skills["demo"].freshness_token
-    )
-
-    monkeypatch.setattr(
-        skills_manager,
-        "_build_signature",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("unchanged content should not be rehashed"),
-        ),
-    )
-    assert snapshots._filter_changed_skills(validated) is validated
 
 
 def test_snapshot_warn_mode_keeps_skill_when_scan_reports_blocking_finding(
