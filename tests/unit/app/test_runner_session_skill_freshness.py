@@ -1482,3 +1482,61 @@ async def test_retryable_completion_failure_keeps_notice_model_only(
     assert outputs[-1][0].get_text_content() == "agent reply"
     assert plan_notice_counts == [1, 1]
     assert _streamed_notice_messages(outputs) == []
+
+
+@pytest.mark.asyncio
+async def test_query_retry_keeps_starting_snapshot_across_ttl(
+    monkeypatch,
+    tmp_path,
+):
+    from swe.agents import skill_runtime_snapshot as snapshots
+
+    runner = _patch_runner(monkeypatch, tmp_path)
+    _FakeAgent.effective_skills = ["xlsx"]
+    _write_skill_manifest(tmp_path, skills=["xlsx"])
+    directory = _write_skill_dir(tmp_path, "xlsx")
+    now = [0.0]
+    monkeypatch.setattr(snapshots.time, "monotonic", lambda: now[0])
+    config = _agent_config()
+    config.running.query_retry.enabled = True
+    config.running.query_retry.max_retries = 1
+    monkeypatch.setattr(
+        "swe.app.runner.runner.load_agent_config",
+        lambda *a, **k: config,
+    )
+    original = runner._build_turn_plan
+    observed = []
+
+    async def retry_after_expiry(*args, **kwargs):
+        snapshot = kwargs["runtime"].agent._workspace_skill_snapshot
+        observed.append(snapshot)
+        if len(observed) == 1:
+            (directory / "resource.txt").write_text(
+                "changed after Query start",
+            )
+            now[0] = 600
+            raise RuntimeError("request timed out")
+        return await original(
+            runtime=kwargs["runtime"],
+            request=kwargs["request"],
+            msgs=kwargs["msgs"],
+            query=kwargs["query"],
+        )
+
+    monkeypatch.setattr(runner, "_build_turn_plan", retry_after_expiry)
+    outputs = [
+        item
+        async for item in runner.query_handler(
+            [Msg(name="user", role="user", content="continue")],
+            request=_request(),
+        )
+    ]
+    assert outputs[-1][0].get_text_content() == "agent reply"
+    assert len(observed) == 2
+    assert observed[0] is observed[1]
+    following = await snapshots.get_workspace_skill_snapshot_async(tmp_path)
+    assert following is not observed[0]
+    assert (
+        following.skills["xlsx"].freshness_token
+        != observed[0].skills["xlsx"].freshness_token
+    )

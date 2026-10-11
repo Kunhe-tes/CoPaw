@@ -3024,7 +3024,7 @@ class _QueryAttemptState:
     session_title_task_started: bool = False
 
 
-@dataclass(frozen=True)
+@dataclass
 class _QueryAttemptInput:
     """封装单次 query 尝试不随执行过程变化的输入。"""
 
@@ -3034,6 +3034,7 @@ class _QueryAttemptInput:
     preflight: _QueryPreflight
     trace_id: str | None
     session_execution: Any | None = None
+    workspace_skill_snapshot: Any | None = None
 
 
 class AgentRunner(Runner):

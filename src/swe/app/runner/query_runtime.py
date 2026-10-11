@@ -291,8 +291,12 @@ async def build_query_runtime_inputs(
             tenant_id=owner.tenant_id,
         )
     )
-    workspace_skill_snapshot = None
-    if getattr(agent_config, "enable_workspace_skills", True):
+    workspace_skill_snapshot = preflight.workspace_skill_snapshot
+    if workspace_skill_snapshot is None and getattr(
+        agent_config,
+        "enable_workspace_skills",
+        True,
+    ):
         from ...agents.skill_runtime_snapshot import (
             get_workspace_skill_snapshot_async,
         )
@@ -322,6 +326,8 @@ async def build_query_runtime_inputs(
                 skills=MappingProxyType({}),
                 manifest_available=False,
             )
+    # Preflight belongs to the whole Query and survives automatic retries.
+    preflight.workspace_skill_snapshot = workspace_skill_snapshot
     passthrough_headers = dict[str, str](
         current_passthrough_headers() or {},
     )

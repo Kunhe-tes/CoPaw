@@ -44,6 +44,7 @@ class _QueryPreflight:
     tenant_hooks: HookConfig | None = None
     hook_overlay: HookSessionOverlay | None = None
     hook_additional_context: str = ""
+    workspace_skill_snapshot: WorkspaceSkillSnapshot | None = None
 
 
 @dataclass

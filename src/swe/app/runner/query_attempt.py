@@ -324,6 +324,10 @@ async def stream_single_query_attempt(
     retry_state: Any,
     attempt_state: Any,
 ) -> AsyncGenerator[tuple[Msg, bool], None]:
+    if attempt_input.workspace_skill_snapshot is not None:
+        attempt_input.preflight.workspace_skill_snapshot = (
+            attempt_input.workspace_skill_snapshot
+        )
     runtime_args = {
         "request": attempt_input.request,
         "msgs": attempt_input.msgs,
@@ -345,6 +349,12 @@ async def stream_single_query_attempt(
         return
     runtime = attempt_state.runtime_start.runtime
     attempt_state.runtime = runtime
+    if runtime is not None:
+        attempt_input.workspace_skill_snapshot = getattr(
+            runtime.agent,
+            "_workspace_skill_snapshot",
+            None,
+        )
     if runtime is None:
         attempt_state.should_return = True
         return
