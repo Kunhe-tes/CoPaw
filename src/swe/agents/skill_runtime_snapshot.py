@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import Future
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from functools import wraps
@@ -61,6 +62,8 @@ _LOCK = RLock()
 _CACHE: dict[Path, _CacheEntry] = {}
 _GENERATION = 0
 _COORDINATORS: dict[Path, RLock] = {}
+_INFLIGHT: dict[Path, Future[WorkspaceSkillSnapshot]] = {}
+_REFRESH_TASKS: set[asyncio.Task] = set()
 
 
 @contextmanager
@@ -424,15 +427,53 @@ async def get_workspace_skill_snapshot_async(
     cached = _cached_workspace_skill_snapshot(workspace_dir)
     if cached is not None:
         return cached
-    # Cancellation of one waiter must not interrupt publication for others.
-    return await asyncio.shield(
-        asyncio.to_thread(
-            get_workspace_skill_snapshot,
+    with _LOCK:
+        future = _INFLIGHT.get(workspace_dir)
+        if future is None:
+            future = Future()
+            _INFLIGHT[workspace_dir] = future
+            task = asyncio.create_task(
+                asyncio.to_thread(
+                    _complete_shared_refresh,
+                    workspace_dir,
+                    reconcile,
+                    future,
+                ),
+            )
+            _REFRESH_TASKS.add(task)
+            task.add_done_callback(_forget_refresh_task)
+    # A concurrent Future can be awaited from different event loops. Only
+    # its owner occupies a worker; cancellation of a waiter is isolated.
+    return await asyncio.shield(asyncio.wrap_future(future))
+
+
+def _forget_refresh_task(task: asyncio.Task) -> None:
+    with _LOCK:
+        _REFRESH_TASKS.discard(task)
+
+
+def _complete_shared_refresh(
+    workspace_dir: Path,
+    reconcile: bool,
+    future: Future[WorkspaceSkillSnapshot],
+) -> None:
+    try:
+        snapshot = get_workspace_skill_snapshot(
             workspace_dir,
             reconcile=reconcile,
             fail_closed=True,
-        ),
-    )
+        )
+    except BaseException as exc:  # noqa: B036
+        # Transport worker failures to every asynchronous waiter via Future.
+        with _LOCK:
+            if _INFLIGHT.get(workspace_dir) is future:
+                _INFLIGHT.pop(workspace_dir)
+        future.set_exception(exc)
+    else:
+        with _LOCK:
+            if _INFLIGHT.get(workspace_dir) is future:
+                _INFLIGHT.pop(workspace_dir)
+        future.set_result(snapshot)
 
 
 def _filter_changed_skills(

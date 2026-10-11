@@ -327,3 +327,65 @@ def test_continuously_changing_skill_is_unconfirmed(
     assert snapshot.unconfirmed_skills == frozenset({"changing"})
     assert len(calls) == 4
     assert snapshots._CACHE[tmp_path.resolve()].expires_at == 180
+
+
+@pytest.mark.asyncio
+async def test_async_waiters_share_refresh_without_occupying_worker_threads(
+    tmp_path,
+    monkeypatch,
+):
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    from functools import partial
+    import threading
+
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    write_workspace(first_dir)
+    write_workspace(second_dir)
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    release = threading.Event()
+    original = snapshots._build_workspace_skill_runtime_snapshot
+
+    def build(workspace, *args, **kwargs):
+        if workspace == first_dir.resolve():
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(3)
+        return original(workspace, *args, **kwargs)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+
+        async def bounded_thread(func, *args, **kwargs):
+            return await loop.run_in_executor(
+                pool,
+                partial(func, *args, **kwargs),
+            )
+
+        monkeypatch.setattr(snapshots.asyncio, "to_thread", bounded_thread)
+        monkeypatch.setattr(
+            snapshots,
+            "_build_workspace_skill_runtime_snapshot",
+            build,
+        )
+        requests = [
+            asyncio.create_task(
+                snapshots.get_workspace_skill_snapshot_async(first_dir),
+            )
+            for _ in range(3)
+        ]
+        await asyncio.wait_for(entered.wait(), 3)
+        other = asyncio.create_task(
+            snapshots.get_workspace_skill_snapshot_async(second_dir),
+        )
+        try:
+            try:
+                result = await asyncio.wait_for(asyncio.shield(other), 0.5)
+            except asyncio.TimeoutError:
+                result = None
+        finally:
+            release.set()
+            await asyncio.gather(*requests, other)
+        assert (
+            result is not None
+        ), "same-workspace waiters exhausted the worker pool"
