@@ -9,8 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-from ...agents.skills_manager import resolve_effective_skill_dir
-from ...constant import WORKING_DIR
+from ...agents.skill_runtime_snapshot import WorkspaceSkillSnapshot
 from .query_contracts import _QueryRuntime
 from .session import (
     SESSION_SKILL_SNAPSHOT_STATE_KEY,
@@ -248,7 +247,8 @@ class SessionLifecycleOwner(Protocol):
         snapshot: dict[str, dict[str, Any]],
         *,
         stored_snapshot: dict[str, dict[str, Any]],
-        effective_skill_dirs: dict[str, Path],
+        workspace_snapshot: WorkspaceSkillSnapshot | None,
+        effective_skills: set[str],
     ) -> list[Any]: ...
 
     def _skill_freshness_notice_text(self, changes: list[Any]) -> str: ...
@@ -391,18 +391,16 @@ async def refresh_session_skill_freshness(
     stored_snapshot = await _runtime_skill_snapshot(owner, runtime)
     if not stored_snapshot:
         return refresh_result_type(stored_snapshot={}, refreshed_snapshot={})
-    workspace_dir = Path(owner.workspace_dir or WORKING_DIR)
-    effective_skill_dirs = {
-        skill_name: resolved
-        for skill_name in runtime.agent.get_effective_skills()
-        if (resolved := resolve_effective_skill_dir(workspace_dir, skill_name))
-        is not None
-    }
     next_snapshot = owner._normalize_session_skill_snapshot(stored_snapshot)
     changes = owner._refresh_session_skill_snapshot_entries(
         next_snapshot,
         stored_snapshot=stored_snapshot,
-        effective_skill_dirs=effective_skill_dirs,
+        workspace_snapshot=getattr(
+            runtime.agent,
+            "_workspace_skill_snapshot",
+            None,
+        ),
+        effective_skills=set(runtime.agent.get_effective_skills()),
     )
     return refresh_result_type(
         notice_text=(

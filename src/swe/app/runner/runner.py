@@ -91,8 +91,11 @@ from ...agents.tool_failure import (
     TOOL_GOVERNANCE_BLOCK_FIELD,
     attach_tool_governance_message_metadata,
 )
+from ...agents.skill_runtime_snapshot import (
+    SkillRuntimeSnapshot,
+    WorkspaceSkillSnapshot,
+)
 from ...agents.skills_manager import (
-    get_skill_freshness_token,
     get_workspace_skills_dir,
     resolve_effective_skill_dir,
 )
@@ -2068,123 +2071,45 @@ def _supports_session_skill_freshness_refresh(
     )
 
 
-def _refresh_switched_session_skill_snapshot_entry(
-    next_snapshot: dict[str, dict[str, Any]],
-    *,
-    skill_name: str,
-    stored_dir: Path,
-    current_dir: Path | None,
-    confirmed_at: Any | None = None,
-) -> str | None:
-    if (
-        current_dir is None
-        or not current_dir.exists()
-        or current_dir == stored_dir
-    ):
-        return None
-
-    current_token = get_skill_freshness_token(current_dir)
-    _upsert_session_skill_snapshot_entry(
-        next_snapshot,
-        skill_name=skill_name,
-        resolved_skill_dir=current_dir,
-        freshness_token=current_token,
-        confirmed_at=confirmed_at,
-    )
-    return (
-        f"{skill_name}: detected skill-directory switch "
-        f"{stored_dir} -> {current_dir}. Treat current skill "
-        "content as superseding earlier assumptions. You MUST "
-        f"re-read {current_dir / 'SKILL.md'} before relying on this skill."
-    )
-
-
-def _refresh_withdrawn_session_skill_snapshot_entry(
-    next_snapshot: dict[str, dict[str, Any]],
-    *,
-    skill_name: str,
-    current_dir: Path | None,
-) -> str | None:
-    if current_dir is not None and current_dir.exists():
-        return None
-
-    _remove_session_skill_snapshot_entry(
-        next_snapshot,
-        skill_name=skill_name,
-    )
-    return (
-        f"{skill_name}: no longer effective for this turn. "
-        "Stop relying on earlier assumptions from this skill."
-    )
-
-
-def _refresh_changed_session_skill_snapshot_entry(
-    next_snapshot: dict[str, dict[str, Any]],
-    *,
-    skill_name: str,
-    entry: dict[str, Any],
-    current_dir: Path,
-) -> str | None:
-    current_token = get_skill_freshness_token(current_dir)
-    if current_token == entry.get("freshness_token"):
-        return None
-
-    _upsert_session_skill_snapshot_entry(
-        next_snapshot,
-        skill_name=skill_name,
-        resolved_skill_dir=current_dir,
-        freshness_token=current_token,
-        confirmed_at=entry.get("confirmed_at"),
-    )
-    return (
-        f"{skill_name}: detected skill-directory change at "
-        f"{current_dir}. Treat current skill content as "
-        "superseding earlier assumptions. You MUST "
-        f"re-read {current_dir / 'SKILL.md'} before relying on this skill."
-    )
-
-
 def _refresh_session_skill_snapshot_entry(
     next_snapshot: dict[str, dict[str, Any]],
     *,
     skill_name: str,
     entry: dict[str, Any],
-    effective_skill_dirs: dict[str, Path],
+    current_skill: SkillRuntimeSnapshot | None,
 ) -> str | None:
-    stored_dir = Path(str(entry.get("resolved_skill_dir", "")))
-    current_dir = effective_skill_dirs.get(skill_name)
-
-    switch_notice = _refresh_switched_session_skill_snapshot_entry(
-        next_snapshot,
-        skill_name=skill_name,
-        stored_dir=stored_dir,
-        current_dir=current_dir,
-        confirmed_at=entry.get("confirmed_at"),
-    )
-    if switch_notice is not None:
-        return switch_notice
-
-    if not stored_dir.exists():
+    if current_skill is None:
         _remove_session_skill_snapshot_entry(
             next_snapshot,
             skill_name=skill_name,
         )
+        return (
+            f"{skill_name}: no longer effective for this turn. "
+            "Stop relying on earlier assumptions from this skill."
+        )
+    stored_dir = Path(str(entry.get("resolved_skill_dir", "")))
+    current_dir = current_skill.directory
+    current_token = current_skill.freshness_token
+    if current_dir == stored_dir and current_token == entry.get(
+        "freshness_token",
+    ):
         return None
-
-    withdrawal_notice = _refresh_withdrawn_session_skill_snapshot_entry(
+    _upsert_session_skill_snapshot_entry(
         next_snapshot,
         skill_name=skill_name,
-        current_dir=current_dir,
+        resolved_skill_dir=current_dir,
+        freshness_token=current_token,
+        confirmed_at=entry.get("confirmed_at"),
     )
-    if withdrawal_notice is not None:
-        return withdrawal_notice
-
-    assert current_dir is not None
-    return _refresh_changed_session_skill_snapshot_entry(
-        next_snapshot,
-        skill_name=skill_name,
-        entry=entry,
-        current_dir=current_dir,
+    change = (
+        f"skill-directory switch {stored_dir} -> {current_dir}"
+        if current_dir != stored_dir
+        else f"skill-directory change at {current_dir}"
+    )
+    return (
+        f"{skill_name}: detected {change}. Treat current skill content as "
+        "superseding earlier assumptions. You MUST "
+        f"re-read {current_dir / 'SKILL.md'} before relying on this skill."
     )
 
 
@@ -2192,15 +2117,32 @@ def _refresh_session_skill_snapshot_entries(
     next_snapshot: dict[str, dict[str, Any]],
     *,
     stored_snapshot: dict[str, dict[str, Any]],
-    effective_skill_dirs: dict[str, Path],
+    workspace_snapshot: WorkspaceSkillSnapshot | None,
+    effective_skills: set[str],
 ) -> list[str]:
+    if workspace_snapshot is None or not workspace_snapshot.manifest_available:
+        return []
     changes: list[str] = []
     for skill_name, entry in stored_snapshot.items():
+        if skill_name in workspace_snapshot.unconfirmed_skills:
+            continue
+        # Effective skills outside the workspace snapshot (e.g. builtin
+        # skills in legacy callers) have no observation to compare here.
+        if (
+            skill_name in effective_skills
+            and skill_name not in workspace_snapshot.skills
+        ):
+            continue
+        current_skill = (
+            workspace_snapshot.skills.get(skill_name)
+            if skill_name in effective_skills
+            else None
+        )
         notice = _refresh_session_skill_snapshot_entry(
             next_snapshot,
             skill_name=skill_name,
             entry=entry,
-            effective_skill_dirs=effective_skill_dirs,
+            current_skill=current_skill,
         )
         if notice is not None:
             changes.append(notice)
@@ -4783,18 +4725,15 @@ class AgentRunner(Runner):
             ):
                 return
 
-            skill_dir = resolve_effective_skill_dir(
-                Path(self.workspace_dir or WORKING_DIR),
-                skill_name,
-            )
-            if skill_dir is None or not skill_dir.exists():
+            skill = snapshot_skills.get(skill_name)
+            if skill is None:
                 return
 
             runtime.pending_confirmed_skill_snapshots[skill_name] = (
                 _build_session_skill_snapshot_entry(
                     skill_name=skill_name,
-                    resolved_skill_dir=skill_dir,
-                    freshness_token=get_skill_freshness_token(skill_dir),
+                    resolved_skill_dir=skill.directory,
+                    freshness_token=skill.freshness_token,
                     confirmed_at=time.time(),
                 )
             )
@@ -4974,12 +4913,14 @@ class AgentRunner(Runner):
         snapshot: dict[str, dict[str, Any]],
         *,
         stored_snapshot: dict[str, dict[str, Any]],
-        effective_skill_dirs: dict[str, Path],
+        workspace_snapshot: WorkspaceSkillSnapshot | None,
+        effective_skills: set[str],
     ) -> list[Any]:
         return _refresh_session_skill_snapshot_entries(
             snapshot,
             stored_snapshot=stored_snapshot,
-            effective_skill_dirs=effective_skill_dirs,
+            workspace_snapshot=workspace_snapshot,
+            effective_skills=effective_skills,
         )
 
     @staticmethod
