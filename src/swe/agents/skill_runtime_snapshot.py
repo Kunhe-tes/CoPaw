@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
+from contextvars import copy_context
 from dataclasses import dataclass, replace
-from functools import wraps
+from functools import partial, wraps
 import logging
 from pathlib import Path
 from threading import RLock
@@ -63,7 +64,7 @@ _CACHE: dict[Path, _CacheEntry] = {}
 _GENERATION = 0
 _COORDINATORS: dict[Path, RLock] = {}
 _INFLIGHT: dict[Path, Future[WorkspaceSkillSnapshot]] = {}
-_REFRESH_TASKS: set[asyncio.Task] = set()
+_REFRESH_EXECUTOR = ThreadPoolExecutor(thread_name_prefix="skill-freshness")
 
 
 @contextmanager
@@ -428,52 +429,36 @@ async def get_workspace_skill_snapshot_async(
     if cached is not None:
         return cached
     with _LOCK:
+        cached = _cached_workspace_skill_snapshot(workspace_dir)
+        if cached is not None:
+            return cached
         future = _INFLIGHT.get(workspace_dir)
         if future is None:
-            future = Future()
-            _INFLIGHT[workspace_dir] = future
-            task = asyncio.create_task(
-                asyncio.to_thread(
-                    _complete_shared_refresh,
-                    workspace_dir,
-                    reconcile,
-                    future,
-                ),
+            # Preserve request context, while making queued work independent
+            # of the lifetime of the event loop that requested it.
+            refresh = partial(
+                get_workspace_skill_snapshot,
+                workspace_dir,
+                reconcile=reconcile,
+                fail_closed=True,
             )
-            _REFRESH_TASKS.add(task)
-            task.add_done_callback(_forget_refresh_task)
+            future = _REFRESH_EXECUTOR.submit(copy_context().run, refresh)
+            _INFLIGHT[workspace_dir] = future
+            future.add_done_callback(
+                partial(_forget_shared_refresh, workspace_dir),
+            )
     # A concurrent Future can be awaited from different event loops. Only
     # its owner occupies a worker; cancellation of a waiter is isolated.
     return await asyncio.shield(asyncio.wrap_future(future))
 
 
-def _forget_refresh_task(task: asyncio.Task) -> None:
-    with _LOCK:
-        _REFRESH_TASKS.discard(task)
-
-
-def _complete_shared_refresh(
+def _forget_shared_refresh(
     workspace_dir: Path,
-    reconcile: bool,
     future: Future[WorkspaceSkillSnapshot],
 ) -> None:
-    try:
-        snapshot = get_workspace_skill_snapshot(
-            workspace_dir,
-            reconcile=reconcile,
-            fail_closed=True,
-        )
-    except BaseException as exc:  # noqa: B036
-        # Transport worker failures to every asynchronous waiter via Future.
-        with _LOCK:
-            if _INFLIGHT.get(workspace_dir) is future:
-                _INFLIGHT.pop(workspace_dir)
-        future.set_exception(exc)
-    else:
-        with _LOCK:
-            if _INFLIGHT.get(workspace_dir) is future:
-                _INFLIGHT.pop(workspace_dir)
-        future.set_result(snapshot)
+    with _LOCK:
+        if _INFLIGHT.get(workspace_dir) is future:
+            _INFLIGHT.pop(workspace_dir)
 
 
 def _filter_changed_skills(

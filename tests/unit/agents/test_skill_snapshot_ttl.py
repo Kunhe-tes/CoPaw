@@ -258,6 +258,11 @@ async def test_async_hit_never_submits_thread_work(
         "to_thread",
         lambda *a, **k: pytest.fail("thread submitted for hot cache"),
     )
+    monkeypatch.setattr(
+        snapshots._REFRESH_EXECUTOR,
+        "submit",
+        lambda *a, **k: pytest.fail("executor submitted for hot cache"),
+    )
     assert (
         await snapshots.get_workspace_skill_snapshot_async(tmp_path) is first
     )
@@ -336,7 +341,6 @@ async def test_async_waiters_share_refresh_without_occupying_worker_threads(
 ):
     import asyncio
     from concurrent.futures import ThreadPoolExecutor
-    from functools import partial
     import threading
 
     first_dir = tmp_path / "first"
@@ -356,13 +360,7 @@ async def test_async_waiters_share_refresh_without_occupying_worker_threads(
 
     with ThreadPoolExecutor(max_workers=2) as pool:
 
-        async def bounded_thread(func, *args, **kwargs):
-            return await loop.run_in_executor(
-                pool,
-                partial(func, *args, **kwargs),
-            )
-
-        monkeypatch.setattr(snapshots.asyncio, "to_thread", bounded_thread)
+        monkeypatch.setattr(snapshots, "_REFRESH_EXECUTOR", pool)
         monkeypatch.setattr(
             snapshots,
             "_build_workspace_skill_runtime_snapshot",
@@ -389,3 +387,108 @@ async def test_async_waiters_share_refresh_without_occupying_worker_threads(
         assert (
             result is not None
         ), "same-workspace waiters exhausted the worker pool"
+
+
+def test_queued_refresh_survives_owner_event_loop_shutdown(
+    tmp_path,
+    monkeypatch,
+):
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    write_workspace(tmp_path)
+    release = threading.Event()
+    occupied = threading.Event()
+    cancelled = threading.Event()
+    errors = []
+
+    def occupy_worker():
+        occupied.set()
+        assert release.wait(3)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(occupy_worker)
+        assert occupied.wait(3)
+        monkeypatch.setattr(
+            snapshots,
+            "_REFRESH_EXECUTOR",
+            pool,
+            raising=False,
+        )
+
+        async def owner_loop():
+            asyncio.get_running_loop().set_default_executor(pool)
+            task = asyncio.create_task(
+                snapshots.get_workspace_skill_snapshot_async(tmp_path),
+            )
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        def run_owner():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(owner_loop())
+                # Finish cancellation of queued owner-loop Tasks before the
+                # worker is released; otherwise queue startup can win the race.
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True),
+                )
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                loop.close()
+                asyncio.set_event_loop(None)
+                cancelled.set()
+
+        thread = threading.Thread(target=run_owner)
+        thread.start()
+        try:
+            assert cancelled.wait(3)
+        finally:
+            release.set()
+        thread.join(3)
+        assert not thread.is_alive()
+        assert not errors
+
+        async def next_loop():
+            return await asyncio.wait_for(
+                snapshots.get_workspace_skill_snapshot_async(tmp_path),
+                0.5,
+            )
+
+        snapshot = asyncio.run(next_loop())
+        assert "demo" in snapshot.skills
+
+
+@pytest.mark.asyncio
+async def test_async_refresh_preserves_request_context(tmp_path, monkeypatch):
+    from contextvars import ContextVar
+
+    value = ContextVar("freshness_request_test", default=None)
+    write_workspace(tmp_path)
+    original = snapshots._build_workspace_skill_runtime_snapshot
+    observed = []
+
+    def build(*args, **kwargs):
+        observed.append(value.get())
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        snapshots,
+        "_build_workspace_skill_runtime_snapshot",
+        build,
+    )
+    token = value.set("alice")
+    try:
+        await snapshots.get_workspace_skill_snapshot_async(tmp_path)
+    finally:
+        value.reset(token)
+    assert observed == ["alice"]
