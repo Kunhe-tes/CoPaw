@@ -1348,11 +1348,11 @@ A user-initiated Market enablement of **Unmanaged Skill Content** in the ordinar
 _Avoid_: automatic skill discovery, reconciliation registration, disabled-skill import
 
 **Skill Runtime View**:
-The current set of registered and enabled skill packages selected from a Workspace's ordinary skill directory. It excludes **Unmanaged Skill Content**; each query captures this view once at its start as a **Query Skill Snapshot**, and enablement or content changes affect subsequent queries rather than changing that query's selected set.
+The most recently observed set of registered and enabled skill packages selected from a Workspace's ordinary skill directory. It excludes **Unmanaged Skill Content**; each query acquires this view once as a **Query Skill Snapshot**, and later observations affect subsequent queries without changing that query's selected set.
 _Avoid_: complete skill directory, live in-flight skill view
 
 **Query Skill Snapshot**:
-The immutable, query-scoped selection of effective skills, trusted metadata, resolved package locations, and content signatures captured when a query starts. It is the consistency boundary for that query: later skill lifecycle changes apply to later queries, while a missing or changed package fails closed for the affected skill instead of being silently represented by stale snapshot metadata; the query may continue without unconfirmed Workspace Skills.
+The immutable, query-scoped selection of effective skills, metadata, resolved package locations, and content signatures obtained when a query starts. It may reuse state from the **Skill Freshness Observation Window** and remains fixed across expiry; independent content-identity checks can still reject a missing or changed package, and the query may continue without unconfirmed Workspace Skills.
 _Avoid_: global skill cache, mutable runtime list, full skill-content copy
 
 **Console Skill Selection Panel**:
@@ -1612,15 +1612,27 @@ A bounded hook-facing snapshot of the current session's message list at one Hook
 _Avoid_: full context, transcript contents, agent state dump, reasoning trace
 
 **Session Skill Freshness**:
-The cross-turn behavior that determines when a chat session starts using updated skill content. In this context, **Session Skill Freshness** means skill changes take effect on the next turn, not during an in-flight turn.
+The cross-turn behavior that detects changes to a session's associated skills using the most recently observed skill state. A turn compares that observed state; changes may remain undetected within the **Skill Freshness Observation Window**.
 _Avoid_: skill hot reload, mid-turn skill reload, live skill patch
+
+**Skill Freshness Observation Window**:
+The fixed ten-minute period during which previously observed workspace skill state and freshness tokens may be reused for query assembly, session comparison, and confirmed association records. Reuse does not extend the window, and ordinary managed skill changes need not end it early.
+_Avoid_: sliding expiry, immediate change visibility, full skill-content cache
+
+**Skill Freshness Refresh Cooldown**:
+The thirty-second interval after a wholly unsuccessful skill-state refresh during which new queries continue without Workspace Skills and do not repeat that refresh. It does not authorize reuse of expired skill state; a later query can retry after the interval.
+_Avoid_: stale-cache grace period, successful empty skill set, retry on every query
+
+**Partial Skill Freshness Observation**:
+A refresh result that confirms some workspace skills but cannot confirm others. New queries may use only the confirmed subset for three minutes before a later query retries; unconfirmed absence is not established skill withdrawal and does not erase the session's prior association.
+_Avoid_: complete successful snapshot, expired-skill fallback, confirmed deletion
 
 **Skill Directory Revision**:
 The content identity of one skill across its full directory tree, including `SKILL.md`, scripts, references, and other skill-owned files. A **Skill Directory Revision** changes when any tracked file in that skill directory changes.
 _Avoid_: SKILL.md version, single-file skill update, prompt-only skill change
 
 **Skill Directory Freshness Token**:
-A lightweight change marker for one skill directory, derived from a stable digest of each tracked file's relative path, `mtime_ns`, and size rather than strict content hashing. In this context, next-turn skill freshness checks compare the stored **Skill Directory Freshness Token** to the current one and accept heuristic rather than exact change detection.
+A lightweight change marker for one skill directory, derived from a stable digest of each tracked file's relative path, `mtime_ns`, and size rather than strict content hashing. Session checks compare the stored marker with the most recently observed marker and accept heuristic detection and the **Skill Freshness Observation Window**.
 _Avoid_: strict content revision, canonical content identity, cryptographic signature
 
 **Session Associated Skill Set**:
@@ -1632,7 +1644,7 @@ A session-state record that stores the session's **Session Associated Skill Set*
 _Avoid_: trace-derived skill history, transient detector state, prompt-only cache
 
 **Skill Freshness Refresh**:
-The next-turn refresh step that rebuilds prompt state and requires the model to re-read the current `SKILL.md` when a stored **Session Skill Snapshot** no longer matches the latest **Skill Directory Freshness Token**.
+The turn-boundary refresh step that rebuilds prompt state and requires the model to re-read the current `SKILL.md` when a stored **Session Skill Snapshot** no longer matches the most recently observed **Skill Directory Freshness Token**.
 _Avoid_: mid-turn reload, background hot patch, user-visible skill reset
 
 **Skill Freshness Notice**:
@@ -2180,7 +2192,7 @@ Resolved as represented by retaining the immediate truncation configuration obje
 Resolved as **Scheduled Run Boundary** when discussing runtime behavior. Cron management API requests remain normal HTTP requests and are outside this term.
 
 **"Skill Reload During A Session"**:
-Resolved as **Session Skill Freshness** with next-turn scope. A skill file change must affect the next turn in the same chat session, not the currently running turn.
+Resolved as **Session Skill Freshness** with turn-boundary scope. A change may remain undetected within the **Skill Freshness Observation Window**; the first turn that observes the changed marker applies the freshness notice rather than requiring discovery on the immediately following turn.
 
 **"Skill Update Scope"**:
 Resolved as **Skill Directory Revision**, not `SKILL.md`-only monitoring. Any tracked file change inside the skill directory counts as a skill update.
