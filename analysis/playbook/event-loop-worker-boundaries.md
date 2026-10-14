@@ -6,7 +6,7 @@
 
 | 工作 | 异步入口 | 执行位置 |
 |------|----------|----------|
-| 即时及历史工具输出压缩 | `compact_tool_result_messages_async` | 独立输出 executor，进程级最多 4 个已提交任务 |
+| 即时及历史工具输出压缩 | `compact_tool_result_messages_async` | 独立输出 executor，当前进程级最多 8 个已提交任务（用户调整） |
 | Shell 完整输出解码及格式化 | `run_output_work` | 与压缩共用输出 executor；实时小块读流仍在 loop |
 | 请求内存绑定 | `ReMeLightMemoryManager.prepare_request_memory` | 现有 runtime-state worker |
 | Query 模型配置准备 | `prepare_model_config_async` | 现有 Provider executor；模型客户端仍在 loop 构造 |
@@ -29,4 +29,8 @@
 
 worker 可以降低同步 I/O 对 loop 的阻塞，但线程中的 Python CPU 工作仍可能竞争 GIL。应测量 loop 延迟、排队时间、运行时间及 RSS，不能仅凭线程 ID 宣称吞吐提升。
 
-阶段 A 尚未解决全历史 artifact 重读、Shell 无界输出积累、恢复重复枚举和默认 runtime-state executor 的容量隔离。Provider 副本捕获后稳定；既有 builtin Provider 逐字段刷新仍不提供捕获时的事务快照。
+历史 artifact 阶段 B 已采用有限头尾读取与展示缓存，容量常量位于 `tool_output_compaction.py`：`_DISPLAY_CACHE_MAX_ENTRIES=128`、`_DISPLAY_CACHE_MAX_BYTES=4*1024*1024`。文件 metadata 与恢复引用参与缓存键，缓存之前必须验证 artifact 仍位于 resolved workspace 内；只检查 resolved tool_result 父目录不足以拒绝整个目录指向外部的 symlink。
+
+清理常量为 `_CLEANUP_INTERVAL_SECONDS=300`、`_CLEANUP_MAX_ENTRIES=128`，按目录与 retention_days 隔离；超出记录容量的冷目录可能提前重扫。显式同步清理不节流。
+
+Shell 无界输出积累、恢复重复枚举、checkpoint epoch-only 读取和默认 runtime-state executor 容量隔离仍未完成。Provider 副本捕获后稳定；既有 builtin Provider 逐字段刷新仍不提供捕获时的事务快照。
