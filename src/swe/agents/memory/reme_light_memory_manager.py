@@ -29,8 +29,7 @@ from swe.agents.model_factory import create_model_and_formatter
 from swe.agents.tools import read_file, write_file, edit_file
 from swe.agents.utils import get_swe_token_counter
 from swe.agents.utils.tool_output_compaction import (
-    cleanup_expired_artifacts,
-    compact_tool_result_messages,
+    compact_tool_result_messages_async,
 )
 from swe.app.source_system_config import resolve_tool_result_compact_config
 from swe.tracing import capture_current_trace_context
@@ -41,6 +40,7 @@ from swe.config.context import (
     set_current_recent_max_bytes,
 )
 from swe.constant import EnvVarLoader
+from swe.runtime_workers import run_runtime_state_work
 
 if TYPE_CHECKING:
     from reme.memory.file_based.reme_in_memory_memory import ReMeInMemoryMemory
@@ -475,17 +475,14 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         self._warn_if_version_mismatch()
         workspace_dir = Path(self.working_dir)
         artifact_dir = workspace_dir / "tool_result"
-        cleanup_expired_artifacts(
-            artifact_dir,
-            retention_days=retention_days,
-        )
-        return compact_tool_result_messages(
+        return await compact_tool_result_messages_async(
             messages,
             old_max_bytes=old_max_bytes,
             recent_max_bytes=recent_max_bytes,
             recent_n=recent_n,
             artifact_dir=artifact_dir,
             workspace_dir=workspace_dir,
+            retention_days=retention_days,
         )
 
     async def check_context(self, **kwargs):
@@ -627,6 +624,16 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
             query=query,
             max_results=max_results,
             min_score=min_score,
+        )
+
+    async def prepare_request_memory(
+        self,
+        chat_id: str,
+    ) -> "ReMeInMemoryMemory | None":
+        """Prepare isolated memory and its checkpoint lease off the loop."""
+        return await run_runtime_state_work(
+            self.create_request_memory,
+            chat_id,
         )
 
     def create_request_memory(

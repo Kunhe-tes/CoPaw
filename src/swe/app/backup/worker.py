@@ -23,6 +23,8 @@ from swe.config.utils import (
 )
 
 from .config import BackupEnvironmentConfig
+from .io_worker import run_backup_io
+from .listing import find_latest_backup_hour, list_restore_tenants
 from .models import BackupTask, BackupTaskStatus
 from .s3_client import S3BackupClient
 from .task_store import TaskStore
@@ -316,17 +318,12 @@ class BackupWorker:
                 tenant_ids = task.target_tenant_ids
             else:
                 # List all backups for the date/hour/instance
-                backups = self.s3_client.list_backups(
-                    instance_id=instance_id,
-                    date=backup_date,
-                    hour=backup_hour,
-                )
-                tenant_ids = list(
-                    backups["backups"]
-                    .get(instance_id, {})
-                    .get(backup_date, {})
-                    .get(backup_hour if backup_hour is not None else 0, {})
-                    .keys(),
+                tenant_ids = await run_backup_io(
+                    list_restore_tenants,
+                    self.s3_client.list_backups,
+                    instance_id,
+                    backup_date,
+                    backup_hour,
                 )
 
             # Check for empty tenant list to avoid division by zero
@@ -368,19 +365,13 @@ class BackupWorker:
                 hour_to_restore = backup_hour
                 if hour_to_restore is None:
                     # Find the latest hour with backup for this tenant
-                    backups = self.s3_client.list_backups(
-                        instance_id=instance_id,
-                        date=backup_date,
+                    hour_to_restore = await run_backup_io(
+                        find_latest_backup_hour,
+                        self.s3_client.list_backups,
+                        instance_id,
+                        backup_date,
                     )
-                    hours = list(
-                        backups["backups"]
-                        .get(instance_id, {})
-                        .get(backup_date, {})
-                        .keys(),
-                    )
-                    if hours:
-                        hour_to_restore = max(hours)
-                    else:
+                    if hour_to_restore is None:
                         logger.warning(
                             f"No backup found for {instance_id}/{backup_date}/{tenant_id}",
                         )

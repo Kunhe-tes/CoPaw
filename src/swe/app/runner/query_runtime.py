@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from types import MappingProxyType
 from typing import Any
@@ -383,6 +384,17 @@ async def finalize_query_runtime(
     """Create and initialize the Agent for one assembled query runtime."""
     agent_build_started_at = time.perf_counter()
     workspace_skill_snapshot = inputs.workspace_skill_snapshot
+    prepared_memory_kwargs: dict[str, Any] = {}
+    memory_manager = getattr(owner, "memory_manager", None)
+    prepare_memory = getattr(memory_manager, "prepare_request_memory", None)
+    if (
+        resources.chat is not None
+        and callable(prepare_memory)
+        and os.getenv("ENABLE_MEMORY_MANAGER", "").lower() != "false"
+    ):
+        prepared_memory_kwargs["prepared_request_memory"] = (
+            await prepare_memory(resources.chat.id)
+        )
     agent = owner._create_agent_for_query(
         agent_config=inputs.agent_config,
         env_context=resources.env_context,
@@ -398,6 +410,8 @@ async def finalize_query_runtime(
         approved_tool_call=preflight.approved_tool_call,
         current_user_text=query or get_last_user_text(msgs) or "",
         workspace_skill_snapshot=workspace_skill_snapshot,
+        prepared_model_config=getattr(inputs, "prepared_model_config", None),
+        **prepared_memory_kwargs,
     )
     await agent.register_mcp_clients()
     agent.set_console_output_enabled(enabled=False)
@@ -459,6 +473,13 @@ async def prepare_query_runtime(
         )
         if block_result is not None:
             return block_result
+        from ...agents.model_factory import prepare_model_config_async
+
+        inputs.prepared_model_config = await prepare_model_config_async(
+            agent_id=inputs.agent_config.id,
+            tenant_id=owner.tenant_id,
+            manager=manager,
+        )
         runtime = await owner._finalize_query_runtime(
             request=request,
             query=query,

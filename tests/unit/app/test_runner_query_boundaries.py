@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -144,9 +145,14 @@ async def test_final_query_assembly_keeps_starting_snapshot_without_validation(
         workspace_dir=tmp_path,
         tenant_id=None,
         agent_id="test-agent",
+        memory_manager=SimpleNamespace(
+            prepare_request_memory=AsyncMock(return_value=SimpleNamespace()),
+        ),
     )
+    event_loop_thread = threading.get_ident()
 
     def create_agent(**kwargs):
+        assert threading.get_ident() == event_loop_thread
         captured.update(kwargs)
         return _Agent()
 
@@ -160,7 +166,7 @@ async def test_final_query_assembly_keeps_starting_snapshot_without_validation(
         preflight=_QueryPreflight(),
         inputs=inputs,
         resources=SimpleNamespace(
-            chat=None,
+            chat=SimpleNamespace(id="chat-1"),
             turn_id="turn-1",
             env_context="",
         ),
@@ -170,6 +176,12 @@ async def test_final_query_assembly_keeps_starting_snapshot_without_validation(
     )
 
     assert runtime.agent is not None
+    owner.memory_manager.prepare_request_memory.assert_awaited_once_with(
+        "chat-1",
+    )
+    assert captured["prepared_request_memory"] is (
+        owner.memory_manager.prepare_request_memory.return_value
+    )
     assert captured["workspace_skill_snapshot"] is snapshot
     assert [
         directive.name for directive in inputs.selected_skill_directives
@@ -836,7 +848,7 @@ async def test_query_runtime_collaborator_preserves_assembly_order(
 
     async def build_inputs(**_kwargs) -> object:
         events.append("inputs")
-        return SimpleNamespace()
+        return SimpleNamespace(agent_config=SimpleNamespace(id="agent-1"))
 
     async def start_resources(**kwargs) -> tuple[object, None]:
         kwargs["mcp_clients"].append(object())
@@ -865,6 +877,11 @@ async def test_query_runtime_collaborator_preserves_assembly_order(
         query_runtime.ProviderManager,
         "get_or_create_instance",
         get_or_create_instance,
+    )
+
+    monkeypatch.setattr(
+        "swe.agents.model_factory.prepare_model_config_async",
+        AsyncMock(return_value=None),
     )
 
     result = await query_runtime.prepare_query_runtime(
@@ -967,7 +984,7 @@ async def test_query_runtime_collaborator_cleans_mcp_after_assembly_error(
 
     async def build_inputs(**_kwargs) -> object:
         events.append("inputs")
-        return SimpleNamespace()
+        return SimpleNamespace(agent_config=SimpleNamespace(id="agent-1"))
 
     async def start_resources(**kwargs) -> tuple[object, None]:
         kwargs["mcp_clients"].append(mcp_client)
@@ -993,6 +1010,11 @@ async def test_query_runtime_collaborator_cleans_mcp_after_assembly_error(
         query_runtime.ProviderManager,
         "get_or_create_instance",
         get_or_create_instance,
+    )
+
+    monkeypatch.setattr(
+        "swe.agents.model_factory.prepare_model_config_async",
+        AsyncMock(return_value=None),
     )
 
     with pytest.raises(RuntimeError, match="agent build failed"):

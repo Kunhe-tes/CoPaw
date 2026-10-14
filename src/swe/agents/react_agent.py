@@ -217,6 +217,8 @@ execute the Goal before the user confirms it."""
 # Valid namesake strategies for tool registration
 NamesakeStrategy = Literal["override", "skip", "raise", "rename"]
 
+_REQUEST_MEMORY_NOT_PREPARED = object()
+
 
 def _plan_interaction_tools_enabled(plan_mode_enabled: bool) -> bool:
     if plan_mode_enabled:
@@ -509,6 +511,8 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         fallback_model_provider: Any | None = None,
         system_prompt_override: str | None = None,
         source_tool_versions: tuple[Any, ...] = (),
+        prepared_request_memory: Any = _REQUEST_MEMORY_NOT_PREPARED,
+        prepared_model_config: Any | None = None,
     ):
         """Initialize SWEAgent.
 
@@ -545,6 +549,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         self._model_provider_override = model_provider_override
         self._fallback_model_slot = fallback_model_slot
         self._fallback_model_provider = fallback_model_provider
+        self._prepared_model_config = prepared_model_config
         self._resolved_model_slot: dict[str, str] = {}
         self._resolved_model_provider = None
         self._system_prompt_override = system_prompt_override
@@ -608,6 +613,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             and not completion_judge,
             None if goal_finalization or completion_judge else memory_manager,
             namesake_strategy,
+            prepared_request_memory=prepared_request_memory,
         )
 
         # Setup command handler
@@ -1603,6 +1609,8 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         enable_memory_manager: bool,
         memory_manager: BaseMemoryManager | None,
         namesake_strategy: NamesakeStrategy,
+        *,
+        prepared_request_memory: Any = _REQUEST_MEMORY_NOT_PREPARED,
     ) -> None:
         """Setup memory manager and register memory search tool if enabled.
 
@@ -1628,7 +1636,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 "create_request_memory",
                 None,
             )
-            if chat_id and callable(create_request_memory):
+            if prepared_request_memory is not _REQUEST_MEMORY_NOT_PREPARED:
+                self.memory = prepared_request_memory
+            elif chat_id and callable(create_request_memory):
                 self.memory = create_request_memory(chat_id)
             else:
                 self.memory = self.memory_manager.get_in_memory_memory(
@@ -1649,7 +1659,15 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             )
             if chat_id and checkpoint_store is not None:
                 try:
-                    state = checkpoint_store._read_checkpoint_state(chat_id)
+                    epoch = getattr(
+                        self.memory,
+                        "_chat_checkpoint_epoch",
+                        None,
+                    )
+                    if epoch is None:
+                        epoch = checkpoint_store._read_checkpoint_state(
+                            chat_id,
+                        ).current_epoch
                 except (TypeError, ValueError):
                     logger.warning(
                         "Skip recover_evidence: request Chat ID is invalid",
@@ -1659,7 +1677,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                         create_recover_evidence_tool(
                             self.memory_manager,
                             chat_id=chat_id,
-                            epoch=state.current_epoch,
+                            epoch=epoch,
                         ),
                         namesake_strategy=namesake_strategy,
                     )

@@ -65,6 +65,7 @@ class _QueryRuntimeInputs:
     selected_skill_directives: list[Any] = field(default_factory=list)
     workspace_skill_snapshot: WorkspaceSkillSnapshot | None = None
     session_execution: Any | None = None
+    prepared_model_config: Any | None = None
 
 
 @dataclass

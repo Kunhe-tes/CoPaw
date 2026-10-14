@@ -84,7 +84,7 @@ from .utils import build_env_context
 from ..identity_resolver import resolve_user_identity
 from ..channels.schema import DEFAULT_CHANNEL
 from ...__version__ import __version__
-from ...agents.react_agent import SWEAgent
+from ...agents.react_agent import SWEAgent, _REQUEST_MEMORY_NOT_PREPARED
 from ...agents.skill_invocation_detector import SkillInvocationDetector
 from ...agents.tool_guard_mixin import PreToolUseTerminalStop
 from ...agents.tool_failure import (
@@ -4041,6 +4041,8 @@ class AgentRunner(Runner):
         approved_tool_call: dict[str, Any] | None,
         current_user_text: str = "",
         workspace_skill_snapshot: Any | None = None,
+        prepared_request_memory: Any = _REQUEST_MEMORY_NOT_PREPARED,
+        prepared_model_config: Any | None = None,
     ) -> SWEAgent:
         """创建 SWEAgent，并注入本轮请求上下文。"""
         request_details = {
@@ -4090,6 +4092,8 @@ class AgentRunner(Runner):
             env_context=env_context,
             mcp_clients=mcp_clients,
             memory_manager=self.memory_manager,
+            prepared_request_memory=prepared_request_memory,
+            prepared_model_config=prepared_model_config,
             request_context=request_context,
             workspace_dir=self.workspace_dir,
             workspace_skill_snapshot=workspace_skill_snapshot,

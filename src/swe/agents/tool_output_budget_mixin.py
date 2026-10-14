@@ -14,7 +14,7 @@ from swe.app.source_system_config.runtime import (
 )
 from swe.constant import WORKING_DIR
 
-from .utils.tool_output_compaction import compact_tool_result_messages
+from .utils.tool_output_compaction import compact_tool_result_messages_async
 
 
 class ToolOutputBudgetMixin:
@@ -56,7 +56,7 @@ class ToolOutputBudgetMixin:
                         ],
                         "system",
                     )
-                    compact_tool_result_messages(
+                    await compact_tool_result_messages_async(
                         [compacted_chunk_msg],
                         old_max_bytes=tool_result_compact.recent_max_bytes,
                         recent_max_bytes=tool_result_compact.recent_max_bytes,

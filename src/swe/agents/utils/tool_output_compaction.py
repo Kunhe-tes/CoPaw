@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+from copy import copy, deepcopy
 import re
 import time
 from dataclasses import dataclass
@@ -12,6 +13,8 @@ from typing import Any
 from uuid import uuid4
 
 from agentscope.message import Msg
+
+from swe.output_workers import run_output_work
 
 _CANONICAL_NOTICE_RE = re.compile(
     r"\n<<<TRUNCATED>>> "
@@ -118,6 +121,50 @@ def compact_tool_result_messages(
                         artifact_dir=artifact_dir,
                         workspace_dir=workspace_dir,
                     )
+    return messages
+
+
+async def compact_tool_result_messages_async(
+    messages: list[Msg],
+    *,
+    old_max_bytes: int,
+    recent_max_bytes: int,
+    recent_n: int,
+    artifact_dir: Path,
+    workspace_dir: Path,
+    retention_days: int | None = None,
+) -> list[Msg]:
+    """Compact private content in a worker, then update still-current messages."""
+    snapshots = [(message, message.content) for message in messages]
+
+    def compact() -> list[tuple[Any, bool]]:
+        private_messages = []
+        for message, content in snapshots:
+            private_message = copy(message)
+            private_message.content = deepcopy(content)
+            private_messages.append(private_message)
+        if retention_days is not None:
+            cleanup_expired_artifacts(
+                artifact_dir,
+                retention_days=retention_days,
+            )
+        compact_tool_result_messages(
+            private_messages,
+            old_max_bytes=old_max_bytes,
+            recent_max_bytes=recent_max_bytes,
+            recent_n=recent_n,
+            artifact_dir=artifact_dir,
+            workspace_dir=workspace_dir,
+        )
+        return [
+            (message.content, message.content != original)
+            for message, (_, original) in zip(private_messages, snapshots)
+        ]
+
+    contents = await run_output_work(compact)
+    for (message, original), (content, changed) in zip(snapshots, contents):
+        if changed and message.content is original:
+            message.content = content
     return messages
 
 

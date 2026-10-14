@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,6 +27,35 @@ class _Memory:
 
     async def add(self, msg) -> None:
         self.messages.append(msg)
+
+
+@pytest.mark.asyncio
+async def test_tool_artifact_write_runs_outside_event_loop(
+    tmp_path,
+    monkeypatch,
+):
+    from swe.agents.utils import tool_output_compaction
+
+    observed_threads = []
+    original = tool_output_compaction._persist_artifact
+
+    def recording_write(*args):
+        observed_threads.append(threading.get_ident())
+        return original(*args)
+
+    monkeypatch.setattr(
+        tool_output_compaction,
+        "_persist_artifact",
+        recording_write,
+    )
+    agent = _AgentScopeLikeAgent(
+        config=ToolResultCompactConfig(recent_max_bytes=1000),
+        workspace_dir=tmp_path,
+        chunks=[_chunk("x" * 4096)],
+    )
+    await agent._acting({"id": "tool-1", "name": "read_file", "input": {}})
+    assert observed_threads
+    assert threading.get_ident() not in observed_threads
 
 
 class _Toolkit:

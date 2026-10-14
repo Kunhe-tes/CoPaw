@@ -31,6 +31,7 @@ from ...app.runner.tool_output_frames import (
     emit_tool_output_text,
 )
 from ...envs.runtime import build_runtime_env
+from ...output_workers import run_output_work
 from ...runtime_invocation_claims import apply_runtime_claim_env
 from ...security.tenant_path_boundary import (
     is_path_within_tenant_with_base,
@@ -1459,7 +1460,12 @@ async def _execute_unix_subprocess(
             timeout=timeout,
         )
         returncode = proc.returncode if proc.returncode is not None else -1
-        return returncode, smart_decode(stdout), smart_decode(stderr)
+        stdout_str, stderr_str = await run_output_work(
+            _decode_shell_streams,
+            [stdout],
+            [stderr],
+        )
+        return returncode, stdout_str, stderr_str
 
     try:
         process_group_id = os.getpgid(proc.pid)
@@ -1489,8 +1495,11 @@ async def _execute_unix_subprocess(
             )
         except asyncio.TimeoutError:
             pass
-        stdout_str = smart_decode(b"".join(stdout_chunks))
-        stderr_str = smart_decode(b"".join(stderr_chunks))
+        stdout_str, stderr_str = await run_output_work(
+            _decode_shell_streams,
+            stdout_chunks,
+            stderr_chunks,
+        )
         return returncode, stdout_str, stderr_str
     except asyncio.TimeoutError:
         stderr_suffix = (
@@ -1517,12 +1526,12 @@ async def _execute_unix_subprocess(
             )
         except asyncio.TimeoutError:
             pass
-        stdout_str = smart_decode(b"".join(stdout_chunks))
-        stderr_str = smart_decode(b"".join(stderr_chunks))
-        if stderr_str:
-            stderr_str += f"\n{stderr_suffix}"
-        else:
-            stderr_str = stderr_suffix
+        stdout_str, stderr_str = await run_output_work(
+            _decode_shell_streams,
+            stdout_chunks,
+            stderr_chunks,
+            stderr_suffix,
+        )
         await emit_tool_output_text("stderr", stderr_suffix)
         return -1, stdout_str, stderr_str
     finally:
@@ -1606,29 +1615,13 @@ async def execute_shell_command(
                     preexec_fn=preexec_fn,
                 )
 
-        response_text = _format_shell_response(
+        response_text = await run_output_work(
+            _prepare_shell_response,
             returncode,
             stdout_str,
             stderr_str,
-        )
-        response_text = _format_process_limit_diagnostic(
-            response_text,
             process_limit_policy,
         )
-        if returncode != 0:
-            _raise_shell_error(
-                _classify_shell_failure(
-                    returncode,
-                    stderr_str,
-                    process_limits_enforced=(
-                        process_limit_policy.should_enforce
-                    ),
-                    memory_limit_enforced=(
-                        process_limit_policy.should_enforce_memory_limit
-                    ),
-                ),
-                response_text,
-            )
 
         return _tool_text_response(response_text)
 
@@ -1639,6 +1632,43 @@ async def execute_shell_command(
             "unexpected_tool_error",
             f"Error: Shell command execution failed due to \n{e}",
         )
+
+
+def _decode_shell_streams(
+    stdout_chunks: list[bytes],
+    stderr_chunks: list[bytes],
+    stderr_suffix: str = "",
+) -> tuple[str, str]:
+    """Join and decode complete output outside the event-loop thread."""
+    stdout = smart_decode(b"".join(stdout_chunks))
+    stderr = smart_decode(b"".join(stderr_chunks))
+    if stderr_suffix:
+        stderr = f"{stderr}\n{stderr_suffix}" if stderr else stderr_suffix
+    return stdout, stderr
+
+
+def _prepare_shell_response(
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    policy: CurrentProcessLimitPolicy,
+) -> str:
+    """Format and classify data-size-dependent output in the output worker."""
+    text = _format_process_limit_diagnostic(
+        _format_shell_response(returncode, stdout, stderr),
+        policy,
+    )
+    if returncode != 0:
+        _raise_shell_error(
+            _classify_shell_failure(
+                returncode,
+                stderr,
+                process_limits_enforced=policy.should_enforce,
+                memory_limit_enforced=policy.should_enforce_memory_limit,
+            ),
+            text,
+        )
+    return text
 
 
 def smart_decode(data: bytes) -> str:
