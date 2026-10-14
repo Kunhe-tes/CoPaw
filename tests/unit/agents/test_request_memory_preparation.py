@@ -36,14 +36,14 @@ def _manager(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_request_preparation_reads_checkpoint_once_in_worker(
+async def test_request_preparation_reads_epoch_once_in_worker(
     tmp_path,
     monkeypatch,
 ):
     manager = _manager(tmp_path, monkeypatch)
     event_loop_thread = threading.get_ident()
     reads = []
-    original = ConversationArchiveStore._read_checkpoint_state
+    original = ConversationArchiveStore._read_checkpoint_epoch
 
     def read(store, chat_id):
         reads.append(threading.get_ident())
@@ -52,7 +52,7 @@ async def test_request_preparation_reads_checkpoint_once_in_worker(
 
     monkeypatch.setattr(
         ConversationArchiveStore,
-        "_read_checkpoint_state",
+        "_read_checkpoint_epoch",
         read,
     )
 
@@ -98,7 +98,7 @@ async def test_blocked_checkpoint_preparation_keeps_loop_responsive(
     manager = _manager(tmp_path, monkeypatch)
     started = threading.Event()
     release = threading.Event()
-    original = ConversationArchiveStore._read_checkpoint_state
+    original = ConversationArchiveStore._read_checkpoint_epoch
 
     def read(store, chat_id):
         started.set()
@@ -107,7 +107,7 @@ async def test_blocked_checkpoint_preparation_keeps_loop_responsive(
 
     monkeypatch.setattr(
         ConversationArchiveStore,
-        "_read_checkpoint_state",
+        "_read_checkpoint_epoch",
         read,
     )
     task = asyncio.create_task(manager.prepare_request_memory(str(uuid4())))

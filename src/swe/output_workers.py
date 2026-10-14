@@ -9,7 +9,10 @@ from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from functools import partial
 import threading
+import time
 from typing import ParamSpec, TypeVar
+
+from .performance_metrics import timed_work
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -25,6 +28,7 @@ async def run_output_work(
     **kwargs: P.kwargs,
 ) -> T:
     """Submit only with a slot; cancellation never releases running work."""
+    queued_at = time.monotonic()
     slots = _SLOTS
     # The worker releases this permit, including after request cancellation.
     # pylint: disable=consider-using-with
@@ -35,7 +39,9 @@ async def run_output_work(
 
     def run() -> T:
         try:
-            return context.run(callback)
+            return context.run(
+                partial(timed_work, "output", queued_at, callback),
+            )
         finally:
             slots.release()
 

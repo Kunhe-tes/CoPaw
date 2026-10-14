@@ -7,8 +7,8 @@
 | 工作 | 异步入口 | 执行位置 |
 |------|----------|----------|
 | 即时及历史工具输出压缩 | `compact_tool_result_messages_async` | 独立输出 executor，当前进程级最多 8 个已提交任务（用户调整） |
-| Shell 完整输出解码及格式化 | `run_output_work` | 与压缩共用输出 executor；实时小块读流仍在 loop |
-| 请求内存绑定 | `ReMeLightMemoryManager.prepare_request_memory` | 现有 runtime-state worker |
+| Shell 流式落盘、完整输出解码及格式化 | `run_shell_spool_work` / `run_output_work` | 与压缩共用输出 executor；Unix pipe 每 4 KiB 读流仍在 loop |
+| 请求内存绑定 | `ReMeLightMemoryManager.prepare_request_memory` | 独立 runtime-state executor，最多 8 个已提交任务，Chat 锁内仅读 epoch |
 | Query 模型配置准备 | `prepare_model_config_async` | 现有 Provider executor；模型客户端仍在 loop 构造 |
 | S3 构造、分页及选择 | `run_backup_io` | 独立备份 executor，进程级最多 4 个已提交任务 |
 
@@ -33,4 +33,10 @@ worker 可以降低同步 I/O 对 loop 的阻塞，但线程中的 Python CPU �
 
 清理常量为 `_CLEANUP_INTERVAL_SECONDS=300`、`_CLEANUP_MAX_ENTRIES=128`，按目录与 retention_days 隔离；超出记录容量的冷目录可能提前重扫。显式同步清理不节流。
 
-Shell 无界输出积累、恢复重复枚举、checkpoint epoch-only 读取和默认 runtime-state executor 容量隔离仍未完成。Provider 副本捕获后稳定；既有 builtin Provider 逐字段刷新仍不提供捕获时的事务快照。
+Unix Shell 在启用工具压缩的调用上下文使用有限缓冲与流式 spool，完整格式化 artifact 复用 canonical 截断引用。每条 pipe 原始缓冲最多 budget，另计 pipe、64 KiB 解码缓冲和其他对象开销；Windows、未启用压缩、磁盘失败回退仍为全输出。取消后必须等待真实 spool worker 结束再关闭文件，重复取消也遵守此规则。
+
+checkpoint 绑定在 Chat 锁内只读 epoch；record/events 的损坏校验由完整状态消费者执行，写入/fsync 和持久化保证保留。runtime-state 使用独立 8 线程预算，避免默认 executor 饱和阻塞状态读取。SSE 历史入队与消费每 64 条让出 loop，锁仍覆盖完整重放，不减少队列内存。
+
+`runtime_diagnostic` 日志包含 loop p95/p99、样本数、RSS 采样峰值和 `performance_metrics`。worker 排队/执行分位数来自最近 2048 次真实完成任务；完成次数、checkpoint 读取字节/调用、S3 分页尝试次数是本进程累计。loop/RSS 则是两次日志之间的窗口；原诊断采样周期 10 秒，采样峰值不等于瞬时峰值。checkpoint 计量限 active-state epoch/record/events，S3 计量限 list_backups 的 list_objects_v2 尝试（不含 SDK 内部重试）。无租户/路径标签，Pod 之间的分位数不能直接平均。
+
+专项脚本与原始结果见 [性能记录](../../docs/superpowers/benchmarks/2026-10-14-event-loop-followups.md)。恢复计划复用由用户明确排除本轮。Provider 副本捕获后稳定；既有 builtin Provider 逐字段刷新仍不提供捕获时的事务快照。

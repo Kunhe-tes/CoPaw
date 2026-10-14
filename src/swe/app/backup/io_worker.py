@@ -9,7 +9,10 @@ from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from functools import partial
 import threading
+import time
 from typing import Callable, TypeVar
+
+from ...performance_metrics import timed_work
 
 _Result = TypeVar("_Result")
 
@@ -66,12 +69,13 @@ class BackupIOWorker:
         **kwargs,
     ) -> _Result:
         loop = asyncio.get_running_loop()
+        queued_at = time.monotonic()
         await self._acquire()
         try:
             operation = partial(function, *args, **kwargs)
             submitted = self._executor.submit(
                 copy_context().run,
-                operation,
+                partial(timed_work, "backup", queued_at, operation),
             )
         except BaseException:
             self._release()

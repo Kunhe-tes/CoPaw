@@ -22,6 +22,7 @@ from .tool_output_frames import ToolOutputFrame, bind_tool_output_emitter
 logger = logging.getLogger(__name__)
 
 _SENTINEL = None
+_REPLAY_BATCH_SIZE = 64
 Producer = Callable[[TurnIdentity, Any], AsyncGenerator[str, None]]
 
 
@@ -117,9 +118,12 @@ class TaskTracker:
     async def attach(self, identity: TurnIdentity) -> asyncio.Queue | None:
         """Attach a subscriber and replay the buffered SSE events."""
         async with self._lock:
-            return self._attach_unlocked(identity)
+            return await self._attach_unlocked(identity)
 
-    def _attach_unlocked(self, identity: TurnIdentity) -> asyncio.Queue | None:
+    async def _attach_unlocked(
+        self,
+        identity: TurnIdentity,
+    ) -> asyncio.Queue | None:
         state = self._runs.get(identity.chat_id)
         if (
             state is None
@@ -129,8 +133,12 @@ class TaskTracker:
         ):
             return None
         queue: asyncio.Queue = asyncio.Queue()
-        for sse in state.buffer:
+        # Keep the lock while yielding so live events cannot precede replay.
+        # Register only after replay completes; cancellation owns no subscriber.
+        for index, sse in enumerate(state.buffer, 1):
             queue.put_nowait(sse)
+            if index % _REPLAY_BATCH_SIZE == 0:
+                await asyncio.sleep(0)
         state.queues.append(queue)
         return queue
 
@@ -182,7 +190,7 @@ class TaskTracker:
         """Attach to *identity*'s transport or register its producer."""
         async with self._lifecycle_lock(identity):
             async with self._lock:
-                queue = self._attach_unlocked(identity)
+                queue = await self._attach_unlocked(identity)
                 if queue is not None:
                     return queue, False
                 if self._has_live_run_unlocked(identity.chat_id):
@@ -200,7 +208,7 @@ class TaskTracker:
                     )
                     await operation
             async with self._lock:
-                queue = self._attach_unlocked(identity)
+                queue = await self._attach_unlocked(identity)
                 if queue is not None:
                     return queue, False
                 if self._has_live_run_unlocked(identity.chat_id):
@@ -286,14 +294,19 @@ class TaskTracker:
         queue: asyncio.Queue,
     ) -> AsyncGenerator[str, None]:
         """Yield transport events until the producer or transport closes."""
+        delivered = 0
         try:
             while True:
                 try:
+                    if delivered == _REPLAY_BATCH_SIZE:
+                        await asyncio.sleep(0)
+                        delivered = 0
                     event = await queue.get()
                 except asyncio.CancelledError:
                     break
                 if event is _SENTINEL:
                     break
+                delivered += 1
                 yield event
         finally:
             await self.detach_subscriber(identity, queue)

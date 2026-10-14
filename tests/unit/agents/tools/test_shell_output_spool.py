@@ -1,0 +1,483 @@
+# -*- coding: utf-8 -*-
+import os
+import asyncio
+import threading
+import signal
+from contextlib import nullcontext
+from types import SimpleNamespace
+
+import pytest
+
+
+def _prepare(monkeypatch, tmp_path):
+    from swe.agents.tools import shell
+
+    monkeypatch.setattr(
+        shell,
+        "prepare_shell_command",
+        lambda command, cwd: SimpleNamespace(
+            command=command,
+            working_dir=tmp_path,
+            env=os.environ.copy(),
+            python_runtime_guard=nullcontext(),
+        ),
+    )
+    monkeypatch.setattr(
+        shell,
+        "resolve_current_process_limit_policy",
+        lambda _: SimpleNamespace(
+            build_preexec_fn=lambda: None,
+            enabled=False,
+            shell_max_concurrent=None,
+            diagnostic=None,
+            should_enforce=False,
+            should_enforce_memory_limit=False,
+        ),
+    )
+    return shell
+
+
+@pytest.mark.asyncio
+async def test_large_shell_output_recovers_exact_formatted_artifact(
+    monkeypatch,
+    tmp_path,
+):
+    shell = _prepare(monkeypatch, tmp_path)
+    from swe.agents.tools.shell_output_spool import bind_shell_output_spool
+
+    with bind_shell_output_spool(tmp_path, 512):
+        result = await shell.execute_shell_command(
+            "printf 'head\\n'; python -c \"print('middle' * 50000)\"; "
+            "printf 'tail\\n'; printf 'warning\\n' >&2",
+        )
+    text = result.content[0]["text"]
+    assert len(text.encode()) <= 512
+    assert "<<<TRUNCATED>>>" in text
+    artifact = next((tmp_path / "tool_result").glob("*.txt"))
+    assert artifact.read_text() == (
+        "head\n" + "middle" * 50000 + "\ntail\n[stderr]\nwarning"
+    )
+
+
+@pytest.mark.asyncio
+async def test_spool_buffers_are_bounded_and_failure_retains_original(
+    tmp_path,
+):
+    from swe.agents.tools.shell_output_spool import ShellOutputSpool
+    from swe.agents.tools.shell import smart_decode, _format_shell_response
+
+    spool = ShellOutputSpool(
+        tmp_path,
+        512,
+        smart_decode,
+        _format_shell_response,
+    )
+    try:
+        for _ in range(128):
+            await spool.append("stdout", b"a" * 4096)
+        assert spool.buffered_bytes <= 512
+        assert spool.total_bytes == 128 * 4096
+        stdout, stderr = spool.decode_streams()
+        text, _ = spool.prepare_response(0, stdout, stderr, "")
+        assert len(text.encode()) <= 512
+        artifact = next((tmp_path / "tool_result").glob("*.txt"))
+        assert artifact.stat().st_size == 128 * 4096
+    finally:
+        await spool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_small_output_and_unbound_output_stay_exact(
+    monkeypatch,
+    tmp_path,
+):
+    shell = _prepare(monkeypatch, tmp_path)
+    from swe.agents.tools.shell_output_spool import bind_shell_output_spool
+
+    with bind_shell_output_spool(tmp_path, 512):
+        small = await shell.execute_shell_command("printf '\\nhello\\n'")
+    assert small.content[0]["text"] == "hello"
+    full = await shell.execute_shell_command("python -c \"print('a' * 4000)\"")
+    assert full.content[0]["text"] == "a" * 4000
+    assert not list((tmp_path / "tool_result").glob("*.txt"))
+
+
+@pytest.mark.asyncio
+async def test_spooled_failure_preserves_type_and_full_detail(
+    monkeypatch,
+    tmp_path,
+):
+    shell = _prepare(monkeypatch, tmp_path)
+    from swe.agents.tools.shell_output_spool import bind_shell_output_spool
+    from swe.agents.tool_failure import ToolExecutionError
+
+    with bind_shell_output_spool(tmp_path, 512):
+        with pytest.raises(ToolExecutionError) as caught:
+            await shell.execute_shell_command(
+                "python -c \"import sys; sys.stderr.write('x' * 4094 + '"
+                "Read timed out' + 'x' * 4096); sys.exit(1)\"",
+            )
+    assert caught.value.error_type == "tool_timeout"
+    assert len(caught.value.detail.encode()) <= 512
+    artifact = next((tmp_path / "tool_result").glob("*.txt"))
+    assert artifact.read_text() == (
+        "Command failed with exit code 1.\n[stderr]\n"
+        + "x" * 4094
+        + "Read timed out"
+        + "x" * 4096
+    )
+
+
+@pytest.mark.asyncio
+async def test_spooled_timeout_retains_output_and_timeout_suffix(
+    monkeypatch,
+    tmp_path,
+):
+    shell = _prepare(monkeypatch, tmp_path)
+    from swe.agents.tools.shell_output_spool import bind_shell_output_spool
+    from swe.agents.tool_failure import ToolExecutionError
+
+    with bind_shell_output_spool(tmp_path, 512):
+        with pytest.raises(ToolExecutionError) as caught:
+            await shell.execute_shell_command(
+                "python -c \"print('a' * 4000)\"; sleep 20",
+                timeout=0.2,
+            )
+    assert caught.value.error_type == "tool_timeout"
+    artifact = next((tmp_path / "tool_result").glob("*.txt"))
+    text = artifact.read_text()
+    assert "a" * 4000 in text
+    assert "TimeoutError" in text
+
+
+@pytest.mark.asyncio
+async def test_spool_handles_unicode_boundaries_and_newline_stripping(
+    tmp_path,
+):
+    from swe.agents.tools.shell_output_spool import ShellOutputSpool
+    from swe.agents.tools.shell import smart_decode, _format_shell_response
+
+    spool = ShellOutputSpool(
+        tmp_path,
+        512,
+        smart_decode,
+        _format_shell_response,
+    )
+    raw = ("\n" * 70000 + "中🙂" * 70000 + "\n" * 70000).encode()
+    try:
+        for start in range(0, len(raw), 4096):
+            await spool.append("stdout", raw[start : start + 4096])
+        stdout, stderr = spool.decode_streams()
+        text, _ = spool.prepare_response(0, stdout, stderr, "")
+        assert len(text.encode()) <= 512
+        assert (
+            next((tmp_path / "tool_result").glob("*.txt")).read_text()
+            == "中🙂" * 70000
+        )
+    finally:
+        await spool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_artifact_failure_falls_back_to_full_output(
+    monkeypatch,
+    tmp_path,
+):
+    from swe.agents.tools.shell_output_spool import ShellOutputSpool
+    from swe.agents.tools.shell import smart_decode, _format_shell_response
+    from pathlib import Path
+
+    spool = ShellOutputSpool(
+        tmp_path,
+        512,
+        smart_decode,
+        _format_shell_response,
+    )
+    try:
+        await spool.append("stdout", b"a" * 10000)
+        original_open = Path.open
+
+        def fail_artifact(path, mode="r", *args, **kwargs):
+            if mode == "xb":
+                raise OSError("disk full")
+            return original_open(path, mode, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", fail_artifact)
+        stdout, stderr = spool.decode_streams()
+        text, _ = spool.prepare_response(0, stdout, stderr, "")
+        assert text == "a" * 10000
+    finally:
+        await spool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_shell_kills_process_group(monkeypatch, tmp_path):
+    shell = _prepare(monkeypatch, tmp_path)
+    from swe.agents.tools.shell_output_spool import bind_shell_output_spool
+
+    pid_path = tmp_path / "shell.pid"
+    with bind_shell_output_spool(tmp_path, 512):
+        task = asyncio.create_task(
+            shell.execute_shell_command(
+                f"echo $$ > {pid_path}; python -c \"print('a' * 4000)\"; sleep 20",
+            ),
+        )
+        while not pid_path.exists():
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+    pid = int(pid_path.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.killpg(pid, 0)
+    assert not list((tmp_path / "tool_result").glob("*.tmp"))
+
+
+@pytest.mark.asyncio
+async def test_replaced_spool_directory_cannot_escape_workspace(tmp_path):
+    from swe.agents.tools.shell_output_spool import ShellOutputSpool
+    from swe.agents.tools.shell import smart_decode, _format_shell_response
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    spool = ShellOutputSpool(
+        workspace,
+        512,
+        smart_decode,
+        _format_shell_response,
+    )
+    (workspace / "tool_result").symlink_to(external, target_is_directory=True)
+    try:
+        await spool.append("stdout", b"a" * 10000)
+        assert spool.buffered_bytes == 10000
+        stdout, stderr = spool.decode_streams()
+        text, _ = spool.prepare_response(0, stdout, stderr, "")
+        assert text == "a" * 10000
+        assert not list(external.iterdir())
+    finally:
+        await spool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_append_finishes_before_cleanup(monkeypatch, tmp_path):
+    from swe.agents.tools.shell_output_spool import ShellOutputSpool
+    from swe.agents.tools.shell import smart_decode, _format_shell_response
+
+    spool = ShellOutputSpool(
+        tmp_path,
+        512,
+        smart_decode,
+        _format_shell_response,
+    )
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    original = spool.streams["stdout"].append
+
+    def delayed(chunk):
+        started.set()
+        release.wait(5)
+        original(chunk)
+        finished.set()
+
+    monkeypatch.setattr(spool.streams["stdout"], "append", delayed)
+    task = asyncio.create_task(spool.append("stdout", b"a" * 4096))
+    while not started.is_set():
+        await asyncio.sleep(0.001)
+    task.cancel()
+    await asyncio.sleep(0.02)
+    try:
+        assert not task.done()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await spool.aclose()
+    assert finished.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repeat_cancel", [False, True])
+async def test_cancelled_response_waits_for_artifact_worker(
+    monkeypatch,
+    tmp_path,
+    repeat_cancel,
+):
+    shell = _prepare(monkeypatch, tmp_path)
+    from swe.agents.tools.shell_output_spool import (
+        ShellOutputSpool,
+        bind_shell_output_spool,
+    )
+
+    started = threading.Event()
+    release = threading.Event()
+    original = ShellOutputSpool._write_response
+
+    def delayed(self, *args):
+        started.set()
+        release.wait(5)
+        return original(self, *args)
+
+    monkeypatch.setattr(ShellOutputSpool, "_write_response", delayed)
+    with bind_shell_output_spool(tmp_path, 512):
+        task = asyncio.create_task(
+            shell.execute_shell_command(
+                "python -c \"print('a' * 4000)\"",
+            ),
+        )
+        while not started.is_set():
+            await asyncio.sleep(0.001)
+        task.cancel()
+        await asyncio.sleep(0.02)
+        if repeat_cancel:
+            task.cancel()
+            await asyncio.sleep(0.02)
+        try:
+            assert not task.done()
+        finally:
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+    assert (
+        next((tmp_path / "tool_result").glob("*.txt")).read_text()
+        == "a" * 4000
+    )
+
+
+@pytest.mark.asyncio
+async def test_permission_failure_marker_remains_case_sensitive(
+    monkeypatch,
+    tmp_path,
+):
+    shell = _prepare(monkeypatch, tmp_path)
+    from swe.agents.tools.shell_output_spool import bind_shell_output_spool
+    from swe.agents.tool_failure import ToolExecutionError
+
+    with bind_shell_output_spool(tmp_path, 512):
+        with pytest.raises(ToolExecutionError) as caught:
+            await shell.execute_shell_command(
+                "python -c \"import sys; sys.stderr.write('x' * 4000 + '"
+                "Outside the allowed workspace'); sys.exit(1)\"",
+            )
+    assert caught.value.error_type == "shell_command_failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_mode", ["short", "raise"])
+async def test_initial_prefix_write_failure_keeps_full_output(
+    monkeypatch,
+    tmp_path,
+    fail_mode,
+):
+    from swe.agents.tools import shell_output_spool
+    from swe.agents.tools.shell import smart_decode, _format_shell_response
+
+    original_file = shell_output_spool.tempfile.TemporaryFile
+
+    class ShortFile:
+        def __init__(self, *args, **kwargs):
+            self.file = original_file(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.file, name)
+
+        def write(self, data):
+            self.file.write(data[:2])
+            if fail_mode == "raise":
+                raise OSError("disk full")
+            return 2
+
+    monkeypatch.setattr(
+        shell_output_spool.tempfile,
+        "TemporaryFile",
+        ShortFile,
+    )
+    spool = shell_output_spool.ShellOutputSpool(
+        tmp_path,
+        512,
+        smart_decode,
+        _format_shell_response,
+    )
+    try:
+        await spool.append("stdout", b"prefix")
+        await spool.append("stdout", b"a" * 4096)
+        await spool.append("stdout", b"suffix")
+        stdout, stderr = spool.decode_streams()
+        text, _ = spool.prepare_response(0, stdout, stderr, "")
+        assert text == "prefix" + "a" * 4096 + "suffix"
+    finally:
+        await spool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancel_kills_sigterm_ignoring_process_group(
+    monkeypatch,
+    tmp_path,
+):
+    shell = _prepare(monkeypatch, tmp_path)
+    from swe.agents.tools.shell_output_spool import bind_shell_output_spool
+
+    pid_path = tmp_path / "ignoring-shell.pid"
+    pid = None
+    with bind_shell_output_spool(tmp_path, 512):
+        task = asyncio.create_task(
+            shell.execute_shell_command(
+                f"trap '' TERM; echo $$ > {pid_path}; exec sleep 20",
+            ),
+        )
+        while not pid_path.exists():
+            await asyncio.sleep(0.01)
+        pid = int(pid_path.read_text())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.sleep(0.1)
+        task.cancel()
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=5)
+            with pytest.raises(ProcessLookupError):
+                os.killpg(pid, 0)
+        finally:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.asyncio
+async def test_cancelled_close_closes_both_spools(monkeypatch, tmp_path):
+    from swe.agents.tools.shell_output_spool import ShellOutputSpool
+    from swe.agents.tools.shell import smart_decode, _format_shell_response
+
+    spool = ShellOutputSpool(
+        tmp_path,
+        512,
+        smart_decode,
+        _format_shell_response,
+    )
+    await spool.append("stdout", b"a" * 4096)
+    await spool.append("stderr", b"b" * 4096)
+    started = threading.Event()
+    release = threading.Event()
+    original = spool.streams["stdout"].close
+
+    def delayed():
+        started.set()
+        release.wait(5)
+        original()
+
+    monkeypatch.setattr(spool.streams["stdout"], "close", delayed)
+    task = asyncio.create_task(spool.aclose())
+    while not started.is_set():
+        await asyncio.sleep(0.001)
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    try:
+        assert all(stream.file is None for stream in spool.streams.values())
+    finally:
+        await spool.aclose()

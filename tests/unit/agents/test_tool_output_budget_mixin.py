@@ -117,6 +117,110 @@ def _source_config(raw_config: dict) -> EffectiveSourceSystemConfig:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_shell_spool_context_wraps_tool_creation_and_iteration(
+    tmp_path,
+    enabled,
+):
+    from swe.agents.tools.shell_output_spool import create_shell_output_spool
+    from swe.agents.tools.shell import smart_decode, _format_shell_response
+
+    observed = []
+
+    def capture():
+        spool = create_shell_output_spool(smart_decode, _format_shell_response)
+        observed.append(
+            None if spool is None else (spool.workspace, spool.max_bytes),
+        )
+
+    class Toolkit:
+        async def call_tool_function(self, _call):
+            capture()
+
+            async def stream():
+                capture()
+                yield _chunk("hello")
+
+            return stream()
+
+    agent = _AgentScopeLikeAgent(
+        config=ToolResultCompactConfig(enabled=enabled, recent_max_bytes=1000),
+        workspace_dir=tmp_path,
+        chunks=[],
+    )
+    agent.toolkit = Toolkit()
+    await agent._acting(
+        {"id": "tool-1", "name": "execute_shell_command", "input": {}},
+    )
+    assert observed == (
+        [(tmp_path.resolve(), 1000)] * 2 if enabled else [None, None]
+    )
+    assert (
+        create_shell_output_spool(smart_decode, _format_shell_response) is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_shell_toolkit_reuses_canonical_spool_artifact(
+    tmp_path,
+    monkeypatch,
+):
+    import os
+    import shlex
+    import sys
+    from contextlib import nullcontext
+    from agentscope.tool import Toolkit
+    from swe.agents.tools import shell
+
+    monkeypatch.setattr(
+        shell,
+        "prepare_shell_command",
+        lambda command, cwd: SimpleNamespace(
+            command=command,
+            working_dir=tmp_path,
+            env=os.environ.copy(),
+            python_runtime_guard=nullcontext(),
+        ),
+    )
+    monkeypatch.setattr(
+        shell,
+        "resolve_current_process_limit_policy",
+        lambda _: SimpleNamespace(
+            build_preexec_fn=lambda: None,
+            enabled=False,
+            shell_max_concurrent=None,
+            diagnostic=None,
+            should_enforce=False,
+            should_enforce_memory_limit=False,
+        ),
+    )
+    agent = _AgentScopeLikeAgent(
+        config=ToolResultCompactConfig(recent_max_bytes=1000),
+        workspace_dir=tmp_path,
+        chunks=[],
+    )
+    agent.toolkit = Toolkit()
+    agent.toolkit.register_tool_function(shell.execute_shell_command)
+    code = "import sys; print('x' * 20000); sys.stderr.write('warning\\n')"
+    await agent._acting(
+        {
+            "id": "shell-1",
+            "name": "execute_shell_command",
+            "input": {
+                "command": f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}",
+            },
+        },
+    )
+    artifacts = list((tmp_path / "tool_result").glob("*.txt"))
+    assert len(artifacts) == 1
+    assert artifacts[0].read_text() == "x" * 20000 + "\n[stderr]\nwarning"
+    output = agent.memory.messages[0].content[0]["output"][0]["text"]
+    assert len(output.encode()) <= 1000
+    assert f"tool_result/{artifacts[0].name}" in output
+    assert agent.printed[0][0] is agent.memory.messages[0]
+
+
+@pytest.mark.asyncio
 async def test_compacts_source_resolved_tool_result_before_print_and_memory(
     tmp_path: Path,
 ) -> None:

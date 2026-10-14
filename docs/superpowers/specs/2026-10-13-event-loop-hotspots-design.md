@@ -14,7 +14,7 @@
 
 ## 后续阶段
 
-阶段 B：artifact 有限头尾读取、签名和预算缓存、低频保留期清理；checkpoint 仅读取构造所需 epoch；恢复计划单次枚举复用。
+阶段 B：artifact 有限头尾读取、签名和预算缓存、低频保留期清理；checkpoint 仅读取构造所需 epoch。恢复计划单次枚举复用已由用户明确排除本轮。
 
 阶段 C：Shell 有界字节缓冲和流式 spool，完整格式化 artifact 共用 canonical 截断协议；SSE 重放分批执行并保持顺序。截断关闭或落盘失败时继续兼容原输出，不承诺最终内存有界。
 
@@ -24,7 +24,7 @@
 
 每项先增加会在原实现失败的线程边界或响应性回归，再修改生产代码。覆盖源配置覆盖、artifact 失败、取消、Chat epoch 重建、Provider scope 隔离、Shell 超时与非零退出、S3 分页。基线定向测试 56 项通过。
 
-记录事件循环延迟、worker 排队和执行时间、RSS、artifact 读取字节数和 S3 调用次数。阶段 A 不宣称解决 Shell 无界积累或全历史重复读取。
+记录事件循环延迟 p95/p99、各 worker 排队和执行时间、RSS 采样峰值、checkpoint 读取字节/调用与 S3 分页尝试次数。阶段 A 不宣称解决 Shell 无界积累或全历史重复读取。
 
 ## 阶段 A 实现状态
 
@@ -42,4 +42,14 @@ Provider 配置副本保证捕获后不会随管理器刷新改变，既有 buil
 
 异步历史压缩按目录和保留期节流，300 秒内最多一次扫描，记录最多 128 项；记录被 LRU 淘汰后允许提前重扫。失败扫描也采用此间隔。显式同步 cleanup 接口继续立即扫描。读取/检查失败或读取期间文件变化时，保留原展示且不缓存。工作区外目录 symlink 不读取；工作区内 alias 保留原恢复引用格式。
 
-此子阶段不改变新输出的全量持久化、在线消息复制及 worker 容量。checkpoint epoch-only、S3 恢复计划复用、Shell spool 与 runtime-state 容量隔离仍待后续开发。
+此子阶段不改变新输出的全量持久化、在线消息复制及 worker 容量。
+
+## 2026-10-14 后续实现
+
+checkpoint 绑定改为 Chat 锁内只读 epoch 元数据，不读取完整 record/events；损坏 epoch 立即拒绝，完整状态消费者继续校验 record/events。持久化写入、原子替换和 fsync 保持原保证。
+
+Unix Shell 在启用工具压缩的上下文内采用流式 spool，stdout/stderr 分别最多保留一个展示预算的原始缓冲。超出后经输出 worker 写临时文件，最终生成完整格式化 UTF-8 artifact 并复用 canonical 展示；短写回退与重复取消保持完整性。Windows、禁用压缩和磁盘失败继续原全输出行为。SSE 历史重放入队及消费每 64 条让出 loop，并保持历史与实时顺序。
+
+默认 executor 饱和探针观测到约 253 ms runtime-state 等待后，将其隔离为独立 8 线程、8 个已提交任务的进程级预算。输出仍为用户调整的 8，备份为 4。ContextVar、异常和真实线程完成后释放许可的规则不变。
+
+进程级指标接入 output/runtime_state/provider/backup，worker 保留最近 2048 次完成任务的排队/执行时长与累计完成数；checkpoint active-state 原始字节和 S3 分页尝试为累计计数。诊断日志增加 loop p99、样本数和 RSS 采样峰值，保留原字段。采样口径、性能代价及可复现结果见 [性能记录](../benchmarks/2026-10-14-event-loop-followups.md)。S3 恢复计划复用未实现，分页计数不变。

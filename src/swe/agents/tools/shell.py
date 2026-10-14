@@ -9,6 +9,7 @@ from contextlib import (
     AbstractContextManager,
     asynccontextmanager,
     contextmanager,
+    nullcontext,
 )
 import locale
 import os
@@ -51,6 +52,12 @@ from .file_io import (
     is_created_workspace_skill_write_target,
 )
 from ..skill_context_manager import get_skill_context_manager
+from .shell_output_spool import (
+    create_shell_output_spool,
+    get_active_shell_output_spool,
+    run_shell_spool_work,
+    await_shell_cleanup_task,
+)
 
 _SHELL_PRESERVED_BOUNDARY_ENV_KEYS = frozenset(
     {
@@ -1421,6 +1428,7 @@ async def _execute_unix_subprocess(
     """Execute a shell command on Unix-like platforms."""
     stdout_chunks: list[bytes] = []
     stderr_chunks: list[bytes] = []
+    spool = get_active_shell_output_spool()
 
     def _decode_live_chunk(chunk: bytes) -> str:
         try:
@@ -1440,7 +1448,10 @@ async def _execute_unix_subprocess(
             chunk = await stream.read(4096)
             if not chunk:
                 break
-            chunks.append(chunk)
+            if spool is None:
+                chunks.append(chunk)
+            else:
+                await spool.append(source, chunk)
             await emit_tool_output_text(source, _decode_live_chunk(chunk))
 
     proc = await asyncio.create_subprocess_shell(
@@ -1495,11 +1506,16 @@ async def _execute_unix_subprocess(
             )
         except asyncio.TimeoutError:
             pass
-        stdout_str, stderr_str = await run_output_work(
-            _decode_shell_streams,
-            stdout_chunks,
-            stderr_chunks,
-        )
+        if spool:
+            stdout_str, stderr_str = await run_shell_spool_work(
+                spool.decode_streams,
+            )
+        else:
+            stdout_str, stderr_str = await run_output_work(
+                _decode_shell_streams,
+                stdout_chunks,
+                stderr_chunks,
+            )
         return returncode, stdout_str, stderr_str
     except asyncio.TimeoutError:
         stderr_suffix = (
@@ -1526,14 +1542,34 @@ async def _execute_unix_subprocess(
             )
         except asyncio.TimeoutError:
             pass
-        stdout_str, stderr_str = await run_output_work(
-            _decode_shell_streams,
-            stdout_chunks,
-            stderr_chunks,
-            stderr_suffix,
-        )
+        if spool:
+            stdout_str, stderr_str = await run_shell_spool_work(
+                spool.decode_streams,
+                stderr_suffix,
+            )
+        else:
+            stdout_str, stderr_str = await run_output_work(
+                _decode_shell_streams,
+                stdout_chunks,
+                stderr_chunks,
+                stderr_suffix,
+            )
         await emit_tool_output_text("stderr", stderr_suffix)
         return -1, stdout_str, stderr_str
+    except asyncio.CancelledError:
+
+        async def cleanup_cancelled_process() -> None:
+            await _terminate_unix_process_group(proc, process_group_id)
+            await asyncio.gather(
+                stdout_task,
+                stderr_task,
+                return_exceptions=True,
+            )
+
+        await await_shell_cleanup_task(
+            asyncio.create_task(cleanup_cancelled_process()),
+        )
+        raise
     finally:
         for task in (stdout_task, stderr_task, wait_task):
             if task is not None and not task.done():
@@ -1599,10 +1635,22 @@ async def execute_shell_command(
     prepared = prepare_shell_command(command, cwd)
     process_limit_policy = resolve_current_process_limit_policy("shell")
     preexec_fn = process_limit_policy.build_preexec_fn()
+    spool = (
+        await run_output_work(
+            create_shell_output_spool,
+            smart_decode,
+            _format_shell_response,
+        )
+        if sys.platform != "win32"
+        else None
+    )
 
     try:
         async with _tenant_shell_execution_slot(process_limit_policy):
-            with prepared.python_runtime_guard:
+            with (
+                prepared.python_runtime_guard,
+                spool.activate() if spool else nullcontext(),
+            ):
                 (
                     returncode,
                     stdout_str,
@@ -1615,13 +1663,15 @@ async def execute_shell_command(
                     preexec_fn=preexec_fn,
                 )
 
-        response_text = await run_output_work(
-            _prepare_shell_response,
-            returncode,
-            stdout_str,
-            stderr_str,
-            process_limit_policy,
-        )
+                response_text = await (
+                    run_shell_spool_work if spool else run_output_work
+                )(
+                    _prepare_shell_response,
+                    returncode,
+                    stdout_str,
+                    stderr_str,
+                    process_limit_policy,
+                )
 
         return _tool_text_response(response_text)
 
@@ -1632,6 +1682,9 @@ async def execute_shell_command(
             "unexpected_tool_error",
             f"Error: Shell command execution failed due to \n{e}",
         )
+    finally:
+        if spool is not None:
+            await spool.aclose()
 
 
 def _decode_shell_streams(
@@ -1654,10 +1707,19 @@ def _prepare_shell_response(
     policy: CurrentProcessLimitPolicy,
 ) -> str:
     """Format and classify data-size-dependent output in the output worker."""
-    text = _format_process_limit_diagnostic(
-        _format_shell_response(returncode, stdout, stderr),
-        policy,
-    )
+    spool = get_active_shell_output_spool()
+    if spool is None:
+        text = _format_process_limit_diagnostic(
+            _format_shell_response(returncode, stdout, stderr),
+            policy,
+        )
+    else:
+        text, stderr = spool.prepare_response(
+            returncode,
+            stdout,
+            stderr,
+            _format_process_limit_diagnostic("", policy),
+        )
     if returncode != 0:
         _raise_shell_error(
             _classify_shell_failure(

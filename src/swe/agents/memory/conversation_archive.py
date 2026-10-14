@@ -26,6 +26,7 @@ import fcntl
 from agentscope.message import Msg
 
 from swe.constant import SECRET_DIR
+from swe.performance_metrics import increment
 from swe.app.runner.hidden_context_injection import (
     redact_hidden_context_for_display,
 )
@@ -379,6 +380,16 @@ class ConversationArchiveStore:
         canonical_chat_id = self._validate_chat_id(chat_id)
         with self._chat_lock(canonical_chat_id):
             return self._read_checkpoint_state_locked(canonical_chat_id)
+
+    def _read_checkpoint_epoch(self, chat_id: str) -> int:
+        """Read a request lease without loading the record or event history.
+
+        Full-state consumers still validate the checkpoint record when they
+        use it; request attachment only validates the epoch metadata.
+        """
+        canonical_chat_id = self._validate_chat_id(chat_id)
+        with self._chat_lock(canonical_chat_id):
+            return self._read_current_epoch(self.path_for(canonical_chat_id))
 
     def _read_checkpoint_state_locked(
         self,
@@ -1086,7 +1097,10 @@ class ConversationArchiveStore:
         if not path.exists():
             return 1
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
+            payload = path.read_bytes()
+            increment("checkpoint_read_calls")
+            increment("checkpoint_read_bytes", len(payload))
+            value = json.loads(payload.decode("utf-8"))
             epoch = value["current_epoch"]
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("Checkpoint epoch state is invalid") from exc
@@ -1201,8 +1215,11 @@ class ConversationArchiveStore:
                 epoch=current_epoch,
             )
         try:
+            payload = path.read_bytes()
+            increment("checkpoint_read_calls")
+            increment("checkpoint_read_bytes", len(payload))
             record = CheckpointRecord.from_dict(
-                json.loads(path.read_text(encoding="utf-8")),
+                json.loads(payload.decode("utf-8")),
             )
         except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
             raise ValueError("Checkpoint record is invalid") from exc
@@ -1245,22 +1262,31 @@ class ConversationArchiveStore:
         if not path.exists():
             return []
         events: list[CheckpointEvent] = []
-        with path.open("r", encoding="utf-8") as file_handle:
-            for line_number, line in enumerate(file_handle, start=1):
-                try:
-                    events.append(CheckpointEvent.from_dict(json.loads(line)))
-                except (
-                    TypeError,
-                    ValueError,
-                    KeyError,
-                    json.JSONDecodeError,
-                ) as exc:
-                    logger.warning(
-                        "Skipping malformed checkpoint event %s:%d: %s",
-                        path,
-                        line_number,
-                        exc,
-                    )
+        with path.open("rb") as file_handle:
+            increment("checkpoint_read_calls")
+            bytes_read = 0
+            try:
+                for line_number, payload in enumerate(file_handle, start=1):
+                    bytes_read += len(payload)
+                    line = payload.decode("utf-8")
+                    try:
+                        events.append(
+                            CheckpointEvent.from_dict(json.loads(line)),
+                        )
+                    except (
+                        TypeError,
+                        ValueError,
+                        KeyError,
+                        json.JSONDecodeError,
+                    ) as exc:
+                        logger.warning(
+                            "Skipping malformed checkpoint event %s:%d: %s",
+                            path,
+                            line_number,
+                            exc,
+                        )
+            finally:
+                increment("checkpoint_read_bytes", bytes_read)
         return events
 
     def _write_checkpoint_events(
@@ -1848,9 +1874,9 @@ def attach_conversation_archive(
     memory.conversation_archive_store = archive_store
     memory.chat_checkpoint_store = archive_store
     memory._chat_checkpoint_chat_id = canonical_chat_id
-    memory._chat_checkpoint_epoch = archive_store._read_checkpoint_state(
+    memory._chat_checkpoint_epoch = archive_store._read_checkpoint_epoch(
         canonical_chat_id,
-    ).current_epoch
+    )
     memory._checkpoint_original_add = original_add
     memory._checkpoint_original_get_memory = original_get_memory
     memory._checkpoint_original_clear_content = original_clear_content
