@@ -14,8 +14,8 @@ from typing import ParamSpec, TypeVar
 P = ParamSpec("P")
 T = TypeVar("T")
 
-_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="swe-output")
-_SLOTS = threading.BoundedSemaphore(4)
+_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="swe-output")
+_SLOTS = threading.BoundedSemaphore(8)
 
 
 async def run_output_work(
