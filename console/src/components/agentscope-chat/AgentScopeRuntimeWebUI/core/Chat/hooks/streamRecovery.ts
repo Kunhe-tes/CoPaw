@@ -8,6 +8,7 @@ interface StreamOptions {
   decode: (response: Response) => AsyncIterable<Frame>;
   reconnect?: (after?: string) => Promise<Response>;
   isActive: () => boolean;
+  isReplaced?: () => boolean;
 }
 
 export class StreamRecoveryError extends Error {
@@ -29,15 +30,21 @@ function cursor(value: string) {
 export async function* readChatStream(
   options: StreamOptions,
 ): AsyncGenerator<Frame> {
-  const { owner, decode, reconnect, isActive } = options;
+  const {
+    owner,
+    decode,
+    reconnect,
+    isActive,
+    isReplaced = () => false,
+  } = options;
   let response = options.response;
   const negotiated =
     response.headers?.get("X-Swe-Stream-Protocol") === "cursor-v1";
   let attempts = 0;
-  while (isActive()) {
+  while (!isReplaced()) {
     try {
       for await (const frame of decode(response)) {
-        if (!isActive()) return;
+        if (isReplaced()) return;
         const event = frame.event?.trim();
         if (event === "stream.end") return;
         if (event === "stream.unavailable") throw new StreamRecoveryError();
@@ -78,16 +85,16 @@ export async function* readChatStream(
         throw error;
     }
     if (!negotiated) return;
-    if (!isActive()) return;
+    if (!isActive() || isReplaced()) return;
     if (!reconnect) throw new StreamRecoveryError();
     // EOF without stream.end is an interrupted transport, never business success.
     let recovered = false;
-    while (attempts < 3 && isActive()) {
+    while (attempts < 3 && isActive() && !isReplaced()) {
       attempts += 1;
       await new Promise((resolve) =>
         setTimeout(resolve, 250 * 2 ** (attempts - 1)),
       );
-      if (!isActive()) return;
+      if (!isActive() || isReplaced()) return;
       try {
         response = await reconnect(owner.streamCursor);
       } catch (error) {
@@ -102,7 +109,7 @@ export async function* readChatStream(
       recovered = true;
       break;
     }
-    if (!isActive()) return;
+    if (!isActive() || isReplaced()) return;
     if (!recovered) throw new StreamRecoveryError();
   }
 }

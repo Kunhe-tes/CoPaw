@@ -122,8 +122,31 @@ describe("cursor stream recovery", () => {
       decode,
       reconnect,
       isActive: () => false,
+      isReplaced: () => true,
     });
     expect((await obsolete.next()).done).toBe(true);
+  });
+
+  it("keeps consuming a completed stream until it is replaced", async () => {
+    const decode = async function* () {
+      yield {
+        id: "turn-a:1",
+        data: JSON.stringify({
+          object: "session_title_updated",
+          session_id: "session-a",
+          session_title: "Generated title",
+        }),
+      };
+    };
+    const iterator = readChatStream({
+      response: response(),
+      owner: owner(),
+      decode,
+      isActive: () => false,
+      isReplaced: () => false,
+    });
+
+    expect((await iterator.next()).value?.data).toContain("Generated title");
   });
 
   it("keeps legacy EOF behavior when the protocol is not negotiated", async () => {

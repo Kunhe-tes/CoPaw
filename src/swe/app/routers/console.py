@@ -2212,10 +2212,18 @@ async def _dispatch_console_stream(
     response_class = (
         ReplayStreamingResponse if resumable else StreamingResponse
     )
+    response_options = {}
+    if resumable:
+
+        async def detach_unstarted_subscription():
+            await tracker.detach_subscriber(stream_identity, queue)
+
+        response_options["on_close"] = detach_unstarted_subscription
     return response_class(
         _stream_with_keepalive(event_generator()),
         media_type="text/event-stream",
         headers=stream_headers,
+        **response_options,
     )
 
 

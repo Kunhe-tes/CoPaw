@@ -277,6 +277,10 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           currentQARef.current.activeRequestOwner,
           owner,
         );
+      const isOwnerReplaced = () => {
+        const activeOwner = currentQARef.current.activeRequestOwner;
+        return Boolean(activeOwner && !isOwnerActive());
+      };
       let didFinish = false;
       const finishOnce = () => {
         if (didFinish) return;
@@ -448,6 +452,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           decode: (nextResponse) =>
             Stream({ readableStream: nextResponse.body! }),
           isActive: isOwnerActive,
+          isReplaced: isOwnerReplaced,
           reconnect: apiOptionsRef.current.reconnect
             ? (after) =>
                 apiOptionsRef.current.reconnect!({

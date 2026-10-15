@@ -181,6 +181,52 @@ async def test_stalled_initial_keepalive_detaches_but_does_not_stop_producer(
 
 
 @pytest.mark.asyncio
+async def test_stalled_response_start_detaches_unstarted_subscription(
+    monkeypatch,
+):
+    tracker = TaskTracker()
+    identity = TurnIdentity(
+        "chat-header-stalled",
+        "message-a",
+        "turn-header-stalled",
+    )
+    release = asyncio.Event()
+
+    async def producer(*_args):
+        await release.wait()
+        yield "data: completed\n\n"
+
+    subscriber, _ = await tracker.attach_or_start(identity, {}, producer)
+
+    async def start(**_kwargs):
+        return subscriber, identity.chat_id, identity, identity.msgid
+
+    monkeypatch.setattr(console, "_start_console_stream_target", start)
+    response = await console._dispatch_console_stream(
+        workspace=SimpleNamespace(task_tracker=tracker),
+        console_channel=None,
+        native_payload={},
+        session_id="session-a",
+        identity={},
+        request_mapping={"stream_protocol": "cursor-v1"},
+        is_reconnect=False,
+    )
+    response.send_timeout = 0.01
+
+    async def blocked_send(_message):
+        await asyncio.Event().wait()
+
+    try:
+        await asyncio.wait_for(response.stream_response(blocked_send), 1)
+        assert subscriber.detached is True
+        assert tracker._runs[identity.chat_id].queues == []
+    finally:
+        release.set()
+        await tracker.wait_all_done(timeout=2)
+        await subscriber.stream.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("disconnect_after_event", [False, True])
 @pytest.mark.parametrize("busy_tracker", [False, True])
 async def test_asgi_disconnect_releases_subscription_without_stopping_producer(
