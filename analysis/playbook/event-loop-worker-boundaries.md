@@ -8,6 +8,7 @@
 |------|----------|----------|
 | 即时及历史工具输出压缩 | `compact_tool_result_messages_async` | 独立输出 executor，当前进程级最多 8 个已提交任务（用户调整） |
 | Shell 流式落盘、完整输出解码及格式化 | `run_shell_spool_work` / `run_output_work` | 与压缩共用输出 executor；Unix pipe 每 4 KiB 读流仍在 loop |
+| 前台 Shell 命令、环境、路径守卫与进程限制准备 | `_prepared_shell_execution` | runtime-state worker 准备并清理守卫；租户执行许可及子进程启动留在 loop |
 | 请求内存绑定 | `ReMeLightMemoryManager.prepare_request_memory` | 独立 runtime-state executor，最多 8 个已提交任务，Chat 锁内仅读 epoch |
 | Query 和辅助模型配置/TLS 准备 | `prepare_model_config_async` / `create_model_and_formatter_async` | Provider executor；SDK 客户端仍在 loop 构造 |
 | Query 配置、Prompt 文件与来源工具目录 | `_create_agent_for_query_async` / `rebuild_sys_prompt_async` | runtime-state worker；Agent/Toolkit/在线消息在 loop 安装 |
@@ -129,3 +130,9 @@ TaskTracker 的普通 SSE 与工具实时输出共用生产者计数，每连续
 最终 artifact 创建、写入、flush/fsync、rename 或展示读取失败时保留命令真实退出码，逐个清理本次不完整文件，再报告存储失败。错误只带有限的最佳努力预览，不读取完整输出，不返回无效 artifact 引用，不重跑命令，也不撤销命令已经发生的副作用。预览内容按展示预算在 stdout/stderr 间分配，另有固定错误文案开销；预览读取或解码失败可省略。
 
 小输出仍使用有限内存；Windows 和未绑定 spool 的路径维持原行为。初始化检查不能保证后续磁盘仍可写，所以执行期和最终阶段都必须保留失败处理。实现与验证见 [实施记录](../../docs/superpowers/plans/2026-10-15-strict-shell-output-storage.md)。
+
+## Shell 执行前准备
+
+前台 `execute_shell_command` 的命令拦截、cwd/路径校验、Python 脚本扫描、环境加载、Python 路径守卫临时文件创建与进程限制配置读取，统一在 `run_runtime_state_work` 中执行。复用进程级 8 个提交许可与 ContextVar 传播，不使用默认 executor，也不缓存租户准备结果。返回后在 loop 构造 preexec 闭包、取得租户执行许可并启动子进程；原校验与错误分类不变。
+
+`_prepared_shell_execution` 用 ExitStack 持有守卫，通过独立 task 等待准备完成。取消准备不会启动命令，也不会提前关闭仍被 worker 使用的资源；正常结束、策略读取失败、spool 初始化失败、执行许可等待取消及子进程启动失败都会在准备真正结束后由 worker 关闭守卫。清理使用重复取消屏障，文件删除也不在 loop。同步 `prepare_shell_command` 保留，后台进程同步启动路径不变。实施记录见 [计划](../../docs/superpowers/plans/2026-10-15-shell-preparation-worker.md)。

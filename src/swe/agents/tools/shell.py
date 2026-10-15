@@ -7,6 +7,7 @@ import asyncio
 import ast
 from contextlib import (
     AbstractContextManager,
+    ExitStack,
     asynccontextmanager,
     contextmanager,
     nullcontext,
@@ -33,6 +34,7 @@ from ...app.runner.tool_output_frames import (
 )
 from ...envs.runtime import build_runtime_env
 from ...output_workers import run_output_work
+from ...runtime_workers import run_runtime_state_work
 from ...runtime_invocation_claims import apply_runtime_claim_env
 from ...security.tenant_path_boundary import (
     is_path_within_tenant_with_base,
@@ -1288,6 +1290,33 @@ def prepare_shell_command(
     )
 
 
+@asynccontextmanager
+async def _prepared_shell_execution(
+    command: str,
+    cwd: Path | str | None,
+) -> AsyncIterator[tuple[PreparedShellCommand, CurrentProcessLimitPolicy]]:
+    """Own preparation and guard files through cancellation and execution."""
+    resources = ExitStack()
+
+    def prepare() -> tuple[PreparedShellCommand, CurrentProcessLimitPolicy]:
+        prepared = prepare_shell_command(command, cwd)
+        resources.enter_context(prepared.python_runtime_guard)
+        policy = resolve_current_process_limit_policy("shell")
+        return prepared, policy
+
+    preparation = asyncio.create_task(run_runtime_state_work(prepare))
+    try:
+        yield await asyncio.shield(preparation)
+    finally:
+
+        async def cleanup() -> None:
+            # A cancelled caller still owns guard files created by its worker.
+            await asyncio.gather(preparation, return_exceptions=True)
+            await run_runtime_state_work(resources.close)
+
+        await await_shell_cleanup_task(asyncio.create_task(cleanup()))
+
+
 def _format_shell_response(
     returncode: int,
     stdout_str: str,
@@ -1780,59 +1809,58 @@ async def execute_shell_command(
             return code will be -1 and stderr will contain timeout information.
     """
 
-    prepared = prepare_shell_command(command, cwd)
-    process_limit_policy = resolve_current_process_limit_policy("shell")
-    preexec_fn = process_limit_policy.build_preexec_fn()
-    spool = None
-    try:
-        spool = (
-            await run_output_work(
-                create_shell_output_spool,
-                smart_decode,
-                _format_shell_response,
+    async with _prepared_shell_execution(command, cwd) as (
+        prepared,
+        process_limit_policy,
+    ):
+        preexec_fn = process_limit_policy.build_preexec_fn()
+        spool = None
+        try:
+            spool = (
+                await run_output_work(
+                    create_shell_output_spool,
+                    smart_decode,
+                    _format_shell_response,
+                )
+                if sys.platform != "win32"
+                else None
             )
-            if sys.platform != "win32"
-            else None
-        )
-        async with _tenant_shell_execution_slot(process_limit_policy):
-            with (
-                prepared.python_runtime_guard,
-                spool.activate() if spool else nullcontext(),
-            ):
-                (
-                    returncode,
-                    stdout_str,
-                    stderr_str,
-                ) = await _execute_platform_subprocess(
-                    prepared.command,
-                    prepared.working_dir,
-                    timeout,
-                    prepared.env,
-                    preexec_fn=preexec_fn,
-                )
+            async with _tenant_shell_execution_slot(process_limit_policy):
+                with spool.activate() if spool else nullcontext():
+                    (
+                        returncode,
+                        stdout_str,
+                        stderr_str,
+                    ) = await _execute_platform_subprocess(
+                        prepared.command,
+                        prepared.working_dir,
+                        timeout,
+                        prepared.env,
+                        preexec_fn=preexec_fn,
+                    )
 
-                response_text = await (
-                    run_shell_spool_work if spool else run_output_work
-                )(
-                    _prepare_shell_response,
-                    returncode,
-                    stdout_str,
-                    stderr_str,
-                    process_limit_policy,
-                )
+                    response_text = await (
+                        run_shell_spool_work if spool else run_output_work
+                    )(
+                        _prepare_shell_response,
+                        returncode,
+                        stdout_str,
+                        stderr_str,
+                        process_limit_policy,
+                    )
 
-        return _tool_text_response(response_text)
+            return _tool_text_response(response_text)
 
-    except Exception as e:
-        if isinstance(e, ToolExecutionError):
-            raise
-        _raise_shell_error(
-            "unexpected_tool_error",
-            f"Error: Shell command execution failed due to \n{e}",
-        )
-    finally:
-        if spool is not None:
-            await spool.aclose()
+        except Exception as e:
+            if isinstance(e, ToolExecutionError):
+                raise
+            _raise_shell_error(
+                "unexpected_tool_error",
+                f"Error: Shell command execution failed due to \n{e}",
+            )
+        finally:
+            if spool is not None:
+                await spool.aclose()
 
 
 def _decode_shell_streams(
