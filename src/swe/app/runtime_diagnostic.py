@@ -23,6 +23,7 @@ import anyio
 import psutil
 
 from swe.performance_metrics import METRICS
+from swe.app.runner.sse_replay import _BUDGET as STREAM_REPLAY_BUDGET
 
 from swe.app.pod_resources import (
     collect_pod_disk_io_bytes,
@@ -1216,6 +1217,8 @@ class RuntimeDiagnosticManager:
         lag_samples = self._event_loop_lag_samples
         cpu_samples = self._process_cpu_samples
         payload = self._base_payload("diagnostic_flow")
+        performance_metrics = METRICS.snapshot()
+        performance_metrics["sse_replay"] = STREAM_REPLAY_BUDGET.snapshot()
         payload.update(
             {
                 "sse_active_connections": self._sse_active_connections,
@@ -1229,7 +1232,7 @@ class RuntimeDiagnosticManager:
                 "event_loop_lag_p99_ms": _percentile(lag_samples, 0.99),
                 "event_loop_lag_sample_count": len(lag_samples),
                 "process_rss_sampled_peak_bytes": self._process_rss_sampled_peak_bytes,
-                "performance_metrics": METRICS.snapshot(),
+                "performance_metrics": performance_metrics,
                 "event_loop_lag_max_ms": (
                     max(lag_samples) if lag_samples else None
                 ),

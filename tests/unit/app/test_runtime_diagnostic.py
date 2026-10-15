@@ -115,6 +115,7 @@ async def test_diagnostic_records_p99_rss_peak_and_worker_metrics():
         "runtime_state",
         "backup",
         "provider",
+        "stream",
     }
     manager.rotate_window()
     assert (
@@ -159,6 +160,7 @@ def test_diagnostic_payload_contains_confirmed_metrics() -> None:
         "runtime_state",
         "backup",
         "provider",
+        "stream",
     }
     assert payload == {
         "schema": "runtime_diagnostic.v1",

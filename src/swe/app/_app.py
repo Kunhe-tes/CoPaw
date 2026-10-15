@@ -1035,6 +1035,7 @@ if CORS_ORIGINS:
             "X-Swe-Msgid",
             "X-Swe-Sessionid",
             "X-Swe-Chatid",
+            "X-Swe-Stream-Protocol",
         ],
     )
 

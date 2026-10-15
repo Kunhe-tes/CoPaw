@@ -39,7 +39,7 @@ worker 可以降低同步 I/O 对 loop 的阻塞，但线程中的 Python CPU �
 
 Unix Shell 在启用工具压缩的调用上下文使用有限缓冲与流式 spool，完整格式化 artifact 复用 canonical 截断引用。每条 pipe 原始缓冲最多 budget，另计 pipe、64 KiB 解码缓冲和其他对象开销；Windows、未启用压缩、磁盘失败回退仍为全输出。取消后必须等待真实 spool worker 结束再关闭文件，重复取消也遵守此规则。
 
-checkpoint 绑定在 Chat 锁内只读 epoch；record/events 的损坏校验由完整状态消费者执行，写入/fsync 和持久化保证保留。runtime-state 使用独立 8 线程预算，避免默认 executor 饱和阻塞状态读取。SSE 历史入队与消费每 64 条让出 loop，锁仍覆盖完整重放，不减少队列内存。
+checkpoint 绑定在 Chat 锁内只读 epoch；record/events 的损坏校验由完整状态消费者执行，写入/fsync 和持久化保证保留。runtime-state 使用独立 8 线程预算，避免默认 executor 饱和阻塞状态读取。SSE 已由下述共享日志替代历史入队，消费每 64 条让出 loop。
 
 `runtime_diagnostic` 日志包含 loop p95/p99、样本数、RSS 采样峰值和 `performance_metrics`。worker 排队/执行分位数来自最近 2048 次真实完成任务；完成次数、checkpoint 读取字节/调用、S3 分页尝试次数是本进程累计。loop/RSS 则是两次日志之间的窗口；原诊断采样周期 10 秒，采样峰值不等于瞬时峰值。checkpoint 计量限 active-state epoch/record/events，S3 计量限 list_backups 的 list_objects_v2 尝试（不含 SDK 内部重试）。无租户/路径标签，Pod 之间的分位数不能直接平均。
 
@@ -74,3 +74,11 @@ Provider 主 Query 初始化与 `refresh_if_due` 已在 Provider executor，未�
 Unix pipe reader 每次仍读取最多 4096 字节、照常发送实时输出；spool 写入按每 pipe 64 KiB 聚合，并在 reader finally flush 尾批次。跨阈值读取块的剩余字节必须在 await 批次写入之前保存，否则取消会丢失尾部。同步 spool append 接口不变，线程完成后释放许可和文件的规则不变。测试不能再用第几个 4 KiB append 的固定偏移假设 worker 执行时机。
 
 每 pipe 新增聚合缓冲及转换瞬间副本，不能将展示预算作为整个请求的内存上限。12 次批次对比显示任务数/总耗时下降，但短窗口 p99 有尖峰；数据、测试口径和限制见 [批次测量](../../docs/superpowers/benchmarks/2026-10-15-shell-batching.md)。
+
+## SSE 共享日志与恢复
+
+`sse_replay.py` 为每轮保存共享临时日志，订阅只持有游标和一个有界读取批次；TaskTracker 全局锁不等待日志 I/O。`run_stream_io` 使用独立 2 线程/4 个提交许可，许可在线程真正结束后释放，取消发布仍等待已提交写入完成。单帧 1 MiB、每轮 64 MiB/65536 条、进程日志与索引 512 MiB；进程最多 128 个日志/256 个订阅，每轮 8 个订阅，读取批次对象另有 64 MiB 总预算。限制与 TTL 常量集中在该模块。
+
+Console 以 cursor-v1 协商游标协议，只有协商成功的订阅启用慢消费者主动恢复和 30 秒 socket 发送超时。前端应用事件后才推进 turn-bound cursor，重连沿用同一 owner/reducer，重复跳过、缺口报错；非终态 EOF 不表示业务成功。网络断开仅释放订阅，不取消后台 Agent。终态已有持久化 snapshot 可恢复，临时日志不支持跨进程/Pod 恢复。
+
+`runtime_diagnostic.performance_metrics.sse_replay` 提供占用/配额/读写/恢复计数，worker 指标新增 stream。磁盘失败、配额不足、过期有明确控制帧；不要在满 payload 队列里等待 sentinel。压测应同时观察 RSS、容器内存、临时目录容量及 worker 排队；[本地测量](../../docs/superpowers/benchmarks/2026-10-15-sse-replay.md) 显示内存下降和逐事件落盘的吞吐代价，不代表生产 p99 改善。

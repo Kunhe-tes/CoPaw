@@ -26,6 +26,7 @@ import {
 } from "./requestOwnership";
 import { createChatStreamAbortReason, isAbortLikeError } from "./abortReasons";
 import { emit } from "../../Context/useChatAnywhereEventEmitter";
+import { readChatStream, StreamRecoveryError } from "./streamRecovery";
 
 export const CONVERSATION_COMPACTION_EVENT = "conversation_compacted";
 
@@ -40,6 +41,7 @@ interface UseChatRequestOptions {
     owner: ChatRequestOwner,
   ) => void | Promise<void>;
   recoverAfterNotFound?: (owner: ChatRequestOwner) => void | Promise<void>;
+  onConnectionLost?: (owner: ChatRequestOwner, error: Error) => void;
 }
 
 function isTaskCancellationMessage(message: unknown) {
@@ -158,6 +160,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
     onFinish,
     applyRecoverySnapshot,
     recoverAfterNotFound,
+    onConnectionLost,
   } = options;
   const apiOptions = useChatAnywhereOptions((v) => v.api);
 
@@ -439,8 +442,22 @@ export default function useChatRequest(options: UseChatRequestOptions) {
       };
 
       try {
-        for await (const chunk of Stream({
-          readableStream: response.body,
+        for await (const chunk of readChatStream({
+          response,
+          owner,
+          decode: (nextResponse) =>
+            Stream({ readableStream: nextResponse.body! }),
+          isActive: isOwnerActive,
+          reconnect: apiOptionsRef.current.reconnect
+            ? (after) =>
+                apiOptionsRef.current.reconnect!({
+                  session_id: owner.sessionId,
+                  signal: currentQARef.current.abortController?.signal,
+                  logical_session_id: owner.logicalSessionId,
+                  chat_id: owner.chatId,
+                  after_event_id: after,
+                })
+            : undefined,
         })) {
           if (chunk.event === "chat.snapshot" && chunk.data) {
             const responseParser =
@@ -621,10 +638,14 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           finishOnce();
         }
       } catch (error) {
-        console.error(error);
         if (!isOwnerActive()) {
           return;
         }
+        if (error instanceof StreamRecoveryError && onConnectionLost) {
+          onConnectionLost(owner, error);
+          return;
+        }
+        console.error(error);
         if (
           currentQARef.current.response?.msgStatus === "interrupted" ||
           isAbortLikeError(error)
@@ -644,6 +665,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
       hasMessage,
       onFinish,
       recoverAfterNotFound,
+      onConnectionLost,
       updateMessage,
     ],
   );
@@ -729,6 +751,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
             signal: abortSignal,
             logical_session_id: requestOwner.logicalSessionId,
             chat_id: requestOwner.chatId,
+            after_event_id: requestOwner.streamCursor,
           });
         } catch (error) {
           if (

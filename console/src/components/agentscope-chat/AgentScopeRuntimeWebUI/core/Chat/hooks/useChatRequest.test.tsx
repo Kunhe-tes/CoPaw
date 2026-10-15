@@ -124,6 +124,7 @@ function Harness(props: {
   onFinish: (owner: ChatRequestOwner) => void;
   applyRecoverySnapshot?: (history: unknown, owner: ChatRequestOwner) => void;
   recoverAfterNotFound?: (owner: ChatRequestOwner) => void;
+  onConnectionLost?: (owner: ChatRequestOwner, error: Error) => void;
 }) {
   hookApi = useChatRequest({
     currentQARef: props.currentQARef,
@@ -133,6 +134,7 @@ function Harness(props: {
     onFinish: props.onFinish,
     applyRecoverySnapshot: props.applyRecoverySnapshot,
     recoverAfterNotFound: props.recoverAfterNotFound,
+    onConnectionLost: props.onConnectionLost,
   });
 
   return null;
@@ -203,6 +205,47 @@ describe("useChatRequest", () => {
       resolveGate = resolve;
     });
     mocks.streamGate.resolve = resolveGate;
+  });
+
+  it("reports unavailable replay without completing or stopping the business turn", async () => {
+    mocks.fetch.mockResolvedValue({
+      ok: true,
+      body: {},
+      headers: new Headers({ "X-Swe-Stream-Protocol": "cursor-v1" }),
+    } as Response);
+    mocks.streamChunks.splice(0, mocks.streamChunks.length, {
+      event: "stream.unavailable",
+      data: "{}",
+    });
+    mocks.streamGate.resolve();
+    const requestOwner = createOwner();
+    const currentQARef = {
+      current: {
+        response: { id: "response-a", cards: [], msgStatus: "generating" },
+        activeRequestOwner: requestOwner,
+      },
+    } as unknown as CurrentQARef;
+    const onFinish = vi.fn();
+    const onConnectionLost = vi.fn();
+    render(
+      <Harness
+        currentQARef={currentQARef}
+        updateMessage={vi.fn()}
+        hasMessage={() => true}
+        onFinish={onFinish}
+        onConnectionLost={onConnectionLost}
+      />,
+    );
+    await act(async () => {
+      await hookApi.request([], undefined, requestOwner);
+    });
+    expect(onConnectionLost).toHaveBeenCalledWith(
+      requestOwner,
+      expect.any(Error),
+    );
+    expect(onFinish).not.toHaveBeenCalled();
+    expect(mocks.cancel).not.toHaveBeenCalled();
+    expect(currentQARef.current.response?.msgStatus).toBe("generating");
   });
 
   it("finishes a W+ entry proposal as a structured Chat card", async () => {
@@ -911,9 +954,9 @@ describe("useChatRequest", () => {
       await requestPromise;
     });
 
-    expect(currentQARef.current.response?.cards?.map((card) => card.code)).toEqual(
-      ["AgentScopeRuntimeResponseCard", "ApprovalAction"],
-    );
+    expect(
+      currentQARef.current.response?.cards?.map((card) => card.code),
+    ).toEqual(["AgentScopeRuntimeResponseCard", "ApprovalAction"]);
     expect(currentQARef.current.response?.cards?.[1]?.data).toMatchObject({
       requestId: "approval-1",
       toolName: "execute_shell_command",

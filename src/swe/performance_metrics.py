@@ -11,7 +11,7 @@ from typing import ParamSpec, TypeVar
 P = ParamSpec("P")
 T = TypeVar("T")
 _SAMPLE_LIMIT = 2048
-_WORKERS = ("output", "runtime_state", "provider", "backup")
+_WORKERS = ("output", "runtime_state", "provider", "backup", "stream")
 _COUNTERS = ("checkpoint_read_bytes", "checkpoint_read_calls", "s3_list_pages")
 
 

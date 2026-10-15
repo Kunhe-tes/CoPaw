@@ -25,6 +25,31 @@ def _identity(
 
 
 @pytest.mark.asyncio
+async def test_attach_uses_shared_replay_without_prefilling_subscriber():
+    tracker = TaskTracker()
+    identity = _identity("bounded-replay")
+    release = asyncio.Event()
+
+    async def producer(*_args):
+        for index in range(300):
+            yield f"data: {index}\n\n"
+        await release.wait()
+
+    original, _ = await tracker.attach_or_start(identity, {}, producer)
+    try:
+        for _ in range(300):
+            await asyncio.wait_for(original.get(), 2)
+        replay = await tracker.attach(identity)
+        assert replay.buffered_bytes == 0
+        assert replay.stream is original.stream
+        assert replay.stream.log.count == 300
+        assert await replay.get() == "data: 0\n\n"
+    finally:
+        release.set()
+        await tracker.wait_all_done(timeout=2)
+
+
+@pytest.mark.asyncio
 async def test_attach_or_start_binds_identity_and_replays_one_producer_stream():
     tracker = TaskTracker()
     release = asyncio.Event()
@@ -268,13 +293,15 @@ async def test_cancelled_prefilled_stream_detaches_subscriber():
     replay = await tracker.attach(identity)
     assert replay is not None
     received = []
+    first_delivered = asyncio.Event()
 
     async def consume():
         async for event in tracker.stream(identity, replay):
             received.append(event)
+            first_delivered.set()
 
     consumer = asyncio.create_task(consume())
-    await asyncio.sleep(0)
+    await asyncio.wait_for(first_delivered.wait(), 2)
     consumer.cancel()
     await consumer
     assert 0 < len(received) < 300

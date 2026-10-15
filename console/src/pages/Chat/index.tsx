@@ -1994,6 +1994,7 @@ function ChatPageContent() {
         channel: getChannel(session?.channel),
         // ==================== userId 统一整改结束 ====================
         stream: true,
+        stream_protocol: "cursor-v1",
         mode: getPlanModeForRequest(planModeEnabled),
         goal_mode_enabled: goalModeEnabled,
         ...biz_params,
@@ -2573,6 +2574,7 @@ function ChatPageContent() {
           signal?: AbortSignal;
           logical_session_id?: string;
           chat_id?: string | null;
+          after_event_id?: string;
         }) {
           const headers: Record<string, string> = {
             "Content-Type": "application/json",
@@ -2591,6 +2593,8 @@ function ChatPageContent() {
               headers,
               body: JSON.stringify({
                 reconnect: true,
+                stream_protocol: "cursor-v1",
+                after_event_id: data.after_event_id,
                 reconnect_mode: "current",
                 session_id: reconnectSessionId,
                 chat_id: data.chat_id || undefined,
