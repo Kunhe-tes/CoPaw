@@ -39,6 +39,149 @@ def _prepare(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_pipe_reader_batches_spool_writes_and_flushes_tail(
+    monkeypatch,
+    tmp_path,
+):
+    shell = _prepare(monkeypatch, tmp_path)
+    from swe.agents.tools.shell_output_spool import (
+        ShellOutputSpool,
+        bind_shell_output_spool,
+    )
+
+    batches = []
+    original = ShellOutputSpool.append
+
+    async def append(self, source, chunk):
+        batches.append((source, chunk))
+        await original(self, source, chunk)
+
+    monkeypatch.setattr(ShellOutputSpool, "append", append)
+    size = 256 * 1024 + 123
+    with bind_shell_output_spool(tmp_path, 512):
+        await shell.execute_shell_command(
+            f"python -c \"import sys; sys.stdout.write('a' * {size})\"",
+        )
+    assert (
+        b"".join(chunk for source, chunk in batches if source == "stdout")
+        == b"a" * size
+    )
+    assert all(0 < len(chunk) <= 64 * 1024 for _, chunk in batches)
+    assert len(batches) == 5
+    assert (
+        next((tmp_path / "tool_result").glob("*.txt")).read_text()
+        == "a" * size
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_reader_flushes_pending_live_output(
+    monkeypatch,
+    tmp_path,
+):
+    shell = _prepare(monkeypatch, tmp_path)
+    from swe.agents.tools.shell_output_spool import (
+        ShellOutputSpool,
+        bind_shell_output_spool,
+    )
+
+    live = asyncio.Event()
+    batches = []
+    original = ShellOutputSpool.append
+
+    async def append(self, source, chunk):
+        batches.append((source, chunk))
+        await original(self, source, chunk)
+
+    async def emit(source, text):
+        if source == "stdout" and text == "pending tail":
+            live.set()
+
+    monkeypatch.setattr(ShellOutputSpool, "append", append)
+    monkeypatch.setattr(shell, "emit_tool_output_text", emit)
+    with bind_shell_output_spool(tmp_path, 512):
+        task = asyncio.create_task(
+            shell.execute_shell_command("printf 'pending tail'; sleep 20"),
+        )
+        try:
+            await asyncio.wait_for(live.wait(), 5)
+            assert batches == []
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 5)
+    assert batches == [("stdout", b"pending tail")]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_batch_preserves_chunk_remainder(
+    monkeypatch,
+    tmp_path,
+):
+    shell = _prepare(monkeypatch, tmp_path)
+    from swe.agents.tools.shell_output_spool import ShellOutputSpool
+
+    class Pipe:
+        def __init__(self, chunks):
+            self.chunks = iter(chunks)
+
+        async def read(self, _size):
+            return next(self.chunks, b"")
+
+    async def wait():
+        return 0
+
+    async def create(*_args, **_kwargs):
+        return SimpleNamespace(
+            stdout=Pipe([b"a" * 3] + [b"b" * 4096] * 16),
+            stderr=Pipe([]),
+            returncode=0,
+            pid=99999999,
+            wait=wait,
+        )
+
+    async def terminate(*_args):
+        pass
+
+    monkeypatch.setattr(shell.asyncio, "create_subprocess_shell", create)
+    monkeypatch.setattr(shell, "_terminate_unix_process_group", terminate)
+    spool = ShellOutputSpool(
+        tmp_path,
+        512,
+        shell.smart_decode,
+        shell._format_shell_response,
+    )
+    started, release = threading.Event(), threading.Event()
+    written = []
+    original = spool.streams["stdout"].append
+
+    def append(chunk):
+        if not written:
+            started.set()
+            assert release.wait(5)
+        written.append(chunk)
+        original(chunk)
+
+    monkeypatch.setattr(spool.streams["stdout"], "append", append)
+    with spool.activate():
+        task = asyncio.create_task(
+            shell._execute_unix_subprocess("ignored", tmp_path, 5, {}),
+        )
+        try:
+            async with asyncio.timeout(5):
+                while not started.is_set():
+                    await asyncio.sleep(0.001)
+            task.cancel()
+            await asyncio.sleep(0)
+        finally:
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await spool.aclose()
+    assert b"".join(written) == b"a" * 3 + b"b" * (16 * 4096)
+
+
+@pytest.mark.asyncio
 async def test_large_shell_output_recovers_exact_formatted_artifact(
     monkeypatch,
     tmp_path,
@@ -502,7 +645,7 @@ async def test_shell_drains_slow_spool_writes_before_formatting(
     draining = asyncio.Event()
 
     def delayed_append(self, chunk):
-        if self.size == 6 * 4096:
+        if self.size == 0:
             started.set()
             assert release.wait(5)
         original_append(self, chunk)

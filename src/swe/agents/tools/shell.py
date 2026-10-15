@@ -65,6 +65,7 @@ _SHELL_PRESERVED_BOUNDARY_ENV_KEYS = frozenset(
         "SWE_SECRET_DIR",
     },
 )
+_SHELL_SPOOL_BATCH_BYTES = 64 * 1024
 
 # Commands that take string arguments which may look like paths
 # but should NOT be treated as file paths
@@ -1446,31 +1447,50 @@ async def _execute_unix_subprocess(
             return
         loop = asyncio.get_running_loop()
         drain_remaining = 1.0
-        while True:
-            if spool is None:
-                chunk = await stream.read(4096)
-            else:
-                draining = proc.returncode is not None
-                read_started = loop.time()
-                try:
-                    chunk = await asyncio.wait_for(
-                        stream.read(4096),
-                        timeout=max(0, drain_remaining) if draining else 1,
-                    )
-                except asyncio.TimeoutError:
-                    if proc.returncode is not None:
-                        break
-                    continue
-                if draining:
-                    # Bound pipe reads, excluding worker and emitter waits.
-                    drain_remaining -= loop.time() - read_started
-            if not chunk:
-                break
-            if spool is None:
-                chunks.append(chunk)
-            else:
-                await spool.append(source, chunk)
-            await emit_tool_output_text(source, _decode_live_chunk(chunk))
+        pending = bytearray()
+
+        async def flush_pending() -> None:
+            if spool is not None and pending:
+                batch = bytes(pending)
+                pending.clear()
+                await spool.append(source, batch)
+
+        try:
+            while True:
+                if spool is None:
+                    chunk = await stream.read(4096)
+                else:
+                    draining = proc.returncode is not None
+                    read_started = loop.time()
+                    try:
+                        chunk = await asyncio.wait_for(
+                            stream.read(4096),
+                            timeout=max(0, drain_remaining) if draining else 1,
+                        )
+                    except asyncio.TimeoutError:
+                        if proc.returncode is not None:
+                            break
+                        continue
+                    if draining:
+                        # Bound pipe reads, excluding worker and emitter waits.
+                        drain_remaining -= loop.time() - read_started
+                if not chunk:
+                    break
+                if spool is None:
+                    chunks.append(chunk)
+                else:
+                    available = _SHELL_SPOOL_BATCH_BYTES - len(pending)
+                    if len(chunk) >= available:
+                        batch = bytes(pending) + chunk[:available]
+                        pending.clear()
+                        # Retain the remainder before the cancellable write.
+                        pending.extend(chunk[available:])
+                        await spool.append(source, batch)
+                    else:
+                        pending.extend(chunk)
+                await emit_tool_output_text(source, _decode_live_chunk(chunk))
+        finally:
+            await flush_pending()
 
     proc = await asyncio.create_subprocess_shell(
         cmd,

@@ -68,3 +68,9 @@ Provider 主 Query 初始化与 `refresh_if_due` 已在 Provider executor，未�
 不能仅凭同步工厂调用判断 loop 上存在 I/O：AgentRuntimeBuilder、工具摘要、建议和 Runner 已可消费准备结果，ReMe 和技能优化的异步生产入口也已迁移。同步 API 保留给脚本和旧调用方；CLI 目录当前没有直接构造 SWEAgent/模型的调用。
 
 真正发现的补漏点：`prepare_model_config_async` 的隐式 Agent ID 解析可能读取配置，必须连同模型配置一起在 Provider worker 执行；共享 `get_agent_and_config_for_request` 在取得工作区后也必须把配置加载交给 runtime-state worker。来源工具调试需先准备模型、Prompt 与技能快照再安装 Agent。构造日志直接使用已解析 model slot，避免仅为日志触发 ProviderManager 冷初始化。测试应同时验证真实线程、ContextVar、准备结果注入和 Prompt 绑定 reset。
+
+## Shell 批次写入
+
+Unix pipe reader 每次仍读取最多 4096 字节、照常发送实时输出；spool 写入按每 pipe 64 KiB 聚合，并在 reader finally flush 尾批次。跨阈值读取块的剩余字节必须在 await 批次写入之前保存，否则取消会丢失尾部。同步 spool append 接口不变，线程完成后释放许可和文件的规则不变。测试不能再用第几个 4 KiB append 的固定偏移假设 worker 执行时机。
+
+每 pipe 新增聚合缓冲及转换瞬间副本，不能将展示预算作为整个请求的内存上限。12 次批次对比显示任务数/总耗时下降，但短窗口 p99 有尖峰；数据、测试口径和限制见 [批次测量](../../docs/superpowers/benchmarks/2026-10-15-shell-batching.md)。
