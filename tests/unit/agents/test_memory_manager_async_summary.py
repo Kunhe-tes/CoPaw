@@ -445,6 +445,73 @@ async def test_summary_context_allowlist_copies_mutables_and_redacts_secrets():
 
 
 @pytest.mark.asyncio
+async def test_summary_context_preserves_workload_and_source_config_snapshot():
+    from swe.app.source_system_config.models import (
+        EffectiveSourceSystemConfig,
+        SourceSystemConfig,
+    )
+    from swe.app.source_system_config.runtime import (
+        bind_source_system_config,
+        get_current_source_system_config,
+        resolve_tool_result_compact_config,
+    )
+    from swe.config.llm_workload import (
+        LLM_WORKLOAD_CRON,
+        bind_llm_workload,
+        get_current_llm_workload,
+    )
+
+    raw_config = SourceSystemConfig.model_validate(
+        {
+            "llm_max_qpm": 7,
+            "tool_result_compact": {"recent_max_bytes": 32000},
+        },
+    )
+    source_config = EffectiveSourceSystemConfig(
+        source_id="source-a",
+        config=raw_config.merged_with_defaults(),
+        raw_config=raw_config,
+    )
+    manager = _ConcreteMemoryManager("/tmp/ws", "default")
+    observed = {}
+
+    async def summary(messages, **kwargs):
+        del messages, kwargs
+        current = get_current_source_system_config()
+        observed["workload"] = get_current_llm_workload()
+        observed["qpm"] = current.config.llm_max_qpm
+        observed["recent_max_bytes"] = resolve_tool_result_compact_config(
+            ToolResultCompactConfig(),
+        ).recent_max_bytes
+        return "done"
+
+    manager.summary_memory = summary
+    with (
+        bind_llm_workload(LLM_WORKLOAD_CRON),
+        bind_source_system_config(
+            source_config,
+        ),
+    ):
+        manager.add_async_summary_task([])
+        updated_raw_config = SourceSystemConfig.model_validate(
+            {
+                "llm_max_qpm": 100,
+                "tool_result_compact": {"recent_max_bytes": 50000},
+            },
+        )
+        source_config.raw_config = updated_raw_config
+        source_config.config = updated_raw_config.merged_with_defaults()
+
+    await manager.await_summary_tasks()
+
+    assert observed == {
+        "workload": LLM_WORKLOAD_CRON,
+        "qpm": 7,
+        "recent_max_bytes": 32000,
+    }
+
+
+@pytest.mark.asyncio
 async def test_summary_close_cleans_tasks_without_reme_and_rejects_new(
     monkeypatch,
 ):

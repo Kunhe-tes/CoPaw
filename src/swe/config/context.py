@@ -768,7 +768,12 @@ def resolve_effective_tenant_id(
 
 
 def capture_summary_context_values() -> list[tuple[ContextVar, Any]]:
-    """Snapshot only request identities and routing needed by summaries."""
+    """Snapshot only runtime state required by detached summaries."""
+    from swe.app.source_system_config.runtime import (
+        capture_source_system_config_context_value,
+    )
+    from swe.config.llm_workload import capture_llm_workload_context_value
+
     variables: tuple[ContextVar[Any], ...] = (
         current_tenant_id,
         current_source_id,
@@ -785,4 +790,6 @@ def capture_summary_context_values() -> list[tuple[ContextVar, Any]]:
             dict(headers) if headers is not None else None,
         ),
     )
+    values.append(capture_llm_workload_context_value())
+    values.append(capture_source_system_config_context_value())
     return values
