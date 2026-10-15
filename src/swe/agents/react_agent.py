@@ -576,20 +576,15 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             namesake_strategy=namesake_strategy,
         )
 
-        # Get model info from ProviderManager (single source of truth)
-        try:
-            from swe.config.context import get_current_effective_tenant_id
-            from swe.providers.provider_manager import ProviderManager
-
-            tenant_id = get_current_effective_tenant_id()
-            manager = ProviderManager.get_instance(tenant_id)
-            active = manager.get_active_model()
-            if active:
-                model_info = f"{active.provider_id}/{active.model}"
-            else:
-                model_info = "not-configured"
-        except Exception:
-            model_info = "unknown"
+        # Log the model actually installed, including private/fallback models,
+        # without starting another Provider lookup during construction.
+        provider_id = self._resolved_model_slot.get("provider_id")
+        model_name = self._resolved_model_slot.get("model")
+        model_info = (
+            f"{provider_id}/{model_name}"
+            if provider_id and model_name
+            else "not-configured"
+        )
         logger.info(
             f"Agent '{agent_config.id}' initialized with model: "
             f"{model_info} (class: {runtime.model.__class__.__name__})",

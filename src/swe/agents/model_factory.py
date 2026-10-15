@@ -1122,6 +1122,7 @@ def _prepare_model_config_sync(
     agent_id: str | None,
     overrides: tuple[Any, Any, Any, Any],
 ) -> PreparedModelConfig:
+    agent_id = _get_agent_id(agent_id, tenant_id)
     model_slot, provider, fallback_slot, fallback_provider = overrides
     if model_slot is None:
         model_slot = _get_model_slot(manager)
@@ -1181,7 +1182,6 @@ async def prepare_model_config_async(
     or Agent construction runs in the worker.
     """
     effective_tenant_id = _get_tenant_id() or tenant_id
-    resolved_agent_id = _get_agent_id(agent_id, effective_tenant_id)
     private_provider = (
         model_slot_override is not None and model_provider_override is not None
     )
@@ -1192,7 +1192,7 @@ async def prepare_model_config_async(
         _prepare_model_config_sync,
         manager,
         effective_tenant_id,
-        resolved_agent_id,
+        agent_id,
         (
             model_slot_override,
             model_provider_override,

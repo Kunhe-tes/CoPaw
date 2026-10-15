@@ -375,9 +375,11 @@ async def get_agent_and_config_for_request(
 ) -> tuple["Workspace", "AgentProfileConfig"]:
     """Resolve the request workspace and authoritative tenant-scoped config."""
     from ..config.config import load_agent_config
+    from ..runtime_workers import run_runtime_state_work
 
     workspace = await get_agent_for_request(request, agent_id=agent_id)
-    agent_config = load_agent_config(
+    agent_config = await run_runtime_state_work(
+        load_agent_config,
         workspace.agent_id,
         tenant_id=getattr(workspace, "tenant_id", None),
     )

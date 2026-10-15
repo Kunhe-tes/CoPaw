@@ -53,6 +53,48 @@ def model_boundary(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_implicit_agent_id_resolution_runs_in_provider_worker(
+    monkeypatch,
+):
+    from swe.app import agent_context
+
+    loop_thread = threading.get_ident()
+    marker = ContextVar("implicit_agent_scope", default=None)
+    token = marker.set("source-a")
+    seen = []
+
+    def resolve(_tenant_id):
+        seen.append((threading.get_ident(), marker.get()))
+        return "agent-a"
+
+    monkeypatch.setattr(agent_context, "get_current_agent_id", resolve)
+    monkeypatch.setattr(
+        model_factory,
+        "_get_model_runtime_configs",
+        lambda *_: (None, None),
+    )
+    provider = _Provider("custom", ModelRuntimeConfig(), lambda *_: object())
+    cache = ProviderRuntimeCache()
+    monkeypatch.setattr(model_factory.ProviderManager, "_runtime_cache", cache)
+    try:
+        prepared = await model_factory.prepare_model_config_async(
+            manager=SimpleNamespace(
+                get_active_model=lambda: ModelSlotConfig(
+                    provider_id="custom",
+                    model="model-a",
+                ),
+                get_provider=lambda _: provider,
+            ),
+        )
+    finally:
+        marker.reset(token)
+        cache.init_executor.shutdown(wait=True)
+    assert prepared.agent_id == "agent-a"
+    assert seen and all(thread != loop_thread for thread, _ in seen)
+    assert all(scope == "source-a" for _, scope in seen)
+
+
+@pytest.mark.asyncio
 async def test_preparation_uses_provider_executor_and_constructs_client_on_loop(
     monkeypatch,
     model_boundary,

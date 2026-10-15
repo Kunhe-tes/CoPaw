@@ -59,3 +59,9 @@ Provider 主 Query 初始化与 `refresh_if_due` 已在 Provider executor，未�
 不宣称所有 CPU 工作已移出 loop：Toolkit 注册、模型包装、实时 JSON 编码仍有同步 CPU；线程工作仍竞争 GIL。Gemini 等未使用这两类 SDK 的 Provider 保持原构造方式。未实施 S3 恢复计划复用。
 
 本轮扩大回归 499 passed、1 deselected；排除的 `test_get_in_memory_memory_uses_instance_tenant_id` 在 HEAD 2311b7506 同样因字符串 fake memory 不支持 add 而失败。Goal 生命周期测试文件的 mypy 1 项、pylint 9 项原有诊断也已在该 HEAD 逐项核对，当前无新增；其他修改文件静态检查通过。提交钩子对这两项使用基线例外，其余钩子正常执行。
+
+## 兼容构造入口复查
+
+不能仅凭同步工厂调用判断 loop 上存在 I/O：AgentRuntimeBuilder、工具摘要、建议和 Runner 已可消费准备结果，ReMe 和技能优化的异步生产入口也已迁移。同步 API 保留给脚本和旧调用方；CLI 目录当前没有直接构造 SWEAgent/模型的调用。
+
+真正发现的补漏点：`prepare_model_config_async` 的隐式 Agent ID 解析可能读取配置，必须连同模型配置一起在 Provider worker 执行；共享 `get_agent_and_config_for_request` 在取得工作区后也必须把配置加载交给 runtime-state worker。来源工具调试需先准备模型、Prompt 与技能快照再安装 Agent。构造日志直接使用已解析 model slot，避免仅为日志触发 ProviderManager 冷初始化。测试应同时验证真实线程、ContextVar、准备结果注入和 Prompt 绑定 reset。
