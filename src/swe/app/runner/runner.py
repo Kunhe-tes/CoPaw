@@ -4114,6 +4114,9 @@ class AgentRunner(Runner):
         values: dict[str, Any],
     ) -> dict[str, Any]:
         """Prepare request-owned context, including expert filesystem work."""
+        from ...agents.builtin_tool_schemas import prepare_builtin_tool_schemas
+
+        prepare_builtin_tool_schemas()
         request = values.get("request")
         session_id = values.get("session_id")
         user_id = values.get("user_id")

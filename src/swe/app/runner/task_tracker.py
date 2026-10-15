@@ -229,7 +229,10 @@ class TaskTracker:
         batch_writes = os.environ.get("SWE_SSE_BATCH_WRITES", "1") == "1"
 
         async def _producer() -> None:
+            published_since_yield = 0
+
             async def _broadcast_sse(sse: str) -> None:
+                nonlocal published_since_yield
                 tracker = tracker_ref()
                 if tracker is None:
                     return
@@ -241,6 +244,10 @@ class TaskTracker:
                     await state.replay.offer(sse)
                 else:
                     await state.replay.append(sse)
+                published_since_yield += 1
+                if published_since_yield >= _REPLAY_BATCH_SIZE:
+                    published_since_yield = 0
+                    await asyncio.sleep(0)
 
             async def _emit_tool_output_frame(frame: ToolOutputFrame) -> None:
                 await _broadcast_sse(

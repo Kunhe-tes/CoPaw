@@ -47,7 +47,7 @@ from ..constant import (
     DEFAULT_LLM_CRON_MAX_CONCURRENT,
 )
 from ..providers import ProviderManager
-from ..providers.client_tls import bind_prepared_client_tls
+from ..providers.client_tls import PreparedTLSFailure, bind_prepared_client_tls
 from ..providers.retry_chat_model import (
     RetryChatModel,
     RetryConfig,
@@ -1113,7 +1113,7 @@ class PreparedModelConfig:
     rate_limit_config: RateLimitConfig | None
     fallback_model_slot: Any | None = None
     fallback_model_provider: Any | None = None
-    tls_context: SSLContext | None = None
+    tls_context: SSLContext | PreparedTLSFailure | None = None
 
 
 def _prepare_model_config_sync(
@@ -1139,7 +1139,7 @@ def _prepare_model_config_sync(
     from ..providers.openai_provider import OpenAIProvider
     from ..providers.anthropic_provider import AnthropicProvider
 
-    tls_context = None
+    tls_context: SSLContext | PreparedTLSFailure | None = None
     if any(
         isinstance(candidate, (OpenAIProvider, AnthropicProvider))
         for candidate in (provider, fallback_provider)
@@ -1149,8 +1149,13 @@ def _prepare_model_config_sync(
         try:
             tls_context = httpx.create_ssl_context()
         except (OSError, ValueError) as exc:
-            # Preserve the original SDK construction and fallback behavior
-            # when the configured certificate environment is invalid.
+            if any(
+                isinstance(candidate, OpenAIProvider)
+                for candidate in (provider, fallback_provider)
+            ):
+                tls_context = PreparedTLSFailure(copy.copy(exc))
+            # Let the existing model fallback handle an OpenAI failure without
+            # repeating certificate I/O on the event loop.
             logger.warning("Unable to prepare SDK TLS context: %s", exc)
     return PreparedModelConfig(
         tenant_id=tenant_id,

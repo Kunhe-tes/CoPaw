@@ -109,3 +109,15 @@ Shell 每流终态边界现只扫描一次，本地全换行8/64MiB最终处理�
 取消写入即使最终物理写入成功，也不补记成功提交样本；close 不计为读写批次。阶段相互嵌套，分位数不能相加，也不能直接平均多个 Pod 的分位数。这些指标不表示客户端收到、HTTP 发送完成或 fsync 完成。
 
 本轮按用户要求暂不压测，仅验证计量边界、失败/取消、配额释放和协议回归；不据此宣称吞吐、RSS 或生产 p99 改善。实施记录见 [计划](../../docs/superpowers/plans/2026-10-15-sse-stage-metrics.md)。
+
+## OpenAI 异常构造与剩余 loop CPU
+
+OpenAI 的异步 TLS 准备失败后，`PreparedTLSFailure` 保存没有 traceback 的异常副本；主/备用 OpenAI 构造重新抛出独立副本，由原模型 fallback 逻辑处理，不在 loop 再次读取同一证书。错误类型、参数及 filename 保留，非 OpenAI fallback 仍可成功。该失败只属于本次冻结准备，下一次请求重新准备；同步未准备入口保留 SDK 原行为。其他 SDK 未纳入本轮失败路径优化。
+
+OpenAI 连接检查、模型列表/单模型检查、图片/视频探测使用 `_client_async`，在有界 runtime-state worker 准备证书，再在 loop 调用原同步 `_client` 安装 SDK。保留原超时值和异常处理位置；准备期间取消不会在 worker 完成后安装迟到客户端。同步 `_client` 仍可供兼容调用。
+
+`builtin_tool_schemas.py` 仅允许固定的 11 个内置工具函数共享 Schema 模板，缓存最多 32 项，每次注册深拷贝。主 Query 在已有 `_prepare_query_agent_context` worker 中预热；新 Toolkit、RegisteredToolFunction、在线 Agent 仍在 loop 构造。动态请求闭包、绑定方法、技能和来源工具继续使用原解析方式，不缓存请求数据；直接同步构造的首次冷解析仍可能在调用线程执行。
+
+本机单次 cProfile 显示 10 个基础工具注册约 15ms，主要在 SDK 签名/文档解析和 Pydantic Schema 生成。这只是定位探针，无网络，使用测试 tracing fake；没有并发压测或生产 p99 收益结论。模型 token/tracing/retry 包装的构造只做字段绑定，没有发现构造期间配置或网络 I/O，因此保持 loop 安装。
+
+TaskTracker 的普通 SSE 与工具实时输出共用生产者计数，每连续发布 64 条主动让出 loop；容量背压仍单独生效，顺序不变。实时 Shell 仍按最多 4KiB pipe chunk 处理，展示帧受字节/行预算限制；小帧 JSON 编码保留在 loop，避免每帧 worker 切换。共享日志只在批次完成时通知最多 8 个订阅者，没有按订阅者复制 payload。本轮不扩大到其他 Provider、Windows 或压测。实施记录见 [计划](../../docs/superpowers/plans/2026-10-15-openai-loop-followups.md)。

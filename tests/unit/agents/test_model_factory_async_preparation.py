@@ -734,3 +734,64 @@ async def test_tls_failure_preserves_model_fallback(
         assert model is fallback_model
     finally:
         cache.init_executor.shutdown(wait=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fallback_kind", ["none", "custom", "openai"])
+async def test_failed_tls_preparation_never_reloads_certificates_on_loop(
+    monkeypatch,
+    model_boundary,
+    fallback_kind,
+):
+    import ssl
+    from swe.providers.openai_provider import OpenAIProvider
+
+    monkeypatch.setenv("SSL_CERT_FILE", "/nonexistent/swe-test-ca.pem")
+    monkeypatch.setattr(
+        model_factory,
+        "_get_model_runtime_configs",
+        lambda *_: (None, None),
+    )
+    threads = []
+    original = ssl.create_default_context
+
+    def certificate_read(*args, **kwargs):
+        threads.append(threading.get_ident())
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ssl, "create_default_context", certificate_read)
+    primary = OpenAIProvider(id="openai", name="openai", api_key="test-key")
+    slot = ModelSlotConfig(provider_id="openai", model="test")
+    fallback_model = object()
+    fallback = None
+    if fallback_kind == "openai":
+        fallback = primary.model_copy(deep=True)
+    elif fallback_kind == "custom":
+        fallback = _Provider(
+            "fallback",
+            ModelRuntimeConfig(),
+            lambda *_: fallback_model,
+        )
+    cache = ProviderRuntimeCache()
+    monkeypatch.setattr(model_factory.ProviderManager, "_runtime_cache", cache)
+    try:
+        prepared = await model_factory.prepare_model_config_async(
+            agent_id="agent-a",
+            model_slot_override=slot,
+            model_provider_override=primary,
+            fallback_model_slot=slot if fallback is not None else None,
+            fallback_model_provider=fallback,
+        )
+        if fallback_kind == "custom":
+            model, _ = model_factory.create_model_and_formatter(
+                prepared_model_config=prepared,
+            )
+            assert model is fallback_model
+        else:
+            with pytest.raises(OSError):
+                model_factory.create_model_and_formatter(
+                    prepared_model_config=prepared,
+                )
+        assert threads and threading.get_ident() not in threads
+    finally:
+        cache.init_executor.shutdown(wait=True)

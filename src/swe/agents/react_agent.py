@@ -24,6 +24,7 @@ from pydantic import BaseModel
 
 from . import mcp_tool_registrar
 from .agent_runtime_builder import AgentRuntimeBuilder
+from .builtin_tool_schemas import get_builtin_tool_schema
 from .command_handler import CommandHandler
 from .mcp_tool_registrar import McpToolRegistrar
 from .hooks import BootstrapHook, MemoryCompactionHook
@@ -819,6 +820,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             async_exec = async_execution_tools.get(tool_name, False)
             toolkit.register_tool_function(
                 tool_func,
+                json_schema=get_builtin_tool_schema(tool_func),
                 namesake_strategy=namesake_strategy,
                 async_execution=async_exec,
             )
