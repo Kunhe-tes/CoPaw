@@ -13,6 +13,16 @@ T = TypeVar("T")
 _SAMPLE_LIMIT = 2048
 _WORKERS = ("output", "runtime_state", "provider", "backup", "stream")
 _COUNTERS = ("checkpoint_read_bytes", "checkpoint_read_calls", "s3_list_pages")
+_STREAM_STAGES = (
+    "admission",
+    "batch_wait",
+    "accepted_to_committed",
+    "write_queue",
+    "write_execution",
+    "read_queue",
+    "read_execution",
+    "read_total",
+)
 
 
 def _summary(values: list[float], prefix: str) -> dict:
@@ -40,6 +50,17 @@ class PerformanceMetrics:
         }
         self._completed = dict.fromkeys(_WORKERS, 0)
         self._counters = dict.fromkeys(_COUNTERS, 0)
+        self._stream_samples: dict[str, deque[float]] = {
+            name: deque(maxlen=_SAMPLE_LIMIT) for name in _STREAM_STAGES
+        }
+        self._stream_observed = dict.fromkeys(_STREAM_STAGES, 0)
+
+    def record_stream_timing(self, stage: str, seconds: float) -> None:
+        if stage not in self._stream_samples:
+            raise ValueError("Unknown stream performance stage")
+        with self._lock:
+            self._stream_samples[stage].append(max(0.0, seconds) * 1000)
+            self._stream_observed[stage] += 1
 
     def record_worker_timing(
         self,
@@ -71,6 +92,10 @@ class PerformanceMetrics:
             }
             completed = self._completed.copy()
             counters = self._counters.copy()
+            stream_samples = {
+                name: list(rows) for name, rows in self._stream_samples.items()
+            }
+            stream_observed = self._stream_observed.copy()
         workers = {}
         for name, rows in samples.items():
             workers[name] = {
@@ -79,10 +104,27 @@ class PerformanceMetrics:
                 **_summary([row[0] for row in rows], "queue"),
                 **_summary([row[1] for row in rows], "execution"),
             }
-        return {"workers": workers, "counters": counters}
+        stream_stages = {
+            name: {
+                "observed_count": stream_observed[name],
+                "sample_count": len(rows),
+                **_summary(rows, "duration"),
+            }
+            for name, rows in stream_samples.items()
+        }
+        return {
+            "workers": workers,
+            "counters": counters,
+            "stream_stages": stream_stages,
+        }
 
 
 METRICS = PerformanceMetrics()
+
+
+def record_stream_timing(stage: str, seconds: float) -> None:
+    """Record one bounded SSE stage observation without payload references."""
+    METRICS.record_stream_timing(stage, seconds)
 
 
 def increment(name: str, value: int = 1) -> None:

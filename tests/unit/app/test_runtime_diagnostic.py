@@ -99,6 +99,28 @@ def _manager(**overrides) -> RuntimeDiagnosticManager:
     )
 
 
+def test_diagnostic_exposes_bounded_stream_stage_metrics(monkeypatch):
+    from swe.performance_metrics import PerformanceMetrics
+
+    metrics = PerformanceMetrics()
+    metrics.record_stream_timing("accepted_to_committed", 0.012)
+    monkeypatch.setattr(runtime_diagnostic, "METRICS", metrics)
+    manager = _manager()
+    stage = manager.build_diagnostic_payload()["performance_metrics"][
+        "stream_stages"
+    ]["accepted_to_committed"]
+    assert stage["observed_count"] == 1
+    assert stage["sample_count"] == 1
+    assert stage["duration_p99_ms"] == 12
+    manager.rotate_window()
+    assert (
+        manager.build_diagnostic_payload()["performance_metrics"][
+            "stream_stages"
+        ]["accepted_to_committed"]
+        == stage
+    )
+
+
 @pytest.mark.asyncio
 async def test_diagnostic_records_p99_rss_peak_and_worker_metrics():
     manager = _manager(monotonic_time=lambda: 1.0)

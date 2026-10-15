@@ -90,3 +90,22 @@ SSE 已增加连续区间读取与有界 writer：32条/约64KiB/首事件5ms触
 TaskTracker 按用户决定默认启用 offer 聚合，`SWE_SSE_BATCH_WRITES=0` 可关闭（每轮启动时捕获，已运行轮次不变）。本地突发 worker 减少约96%、完成时间改善，但稀疏交付增加约5–6ms，16租户事件p99也上升。Linux/Kubernetes 固定时长延迟/RSS准入尚未通过，默认开关调整不改变这些测量限制。见 [方案](../../docs/superpowers/specs/2026-10-15-sse-batching-design.md) 和 [原始测量](../../docs/superpowers/benchmarks/2026-10-15-sse-batching.md)。
 
 Shell 每流终态边界现只扫描一次，本地全换行8/64MiB最终处理约减半。乐观单遍 UTF-8 候选的非法尾部回退增加约25%～101%，超过20%门槛，已撤回候选并保留原双遍预校验、持久化与完整字符串回退。正常 spool 已分块生成 artifact；失败回退仍可能重建完整字符串，不能宣称整个请求内存有界。见 [方案](../../docs/superpowers/specs/2026-10-15-shell-finalization-design.md) 和 [测量](../../docs/superpowers/benchmarks/2026-10-15-shell-finalization.md)。
+
+## SSE 分阶段延迟指标
+
+`runtime_diagnostic` 日志的 `performance_metrics.stream_stages` 输出以下固定阶段，单位为毫秒：
+
+| 阶段 | 计量口径 |
+|---|---|
+| `admission` | offer 进入至成功接纳，每事件，包含容量等待；拒绝或接纳前取消不采样 |
+| `batch_wait` | 接纳至批次提交，每事件，包含聚合及前批占用，并非纯定时器等待 |
+| `accepted_to_committed` | 接纳至 loop 公布成功提交，每成功事件，包含写入和 loop 恢复 |
+| `write_queue` / `read_queue` | I/O 入口至线程开始，每物理批次，包含提交许可等待和 executor 排队 |
+| `write_execution` / `read_execution` | 线程开始至操作退出，每物理批次，失败和取消后的真实完成也计入 |
+| `read_total` | read 进入至返回或异常，每读取批次，包含排队、执行及 loop 恢复 |
+
+每阶段最多保留最近 2048 个浮点样本，输出 `sample_count`、`duration_avg_ms`、`duration_p95_ms`、`duration_p99_ms`、`duration_max_ms`；`observed_count` 是本进程累计次数。空样本的延迟字段为 null，诊断窗口轮换不清空这些样本和累计次数。无租户、路径或事件文本标签。
+
+取消写入即使最终物理写入成功，也不补记成功提交样本；close 不计为读写批次。阶段相互嵌套，分位数不能相加，也不能直接平均多个 Pod 的分位数。这些指标不表示客户端收到、HTTP 发送完成或 fsync 完成。
+
+本轮按用户要求暂不压测，仅验证计量边界、失败/取消、配额释放和协议回归；不据此宣称吞吐、RSS 或生产 p99 改善。实施记录见 [计划](../../docs/superpowers/plans/2026-10-15-sse-stage-metrics.md)。

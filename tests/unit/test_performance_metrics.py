@@ -9,6 +9,52 @@ import time
 import pytest
 
 
+def test_stream_stage_samples_are_bounded_and_have_fixed_labels():
+    from swe.performance_metrics import PerformanceMetrics
+
+    metrics = PerformanceMetrics()
+    for value in range(1, 2101):
+        metrics.record_stream_timing("admission", value / 1000)
+    stages = metrics.snapshot()["stream_stages"]
+    assert set(stages) == {
+        "admission",
+        "batch_wait",
+        "accepted_to_committed",
+        "write_queue",
+        "write_execution",
+        "read_queue",
+        "read_execution",
+        "read_total",
+    }
+    result = stages["admission"]
+    assert result["observed_count"] == 2100
+    assert result["sample_count"] == 2048
+    assert result["duration_p95_ms"] == 1998
+    assert result["duration_p99_ms"] == 2080
+    assert stages["read_total"]["duration_p99_ms"] is None
+    with pytest.raises(ValueError):
+        metrics.record_stream_timing("tenant-secret", 0)
+
+
+def test_stream_stage_timings_are_thread_safe():
+    from swe.performance_metrics import PerformanceMetrics
+
+    metrics = PerformanceMetrics()
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(
+            pool.map(
+                lambda _: metrics.record_stream_timing(
+                    "write_execution",
+                    0.002,
+                ),
+                range(500),
+            ),
+        )
+    result = metrics.snapshot()["stream_stages"]["write_execution"]
+    assert result["observed_count"] == 500
+    assert result["duration_p99_ms"] == 2
+
+
 def test_metrics_bound_samples_and_keep_cumulative_counts():
     from swe.performance_metrics import PerformanceMetrics
 

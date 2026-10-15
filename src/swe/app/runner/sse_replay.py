@@ -17,7 +17,7 @@ import time
 import traceback
 from typing import Any, Callable
 
-from ...performance_metrics import timed_work
+from ...performance_metrics import record_stream_timing, timed_work
 
 _EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="swe-stream")
 _SLOTS = threading.BoundedSemaphore(4)
@@ -40,7 +40,11 @@ class ReplayUnavailable(RuntimeError):
     """The requested stream cannot be replayed without losing events."""
 
 
-async def run_stream_io(function: Callable, *args: Any):
+async def run_stream_io(
+    function: Callable,
+    *args: Any,
+    operation: str | None = None,
+):
     """Bound submissions and keep resources alive through repeated cancellation."""
     queued_at = time.monotonic()
 
@@ -52,6 +56,7 @@ async def run_stream_io(function: Callable, *args: Any):
         context = copy_context()
 
         def execute():
+            started = time.monotonic()
             try:
                 return context.run(
                     timed_work,
@@ -61,7 +66,19 @@ async def run_stream_io(function: Callable, *args: Any):
                     *args,
                 )
             finally:
-                _SLOTS.release()
+                finished = time.monotonic()
+                try:
+                    if operation is not None:
+                        record_stream_timing(
+                            f"{operation}_queue",
+                            started - queued_at,
+                        )
+                        record_stream_timing(
+                            f"{operation}_execution",
+                            finished - started,
+                        )
+                finally:
+                    _SLOTS.release()
 
         try:
             future = _EXECUTOR.submit(execute)
@@ -276,10 +293,10 @@ class ReplayLog:
                 raise
 
     async def append_many(self, texts: list[str]) -> int:
-        return await run_stream_io(self._append_many, texts)
+        return await run_stream_io(self._append_many, texts, operation="write")
 
     async def append(self, text: str) -> int:
-        return await run_stream_io(self._append, text)
+        return await run_stream_io(self._append, text, operation="write")
 
     def _read(self, first: int, max_bytes: int, upto: int | None):
         with self.lock:
@@ -345,7 +362,17 @@ class ReplayLog:
         max_bytes: int = READ_BATCH_BYTES,
         upto: int | None = None,
     ):
-        return await run_stream_io(self._read, first, max_bytes, upto)
+        started = time.monotonic()
+        try:
+            return await run_stream_io(
+                self._read,
+                first,
+                max_bytes,
+                upto,
+                operation="read",
+            )
+        finally:
+            record_stream_timing("read_total", time.monotonic() - started)
 
     def close(self) -> None:
         with self.lock:
@@ -410,6 +437,7 @@ class ReplayStream:
 
     async def offer(self, text: str) -> int | None:
         """Accept into a bounded buffer; only committed records are readable."""
+        started = time.monotonic()
         if self.writer is not None and self.writer.done():
             self._writer_done(self.writer)
         if self.closing or self.ended or self.closed or self.error:
@@ -427,7 +455,9 @@ class ReplayStream:
             )
             if fits and self.log.budget.try_reserve_pending(cost):
                 self.accepted += 1
-                self.pending.append((text, cost, time.monotonic()))
+                accepted_at = time.monotonic()
+                self.pending.append((text, cost, accepted_at))
+                record_stream_timing("admission", accepted_at - started)
                 self.pending_bytes += cost
                 self.pending_count += 1
                 if self.writer is None or self.writer.done():
@@ -487,9 +517,21 @@ class ReplayStream:
                     rows.append(self.pending.popleft())
                     size += row[1]
                 del row
+                submitted_at = time.monotonic()
+                for _, _, accepted_at in rows:
+                    record_stream_timing(
+                        "batch_wait",
+                        submitted_at - accepted_at,
+                    )
                 texts = [row[0] for row in rows]
                 try:
                     self.committed = await self.log.append_many(texts)
+                    committed_at = time.monotonic()
+                    for _, _, accepted_at in rows:
+                        record_stream_timing(
+                            "accepted_to_committed",
+                            committed_at - accepted_at,
+                        )
                 finally:
                     # Drop payload references before returning their memory permit.
                     count = len(rows)
