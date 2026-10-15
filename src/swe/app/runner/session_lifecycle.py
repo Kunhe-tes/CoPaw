@@ -179,6 +179,9 @@ async def admit_user_turn(
     if anchor is None:
         return None
     turn_id, message = anchor
+    hydrate_turn = getattr(execution, "hydrate_turn", None)
+    if hydrate_turn is not None:
+        await hydrate_turn(turn_id)
     state = execution.state
     turn_states = state.get(TURN_STATES_KEY)
     if not isinstance(turn_states, dict):
@@ -191,6 +194,8 @@ async def admit_user_turn(
             "message": message,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
+        if isinstance(existing, dict) and "admission_order" in existing:
+            admitted_state["admission_order"] = existing["admission_order"]
         chat_id = (getattr(request, "channel_meta", None) or {}).get(
             "chat_id",
         )

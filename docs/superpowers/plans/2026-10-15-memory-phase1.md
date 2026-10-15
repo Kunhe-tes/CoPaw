@@ -35,7 +35,7 @@
 
 - [x] 对 `_start_lifespan_background_services`、`_shutdown_lifespan_resources` 运行 impact。
 - [x] 在 `tests/unit/app/test_transient_memory_cleanup.py` 覆盖启动/停止幂等、清理隔离、错误恢复、取消和最终 reset 顺序；先观察失败。
-- [x] 新增 `transient_memory_cleanup.py`：每30秒依次清理三类存储，异常隔离；lifespan 启停，生产方关闭后 reset。
+- [x] 新增 `transient_memory_cleanup.py`：每60秒依次清理三类存储，异常隔离；lifespan 启停，生产方关闭后 reset。
 - [x] 运行上述测试及现有生命周期测试，按实际变更扩展必要范围。
 
 ## Task E: 审查与交付

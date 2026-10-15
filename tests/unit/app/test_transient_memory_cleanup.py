@@ -14,6 +14,10 @@ import pytest
 from swe.app.transient_memory_cleanup import TransientMemoryCleanup
 
 
+def test_default_cleanup_interval_is_one_minute():
+    assert TransientMemoryCleanup()._interval_seconds == 60.0
+
+
 @pytest.mark.asyncio
 async def test_cleanup_continues_after_failure_and_can_retry():
     calls = []

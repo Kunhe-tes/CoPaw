@@ -20,7 +20,7 @@ class TransientMemoryCleanup:
         *,
         cleaners: Sequence[Cleanup] | None = None,
         resetters: Sequence[Cleanup] | None = None,
-        interval_seconds: float = 30.0,
+        interval_seconds: float = 60.0,
     ) -> None:
         self._cleaners = cleaners
         self._resetters = resetters

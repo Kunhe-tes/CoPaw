@@ -1649,9 +1649,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                         None,
                     )
                     if epoch is None:
-                        epoch = checkpoint_store._read_checkpoint_state(
+                        epoch = checkpoint_store._read_checkpoint_epoch(
                             chat_id,
-                        ).current_epoch
+                        )
                 except (TypeError, ValueError):
                     logger.warning(
                         "Skip recover_evidence: request Chat ID is invalid",

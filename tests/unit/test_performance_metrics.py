@@ -9,6 +9,20 @@ import time
 import pytest
 
 
+def test_journal_counters_are_fixed_aggregate_labels():
+    from swe.performance_metrics import PerformanceMetrics
+
+    metrics = PerformanceMetrics()
+    for key in (
+        "journal_append_bytes",
+        "journal_read_bytes",
+        "journal_frames_decoded",
+        "ledger_lookup_read_bytes",
+    ):
+        metrics.increment(key, 2)
+        assert metrics.snapshot()["counters"][key] == 2
+
+
 def test_stream_stage_samples_are_bounded_and_have_fixed_labels():
     from swe.performance_metrics import PerformanceMetrics
 

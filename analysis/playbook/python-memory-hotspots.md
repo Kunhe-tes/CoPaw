@@ -120,7 +120,7 @@ RSS 不一定在对象释放后立即回落，因此验收应同时看存活对�
 
 ## 第一阶段实现记录（2026-10-15）
 
-已按[批准设计](../../docs/superpowers/specs/2026-10-15-memory-phase1-design.md)实现：Summary 完成移除 Task、轻量有界结果、后台 Context allowlist、关闭等待/取消；SessionExecution 退出解除快照引用；推送、suggestions、Q&A 写入预算和主动过期；lifespan 每 30 秒分批清理。Redis 迁移后续单独设计。上文热点证据描述优化前基线，当前以实现和设计参数为准。
+已按[批准设计](../../docs/superpowers/specs/2026-10-15-memory-phase1-design.md)实现：Summary 完成移除 Task、轻量有界结果、后台 Context allowlist、关闭等待/取消；SessionExecution 退出解除快照引用；推送、suggestions、Q&A 写入预算和主动过期；lifespan 每 60 秒分批清理。Redis 迁移后续单独设计。上文热点证据描述优化前基线，当前以实现和设计参数为准。
 
 - 推送：TTL 60 秒，16 MiB / 10,000 条，单 scope 2 MiB / 500 条，单条 256 KiB，超大完整拒绝。
 - suggestions：TTL 60 秒，2 MiB / 2,000 session，单 scope 256 KiB / 200 session，单条最多 10 条建议且 16 KiB。
@@ -132,3 +132,10 @@ RSS 不一定在对象释放后立即回落，因此验收应同时看存活对�
 联合回归 165 passed、9 skipped；另一个既有租户内存 fake-backend 测试失败在原基线可复现，排除后 165 passed、9 skipped、1 deselected。新增测试验证 1,000 个 scope、引用释放、取消、并行等待、UTF-8 与容量、跨 yield 覆盖、真实清理装配和关闭错误路径。Black/mypy/flake8 通过；完整 pre-commit 的 pylint 仍有原有压缩分支 metadata 参数诊断。
 
 关闭入口失败或 Summary 取消超时仍 pending 时跳过最终 reset；现有上层服务停止错误传播未全面重构。GitNexus 方法查询 UNKNOWN、类关联存在不可靠跨语言数据，detect_changes 的 CRITICAL 提示已记录，未视为空影响。生产验收还需观察 pending/completed、payload_bytes、expired/evicted/rejected_total、cleanup_errors_total 及 Pod 长期内存曲线。
+
+
+## 第二阶段实现入口
+
+[第二阶段设计与操作说明](../../docs/superpowers/specs/2026-10-15-memory-phase2-design.md)覆盖checkpoint分段追加、session终态turn冷存储及迁移回退。两种新格式默认关闭；已有新格式根继续按自身版本读写。使用`swe memory-storage`预览、显式迁移、完整校验及旧格式导出，不能把迁移前备份当作含新写入的回退结果。
+
+故障检查先看`state-v2.json`及quarantine，session看根revision/generation与`.turn-ledger/<generation>/pending.json`。不要手动删除pending：下一writer根据根提交点恢复；预览不会执行恢复。冷正文和reference缺失会报错，二者同时丢失需完整validate以计数检出。新格式恢复必须使用空目录，旧shell脚本主动拒绝。生产NAS锁/rename/fsync/硬链接及跨Pod退出恢复仍是启用门禁。

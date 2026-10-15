@@ -724,8 +724,9 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
             or len(online_message_ids) != len(set(online_message_ids))
         ):
             return False
-        state = await memory.chat_checkpoint_store.read_checkpoint_state(
+        state = await memory.chat_checkpoint_store.read_checkpoint_prefix(
             chat_id,
+            len(messages),
         )
         if len(state.events) < len(messages):
             return False

@@ -3274,6 +3274,9 @@ class AgentRunner(Runner):
             "is_active",
             True,
         ):
+            hydrate = getattr(session_execution, "hydrate_turn", None)
+            if hydrate is not None:
+                await hydrate(outcome.identity.msgid)
             mark_terminal_turn_state(
                 session_execution.state,
                 outcome.identity.msgid,
@@ -3299,10 +3302,14 @@ class AgentRunner(Runner):
             )
             return state
 
+        mutation_options = {}
+        if isinstance(self.session, SafeJSONSession):
+            mutation_options["hydrate_turn_ids"] = (outcome.identity.msgid,)
         await self.session.mutate_session_state(
             session_id,
             mark_outcome,
             user_id=user_id,
+            **mutation_options,
         )
 
     async def release_outcome(self, identity: TurnIdentity) -> None:

@@ -1132,19 +1132,28 @@ async def _current_recovery_terminal_snapshot(
     from ..runner.api import _build_chat_history, _read_history_state
 
     session = workspace.runner.session
+    state = await _read_history_state(
+        session,
+        chat.session_id,
+        chat.user_id,
+    )
     history = await _build_chat_history(
         chat,
         session=session,
         workspace=workspace,
         status_override="idle",
         non_blocking=True,
-    )
-    state = await _read_history_state(
-        session,
-        chat.session_id,
-        chat.user_id,
+        state=state,
     )
     turn_states = state.get("turn_states")
+    if state.get("schema_version") == 3:
+        latest = await session.get_latest_turn_state(
+            chat.session_id,
+            chat.user_id,
+            state,
+            chat.id,
+        )
+        turn_states = dict([latest]) if latest is not None else {}
     if not isinstance(turn_states, dict):
         return history.model_dump(mode="json"), None, None
     for msgid, turn_state in reversed(tuple(turn_states.items())):
