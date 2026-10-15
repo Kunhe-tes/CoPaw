@@ -139,3 +139,10 @@ RSS 不一定在对象释放后立即回落，因此验收应同时看存活对�
 [第二阶段设计与操作说明](../../docs/superpowers/specs/2026-10-15-memory-phase2-design.md)覆盖checkpoint分段追加、session终态turn冷存储及迁移回退。两种新格式默认关闭；已有新格式根继续按自身版本读写。使用`swe memory-storage`预览、显式迁移、完整校验及旧格式导出，不能把迁移前备份当作含新写入的回退结果。
 
 故障检查先看`state-v2.json`及quarantine，session看根revision/generation与`.turn-ledger/<generation>/pending.json`。不要手动删除pending：下一writer根据根提交点恢复；预览不会执行恢复。冷正文和reference缺失会报错，二者同时丢失需完整validate以计数检出。新格式恢复必须使用空目录，旧shell脚本主动拒绝。生产NAS锁/rename/fsync/硬链接及跨Pod退出恢复仍是启用门禁。
+
+
+## 第二阶段运行指标
+
+[指标口径与使用说明](../../docs/superpowers/specs/2026-10-15-memory-runtime-metrics-design.md)补齐现有diagnostic_flow的`performance_metrics`：`session_memory`提供已发布v3 session热终态/保护状态的条数及UTF-8字节分布；`storage_operations`提供session/checkpoint提交、恢复检查、迁移及预览的耗时和结果计数；`counters`提供固定操作的`*_failures`。
+
+窗口每类最多2048条数值，无tenant/session/msgid/正文标签。热状态last只表示最近观测的单次提交，不是进程全部会话常驻总量；保护终态同时计入terminal和protected，不能把两者相加。失败累计在进程重启后清零；取消单列，preview失败和实际迁移失败分开。提交耗时在线程真实执行阶段计时，取消等待者不提前终止统计；指标采集异常不覆盖存储业务结果。不据此直接推算RSS。

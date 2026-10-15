@@ -206,3 +206,204 @@ def test_provider_startup_is_counted_once_for_shared_future(monkeypatch):
         )
     finally:
         cache.init_executor.shutdown()
+
+
+def test_session_memory_observations_are_bounded_numeric_and_isolated():
+    from swe.performance_metrics import PerformanceMetrics
+
+    metrics = PerformanceMetrics()
+    for value in range(1, 2101):
+        metrics.record_session_memory(value, value * 3, value * 2, value * 5)
+    result = metrics.snapshot()["session_memory"]
+    assert result["observed_count"] == 2100
+    assert result["sample_count"] == 2048
+    assert result["session_hot_terminal_count"] == {
+        "last": 2100,
+        "avg": (53 + 2100) / 2,
+        "p95": 1998,
+        "max": 2100,
+    }
+    assert result["session_hot_terminal_bytes"]["last"] == 6300
+    assert result["session_protected_count"]["last"] == 4200
+    assert result["session_protected_bytes"]["last"] == 10500
+    result["session_hot_terminal_count"]["last"] = -1
+    assert (
+        metrics.snapshot()["session_memory"]["session_hot_terminal_count"][
+            "last"
+        ]
+        == 2100
+    )
+
+
+def test_storage_operation_labels_outcomes_and_windows_are_bounded():
+    from swe.performance_metrics import PerformanceMetrics
+
+    metrics = PerformanceMetrics()
+    expected = {
+        "session_commit",
+        "checkpoint_commit",
+        "session_recovery",
+        "checkpoint_recovery",
+        "session_migration",
+        "checkpoint_migration",
+        "session_migration_preview",
+        "checkpoint_migration_preview",
+    }
+    assert set(metrics.snapshot()["storage_operations"]) == expected
+    assert (
+        metrics.snapshot()["session_memory"]["session_protected_bytes"]["last"]
+        is None
+    )
+    for value in range(1, 2101):
+        metrics.record_storage_operation(
+            "session_commit",
+            value / 1000,
+            "succeeded",
+        )
+    metrics.record_storage_operation("session_migration", 0.1, "failed")
+    metrics.record_storage_operation("session_migration", 0.2, "cancelled")
+    result = metrics.snapshot()
+    commit = result["storage_operations"]["session_commit"]
+    assert commit["attempted_count"] == commit["succeeded_count"] == 2100
+    assert commit["sample_count"] == 2048
+    assert commit["duration_p95_ms"] == 1998
+    assert commit["failed_count"] == commit["cancelled_count"] == 0
+    assert result["counters"]["session_migration_failures"] == 1
+    assert (
+        result["storage_operations"]["session_migration"]["cancelled_count"]
+        == 1
+    )
+    with pytest.raises(ValueError):
+        metrics.record_storage_operation("private-tenant-id", 0, "failed")
+    with pytest.raises(ValueError):
+        metrics.record_storage_operation(
+            "session_commit",
+            0,
+            "private-error-text",
+        )
+
+
+def test_storage_operation_updates_are_thread_safe():
+    from swe.performance_metrics import PerformanceMetrics
+
+    metrics = PerformanceMetrics()
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(
+            pool.map(
+                lambda _: metrics.record_storage_operation(
+                    "session_recovery",
+                    0.01,
+                    "failed",
+                ),
+                range(500),
+            ),
+        )
+    result = metrics.snapshot()
+    assert result["counters"]["session_recovery_failures"] == 500
+    assert (
+        result["storage_operations"]["session_recovery"]["failed_count"] == 500
+    )
+
+
+def test_measured_storage_operation_preserves_results_errors_and_name(
+    monkeypatch,
+):
+    from swe import performance_metrics as module
+
+    metrics = module.PerformanceMetrics()
+    monkeypatch.setattr(module, "METRICS", metrics)
+    values = iter([1, 1.25, 2, 2.5])
+    monkeypatch.setattr(module, "perf_counter", lambda: next(values))
+
+    @module.measure_storage_operation("checkpoint_commit")
+    def commit(fail=False):
+        if fail:
+            raise OSError("disk failure")
+        return "receipt"
+
+    assert commit.__name__ == "commit"
+    assert commit() == "receipt"
+    with pytest.raises(OSError, match="disk failure"):
+        commit(fail=True)
+    result = metrics.snapshot()["storage_operations"]["checkpoint_commit"]
+    assert result["attempted_count"] == 2
+    assert result["succeeded_count"] == result["failed_count"] == 1
+    assert result["duration_avg_ms"] == 375
+
+
+@pytest.mark.asyncio
+async def test_async_storage_timing_waits_for_real_completion_and_counts_cancellation(
+    monkeypatch,
+):
+    from swe import performance_metrics as module
+
+    metrics = module.PerformanceMetrics()
+    monkeypatch.setattr(module, "METRICS", metrics)
+    now = [10.0]
+    monkeypatch.setattr(module, "perf_counter", lambda: now[0])
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    @module.measure_storage_operation(
+        "session_migration",
+        dry_run_default=True,
+    )
+    async def migrate(*, dry_run=True):
+        entered.set()
+        await release.wait()
+        return 7
+
+    task = asyncio.create_task(migrate(dry_run=False))
+    await entered.wait()
+    assert (
+        metrics.snapshot()["storage_operations"]["session_migration"][
+            "attempted_count"
+        ]
+        == 0
+    )
+    now[0] = 15.0
+    release.set()
+    assert await task == 7
+    assert (
+        metrics.snapshot()["storage_operations"]["session_migration"][
+            "duration_max_ms"
+        ]
+        == 5000
+    )
+    entered.clear()
+    release.clear()
+    task = asyncio.create_task(migrate())
+    await entered.wait()
+    now[0] = 17.0
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    result = metrics.snapshot()
+    assert (
+        result["storage_operations"]["session_migration_preview"][
+            "cancelled_count"
+        ]
+        == 1
+    )
+    assert result["counters"]["session_migration_preview_failures"] == 0
+
+
+def test_broken_metrics_cannot_mask_storage_result_or_exception(monkeypatch):
+    from swe import performance_metrics as module
+
+    metrics = module.PerformanceMetrics()
+    monkeypatch.setattr(module, "METRICS", metrics)
+    monkeypatch.setattr(
+        metrics,
+        "record_storage_operation",
+        lambda *a: (_ for _ in ()).throw(RuntimeError("metrics failed")),
+    )
+
+    @module.measure_storage_operation("session_commit")
+    def commit(fail=False):
+        if fail:
+            raise OSError("original storage error")
+        return 3
+
+    assert commit() == 3
+    with pytest.raises(OSError, match="original storage error"):
+        commit(True)

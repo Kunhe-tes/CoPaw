@@ -5,17 +5,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import tempfile
 from typing import Any, Iterator
 import uuid
-from swe.performance_metrics import increment
+from swe import performance_metrics
+from swe.performance_metrics import increment, measure_storage_operation
 
 HOT_TURNS = 64
 HOT_BYTES = 256 * 1024
 TERMINAL = frozenset({"completed", "stopped", "failed", "cancelled"})
 ORDER = "admission_order"
+logger = logging.getLogger(__name__)
 
 
 class TurnHistorySnapshot(dict):
@@ -100,6 +103,29 @@ def terminal_fingerprints(state: dict) -> dict[str, str]:
         for key, value in state.get("turn_states", {}).items()
         if isinstance(value, dict) and value.get("status") in TERMINAL
     }
+
+
+def observe_hot_turns(state: dict, baseline: dict[str, str]) -> None:
+    """Observe one published hot snapshot; never retain or load cold turns."""
+    try:
+        terminal_count = terminal_bytes = protected_count = protected_bytes = 0
+        for key, value in state.get("turn_states", {}).items():
+            size = _size({key: value})
+            terminal = value.get("status") in TERMINAL
+            if terminal:
+                terminal_count += 1
+                terminal_bytes += size
+            if not terminal or baseline.get(key) != _digest(value):
+                protected_count += 1
+                protected_bytes += size
+        performance_metrics.METRICS.record_session_memory(
+            terminal_count,
+            terminal_bytes,
+            protected_count,
+            protected_bytes,
+        )
+    except Exception:
+        logger.warning("Failed to observe published session memory quantities")
 
 
 class TurnLedger:
@@ -331,6 +357,7 @@ class TurnLedger:
             for _ in self._latest_nodes(state, bucket, head):
                 pass
 
+    @measure_storage_operation("session_recovery")
     def recover(self, state: dict) -> None:
         if state.get("schema_version") != 3:
             return

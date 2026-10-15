@@ -28,7 +28,13 @@ from swe.app.runner.session_lock import (
     get_session_lock_path,
 )
 from swe.runtime_workers import run_runtime_state_work
-from .turn_ledger import TurnLedger, atomic_json, terminal_fingerprints
+from swe.performance_metrics import measure_storage_operation
+from .turn_ledger import (
+    TurnLedger,
+    atomic_json,
+    terminal_fingerprints,
+    observe_hot_turns,
+)
 
 logger = logging.getLogger(__name__)
 SESSION_SKILL_SNAPSHOT_STATE_KEY = "session_skill_snapshot"
@@ -216,6 +222,7 @@ def _write_json_state_sync(
     atomic_json(Path(session_save_path), state)
 
 
+@measure_storage_operation("session_commit")
 def _commit_ledger_sync(session_save_path, state, baseline, revision):
     ledger = TurnLedger(session_save_path)
     _, durable = _read_json_state_sync(session_save_path, allow_not_exist=True)
@@ -235,8 +242,10 @@ def _commit_ledger_sync(session_save_path, state, baseline, revision):
             allow_not_exist=True,
         )
         if actual.get("ledger_nonce") == committed["ledger_nonce"]:
+            observe_hot_turns(committed, baseline)
             raise PublishedLedgerCommitError(committed) from exc
         raise
+    observe_hot_turns(committed, baseline)
     try:
         ledger.finish(committed)
     except OSError:
@@ -604,6 +613,7 @@ class SafeJSONSession(SessionBase):
             chat_id,
         )
 
+    @measure_storage_operation("session_migration", dry_run_default=True)
     async def migrate_terminal_turns(
         self,
         session_id,

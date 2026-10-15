@@ -28,7 +28,7 @@ import fcntl
 from agentscope.message import Msg
 
 from swe.constant import SECRET_DIR
-from swe.performance_metrics import increment
+from swe.performance_metrics import increment, measure_storage_operation
 from swe.app.runner.hidden_context_injection import (
     redact_hidden_context_for_display,
 )
@@ -591,6 +591,7 @@ class ConversationArchiveStore:
                 )
             previous = number
 
+    @measure_storage_operation("checkpoint_migration", dry_run_default=False)
     def migrate_checkpoint_v2(
         self,
         chat_id: str,

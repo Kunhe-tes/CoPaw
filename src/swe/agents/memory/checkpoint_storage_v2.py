@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterator
 
-from swe.performance_metrics import increment
+from swe.performance_metrics import increment, measure_storage_operation
 from .chat_checkpoint import (
     CheckpointEvent,
     CheckpointRecord,
@@ -212,6 +212,7 @@ class CheckpointStorageV2:
             raise ValueError("Checkpoint journal record disagrees with root")
         return record
 
+    @measure_storage_operation("checkpoint_commit")
     def initialize(
         self,
         record: CheckpointRecord,
@@ -248,6 +249,7 @@ class CheckpointStorageV2:
         self.check_writable()
         atomic_bytes(self.root_path, canonical_bytes(head))
 
+    @measure_storage_operation("checkpoint_commit")
     def publish(
         self,
         *,
@@ -436,6 +438,25 @@ class CheckpointStorageV2:
                 if event.sequence > after_sequence:
                     yield event
 
+    @measure_storage_operation("checkpoint_recovery")
+    def _recover_active_segment(self, head: dict) -> Path:
+        """Verify the committed prefix before truncating an unpublished suffix."""
+        for _ in self._segment_events(
+            head,
+            head["active_segment_ordinal"],
+            head["committed_bytes"],
+            head["active_first_sequence"],
+            head["active_count"],
+        ):
+            pass
+        path = self.segment_path(head)
+        with path.open("r+b") as handle:
+            handle.truncate(head["committed_bytes"])
+            handle.flush()
+            os.fsync(handle.fileno())
+        return path
+
+    @measure_storage_operation("checkpoint_commit")
     def append(
         self,
         event: CheckpointEvent,
@@ -482,20 +503,7 @@ class CheckpointStorageV2:
             raise ValueError("Checkpoint conditional append conflict")
         if event.sequence != head["last_event_sequence"] + 1:
             raise ValueError("Checkpoint event sequence must be contiguous")
-        # Always validate the committed active prefix before extending it.
-        for _ in self._segment_events(
-            head,
-            head["active_segment_ordinal"],
-            head["committed_bytes"],
-            head["active_first_sequence"],
-            head["active_count"],
-        ):
-            pass
-        path = self.segment_path(head)
-        with path.open("r+b") as handle:
-            handle.truncate(head["committed_bytes"])
-            handle.flush()
-            os.fsync(handle.fileno())
+        path = self._recover_active_segment(head)
         frame = (
             canonical_bytes(
                 {
@@ -547,6 +555,7 @@ class CheckpointStorageV2:
         self._publish(head)
         return receipt
 
+    @measure_storage_operation("checkpoint_commit")
     def reset(self, record: CheckpointRecord, reason: str) -> None:
         self.check_writable()
         old = self.head()
