@@ -364,3 +364,79 @@ async def test_interrupted_chunk_is_printed_and_stored_before_cancellation(
 
     assert len(agent.printed) == len(agent.memory.messages) == 1
     assert agent.printed[0][0] is agent.memory.messages[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("previous_chunk", [False, True])
+@pytest.mark.parametrize("worker_state", ["queued", "running"])
+async def test_cancellation_preserves_received_chunk_during_compaction(
+    tmp_path,
+    monkeypatch,
+    previous_chunk,
+    worker_state,
+):
+    from swe import output_workers
+    from swe.agents.utils import tool_output_compaction as compaction
+
+    received = _chunk("x" * 4096)
+    chunks = [_chunk("previous"), received] if previous_chunk else [received]
+    agent = _AgentScopeLikeAgent(
+        config=ToolResultCompactConfig(recent_max_bytes=1000),
+        workspace_dir=tmp_path,
+        chunks=chunks,
+    )
+    entered = asyncio.Event()
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    slots = threading.BoundedSemaphore(1)
+    original_work = compaction.run_output_work
+    original_write = compaction._persist_artifact
+    calls = 0
+
+    async def record_work(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == len(chunks):
+            if worker_state == "queued":
+                # Keep capacity occupied until the request is cancelled.
+                slots.acquire()  # pylint: disable=consider-using-with
+                monkeypatch.setattr(output_workers, "_SLOTS", slots)
+            entered.set()
+        return await original_work(*args, **kwargs)
+
+    def blocked_write(*args):
+        started.set()
+        try:
+            assert release.wait(5)
+            return original_write(*args)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(compaction, "run_output_work", record_work)
+    monkeypatch.setattr(compaction, "_persist_artifact", blocked_write)
+    task = asyncio.create_task(
+        agent._acting({"id": "tool-1", "name": "read_file", "input": {}}),
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        if worker_state == "running":
+            while not started.is_set():
+                await asyncio.sleep(0.001)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert len(agent.memory.messages) == 1
+        stored = agent.memory.messages[0]
+        assert stored.content[0]["output"] == received.content
+    finally:
+        release.set()
+        if worker_state == "queued" and entered.is_set():
+            slots.release()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if started.is_set():
+            while not finished.is_set():
+                await asyncio.sleep(0.001)
+    assert agent.memory.messages[0].content[0]["output"] == received.content

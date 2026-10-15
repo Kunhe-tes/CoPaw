@@ -3,6 +3,7 @@ import os
 import asyncio
 import threading
 import signal
+import time
 from contextlib import nullcontext
 from types import SimpleNamespace
 
@@ -481,3 +482,160 @@ async def test_cancelled_close_closes_both_spools(monkeypatch, tmp_path):
         assert all(stream.file is None for stream in spool.streams.values())
     finally:
         await spool.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command_timeout", [False, True])
+async def test_shell_drains_slow_spool_writes_before_formatting(
+    monkeypatch,
+    tmp_path,
+    command_timeout,
+):
+    shell = _prepare(monkeypatch, tmp_path)
+    from swe.agents.tools import shell_output_spool
+    from swe.agents.tool_failure import ToolExecutionError
+
+    original_append = shell_output_spool._StreamBuffer.append
+    original_wait = shell._wait_for_unix_process_exit
+    started = threading.Event()
+    release = threading.Event()
+    draining = asyncio.Event()
+
+    def delayed_append(self, chunk):
+        if self.size == 6 * 4096:
+            started.set()
+            assert release.wait(5)
+        original_append(self, chunk)
+
+    async def wait_for_exit(proc, timeout):
+        await original_wait(proc, timeout)
+        draining.set()
+
+    monkeypatch.setattr(
+        shell_output_spool._StreamBuffer,
+        "append",
+        delayed_append,
+    )
+    monkeypatch.setattr(shell, "_wait_for_unix_process_exit", wait_for_exit)
+    command = "python -c \"import sys; sys.stdout.write('a' * 32768)\""
+    if command_timeout:
+        command += "; sleep 20"
+    with shell_output_spool.bind_shell_output_spool(tmp_path, 512):
+        task = asyncio.create_task(
+            shell.execute_shell_command(command, timeout=1),
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while not started.is_set():
+                assert time.monotonic() < deadline
+                await asyncio.sleep(0.001)
+            if not command_timeout:
+                await asyncio.wait_for(draining.wait(), 5)
+            # Exceed the old one-second pipe-drain limit while a write is live.
+            await asyncio.sleep(2.1 if command_timeout else 1.1)
+        finally:
+            release.set()
+        if command_timeout:
+            with pytest.raises(ToolExecutionError) as caught:
+                await task
+            assert "TimeoutError" in str(caught.value)
+        else:
+            await task
+    artifact = next((tmp_path / "tool_result").glob("*.txt"))
+    text = artifact.read_text()
+    assert text.count("a") >= 32768
+    assert "a" * 32768 in text
+
+
+@pytest.mark.asyncio
+async def test_replaced_spool_directory_returns_full_output(tmp_path):
+    from swe.agents.tools.shell_output_spool import ShellOutputSpool
+    from swe.agents.tools.shell import smart_decode, _format_shell_response
+
+    spool = ShellOutputSpool(
+        tmp_path,
+        512,
+        smart_decode,
+        _format_shell_response,
+    )
+    try:
+        await spool.append("stdout", b"a" * 32768)
+        await spool.append("stderr", b"warning")
+        stdout, stderr = spool.decode_streams("timeout diagnostic")
+        spool.directory.rename(tmp_path / "old_tool_result")
+        spool.directory.write_text("replacement")
+        text, recovered_stderr = spool.prepare_response(
+            0,
+            stdout,
+            stderr,
+            "\nprocess diagnostic",
+        )
+        assert text == (
+            "a" * 32768
+            + "\n[stderr]\nwarning\ntimeout diagnostic\nprocess diagnostic"
+        )
+        assert recovered_stderr == "warning\ntimeout diagnostic"
+        assert spool.directory.read_text() == "replacement"
+    finally:
+        await spool.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command_timeout", [False, True])
+async def test_spool_drain_bounds_wait_for_inherited_pipe(
+    monkeypatch,
+    tmp_path,
+    command_timeout,
+):
+    shell = _prepare(monkeypatch, tmp_path)
+    from swe.agents.tools.shell_output_spool import bind_shell_output_spool
+    from swe.agents.tool_failure import ToolExecutionError
+
+    stdout = asyncio.StreamReader()
+    stdout.feed_data(b"received output")
+    stderr = asyncio.StreamReader()
+    stderr.feed_eof()
+
+    async def process_wait():
+        return 0
+
+    async def create_process(*_args, **_kwargs):
+        return SimpleNamespace(
+            stdout=stdout,
+            stderr=stderr,
+            returncode=0,
+            pid=99999999,
+            wait=process_wait,
+        )
+
+    async def wait_for_exit(*_args, **_kwargs):
+        if command_timeout:
+            raise asyncio.TimeoutError
+
+    async def terminate(*_args, **_kwargs):
+        pass
+
+    monkeypatch.setattr(
+        shell.asyncio,
+        "create_subprocess_shell",
+        create_process,
+    )
+    monkeypatch.setattr(shell, "_wait_for_unix_process_exit", wait_for_exit)
+    monkeypatch.setattr(shell, "_terminate_unix_process_group", terminate)
+    loop = asyncio.get_running_loop()
+    # Model a detached child holding the pipe, with finite test cleanup.
+    close_pipe = loop.call_later(2.5, stdout.feed_eof)
+    started = loop.time()
+    try:
+        with bind_shell_output_spool(tmp_path, 512):
+            if command_timeout:
+                with pytest.raises(ToolExecutionError) as caught:
+                    await shell.execute_shell_command("ignored", timeout=1)
+                assert "received output" in str(caught.value)
+            else:
+                result = await shell.execute_shell_command("ignored")
+                assert result.content[0]["text"] == "received output"
+        assert loop.time() - started < 2
+    finally:
+        close_pipe.cancel()
+        stdout.feed_eof()

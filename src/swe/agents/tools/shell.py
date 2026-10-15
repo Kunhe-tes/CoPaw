@@ -1444,8 +1444,26 @@ async def _execute_unix_subprocess(
     ) -> None:
         if stream is None:
             return
+        loop = asyncio.get_running_loop()
+        drain_remaining = 1.0
         while True:
-            chunk = await stream.read(4096)
+            if spool is None:
+                chunk = await stream.read(4096)
+            else:
+                draining = proc.returncode is not None
+                read_started = loop.time()
+                try:
+                    chunk = await asyncio.wait_for(
+                        stream.read(4096),
+                        timeout=max(0, drain_remaining) if draining else 1,
+                    )
+                except asyncio.TimeoutError:
+                    if proc.returncode is not None:
+                        break
+                    continue
+                if draining:
+                    # Bound pipe reads, excluding worker and emitter waits.
+                    drain_remaining -= loop.time() - read_started
             if not chunk:
                 break
             if spool is None:
@@ -1502,7 +1520,8 @@ async def _execute_unix_subprocess(
                     stderr_task,
                     return_exceptions=True,
                 ),
-                timeout=1,
+                # Readers bound pipe waits separately from spool worker waits.
+                timeout=None if spool is not None else 1,
             )
         except asyncio.TimeoutError:
             pass
@@ -1538,7 +1557,7 @@ async def _execute_unix_subprocess(
         try:
             await asyncio.wait_for(
                 asyncio.gather(*timeout_tasks, return_exceptions=True),
-                timeout=1,
+                timeout=None if spool is not None else 1,
             )
         except asyncio.TimeoutError:
             pass

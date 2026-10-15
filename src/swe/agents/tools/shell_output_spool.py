@@ -401,8 +401,11 @@ class ShellOutputSpool:
             )
             return text, stderr_markers
         except (OSError, ValueError):
-            temporary.unlink(missing_ok=True)
-            artifact.unlink(missing_ok=True)
+            for path in (temporary, artifact):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
             return self._full_response(returncode, diagnostic)
 
     async def aclose(self) -> None:

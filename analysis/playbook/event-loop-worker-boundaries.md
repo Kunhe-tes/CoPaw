@@ -20,6 +20,9 @@
 - 通过 `copy_context()` 传播请求的租户、来源和 tracing 上下文。
 - shield 后的 Future 要消费异常，否则请求取消后工作失败会产生 `Future exception was never retrieved`；正常 await 仍应收到原异常。
 - 输出压缩在 worker 内复制内容，返回 loop 后应用。取消不应用结果；没有变化的内容保持原对象。请求应独占消息内容，不能在 worker 执行时原地修改同一内容。
+- 工具收到 chunk 后，必须在 await 压缩之前更新待持久化消息，避免取消时保存空输出或上一块；压缩仍使用独立临时消息，只有成功返回才替换在线输出。
+- Unix Shell 启用 spool 时，正常结束和命令超时后都必须等待 stdout/stderr reader 及其 append worker 完成，再解码、格式化和关闭文件。进程结束后的 pipe 读取使用累计 1 秒预算，不计入 append worker 和实时回调等待；不能用整个 reader 的超时取消慢写入，也不能无限等待继承 pipe 的脱离进程组子进程。命令执行超时与输出落盘等待是不同阶段。
+- Shell 命令可能在 spooling 开始后将 `tool_result` 目录改成普通文件。artifact 失败清理需逐个容错；`unlink(missing_ok=True)` 不会吞掉 `NotADirectoryError`，清理失败也必须进入完整输出回退。
 - 备份初始化 await 放在任务互斥锁内、409 检查之后；保存任务到启动任务之间没有 await，避免初始化取消留下未启动的 PENDING 任务。TaskStore 原有判忙范围仍是 RUNNING。
 
 ## 验证与解释结果
