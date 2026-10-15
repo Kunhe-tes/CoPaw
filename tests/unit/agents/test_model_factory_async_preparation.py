@@ -460,3 +460,235 @@ async def test_cancelled_preparation_consumes_late_worker_failure(monkeypatch):
         release.set()
         cache.init_executor.shutdown(wait=True)
         loop.set_exception_handler(previous_handler)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider_name",
+    ["openai", "anthropic", "ollama"],
+)
+async def test_real_sdk_tls_preparation_runs_on_worker(
+    monkeypatch,
+    model_boundary,
+    provider_name,
+):
+    import ssl
+    from swe.providers.openai_provider import OpenAIProvider
+    from swe.providers.anthropic_provider import AnthropicProvider
+    from swe.providers.ollama_provider import OllamaProvider
+
+    classes = {
+        "openai": OpenAIProvider,
+        "anthropic": AnthropicProvider,
+        "ollama": OllamaProvider,
+    }
+    provider = classes[provider_name](
+        id=provider_name,
+        name=provider_name,
+        api_key="test-key",
+        base_url="https://example.invalid/v1",
+    )
+    monkeypatch.setattr(
+        model_factory,
+        "_get_model_runtime_configs",
+        lambda *_: (None, None),
+    )
+    main_thread = threading.get_ident()
+    tls_threads = []
+    import anthropic
+    import openai
+
+    sdk = anthropic if provider_name == "anthropic" else openai
+    sdk_class = (
+        sdk.AsyncAnthropic if provider_name == "anthropic" else sdk.AsyncClient
+    )
+    original_init = sdk_class.__init__
+    constructions = []
+
+    def construct(self, *args, **kwargs):
+        constructions.append(threading.get_ident())
+        return original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(sdk_class, "__init__", construct)
+    original = ssl.create_default_context
+
+    def create_context(*args, **kwargs):
+        tls_threads.append(threading.get_ident())
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ssl, "create_default_context", create_context)
+    cache = ProviderRuntimeCache()
+    monkeypatch.setattr(model_factory.ProviderManager, "_runtime_cache", cache)
+    try:
+        prepared = await model_factory.prepare_model_config_async(
+            agent_id="agent-a",
+            model_slot_override=ModelSlotConfig(
+                provider_id=provider_name,
+                model="test-model",
+            ),
+            model_provider_override=provider,
+        )
+        model, _ = model_factory.create_model_and_formatter(
+            prepared_model_config=prepared,
+        )
+        try:
+            assert tls_threads and main_thread not in tls_threads
+            assert constructions == [main_thread]
+            assert model.client.timeout.read == 600
+            assert model.client._client.follow_redirects is True
+            context = model.client._client._transport._pool._ssl_context
+            assert context.verify_mode == ssl.CERT_REQUIRED
+            assert context.check_hostname
+            pool = model.client._client._transport._pool
+            assert (
+                pool._max_connections
+                == sdk.DEFAULT_CONNECTION_LIMITS.max_connections
+            )
+            assert (
+                pool._max_keepalive_connections
+                == sdk.DEFAULT_CONNECTION_LIMITS.max_keepalive_connections
+            )
+        finally:
+            await model.client.close()
+    finally:
+        cache.init_executor.shutdown(wait=True)
+
+
+@pytest.mark.asyncio
+async def test_prepared_tls_respects_cert_environment_and_binding_lifecycle(
+    tmp_path,
+    monkeypatch,
+    model_boundary,
+):
+    import asyncio
+    import certifi
+    import ssl
+    from pathlib import Path
+    from swe.providers.client_tls import (
+        bind_prepared_client_tls,
+        prepared_http_client_kwargs,
+    )
+    from swe.providers.openai_provider import OpenAIProvider
+
+    cert_file = tmp_path / "ca.pem"
+    cert_file.write_bytes(Path(certifi.where()).read_bytes())
+    monkeypatch.setenv("SSL_CERT_FILE", str(cert_file))
+    observed = []
+    original = ssl.create_default_context
+
+    def create_context(*args, **kwargs):
+        observed.append((kwargs.get("cafile"), threading.get_ident()))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ssl, "create_default_context", create_context)
+    monkeypatch.setattr(
+        model_factory,
+        "_get_model_runtime_configs",
+        lambda *_: (None, None),
+    )
+    cache = ProviderRuntimeCache()
+    monkeypatch.setattr(model_factory.ProviderManager, "_runtime_cache", cache)
+    try:
+        prepared = await model_factory.prepare_model_config_async(
+            agent_id="agent-a",
+            model_slot_override=ModelSlotConfig(
+                provider_id="openai",
+                model="test",
+            ),
+            model_provider_override=OpenAIProvider(id="openai", name="openai"),
+        )
+        assert observed == [(str(cert_file), observed[0][1])]
+        assert observed[0][1] != threading.get_ident()
+        assert prepared_http_client_kwargs("openai") == {}
+        with (
+            pytest.raises(ValueError),
+            bind_prepared_client_tls(prepared.tls_context),
+        ):
+            http_client = prepared_http_client_kwargs("openai")["http_client"]
+            raise ValueError("construction failed")
+        assert prepared_http_client_kwargs("openai") == {}
+        http_client.__del__()
+        await asyncio.sleep(0)
+        assert http_client.is_closed
+    finally:
+        cache.init_executor.shutdown(wait=True)
+
+
+@pytest.mark.asyncio
+async def test_async_model_factory_prepares_then_constructs_on_loop(
+    monkeypatch,
+):
+    from unittest.mock import AsyncMock
+
+    snapshot = object()
+    preparation = AsyncMock(return_value=snapshot)
+    construction = MagicMock(return_value=(object(), object()))
+    monkeypatch.setattr(
+        model_factory,
+        "prepare_model_config_async",
+        preparation,
+    )
+    monkeypatch.setattr(
+        model_factory,
+        "create_model_and_formatter",
+        construction,
+    )
+    trace_context = {"trace_id": "trace-a"}
+    result = await model_factory.create_model_and_formatter_async(
+        agent_id="agent-a",
+        trace_context=trace_context,
+    )
+    preparation.assert_awaited_once_with(agent_id="agent-a")
+    construction.assert_called_once_with(
+        agent_id="agent-a",
+        trace_context=trace_context,
+        prepared_model_config=snapshot,
+    )
+    assert result == construction.return_value
+
+
+@pytest.mark.asyncio
+async def test_tls_failure_preserves_model_fallback(
+    monkeypatch,
+    model_boundary,
+):
+    from swe.providers.openai_provider import OpenAIProvider
+
+    monkeypatch.setenv("SSL_CERT_FILE", "/nonexistent/swe-test-ca.pem")
+    monkeypatch.setattr(
+        model_factory,
+        "_get_model_runtime_configs",
+        lambda *_: (None, None),
+    )
+    fallback_model = object()
+    fallback = _Provider(
+        "fallback",
+        ModelRuntimeConfig(),
+        lambda *_: fallback_model,
+    )
+    cache = ProviderRuntimeCache()
+    monkeypatch.setattr(model_factory.ProviderManager, "_runtime_cache", cache)
+    try:
+        prepared = await model_factory.prepare_model_config_async(
+            agent_id="agent-a",
+            model_slot_override=ModelSlotConfig(
+                provider_id="openai",
+                model="test",
+            ),
+            model_provider_override=OpenAIProvider(
+                id="openai",
+                name="openai",
+                api_key="test-key",
+            ),
+            fallback_model_slot=ModelSlotConfig(
+                provider_id="fallback",
+                model="test",
+            ),
+            fallback_model_provider=fallback,
+        )
+        model, _ = model_factory.create_model_and_formatter(
+            prepared_model_config=prepared,
+        )
+        assert model is fallback_model
+    finally:
+        cache.init_executor.shutdown(wait=True)

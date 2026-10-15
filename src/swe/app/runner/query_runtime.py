@@ -21,6 +21,7 @@ from ...agents.hook_runtime.skill_loader import (
 )
 from ...constant import WORKING_DIR
 from ...providers.provider_manager import ProviderManager
+from ...runtime_workers import run_runtime_state_work
 from ..source_system_config.runtime import get_system_prompt_injections
 from .query_contracts import (
     _QueryPreflight,
@@ -287,7 +288,8 @@ async def build_query_runtime_inputs(
     agent_config = (
         preflight.agent_config
         if preflight.agent_config is not None
-        else load_agent_configuration(
+        else await run_runtime_state_work(
+            load_agent_configuration,
             owner.agent_id,
             tenant_id=owner.tenant_id,
         )
@@ -345,7 +347,10 @@ async def build_query_runtime_inputs(
         tenant_hooks=(
             preflight.tenant_hooks
             if preflight.tenant_hooks is not None
-            else load_tenant_hooks(owner.tenant_id)
+            else await run_runtime_state_work(
+                load_tenant_hooks,
+                owner.tenant_id,
+            )
         ),
         hook_overlay=(
             preflight.hook_overlay
@@ -395,23 +400,33 @@ async def finalize_query_runtime(
         prepared_memory_kwargs["prepared_request_memory"] = (
             await prepare_memory(resources.chat.id)
         )
-    agent = owner._create_agent_for_query(
-        agent_config=inputs.agent_config,
-        env_context=resources.env_context,
-        mcp_clients=mcp_clients,
-        request=request,
-        session_id=inputs.session_id,
-        user_id=inputs.user_id,
-        channel=inputs.channel,
-        chat=resources.chat,
-        turn_id=resources.turn_id,
-        hook_overlay=inputs.hook_overlay,
-        auth_token=inputs.auth_token,
-        approved_tool_call=preflight.approved_tool_call,
-        current_user_text=query or get_last_user_text(msgs) or "",
-        workspace_skill_snapshot=workspace_skill_snapshot,
-        prepared_model_config=getattr(inputs, "prepared_model_config", None),
+    agent_kwargs = {
+        "agent_config": inputs.agent_config,
+        "env_context": resources.env_context,
+        "mcp_clients": mcp_clients,
+        "request": request,
+        "session_id": inputs.session_id,
+        "user_id": inputs.user_id,
+        "channel": inputs.channel,
+        "chat": resources.chat,
+        "turn_id": resources.turn_id,
+        "hook_overlay": inputs.hook_overlay,
+        "auth_token": inputs.auth_token,
+        "approved_tool_call": preflight.approved_tool_call,
+        "current_user_text": query or get_last_user_text(msgs) or "",
+        "workspace_skill_snapshot": workspace_skill_snapshot,
+        "prepared_model_config": getattr(
+            inputs,
+            "prepared_model_config",
+            None,
+        ),
         **prepared_memory_kwargs,
+    }
+    create_async = getattr(owner, "_create_agent_for_query_async", None)
+    agent = (
+        await create_async(**agent_kwargs)
+        if callable(create_async)
+        else owner._create_agent_for_query(**agent_kwargs)
     )
     await agent.register_mcp_clients()
     agent.set_console_output_enabled(enabled=False)
@@ -490,6 +505,25 @@ async def prepare_query_runtime(
             mcp_clients=mcp_clients,
         )
         return _RuntimeStartResult(runtime=runtime)
+    except asyncio.CancelledError:
+        if mcp_clients:
+            cleanup = asyncio.create_task(
+                owner._cleanup_query_runtime_mcp_clients(mcp_clients),
+            )
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            try:
+                cleanup.result()
+            except Exception:
+                logger.exception(
+                    "MCP cleanup failed after runtime preparation cancellation",
+                )
+        raise
     except Exception:
         if mcp_clients:
             await owner._cleanup_query_runtime_mcp_clients(mcp_clients)

@@ -25,7 +25,10 @@ from agentscope.tool import Toolkit, ToolResponse
 
 # Pre-import heavy dependencies to avoid first-request latency
 from swe.agents.memory.base_memory_manager import BaseMemoryManager
-from swe.agents.model_factory import create_model_and_formatter
+from swe.agents.model_factory import (
+    create_model_and_formatter,
+    create_model_and_formatter_async,
+)
 from swe.agents.tools import read_file, write_file, edit_file
 from swe.agents.utils import get_swe_token_counter
 from swe.agents.utils.tool_output_compaction import (
@@ -400,6 +403,16 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
             trace_context=trace_context,
         )
 
+    async def _create_execution_model_formatter_async(
+        self,
+        trace_context: dict | None = None,
+    ):
+        self._warn_if_version_mismatch()
+        return await create_model_and_formatter_async(
+            self.agent_id,
+            trace_context=trace_context,
+        )
+
     # ------------------------------------------------------------------
     # Public helpers
     # ------------------------------------------------------------------
@@ -507,7 +520,7 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         if bound_chat_model is None or bound_formatter is None:
             execution_trace_context = capture_current_trace_context()
             execution_model, execution_formatter = (
-                self._create_execution_model_formatter(
+                await self._create_execution_model_formatter_async(
                     trace_context=execution_trace_context,
                 )
             )
@@ -516,7 +529,7 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
             if bound_formatter is None:
                 bound_formatter = execution_formatter
 
-        agent_config = self._load_agent_config()
+        agent_config = await run_runtime_state_work(self._load_agent_config)
         cc = agent_config.running.context_compact
 
         result = await self._reme.compact_memory(
@@ -572,7 +585,7 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         if bound_chat_model is None or bound_formatter is None:
             execution_trace_context = capture_current_trace_context()
             execution_model, execution_formatter = (
-                self._create_execution_model_formatter(
+                await self._create_execution_model_formatter_async(
                     trace_context=execution_trace_context,
                 )
             )
@@ -581,7 +594,7 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
             if bound_formatter is None:
                 bound_formatter = execution_formatter
 
-        agent_config = self._load_agent_config()
+        agent_config = await run_runtime_state_work(self._load_agent_config)
         cc = agent_config.running.context_compact
 
         set_current_workspace_dir(Path(self.working_dir))
@@ -599,7 +612,8 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
             language=agent_config.language,
             max_input_length=agent_config.running.max_input_length,
             compact_ratio=cc.memory_compact_ratio,
-            timezone=load_config().user_timezone or None,
+            timezone=(await run_runtime_state_work(load_config)).user_timezone
+            or None,
             add_thinking_block=cc.compact_with_thinking_block,
         )
 
@@ -851,12 +865,18 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         start_time = time.time()
 
         execution_trace_context = capture_current_trace_context()
-        dream_model, dream_formatter = self._create_execution_model_formatter(
-            trace_context=execution_trace_context,
+        dream_model, dream_formatter = (
+            await self._create_execution_model_formatter_async(
+                trace_context=execution_trace_context,
+            )
         )
 
         # Load agent config with tenant_id for proper scoping
-        agent_config = load_agent_config(self.agent_id, tenant_id=tenant_id)
+        agent_config = await run_runtime_state_work(
+            load_agent_config,
+            self.agent_id,
+            tenant_id=tenant_id,
+        )
 
         set_current_workspace_dir(Path(self.working_dir))
         tool_result_compact = resolve_tool_result_compact_config(

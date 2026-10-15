@@ -189,6 +189,9 @@ class OpenAIProvider(Provider):
         from .kimi_chat_model import KimiChatModel
 
         client_kwargs = {"base_url": self.base_url}
+        from .client_tls import prepared_http_client_kwargs
+
+        client_kwargs.update(prepared_http_client_kwargs("openai"))
 
         if self.base_url == DASHSCOPE_BASE_URL:
             client_kwargs["default_headers"] = {

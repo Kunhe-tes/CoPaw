@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import time
+from ssl import SSLContext
 from dataclasses import dataclass
 from functools import partial
 from typing import Callable, List, Sequence, Tuple, Type, Any, Union, Optional
@@ -46,6 +47,7 @@ from ..constant import (
     DEFAULT_LLM_CRON_MAX_CONCURRENT,
 )
 from ..providers import ProviderManager
+from ..providers.client_tls import bind_prepared_client_tls
 from ..providers.retry_chat_model import (
     RetryChatModel,
     RetryConfig,
@@ -1111,6 +1113,7 @@ class PreparedModelConfig:
     rate_limit_config: RateLimitConfig | None
     fallback_model_slot: Any | None = None
     fallback_model_provider: Any | None = None
+    tls_context: SSLContext | None = None
 
 
 def _prepare_model_config_sync(
@@ -1132,6 +1135,22 @@ def _prepare_model_config_sync(
         agent_id,
         tenant_id,
     )
+    from ..providers.openai_provider import OpenAIProvider
+    from ..providers.anthropic_provider import AnthropicProvider
+
+    tls_context = None
+    if any(
+        isinstance(candidate, (OpenAIProvider, AnthropicProvider))
+        for candidate in (provider, fallback_provider)
+    ):
+        import httpx
+
+        try:
+            tls_context = httpx.create_ssl_context()
+        except (OSError, ValueError) as exc:
+            # Preserve the original SDK construction and fallback behavior
+            # when the configured certificate environment is invalid.
+            logger.warning("Unable to prepare SDK TLS context: %s", exc)
     return PreparedModelConfig(
         tenant_id=tenant_id,
         agent_id=agent_id,
@@ -1141,6 +1160,7 @@ def _prepare_model_config_sync(
         rate_limit_config=copy.deepcopy(rate_limit_config),
         fallback_model_slot=copy.deepcopy(fallback_slot),
         fallback_model_provider=copy.deepcopy(fallback_provider),
+        tls_context=tls_context,
     )
 
 
@@ -1190,6 +1210,19 @@ async def prepare_model_config_async(
         ),
     )
     return await asyncio.shield(wrapped)
+
+
+async def create_model_and_formatter_async(
+    agent_id: str | None = None,
+    trace_context: dict[str, Any] | None = None,
+) -> Tuple[ChatModelBase, FormatterBase]:
+    """Prepare configuration/TLS in a worker, install SDK clients on the loop."""
+    prepared = await prepare_model_config_async(agent_id=agent_id)
+    return create_model_and_formatter(
+        agent_id=agent_id,
+        trace_context=trace_context,
+        prepared_model_config=prepared,
+    )
 
 
 def create_model_and_formatter(
@@ -1253,17 +1286,24 @@ def create_model_and_formatter(
             fallback_model_provider = (
                 prepared_model_config.fallback_model_provider
             )
-        (
-            model_config,
-            model,
-            resolved_slot,
-            resolved_provider,
-        ) = _create_model_with_fallback(
-            model_slot,
-            provider,
-            fallback_model_slot,
-            fallback_model_provider,
-        )
+        with bind_prepared_client_tls(
+            (
+                prepared_model_config.tls_context
+                if prepared_model_config is not None
+                else None
+            ),
+        ):
+            (
+                model_config,
+                model,
+                resolved_slot,
+                resolved_provider,
+            ) = _create_model_with_fallback(
+                model_slot,
+                provider,
+                fallback_model_slot,
+                fallback_model_provider,
+            )
         provider_id = resolved_slot.provider_id
 
         if on_model_config_resolved is not None:
@@ -1346,6 +1386,7 @@ def _create_formatter_instance(
 
 __all__ = [
     "create_model_and_formatter",
+    "create_model_and_formatter_async",
     "prepare_model_config_async",
     "PreparedModelConfig",
 ]

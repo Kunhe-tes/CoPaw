@@ -4024,6 +4024,36 @@ class AgentRunner(Runner):
         )
         return _with_hook_context(env_context, session_start_context), None
 
+    async def _create_agent_for_query_async(self, **kwargs: Any) -> SWEAgent:
+        """Prepare file-derived inputs, then install the Agent on the loop."""
+        from ...agents.prompt import (
+            PromptConfig,
+            bind_prepared_system_prompt,
+            prepare_system_prompt_async,
+        )
+        from ...runtime_workers import run_runtime_state_work
+
+        config = kwargs["agent_config"]
+        files = getattr(config, "system_prompt_files", None)
+        prepared = await prepare_system_prompt_async(
+            Path(self.workspace_dir or WORKING_DIR),
+            list(PromptConfig.DEFAULT_FILES if files is None else files),
+            self.agent_id,
+            bool(
+                getattr(getattr(config, "heartbeat", None), "enabled", False),
+            ),
+        )
+        kwargs["prepared_request_context"] = await run_runtime_state_work(
+            self._prepare_query_agent_context,
+            kwargs,
+        )
+        kwargs["source_tool_versions"] = await run_runtime_state_work(
+            self._source_tool_versions,
+            kwargs["prepared_request_context"],
+        )
+        with bind_prepared_system_prompt(prepared):
+            return self._create_agent_for_query(**kwargs)
+
     def _create_agent_for_query(
         self,
         *,
@@ -4043,8 +4073,57 @@ class AgentRunner(Runner):
         workspace_skill_snapshot: Any | None = None,
         prepared_request_memory: Any = _REQUEST_MEMORY_NOT_PREPARED,
         prepared_model_config: Any | None = None,
+        source_tool_versions: Any | None = None,
+        prepared_request_context: dict[str, Any] | None = None,
     ) -> SWEAgent:
         """创建 SWEAgent，并注入本轮请求上下文。"""
+        if prepared_request_context is None:
+            prepared_request_context = self._prepare_query_agent_context(
+                {
+                    "request": request,
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "channel": channel,
+                    "chat": chat,
+                    "turn_id": turn_id,
+                    "hook_overlay": hook_overlay,
+                    "auth_token": auth_token,
+                    "approved_tool_call": approved_tool_call,
+                    "current_user_text": current_user_text,
+                },
+            )
+        request_context = prepared_request_context
+        if source_tool_versions is None:
+            source_tool_versions = self._source_tool_versions(request_context)
+        return SWEAgent(
+            agent_config=agent_config,
+            env_context=env_context,
+            mcp_clients=mcp_clients,
+            memory_manager=self.memory_manager,
+            prepared_request_memory=prepared_request_memory,
+            prepared_model_config=prepared_model_config,
+            request_context=request_context,
+            workspace_dir=self.workspace_dir,
+            workspace_skill_snapshot=workspace_skill_snapshot,
+            task_tracker=self._task_tracker,
+            source_tool_versions=source_tool_versions,
+        )
+
+    def _prepare_query_agent_context(
+        self,
+        values: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Prepare request-owned context, including expert filesystem work."""
+        request = values.get("request")
+        session_id = values.get("session_id")
+        user_id = values.get("user_id")
+        channel = values.get("channel")
+        chat = values.get("chat")
+        turn_id = values.get("turn_id")
+        hook_overlay = values.get("hook_overlay")
+        auth_token = values.get("auth_token")
+        approved_tool_call = values.get("approved_tool_call")
+        current_user_text = values.get("current_user_text", "")
         request_details = {
             "session_id": session_id,
             "user_id": user_id,
@@ -4086,20 +4165,7 @@ class AgentRunner(Runner):
                 approved_tool_call,
                 ensure_ascii=False,
             )
-        source_tool_versions = self._source_tool_versions(request_context)
-        return SWEAgent(
-            agent_config=agent_config,
-            env_context=env_context,
-            mcp_clients=mcp_clients,
-            memory_manager=self.memory_manager,
-            prepared_request_memory=prepared_request_memory,
-            prepared_model_config=prepared_model_config,
-            request_context=request_context,
-            workspace_dir=self.workspace_dir,
-            workspace_skill_snapshot=workspace_skill_snapshot,
-            task_tracker=self._task_tracker,
-            source_tool_versions=source_tool_versions,
-        )
+        return request_context
 
     def _build_query_request_context(
         self,
@@ -4308,6 +4374,7 @@ class AgentRunner(Runner):
         *,
         runtime: _QueryRuntime,
         goal: Any,
+        prepared_model_config: Any | None = None,
     ) -> SWEAgent:
         """Create an isolated, tool-free Agent for one Goal finalization."""
         source_context = getattr(runtime.agent, "_request_context", {}) or {}
@@ -4330,6 +4397,34 @@ class AgentRunner(Runner):
         }
         request_context["agent_role"] = "main"
         request_context["goal_finalization"] = True
+        if prepared_model_config is None:
+            model_slot_override, model_provider_override = (
+                self._resolve_goal_finalization_model(runtime)
+            )
+        else:
+            model_slot_override = prepared_model_config.model_slot
+            model_provider_override = prepared_model_config.provider
+        return SWEAgent(
+            agent_config=runtime.agent_config,
+            prepared_model_config=prepared_model_config,
+            env_context=None,
+            enable_memory_manager=False,
+            mcp_clients=[],
+            memory_manager=None,
+            request_context=request_context,
+            workspace_dir=self.workspace_dir,
+            task_tracker=None,
+            enable_workspace_skills=False,
+            model_slot_override=model_slot_override,
+            model_provider_override=model_provider_override,
+            system_prompt_override=_GOAL_FINALIZATION_SYSTEM_PROMPT,
+            source_tool_versions=(),
+        )
+
+    def _resolve_goal_finalization_model(
+        self,
+        runtime: _QueryRuntime,
+    ) -> tuple[Any, Any]:
         resolved_slot = (
             getattr(runtime.agent, "_resolved_model_slot", {}) or {}
         )
@@ -4360,20 +4455,59 @@ class AgentRunner(Runner):
             )
             if model_provider_override is None:
                 raise RuntimeError("Goal finalization provider is unavailable")
-        return SWEAgent(
-            agent_config=runtime.agent_config,
-            env_context=None,
-            enable_memory_manager=False,
-            mcp_clients=[],
-            memory_manager=None,
-            request_context=request_context,
-            workspace_dir=self.workspace_dir,
-            task_tracker=None,
-            enable_workspace_skills=False,
-            model_slot_override=model_slot_override,
-            model_provider_override=model_provider_override,
-            system_prompt_override=_GOAL_FINALIZATION_SYSTEM_PROMPT,
-            source_tool_versions=(),
+        return model_slot_override, model_provider_override
+
+    async def _create_goal_finalization_agent_async(
+        self,
+        *,
+        runtime: _QueryRuntime,
+        goal: Any,
+    ) -> SWEAgent:
+        from ...agents.model_factory import prepare_model_config_async
+        from ...runtime_workers import run_runtime_state_work
+
+        slot, provider = await run_runtime_state_work(
+            self._resolve_goal_finalization_model,
+            runtime,
+        )
+        prepared = await prepare_model_config_async(
+            agent_id=runtime.agent_config.id,
+            tenant_id=self.tenant_id,
+            model_slot_override=slot,
+            model_provider_override=provider,
+        )
+        return self._create_goal_finalization_agent(
+            runtime=runtime,
+            goal=goal,
+            prepared_model_config=prepared,
+        )
+
+    async def _create_goal_completion_judge_agent_async(
+        self,
+        *,
+        runtime: _QueryRuntime,
+        goal: Any,
+        approved_tool_call: dict[str, Any] | None = None,
+    ) -> SWEAgent:
+        from ...agents.model_factory import prepare_model_config_async
+        from ...runtime_workers import run_runtime_state_work
+
+        slot, provider = await run_runtime_state_work(
+            self._resolve_goal_completion_judge_model,
+            runtime,
+            goal,
+        )
+        prepared = await prepare_model_config_async(
+            agent_id=runtime.agent_config.id,
+            tenant_id=self.tenant_id,
+            model_slot_override=slot,
+            model_provider_override=provider,
+        )
+        return self._create_goal_completion_judge_agent(
+            runtime=runtime,
+            goal=goal,
+            approved_tool_call=approved_tool_call,
+            prepared_model_config=prepared,
         )
 
     def _create_goal_completion_judge_agent(
@@ -4382,17 +4516,23 @@ class AgentRunner(Runner):
         runtime: _QueryRuntime,
         goal: Any,
         approved_tool_call: dict[str, Any] | None = None,
+        prepared_model_config: Any | None = None,
     ) -> SWEAgent:
         """Create a restricted, frozen-model Agent for Goal completion review."""
         request_context = _build_goal_judge_request_context(
             runtime,
             approved_tool_call,
         )
-        model_slot_override, model_provider_override = (
-            self._resolve_goal_completion_judge_model(runtime, goal)
-        )
+        if prepared_model_config is None:
+            model_slot_override, model_provider_override = (
+                self._resolve_goal_completion_judge_model(runtime, goal)
+            )
+        else:
+            model_slot_override = prepared_model_config.model_slot
+            model_provider_override = prepared_model_config.provider
         return SWEAgent(
             agent_config=runtime.agent_config,
+            prepared_model_config=prepared_model_config,
             env_context=None,
             enable_memory_manager=False,
             mcp_clients=[],
@@ -4517,7 +4657,7 @@ class AgentRunner(Runner):
                     )
                     for criterion_id in criterion_ids
                 }
-            agent = self._create_goal_completion_judge_agent(
+            agent = await self._create_goal_completion_judge_agent_async(
                 runtime=runtime,
                 goal=review_goal,
                 approved_tool_call=approved_tool_call,
@@ -4639,7 +4779,7 @@ class AgentRunner(Runner):
         state = goal.state.value
         previous_msg: Msg | None = None
         try:
-            agent = self._create_goal_finalization_agent(
+            agent = await self._create_goal_finalization_agent_async(
                 runtime=runtime,
                 goal=goal,
             )

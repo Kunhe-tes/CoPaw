@@ -233,7 +233,7 @@ async def test_dream_memory_uses_fresh_execution_model(
         lambda _value: None,
     )
 
-    def fake_create_execution_model_formatter(*, trace_context=None):
+    async def fake_create_execution_model_formatter(*, trace_context=None):
         observed["trace_context"] = trace_context
         return "fresh-model", "fresh-formatter"
 
@@ -243,7 +243,7 @@ async def test_dream_memory_uses_fresh_execution_model(
     manager.working_dir = str(tmp_path)
     manager.summary_toolkit = object()
     manager._warn_if_version_mismatch = lambda: None
-    manager._create_execution_model_formatter = (
+    manager._create_execution_model_formatter_async = (
         fake_create_execution_model_formatter
     )
     manager._get_dream_prompt = lambda language, current_date: "dream prompt"

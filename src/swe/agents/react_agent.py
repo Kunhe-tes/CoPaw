@@ -32,7 +32,9 @@ from .prompt import (
     build_multimodal_hint,
     build_system_prompt_from_working_dir,
     get_active_model_supports_multimodal,
+    system_prompt_file_snapshot,
 )
+from ..runtime_workers import run_runtime_state_work
 from .skills_manager import (
     apply_skill_config_env_overrides,
     ensure_skills_initialized,
@@ -1430,25 +1432,10 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         workspace_dir = Path(
             getattr(self, "_workspace_dir", None) or WORKING_DIR,
         )
-        snapshots: list[tuple[Any, ...]] = []
-        for filename in self._system_prompt_enabled_files():
-            file_path = workspace_dir / filename
-            try:
-                stat_result = file_path.stat()
-            except FileNotFoundError:
-                snapshots.append((filename, "missing"))
-            except OSError as exc:
-                snapshots.append((filename, "error", type(exc).__name__))
-            else:
-                snapshots.append(
-                    (
-                        filename,
-                        "present",
-                        stat_result.st_mtime_ns,
-                        stat_result.st_size,
-                    ),
-                )
-        return tuple(snapshots)
+        return system_prompt_file_snapshot(
+            workspace_dir,
+            self._system_prompt_enabled_files(),
+        )
 
     @staticmethod
     def _source_system_config_prompt_token() -> tuple[Any, ...] | None:
@@ -1726,14 +1713,38 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         Updates both self._sys_prompt and the first system-role
         message stored in self.memory.content (if one exists).
         """
+        self._apply_system_prompt_refresh(
+            *self._prepare_system_prompt_refresh(),
+        )
+
+    async def rebuild_sys_prompt_async(self) -> None:
+        """Compute file-dependent state in a worker, apply only on the loop."""
+        prepared = await run_runtime_state_work(
+            self._prepare_system_prompt_refresh,
+        )
+        self._apply_system_prompt_refresh(*prepared)
+
+    def _prepare_system_prompt_refresh(
+        self,
+    ) -> tuple[str | None, tuple[Any, ...]]:
         current_token = self._current_system_prompt_freshness_token()
         if (
             getattr(self, "_sys_prompt", None) is None
             or getattr(self, "_sys_prompt_freshness_token", None)
             != current_token
         ):
-            self._sys_prompt = self._build_sys_prompt()
+            text = self._build_sys_prompt()
             current_token = self._current_system_prompt_freshness_token()
+            return text, current_token
+        return None, current_token
+
+    def _apply_system_prompt_refresh(
+        self,
+        text: str | None,
+        current_token: tuple[Any, ...],
+    ) -> None:
+        if text is not None:
+            self._sys_prompt = text
             self._sys_prompt_freshness_token = current_token
 
         if self.memory is None:

@@ -395,7 +395,15 @@ async def stream_single_query_attempt(
         skill_freshness_refresh = await owner._refresh_session_skill_freshness(
             runtime=runtime,
         )
-        runtime.agent.rebuild_sys_prompt()
+        rebuild_prompt = getattr(
+            runtime.agent,
+            "rebuild_sys_prompt_async",
+            None,
+        )
+        if callable(rebuild_prompt):
+            await rebuild_prompt()
+        else:
+            runtime.agent.rebuild_sys_prompt()
         plan = await owner._build_turn_plan(
             runtime=runtime,
             request=attempt_input.request,
