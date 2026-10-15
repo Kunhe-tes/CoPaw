@@ -229,10 +229,12 @@ async def test_stalled_response_start_detaches_unstarted_subscription(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("disconnect_after_event", [False, True])
 @pytest.mark.parametrize("busy_tracker", [False, True])
+@pytest.mark.parametrize("blocked_body_send", [False, True])
 async def test_asgi_disconnect_releases_subscription_without_stopping_producer(
     monkeypatch,
     disconnect_after_event,
     busy_tracker,
+    blocked_body_send,
 ):
     tracker = TaskTracker()
     identity = TurnIdentity("chat-disconnect", "message-a", "turn-disconnect")
@@ -269,6 +271,8 @@ async def test_asgi_disconnect_releases_subscription_without_stopping_producer(
                     tracker.lock.release,
                 )
             disconnect.set()
+            if blocked_body_send:
+                await asyncio.Event().wait()
 
     async def receive():
         await disconnect.wait()

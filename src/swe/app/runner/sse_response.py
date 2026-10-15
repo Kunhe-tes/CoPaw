@@ -3,6 +3,7 @@
 
 import asyncio
 
+import anyio
 from starlette.responses import StreamingResponse
 
 
@@ -32,8 +33,13 @@ class ReplayStreamingResponse(StreamingResponse):
             # its source detaches only this subscriber; the producer continues.
             pass
         finally:
-            if self.on_close is not None:
-                await self.on_close()
-            close = getattr(self.body_iterator, "aclose", None)
-            if close is not None:
-                await close()
+            # ASGI disconnect cancels the surrounding AnyIO scope. Cleanup
+            # must survive cancellation even while waiting for a tracker lock.
+            with anyio.CancelScope(shield=True):
+                try:
+                    if self.on_close is not None:
+                        await self.on_close()
+                finally:
+                    close = getattr(self.body_iterator, "aclose", None)
+                    if close is not None:
+                        await close()
