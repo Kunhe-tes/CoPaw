@@ -359,7 +359,7 @@ async def manual_test_draft(
             ),
         ),
         workspace.agent_id,
-        bool(test_config.heartbeat.enabled),
+        bool(getattr(test_config.heartbeat, "enabled", False)),
     )
     with bind_prepared_system_prompt(prepared_prompt):
         agent = SWEAgent(

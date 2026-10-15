@@ -171,7 +171,7 @@ async def test_manual_draft_test_uses_guarded_agent_path(
         def __init__(self):
             self.tools = SimpleNamespace(builtin_tools={})
             self.system_prompt_files = ["AGENTS.md"]
-            self.heartbeat = SimpleNamespace(enabled=False)
+            self.heartbeat = None
 
         def model_copy(self, *, deep: bool):
             assert deep is True
