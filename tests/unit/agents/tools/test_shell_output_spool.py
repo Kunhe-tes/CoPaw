@@ -782,3 +782,277 @@ async def test_spool_drain_bounds_wait_for_inherited_pipe(
     finally:
         close_pipe.cancel()
         stdout.feed_eof()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [b"\n" * 200000, b"\n" * 70000 + b"hello" * 20000 + b"\n" * 70000],
+    ids=["all-newlines", "trimmed"],
+)
+def test_finalization_locates_each_stream_bounds_once(
+    monkeypatch,
+    tmp_path,
+    raw,
+):
+    from swe.agents.tools import shell_output_spool as module
+    from swe.agents.tools.shell import smart_decode, _format_shell_response
+
+    spool = module.ShellOutputSpool(
+        tmp_path,
+        512,
+        smart_decode,
+        _format_shell_response,
+    )
+    calls = []
+    original = module._stream_bounds
+
+    def bounds(reader):
+        calls.append(reader)
+        return original(reader)
+
+    monkeypatch.setattr(module, "_stream_bounds", bounds)
+    try:
+        spool.streams["stdout"].append(raw)
+        stdout, stderr = spool.decode_streams()
+        text, _ = spool.prepare_response(0, stdout, stderr, "")
+        artifacts = list((tmp_path / "tool_result").glob("*.txt"))
+        actual = artifacts[0].read_text() if artifacts else text
+        assert actual == _format_shell_response(0, smart_decode(raw), "")
+        assert len(calls) == 2
+    finally:
+        for stream in spool.streams.values():
+            stream.close()
+
+
+def test_valid_utf8_finalization_uses_bounded_decode_passes(
+    monkeypatch,
+    tmp_path,
+):
+    from swe.agents.tools import shell_output_spool as module
+    from swe.agents.tools.shell import smart_decode, _format_shell_response
+
+    raw = b"a" * (module._COPY_BYTES - 1) + "中🙂".encode() * 20000
+    spool = module.ShellOutputSpool(
+        tmp_path,
+        512,
+        smart_decode,
+        _format_shell_response,
+    )
+    read_bytes = 0
+    original = module._read_chunks
+
+    def chunks(reader, bounds):
+        nonlocal read_bytes
+        for chunk in original(reader, bounds):
+            read_bytes += len(chunk)
+            yield chunk
+
+    monkeypatch.setattr(module, "_read_chunks", chunks)
+    try:
+        spool.streams["stdout"].append(raw)
+        stdout, stderr = spool.decode_streams()
+        spool.prepare_response(0, stdout, stderr, "")
+        assert (
+            next((tmp_path / "tool_result").glob("*.txt")).read_bytes() == raw
+        )
+        assert read_bytes == 2 * len(raw)
+    finally:
+        for stream in spool.streams.values():
+            stream.close()
+
+
+@pytest.mark.parametrize("position", ["start", "middle", "end", "incomplete"])
+@pytest.mark.parametrize("source", ["stdout", "stderr"])
+def test_invalid_utf8_finalization_preserves_whole_locale_decode(
+    monkeypatch,
+    tmp_path,
+    position,
+    source,
+):
+    from swe.agents.tools import shell_output_spool as module
+    from swe.agents.tools.shell import smart_decode, _format_shell_response
+
+    monkeypatch.setattr(
+        module.locale,
+        "getpreferredencoding",
+        lambda _: "cp1252",
+    )
+    prefix = "é".encode() + b"a" * 70000
+    suffix = b"z" * 70000
+    invalid = b"\xe2\x82" if position == "incomplete" else b"\xff"
+    raw = {
+        "start": invalid + prefix + suffix,
+        "middle": prefix + invalid + suffix,
+        "end": prefix + suffix + invalid,
+        "incomplete": prefix + suffix + invalid,
+    }[position]
+    spool = module.ShellOutputSpool(
+        tmp_path,
+        512,
+        smart_decode,
+        _format_shell_response,
+    )
+    try:
+        spool.streams[source].append(b"\n\n" + raw + b"\n\n")
+        spool.streams["stderr" if source == "stdout" else "stdout"].append(
+            b"other stream",
+        )
+        stdout, stderr = spool.decode_streams("TimeoutError suffix")
+        display, markers = spool.prepare_response(
+            9,
+            stdout,
+            stderr,
+            "\ndiagnostic",
+        )
+        expected = (
+            _format_shell_response(
+                9,
+                smart_decode(spool.streams["stdout"].read_all()),
+                smart_decode(spool.streams["stderr"].read_all())
+                + "\nTimeoutError suffix",
+            )
+            + "\ndiagnostic"
+        )
+        assert (
+            next((tmp_path / "tool_result").glob("*.txt")).read_bytes()
+            == expected.encode()
+        )
+        assert len(display.encode()) <= 512
+        assert "TimeoutError suffix" in markers
+        assert not list((tmp_path / "tool_result").glob("*.tmp"))
+    finally:
+        for stream in spool.streams.values():
+            stream.close()
+
+
+def test_whole_locale_decode_preserves_exact_stderr_markers(
+    monkeypatch,
+    tmp_path,
+):
+    from swe.agents.tools import shell_output_spool as module
+    from swe.agents.tools.shell import smart_decode, _format_shell_response
+
+    monkeypatch.setattr(
+        module.locale,
+        "getpreferredencoding",
+        lambda _: "utf-16-le",
+    )
+    raw = b"Killed Read timed out" + b"x" * 140000 + b"\xff\xff"
+    spool = module.ShellOutputSpool(
+        tmp_path,
+        512,
+        smart_decode,
+        _format_shell_response,
+    )
+    try:
+        spool.streams["stderr"].append(raw)
+        stdout, stderr = spool.decode_streams()
+        _, markers = spool.prepare_response(1, stdout, stderr, "")
+        assert markers == ""
+        expected = _format_shell_response(1, "", smart_decode(raw)).encode()
+        assert (
+            next((tmp_path / "tool_result").glob("*.txt")).read_bytes()
+            == expected
+        )
+    finally:
+        for stream in spool.streams.values():
+            stream.close()
+
+
+@pytest.mark.parametrize(
+    ("marker", "expected"),
+    [
+        ("Read timed out", "read timed out"),
+        ("MemoryError", "MemoryError"),
+        ("outside the allowed workspace", "outside the allowed workspace"),
+        ("Outside the allowed workspace", ""),
+    ],
+)
+def test_finalization_scans_markers_across_decode_chunks(
+    monkeypatch,
+    tmp_path,
+    marker,
+    expected,
+):
+    from swe.agents.tools import shell_output_spool as module
+    from swe.agents.tools.shell import smart_decode, _format_shell_response
+
+    monkeypatch.setattr(
+        module.locale,
+        "getpreferredencoding",
+        lambda _: "cp1252",
+    )
+    raw = (
+        b"x" * (module._COPY_BYTES - 3)
+        + marker.encode()
+        + b"x" * 70000
+        + b"\xff"
+    )
+    spool = module.ShellOutputSpool(
+        tmp_path,
+        512,
+        smart_decode,
+        _format_shell_response,
+    )
+    try:
+        spool.streams["stderr"].append(raw)
+        stdout, stderr = spool.decode_streams()
+        _, markers = spool.prepare_response(1, stdout, stderr, "")
+        assert markers == expected
+        assert next((tmp_path / "tool_result").glob("*.txt")).read_bytes() == (
+            _format_shell_response(1, "", smart_decode(raw)).encode()
+        )
+    finally:
+        for stream in spool.streams.values():
+            stream.close()
+
+
+@pytest.mark.parametrize("stage", ["fsync", "rename"])
+def test_finalization_durability_failure_retains_full_response(
+    monkeypatch,
+    tmp_path,
+    stage,
+):
+    from pathlib import Path
+    from swe.agents.tools import shell_output_spool as module
+    from swe.agents.tools.shell import smart_decode, _format_shell_response
+
+    def fail(*_args):
+        raise OSError("durability failure")
+
+    if stage == "fsync":
+        monkeypatch.setattr(module.os, "fsync", fail)
+    else:
+        monkeypatch.setattr(Path, "replace", fail)
+    spool = module.ShellOutputSpool(
+        tmp_path,
+        512,
+        smart_decode,
+        _format_shell_response,
+    )
+    raw = b"a" * 140000
+    try:
+        spool.streams["stdout"].append(raw)
+        spool.streams["stderr"].append(b"warning")
+        stdout, stderr = spool.decode_streams("TimeoutError suffix")
+        text, detail = spool.prepare_response(
+            3,
+            stdout,
+            stderr,
+            "\ndiagnostic",
+        )
+        assert (
+            text
+            == _format_shell_response(
+                3,
+                smart_decode(raw),
+                "warning\nTimeoutError suffix",
+            )
+            + "\ndiagnostic"
+        )
+        assert detail == "warning\nTimeoutError suffix"
+        assert not list((tmp_path / "tool_result").glob("*.txt"))
+        assert not list((tmp_path / "tool_result").glob("*.tmp"))
+    finally:
+        for stream in spool.streams.values():
+            stream.close()

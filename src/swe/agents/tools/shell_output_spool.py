@@ -216,9 +216,11 @@ def _read_chunks(reader: BinaryIO, bounds: tuple[int, int]) -> Iterator[bytes]:
         yield chunk
 
 
-def _decoded_chunks(stream: _StreamBuffer) -> Iterator[str]:
+def _decoded_chunks(
+    stream: _StreamBuffer,
+    bounds: tuple[int, int],
+) -> Iterator[str]:
     reader = stream.reader()
-    bounds = _stream_bounds(reader)
     encoding = "utf-8"
     decoder = codecs.getincrementaldecoder(encoding)()
     try:
@@ -305,10 +307,15 @@ class ShellOutputSpool:
             stderr,
         )
 
-    def _write_stream(self, target: BinaryIO, source: str) -> str:
+    def _write_stream(
+        self,
+        target: BinaryIO,
+        source: str,
+        bounds: tuple[int, int],
+    ) -> str:
         found = set()
         previous = ""
-        for text in _decoded_chunks(self.streams[source]):
+        for text in _decoded_chunks(self.streams[source], bounds):
             target.write(text.encode("utf-8", errors="replace"))
             if source == "stderr":
                 scan = previous + text
@@ -329,14 +336,18 @@ class ShellOutputSpool:
         returncode: int,
         diagnostic: str,
     ):
-        nonempty = {
-            source: _stream_bounds(stream.reader())[1]
-            > _stream_bounds(stream.reader())[0]
+        # Readers and append workers have drained before finalization. Keep
+        # these immutable bounds local to this response, including empty pipes.
+        bounds = {
+            source: _stream_bounds(stream.reader())
             for source, stream in self.streams.items()
+        }
+        nonempty = {
+            source: end > start for source, (start, end) in bounds.items()
         }
         if returncode == 0:
             if nonempty["stdout"]:
-                self._write_stream(target, "stdout")
+                self._write_stream(target, "stdout", bounds["stdout"])
             else:
                 target.write(b"Command executed successfully (no output).")
         else:
@@ -345,11 +356,15 @@ class ShellOutputSpool:
             )
             if nonempty["stdout"]:
                 target.write(b"\n[stdout]\n")
-                self._write_stream(target, "stdout")
+                self._write_stream(target, "stdout", bounds["stdout"])
         stderr_markers = ""
         if nonempty["stderr"] or self.stderr_suffix:
             target.write(b"\n[stderr]\n")
-            stderr_markers = self._write_stream(target, "stderr")
+            stderr_markers = self._write_stream(
+                target,
+                "stderr",
+                bounds["stderr"],
+            )
             if self.stderr_suffix:
                 if nonempty["stderr"]:
                     target.write(b"\n")

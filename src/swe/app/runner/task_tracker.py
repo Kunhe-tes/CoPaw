@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import weakref
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Callable
@@ -18,7 +19,7 @@ from typing import Any, AsyncGenerator, Callable
 from ..answer_turn.models import TurnIdentity
 from .task_progress import TaskProgressPayload, clone_task_progress
 from .tool_output_frames import ToolOutputFrame, bind_tool_output_emitter
-from .sse_replay import ReplayStream, ReplaySubscription
+from .sse_replay import ReplayStream, ReplaySubscription, _await_stream_task
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +226,7 @@ class TaskTracker:
         replay = ReplayStream()
         queue = replay.subscribe()
         tracker_ref = weakref.ref(self)
+        batch_writes = os.environ.get("SWE_SSE_BATCH_WRITES", "0") == "1"
 
         async def _producer() -> None:
             async def _broadcast_sse(sse: str) -> None:
@@ -235,7 +237,10 @@ class TaskTracker:
                     state = tracker._runs.get(identity.chat_id)
                     if state is None or state.closed:
                         return
-                await state.replay.append(sse)
+                if batch_writes:
+                    await state.replay.offer(sse)
+                else:
+                    await state.replay.append(sse)
 
             async def _emit_tool_output_frame(frame: ToolOutputFrame) -> None:
                 await _broadcast_sse(
@@ -258,14 +263,28 @@ class TaskTracker:
                     f"{json.dumps({'error': 'internal server error'})}\n\n",
                 )
             finally:
-                tracker = tracker_ref()
-                if tracker is not None:
-                    async with tracker.lock:
-                        state = tracker._runs.get(identity.chat_id)
-                        if state is not None and state.identity == identity:
-                            tracker._task_progress.pop(identity.chat_id, None)
-                            tracker._runs.pop(identity.chat_id, None)
-                await replay.end()
+
+                async def finish_transport():
+                    try:
+                        await replay.end()
+                    finally:
+                        tracker = tracker_ref()
+                        if tracker is not None:
+                            async with tracker.lock:
+                                state = tracker._runs.get(identity.chat_id)
+                                if (
+                                    state is not None
+                                    and state.identity == identity
+                                ):
+                                    tracker._task_progress.pop(
+                                        identity.chat_id,
+                                        None,
+                                    )
+                                    tracker._runs.pop(identity.chat_id, None)
+
+                await _await_stream_task(
+                    asyncio.create_task(finish_transport()),
+                )
 
         task = asyncio.create_task(_producer())
         self._runs[identity.chat_id] = _RunState(

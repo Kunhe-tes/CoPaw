@@ -25,6 +25,110 @@ def _identity(
 
 
 @pytest.mark.asyncio
+async def test_tail_drain_keeps_transport_discoverable(monkeypatch):
+    from swe.app.runner.sse_replay import ReplayLog
+
+    entered, release = threading.Event(), threading.Event()
+    original = ReplayLog._append_many
+
+    def delayed(log, texts):
+        entered.set()
+        assert release.wait(5)
+        return original(log, texts)
+
+    monkeypatch.setattr(ReplayLog, "_append_many", delayed)
+    tracker = TaskTracker()
+    identity = _identity("tail-drain")
+
+    async def producer(*_args):
+        yield "data: tail\n\n"
+
+    subscriber, _ = await tracker.attach_or_start(identity, {}, producer)
+    try:
+        async with asyncio.timeout(2):
+            while not entered.is_set():
+                await asyncio.sleep(0.001)
+        assert identity.chat_id in tracker._runs
+        release.set()
+        await tracker.wait_all_done(timeout=2)
+        assert await subscriber.get() == "data: tail\n\n"
+        assert await subscriber.get() is None
+    finally:
+        release.set()
+        await tracker.wait_all_done(timeout=2)
+        await subscriber.stream.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batching", [False, True])
+async def test_tracker_batches_only_when_enabled(monkeypatch, batching):
+    monkeypatch.setenv("SWE_SSE_BATCH_WRITES", "1" if batching else "0")
+    tracker = TaskTracker()
+    identity = _identity("burst")
+
+    async def producer(*_args):
+        for index in range(100):
+            yield f"data: {index}\n\n"
+
+    subscriber, _ = await tracker.attach_or_start(identity, {}, producer)
+    budget = subscriber.stream.log.budget
+    before = budget.snapshot()["write_batches"]
+    try:
+        await tracker.wait_all_done(timeout=2)
+        batches = budget.snapshot()["write_batches"] - before
+        assert batches <= 5 if batching else batches == 100
+        assert [await subscriber.get() for _ in range(100)] == [
+            f"data: {i}\n\n" for i in range(100)
+        ]
+        assert await subscriber.get() is None
+    finally:
+        await subscriber.stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_repeated_producer_cancel_still_unregisters_after_tail_drain(
+    monkeypatch,
+):
+    from swe.app.runner.sse_replay import ReplayLog
+
+    monkeypatch.setenv("SWE_SSE_BATCH_WRITES", "1")
+    started, release = threading.Event(), threading.Event()
+    original = ReplayLog._append_many
+
+    def delayed(log, texts):
+        started.set()
+        assert release.wait(5)
+        return original(log, texts)
+
+    monkeypatch.setattr(ReplayLog, "_append_many", delayed)
+    tracker = TaskTracker()
+    identity = _identity("cancel-tail")
+    produced = asyncio.Event()
+
+    async def producer(*_args):
+        yield "data: tail\n\n"
+        produced.set()
+        await asyncio.Event().wait()
+
+    subscriber, _ = await tracker.attach_or_start(identity, {}, producer)
+    task = tracker._runs[identity.chat_id].task
+    try:
+        await produced.wait()
+        task.cancel()
+        async with asyncio.timeout(2):
+            while not started.is_set():
+                await asyncio.sleep(0.001)
+        task.cancel()
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        assert identity.chat_id not in tracker._runs
+        assert await subscriber.get() == "data: tail\n\n"
+    finally:
+        release.set()
+        await subscriber.stream.aclose()
+
+
+@pytest.mark.asyncio
 async def test_attach_uses_shared_replay_without_prefilling_subscriber():
     tracker = TaskTracker()
     identity = _identity("bounded-replay")
