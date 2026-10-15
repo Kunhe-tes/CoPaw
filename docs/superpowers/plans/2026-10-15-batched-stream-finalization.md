@@ -20,7 +20,7 @@ Specs: `docs/superpowers/specs/2026-10-15-sse-batching-design.md`, `docs/superpo
 ## Task 2: SSE 有界 writer 与生命周期
 
 - [x] 先测试 `offer/flush/end` 水位、32 条/64 KiB/5 ms、容量等待、重复取消和失败唤醒，再实现。
-- [x] 保留 `append(text)` await committed；TaskTracker 通过 `SWE_SSE_BATCH_WRITES=1` 选择 `offer`，默认保留等待提交；本地延迟/RSS数据不足以放行默认聚合。`end()` 收敛已接受事件后才移除 `_runs`，所有提前关闭复用同一 drain。
+- [x] 保留 `append(text)` await committed；TaskTracker 按用户决定默认选择 `offer`，`SWE_SSE_BATCH_WRITES=0` 保留等待提交路径；本地延迟/RSS及部署验证边界继续保留。`end()` 收敛已接受事件后才移除 `_runs`，所有提前关闭复用同一 drain。
 - [x] 每轮单 writer/单写任务，pending/in-flight 合计最多64条，普通256KiB、大帧独占；全进程32MiB输入引用预算。释放许可必须晚于实际worker完成。
 - [x] 验证并发 emitter、断连不取消业务、结束尾批次、错误控制、global-budget等待取消。测试沿用 `test_task_tracker.py`、ASGI/replay/coordinator 回归。
 
@@ -45,4 +45,4 @@ Specs: `docs/superpowers/specs/2026-10-15-sse-batching-design.md`, `docs/superpo
 - [ ] Shell 256MiB、并发worker排队/loop/RSS、fallback次数和字节的完整矩阵。
 - [ ] SSE 2000event/s pacing、历史重连压力与真实HTTP客户端应用延迟；最终源码与被测快照的性能复核。
 
-本地17次SSE测量及Shell两轮候选门槛记录均已保留。SSE任务数/吞吐目标达到，但延迟代价使聚合默认关闭；Shell只交付阶段A。
+本地17次SSE测量及Shell两轮候选门槛记录均已保留。SSE任务数/吞吐目标达到，用户决定默认开启聚合，仍记录延迟代价和部署验证缺口；Shell只交付阶段A。

@@ -226,7 +226,7 @@ class TaskTracker:
         replay = ReplayStream()
         queue = replay.subscribe()
         tracker_ref = weakref.ref(self)
-        batch_writes = os.environ.get("SWE_SSE_BATCH_WRITES", "0") == "1"
+        batch_writes = os.environ.get("SWE_SSE_BATCH_WRITES", "1") == "1"
 
         async def _producer() -> None:
             async def _broadcast_sse(sse: str) -> None:

@@ -60,9 +60,19 @@ async def test_tail_drain_keeps_transport_discoverable(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("batching", [False, True])
-async def test_tracker_batches_only_when_enabled(monkeypatch, batching):
-    monkeypatch.setenv("SWE_SSE_BATCH_WRITES", "1" if batching else "0")
+@pytest.mark.parametrize(
+    "setting,batching",
+    [(None, True), ("0", False), ("1", True)],
+)
+async def test_tracker_batching_defaults_on_and_honors_override(
+    monkeypatch,
+    setting,
+    batching,
+):
+    if setting is None:
+        monkeypatch.delenv("SWE_SSE_BATCH_WRITES", raising=False)
+    else:
+        monkeypatch.setenv("SWE_SSE_BATCH_WRITES", setting)
     tracker = TaskTracker()
     identity = _identity("burst")
 

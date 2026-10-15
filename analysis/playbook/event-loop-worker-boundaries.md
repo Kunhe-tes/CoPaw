@@ -87,6 +87,6 @@ Console 以 cursor-v1 协商游标协议，只有协商成功的订阅启用慢�
 
 SSE 已增加连续区间读取与有界 writer：32条/约64KiB/首事件5ms触发，pending+in-flight最多64条/普通256KiB，大帧独占；进程输入引用预算32MiB。兼容 append 仍等待提交，end/close 排空后才结束和移除运行记录；启动前取消和无文案异常也必须唤醒等待者。`pending_memory_bytes`、`write_batches`、`written_records` 可观察输入引用和批量写入。
 
-TaskTracker 默认仍使用等待提交路径，`SWE_SSE_BATCH_WRITES=1` 才启用 offer 聚合（每轮启动时捕获）。原因是本地突发 worker 减少约96%、完成时间改善，但稀疏交付增加约5–6ms，16租户事件p99也上升。Linux/Kubernetes 固定时长延迟/RSS准入尚未通过；不要把吞吐提升当作默认上线依据。见 [方案](../../docs/superpowers/specs/2026-10-15-sse-batching-design.md) 和 [原始测量](../../docs/superpowers/benchmarks/2026-10-15-sse-batching.md)。
+TaskTracker 按用户决定默认启用 offer 聚合，`SWE_SSE_BATCH_WRITES=0` 可关闭（每轮启动时捕获，已运行轮次不变）。本地突发 worker 减少约96%、完成时间改善，但稀疏交付增加约5–6ms，16租户事件p99也上升。Linux/Kubernetes 固定时长延迟/RSS准入尚未通过，默认开关调整不改变这些测量限制。见 [方案](../../docs/superpowers/specs/2026-10-15-sse-batching-design.md) 和 [原始测量](../../docs/superpowers/benchmarks/2026-10-15-sse-batching.md)。
 
 Shell 每流终态边界现只扫描一次，本地全换行8/64MiB最终处理约减半。乐观单遍 UTF-8 候选的非法尾部回退增加约25%～101%，超过20%门槛，已撤回候选并保留原双遍预校验、持久化与完整字符串回退。正常 spool 已分块生成 artifact；失败回退仍可能重建完整字符串，不能宣称整个请求内存有界。见 [方案](../../docs/superpowers/specs/2026-10-15-shell-finalization-design.md) 和 [测量](../../docs/superpowers/benchmarks/2026-10-15-shell-finalization.md)。
