@@ -765,3 +765,24 @@ def resolve_effective_tenant_id(
     避免调用方通过旧名称重新引入 ``default_{source}`` 目录语义。
     """
     return resolve_runtime_tenant_id(tenant_id, source_id) or tenant_id
+
+
+def capture_summary_context_values() -> list[tuple[ContextVar, Any]]:
+    """Snapshot only request identities and routing needed by summaries."""
+    variables: tuple[ContextVar[Any], ...] = (
+        current_tenant_id,
+        current_source_id,
+        current_scope_id,
+        current_user_id,
+        current_workspace_dir,
+        current_file_url_network,
+    )
+    values = [(variable, variable.get()) for variable in variables]
+    headers = current_passthrough_headers.get()
+    values.append(
+        (
+            current_passthrough_headers,
+            dict(headers) if headers is not None else None,
+        ),
+    )
+    return values

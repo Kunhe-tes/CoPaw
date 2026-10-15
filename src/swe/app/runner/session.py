@@ -330,6 +330,7 @@ class SessionExecution:
             return self
         except BaseException:
             self._reset_active_executions()
+            self._state = {}
             if self._scope is not None:
                 await self._scope.__aexit__(None, None, None)
                 self._scope = None
@@ -343,6 +344,7 @@ class SessionExecution:
             self._entered = False
             self._scope = None
             self._reset_active_executions()
+            self._state = {}
 
     async def close(self) -> None:
         """Release this transaction before unrelated query cleanup begins."""

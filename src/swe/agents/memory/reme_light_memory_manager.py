@@ -461,19 +461,17 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         return await self._reme.start()
 
     async def close(self) -> bool:
-        """Close ReMeLight and perform cleanup."""
-        self._warn_if_version_mismatch()
-        logger.info(
-            f"ReMeLightMemoryManager closing: agent_id={self.agent_id}",
-        )
-        if self._reme is None:
-            return True
-        result = await self._reme.close()
-        logger.info(
-            f"ReMeLightMemoryManager closed: "
-            f"agent_id={self.agent_id}, result={result}",
-        )
-        return result
+        """Drain summary work before closing its shared backend."""
+        async with self._summary_close_lock:
+            if self._summary_backend_closed:
+                return True
+            if not await self._close_summary_tasks():
+                return False
+            self._warn_if_version_mismatch()
+            result = True if self._reme is None else await self._reme.close()
+            if result:
+                self._summary_backend_closed = True
+            return result
 
     async def compact_tool_result(
         self,
@@ -582,8 +580,10 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         """Generate a comprehensive summary of the given messages."""
         bound_chat_model = kwargs.pop("_bound_chat_model", None)
         bound_formatter = kwargs.pop("_bound_formatter", None)
+        execution_trace_context = kwargs.pop("_summary_trace_context", None)
         if bound_chat_model is None or bound_formatter is None:
-            execution_trace_context = capture_current_trace_context()
+            if execution_trace_context is None:
+                execution_trace_context = capture_current_trace_context()
             execution_model, execution_formatter = (
                 await self._create_execution_model_formatter_async(
                     trace_context=execution_trace_context,
