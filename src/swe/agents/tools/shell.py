@@ -53,6 +53,7 @@ from .file_io import (
 )
 from ..skill_context_manager import get_skill_context_manager
 from .shell_output_spool import (
+    ShellOutputStorageError,
     create_shell_output_spool,
     get_active_shell_output_spool,
     run_shell_spool_work,
@@ -1419,6 +1420,65 @@ async def _handle_unix_subprocess_timeout(
         return -1, "", stderr_suffix
 
 
+async def _wait_for_spooled_process_exit(
+    proc: asyncio.subprocess.Process,
+    timeout: float,
+    readers: tuple[asyncio.Task[None], ...],
+) -> None:
+    """Notice output storage errors even when the command is still running."""
+    waiter = asyncio.create_task(_wait_for_unix_process_exit(proc, timeout))
+    pending = {waiter, *readers}
+    try:
+        while waiter in pending:
+            done, pending = await asyncio.wait(
+                pending,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done:
+                if task is waiter:
+                    task.result()
+                elif isinstance(task.exception(), ShellOutputStorageError):
+                    task.result()
+    finally:
+        if not waiter.done():
+            waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+
+
+async def _drain_shell_readers(
+    tasks: list[Awaitable[Any]],
+    timeout: float | None,
+) -> None:
+    results = await asyncio.wait_for(
+        asyncio.gather(*tasks, return_exceptions=True),
+        timeout=timeout,
+    )
+    for result in results:
+        if isinstance(result, ShellOutputStorageError):
+            raise result
+
+
+async def _discard_failed_shell_pipes(
+    proc: asyncio.subprocess.Process,
+    readers: tuple[asyncio.Task[None], ...],
+) -> None:
+    """Release failed readers' pipe buffers without collecting their output."""
+
+    async def discard(stream: asyncio.StreamReader) -> None:
+        while await stream.read(_SHELL_SPOOL_BATCH_BYTES):
+            pass
+
+    for stream, reader in zip((proc.stdout, proc.stderr), readers):
+        if stream is None or reader.cancelled():
+            continue
+        if not isinstance(reader.exception(), ShellOutputStorageError):
+            continue
+        try:
+            await asyncio.wait_for(discard(stream), timeout=1)
+        except (asyncio.TimeoutError, OSError):
+            pass
+
+
 async def _execute_unix_subprocess(
     cmd: str,
     working_dir: Path,
@@ -1530,16 +1590,19 @@ async def _execute_unix_subprocess(
     wait_task: asyncio.Task[int] | None = None
 
     try:
-        await _wait_for_unix_process_exit(proc, timeout=timeout)
+        if spool is not None:
+            await _wait_for_spooled_process_exit(
+                proc,
+                timeout,
+                (stdout_task, stderr_task),
+            )
+        else:
+            await _wait_for_unix_process_exit(proc, timeout=timeout)
         returncode = proc.returncode if proc.returncode is not None else -1
         await _terminate_unix_process_group(proc, process_group_id)
         try:
-            await asyncio.wait_for(
-                asyncio.gather(
-                    stdout_task,
-                    stderr_task,
-                    return_exceptions=True,
-                ),
+            await _drain_shell_readers(
+                [stdout_task, stderr_task],
                 # Readers bound pipe waits separately from spool worker waits.
                 timeout=None if spool is not None else 1,
             )
@@ -1556,6 +1619,31 @@ async def _execute_unix_subprocess(
                 stderr_chunks,
             )
         return returncode, stdout_str, stderr_str
+    except ShellOutputStorageError as exc:
+        assert spool is not None
+
+        async def cleanup_storage_failure() -> None:
+            try:
+                await _terminate_unix_process_group(proc, process_group_id)
+            finally:
+                await asyncio.gather(
+                    stdout_task,
+                    stderr_task,
+                    return_exceptions=True,
+                )
+                await _discard_failed_shell_pipes(
+                    proc,
+                    (stdout_task, stderr_task),
+                )
+
+        await await_shell_cleanup_task(
+            asyncio.create_task(cleanup_storage_failure()),
+        )
+        raise await run_shell_spool_work(
+            spool.storage_failure,
+            "write",
+            proc.returncode,
+        ) from exc
     except asyncio.TimeoutError:
         stderr_suffix = (
             f"⚠️ TimeoutError: The command execution exceeded "
@@ -1572,13 +1660,29 @@ async def _execute_unix_subprocess(
             except (ProcessLookupError, OSError):
                 pass
         timeout_tasks: list[Awaitable[Any]] = [stdout_task, stderr_task]
-        wait_task = asyncio.create_task(proc.wait())
-        timeout_tasks.append(wait_task)
+        if spool is None:
+            wait_task = asyncio.create_task(proc.wait())
+            timeout_tasks.append(wait_task)
         try:
-            await asyncio.wait_for(
-                asyncio.gather(*timeout_tasks, return_exceptions=True),
+            await _drain_shell_readers(
+                timeout_tasks,
                 timeout=None if spool is not None else 1,
             )
+        except ShellOutputStorageError as exc:
+            assert spool is not None
+            await await_shell_cleanup_task(
+                asyncio.create_task(
+                    _discard_failed_shell_pipes(
+                        proc,
+                        (stdout_task, stderr_task),
+                    ),
+                ),
+            )
+            raise await run_shell_spool_work(
+                spool.storage_failure,
+                "write",
+                proc.returncode,
+            ) from exc
         except asyncio.TimeoutError:
             pass
         if spool:
@@ -1604,6 +1708,11 @@ async def _execute_unix_subprocess(
                 stderr_task,
                 return_exceptions=True,
             )
+            if spool is not None:
+                await _discard_failed_shell_pipes(
+                    proc,
+                    (stdout_task, stderr_task),
+                )
 
         await await_shell_cleanup_task(
             asyncio.create_task(cleanup_cancelled_process()),
@@ -1674,17 +1783,17 @@ async def execute_shell_command(
     prepared = prepare_shell_command(command, cwd)
     process_limit_policy = resolve_current_process_limit_policy("shell")
     preexec_fn = process_limit_policy.build_preexec_fn()
-    spool = (
-        await run_output_work(
-            create_shell_output_spool,
-            smart_decode,
-            _format_shell_response,
-        )
-        if sys.platform != "win32"
-        else None
-    )
-
+    spool = None
     try:
+        spool = (
+            await run_output_work(
+                create_shell_output_spool,
+                smart_decode,
+                _format_shell_response,
+            )
+            if sys.platform != "win32"
+            else None
+        )
         async with _tenant_shell_execution_slot(process_limit_policy):
             with (
                 prepared.python_runtime_guard,

@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from swe.output_workers import run_output_work
 
+from ..tool_failure import ToolExecutionError
 from ..utils.tool_output_compaction import (
     _historical_artifact_display,
     _truncation_notice,
@@ -46,6 +47,37 @@ _FAILURE_MARKERS = (
     "Cannot allocate memory",
     "Killed",
 )
+
+
+class ShellOutputStorageError(ToolExecutionError):
+    """Output storage failed; full in-memory recovery is forbidden."""
+
+    def __init__(
+        self,
+        stage: str,
+        returncode: int | None = None,
+        preview: str = "",
+    ):
+        self.stage = stage
+        self.returncode = returncode
+        if stage == "initialization":
+            status = "Command was not started."
+        elif stage == "finalization":
+            status = f"Command finished with exit code {returncode}."
+        else:
+            status = "Command stopped after output storage failure."
+            if returncode is not None:
+                status += f" Exit code {returncode}."
+        detail = (
+            f"Shell output storage failed during {stage}. {status} "
+            "Complete output is unavailable. Command was not retried."
+        )
+        if preview:
+            detail += f"\n[partial output preview]\n{preview}"
+        super().__init__(
+            error_type="shell_output_storage_failed",
+            detail=detail,
+        )
 
 
 @contextmanager
@@ -79,9 +111,16 @@ def create_shell_output_spool(
             artifact_reference=reference,
             max_bytes=max_bytes,
         )
-        return ShellOutputSpool(workspace, max_bytes, decode, format_response)
-    except (OSError, ValueError):
-        return None
+        spool = ShellOutputSpool(workspace, max_bytes, decode, format_response)
+        if spool.directory.is_symlink():
+            raise OSError("Shell spool directory is a symlink")
+        spool.directory.mkdir(parents=True, exist_ok=True)
+        # Fail before running the command if temporary storage is unavailable.
+        with tempfile.TemporaryFile(dir=spool.directory, mode="w+b"):
+            pass
+        return spool
+    except (OSError, ValueError) as exc:
+        raise ShellOutputStorageError("initialization") from exc
 
 
 async def run_shell_spool_work(
@@ -126,9 +165,10 @@ class _StreamBuffer:
 
     def append(self, chunk: bytes) -> None:
         with self.lock:
-            previous_size = self.size
+            if self.failed:
+                raise ShellOutputStorageError("write")
             self.size += len(chunk)
-            if self.failed or (
+            if (
                 self.file is None
                 and len(self.buffer) + len(chunk) <= self.limit
             ):
@@ -152,15 +192,9 @@ class _StreamBuffer:
                 written = self.file.write(chunk)
                 if written != len(chunk):
                     raise OSError("Incomplete Shell spool write")
-            except OSError:
-                if self.file is not None:
-                    if not self.buffer:
-                        self.file.seek(0)
-                        self.buffer = bytearray(self.file.read(previous_size))
-                    self.file.close()
-                    self.file = None
-                self.buffer.extend(chunk)
+            except OSError as exc:
                 self.failed = True
+                raise ShellOutputStorageError("write") from exc
 
     def read_all(self) -> bytes:
         with self.lock:
@@ -278,6 +312,8 @@ class ShellOutputSpool:
 
     def decode_streams(self, stderr_suffix: str = "") -> tuple[str, str]:
         self.stderr_suffix = stderr_suffix
+        if any(stream.failed for stream in self.streams.values()):
+            raise self.storage_failure("write")
         output = [
             self.decode(stream.read_all()) if stream.file is None else ""
             for stream in self.streams.values()
@@ -288,24 +324,30 @@ class ShellOutputSpool:
             )
         return output[0], output[1]
 
-    def _full_response(
+    def storage_failure(
         self,
-        returncode: int,
-        diagnostic: str,
-    ) -> tuple[str, str]:
-        stdout, stderr = [
-            self.decode(stream.read_all()) for stream in self.streams.values()
-        ]
-        if self.stderr_suffix:
-            stderr = (
-                f"{stderr}\n{self.stderr_suffix}"
-                if stderr
-                else self.stderr_suffix
-            )
-        return (
-            self.format_response(returncode, stdout, stderr) + diagnostic,
-            stderr,
-        )
+        stage: str,
+        returncode: int | None = None,
+    ) -> ShellOutputStorageError:
+        """Build a bounded, best-effort preview without complete-output reads."""
+        preview = []
+        limit = max(0, self.max_bytes // len(self.streams))
+        for source, stream in self.streams.items():
+            try:
+                with stream.lock:
+                    raw = (
+                        bytes(stream.buffer[:limit])
+                        if stream.buffer
+                        else stream.reader().read(limit)
+                    )
+                text = self.decode(raw).encode("utf-8", errors="replace")
+                text = text[:limit].decode("utf-8", errors="ignore")
+                if text:
+                    preview.append(f"[{source}]\n{text}")
+            except (OSError, ValueError, LookupError):
+                # Losing the preview must not prevent the storage error report.
+                continue
+        return ShellOutputStorageError(stage, returncode, "\n".join(preview))
 
     def _write_stream(
         self,
@@ -380,6 +422,8 @@ class ShellOutputSpool:
         stderr: str,
         diagnostic: str,
     ) -> tuple[str, str]:
+        if any(stream.failed for stream in self.streams.values()):
+            raise self.storage_failure("write", returncode)
         if not any(
             stream.file is not None for stream in self.streams.values()
         ):
@@ -415,13 +459,13 @@ class ShellOutputSpool:
                 f"tool_result/{artifact.name}",
             )
             return text, stderr_markers
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
             for path in (temporary, artifact):
                 try:
                     path.unlink(missing_ok=True)
                 except OSError:
                     pass
-            return self._full_response(returncode, diagnostic)
+            raise self.storage_failure("finalization", returncode) from exc
 
     async def aclose(self) -> None:
         def close_all() -> None:

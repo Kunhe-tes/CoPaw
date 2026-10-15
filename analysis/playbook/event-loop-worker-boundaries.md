@@ -22,7 +22,7 @@
 - 输出压缩在 worker 内复制内容，返回 loop 后应用。取消不应用结果；没有变化的内容保持原对象。请求应独占消息内容，不能在 worker 执行时原地修改同一内容。
 - 工具收到 chunk 后，必须在 await 压缩之前更新待持久化消息，避免取消时保存空输出或上一块；压缩仍使用独立临时消息，只有成功返回才替换在线输出。
 - Unix Shell 启用 spool 时，正常结束和命令超时后都必须等待 stdout/stderr reader 及其 append worker 完成，再解码、格式化和关闭文件。进程结束后的 pipe 读取使用累计 1 秒预算，不计入 append worker 和实时回调等待；不能用整个 reader 的超时取消慢写入，也不能无限等待继承 pipe 的脱离进程组子进程。命令执行超时与输出落盘等待是不同阶段。
-- Shell 命令可能在 spooling 开始后将 `tool_result` 目录改成普通文件。artifact 失败清理需逐个容错；`unlink(missing_ok=True)` 不会吞掉 `NotADirectoryError`，清理失败也必须进入完整输出回退。
+- Shell 命令可能在 spooling 开始后将 `tool_result` 目录改成普通文件。artifact 失败清理需逐个容错；`unlink(missing_ok=True)` 不会吞掉 `NotADirectoryError`，清理失败也必须报告 `shell_output_storage_failed`，不得读回完整输出。
 - 备份初始化 await 放在任务互斥锁内、409 检查之后；保存任务到启动任务之间没有 await，避免初始化取消留下未启动的 PENDING 任务。TaskStore 原有判忙范围仍是 RUNNING。
 
 ## 验证与解释结果
@@ -37,7 +37,7 @@ worker 可以降低同步 I/O 对 loop 的阻塞，但线程中的 Python CPU �
 
 清理常量为 `_CLEANUP_INTERVAL_SECONDS=300`、`_CLEANUP_MAX_ENTRIES=128`，按目录与 retention_days 隔离；超出记录容量的冷目录可能提前重扫。显式同步清理不节流。
 
-Unix Shell 在启用工具压缩的调用上下文使用有限缓冲与流式 spool，完整格式化 artifact 复用 canonical 截断引用。每条 pipe 原始缓冲最多 budget，另计 pipe、64 KiB 解码缓冲和其他对象开销；Windows、未启用压缩、磁盘失败回退仍为全输出。取消后必须等待真实 spool worker 结束再关闭文件，重复取消也遵守此规则。
+Unix Shell 在启用工具压缩的调用上下文使用有限缓冲与流式 spool，完整格式化 artifact 复用 canonical 截断引用。每条 pipe 原始缓冲最多 budget，另计 pipe、64 KiB 解码缓冲和其他对象开销；Windows、未启用压缩仍为全输出；已启用 Unix spool 的存储失败按下述严格策略处理。取消后必须等待真实 spool worker 结束再关闭文件，重复取消也遵守此规则。
 
 checkpoint 绑定在 Chat 锁内只读 epoch；record/events 的损坏校验由完整状态消费者执行，写入/fsync 和持久化保证保留。runtime-state 使用独立 8 线程预算，避免默认 executor 饱和阻塞状态读取。SSE 已由下述共享日志替代历史入队，消费每 64 条让出 loop。
 
@@ -89,7 +89,7 @@ SSE 已增加连续区间读取与有界 writer：32条/约64KiB/首事件5ms触
 
 TaskTracker 按用户决定默认启用 offer 聚合，`SWE_SSE_BATCH_WRITES=0` 可关闭（每轮启动时捕获，已运行轮次不变）。本地突发 worker 减少约96%、完成时间改善，但稀疏交付增加约5–6ms，16租户事件p99也上升。Linux/Kubernetes 固定时长延迟/RSS准入尚未通过，默认开关调整不改变这些测量限制。见 [方案](../../docs/superpowers/specs/2026-10-15-sse-batching-design.md) 和 [原始测量](../../docs/superpowers/benchmarks/2026-10-15-sse-batching.md)。
 
-Shell 每流终态边界现只扫描一次，本地全换行8/64MiB最终处理约减半。乐观单遍 UTF-8 候选的非法尾部回退增加约25%～101%，超过20%门槛，已撤回候选并保留原双遍预校验、持久化与完整字符串回退。正常 spool 已分块生成 artifact；失败回退仍可能重建完整字符串，不能宣称整个请求内存有界。见 [方案](../../docs/superpowers/specs/2026-10-15-shell-finalization-design.md) 和 [测量](../../docs/superpowers/benchmarks/2026-10-15-shell-finalization.md)。
+Shell 每流终态边界现只扫描一次，本地全换行8/64MiB最终处理约减半。乐观单遍 UTF-8 候选的非法尾部回退增加约25%～101%，超过20%门槛，已撤回候选并保留原双遍预校验与持久化。正常 spool 已分块生成 artifact；完整字符串回退已由下述严格存储失败策略取代，仍不能把展示预算作为整个请求的内存上限。见 [方案](../../docs/superpowers/specs/2026-10-15-shell-finalization-design.md) 和 [测量](../../docs/superpowers/benchmarks/2026-10-15-shell-finalization.md)。
 
 ## SSE 分阶段延迟指标
 
@@ -121,3 +121,11 @@ OpenAI 连接检查、模型列表/单模型检查、图片/视频探测使用 `
 本机单次 cProfile 显示 10 个基础工具注册约 15ms，主要在 SDK 签名/文档解析和 Pydantic Schema 生成。这只是定位探针，无网络，使用测试 tracing fake；没有并发压测或生产 p99 收益结论。模型 token/tracing/retry 包装的构造只做字段绑定，没有发现构造期间配置或网络 I/O，因此保持 loop 安装。
 
 TaskTracker 的普通 SSE 与工具实时输出共用生产者计数，每连续发布 64 条主动让出 loop；容量背压仍单独生效，顺序不变。实时 Shell 仍按最多 4KiB pipe chunk 处理，展示帧受字节/行预算限制；小帧 JSON 编码保留在 loop，避免每帧 worker 切换。共享日志只在批次完成时通知最多 8 个订阅者，没有按订阅者复制 payload。本轮不扩大到其他 Provider、Windows 或压测。实施记录见 [计划](../../docs/superpowers/plans/2026-10-15-openai-loop-followups.md)。
+
+## Shell 严格存储失败策略
+
+已启用 spool 的 Unix/Linux 调用禁止完整输出内存回退，错误类型统一为 `shell_output_storage_failed`。初始化会在命令启动前检查目录并试建临时文件；失败时命令未运行。写入失败（含短写）后 stream 进入失败终态，拒绝追加，立即终止进程组，等待 reader 和真实 worker 完成。失败 reader 的剩余管道数据按固定块丢弃、限时排空，避免未读管道阻止进程资源释放；重复取消仍等待清理。
+
+最终 artifact 创建、写入、flush/fsync、rename 或展示读取失败时保留命令真实退出码，逐个清理本次不完整文件，再报告存储失败。错误只带有限的最佳努力预览，不读取完整输出，不返回无效 artifact 引用，不重跑命令，也不撤销命令已经发生的副作用。预览内容按展示预算在 stdout/stderr 间分配，另有固定错误文案开销；预览读取或解码失败可省略。
+
+小输出仍使用有限内存；Windows 和未绑定 spool 的路径维持原行为。初始化检查不能保证后续磁盘仍可写，所以执行期和最终阶段都必须保留失败处理。实现与验证见 [实施记录](../../docs/superpowers/plans/2026-10-15-strict-shell-output-storage.md)。
