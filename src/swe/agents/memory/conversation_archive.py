@@ -841,6 +841,10 @@ class ConversationArchiveStore:
                 raise ValueError("Export destination must not exist")
             storage = CheckpointStorageV2(self.path_for(canonical))
             storage.check_writable()
+            if not storage.exists:
+                raise ValueError(
+                    "Checkpoint export requires a version 2 journal",
+                )
             head = storage.head()
             self._validate_archive_metadata(
                 storage.chat_dir,

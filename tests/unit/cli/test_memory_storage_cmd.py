@@ -107,6 +107,51 @@ def test_journal_commands_default_to_preview(tmp_path):
     assert output.is_dir()
 
 
+def test_journal_legacy_export_rejected_without_quarantine(
+    tmp_path,
+    monkeypatch,
+):
+    from swe.agents.memory.chat_checkpoint import CheckpointEvent
+    from swe.agents.memory.conversation_archive import ConversationArchiveStore
+
+    monkeypatch.delenv("SWE_CHECKPOINT_V2_TENANTS", raising=False)
+    dialog = tmp_path / "dialog"
+    store = ConversationArchiveStore(dialog, cursor_secret=b"test")
+    chat_id = "11111111-1111-1111-1111-111111111111"
+    store._append_checkpoint_event(
+        chat_id,
+        CheckpointEvent.new(
+            sequence=1,
+            epoch=1,
+            type="message_added",
+            facts={"message_id": "first", "role": "user"},
+            source_refs=("message:first",),
+        ),
+    )
+    destination = tmp_path / "legacy"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "memory-storage",
+            "journal",
+            "--dialog-root",
+            str(dialog),
+            "--chat-id",
+            chat_id,
+            "export",
+            "--destination",
+            str(destination),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "version 2" in result.output
+    assert not (
+        store.path_for(chat_id) / "journal-v2-quarantine.json"
+    ).exists()
+    assert not destination.exists()
+
+
 def test_corrupt_session_is_not_replaced_by_migration(tmp_path):
     source = tmp_path / "broken.json"
     source.write_text('{"turn_states":')
