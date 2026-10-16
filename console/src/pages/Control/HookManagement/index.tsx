@@ -153,7 +153,9 @@ function normalizeCommandShells(config: HookConfigDraft): HookConfigDraft {
         groups?.map((group) => ({
           ...group,
           hooks: group.hooks.map((handler) =>
-            handler.type === "command" ? { ...handler, shell: "bash" } : handler,
+            handler.type === "command"
+              ? { ...handler, shell: "bash" }
+              : handler,
           ),
         })),
       ]),
@@ -1188,7 +1190,7 @@ function HookManagementPage() {
           if (!distributing) setDistributionOpen(false);
         }}
         onOk={() => void distribute()}
-        okText="开始分发"
+        okText="分发并启用"
         okButtonProps={{
           disabled:
             distributionGroupIds.length === 0 ||
@@ -1200,6 +1202,10 @@ function HookManagementPage() {
         width={760}
       >
         <div className={styles.distributionContent}>
+          <p>
+            分发后将开启目标 Default Agent 的 Hook
+            总开关，目标已有分组也会按规则参与执行。
+          </p>
           <section className={styles.distributionSection}>
             <h3>选择 Matcher Group</h3>
             <div className={styles.distributionGroupList}>

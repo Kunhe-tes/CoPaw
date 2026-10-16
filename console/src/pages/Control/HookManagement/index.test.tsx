@@ -547,7 +547,12 @@ describe("HookManagementPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: "分发 Hook" }));
     fireEvent.click(screen.getByLabelText("选择 tool-guards"));
     fireEvent.click(screen.getByRole("button", { name: "选择目标租户" }));
-    fireEvent.click(screen.getByRole("button", { name: "开始分发" }));
+    expect(
+      screen.getByText(
+        "分发后将开启目标 Default Agent 的 Hook 总开关，目标已有分组也会按规则参与执行。",
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "分发并启用" }));
 
     await waitFor(() =>
       expect(mocks.distributeToDefaultAgents).toHaveBeenCalledWith({

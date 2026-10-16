@@ -651,6 +651,7 @@ class HookManagementService:
         payload: HookDistributionPayload,
     ) -> dict[str, Any]:
         merged_hooks = copy.deepcopy(target_hooks)
+        merged_hooks["enabled"] = True
         selected_groups = {
             group["id"]: group
             for groups in payload.groups_by_event.values()

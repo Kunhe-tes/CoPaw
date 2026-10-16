@@ -674,7 +674,7 @@ async def test_distribution_merges_selected_groups_and_copies_scripts(
 
     target_hooks = target.get_configuration().hooks
     groups = target_hooks["events"]["PreToolUse"]
-    assert target_hooks["enabled"] is False
+    assert target_hooks["enabled"] is True
     assert [group["id"] for group in groups] == [
         "replace-group",
         "preserved-group",
