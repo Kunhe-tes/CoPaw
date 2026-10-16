@@ -4,7 +4,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -247,6 +247,53 @@ async def test_shutdown_returns_when_writer_cancellation_cleanup_stalls(
             await asyncio.wait_for(store_closed.wait(), 0.2)
         else:
             await asyncio.gather(manager.close(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close_manager", [False, True])
+async def test_shutdown_logs_cleanup_failure_during_cancellation_grace(
+    monkeypatch,
+    close_manager,
+):
+    from swe.tracing.writer import SpanWriter
+
+    started = asyncio.Event()
+    failure = OSError("writer cancellation cleanup failed")
+    log = MagicMock()
+
+    async def failing_cleanup(_self):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise failure
+
+    monkeypatch.setattr(SpanWriter, "_run", failing_cleanup)
+    monkeypatch.setattr("swe.tracing.writer.logger", log)
+    manager, _db, trace_id = await new_manager(shutdown_timeout=0.02)
+    manager.store.close = AsyncMock()
+    await emit(manager, trace_id)
+    await started.wait()
+    close = manager.close if close_manager else manager._writer.close
+    try:
+        with pytest.raises(TimeoutError, match="unconfirmed"):
+            await close()
+        assert manager._writer.task.done()
+        assert manager._pending_spans
+        failures = [
+            call.kwargs["exc_info"]
+            for call in log.error.call_args_list
+            if "exc_info" in call.kwargs
+        ]
+        assert len(failures) == 1
+        assert failures[0][0] is OSError
+        assert failures[0][1] is failure
+        assert failures[0][2] is failure.__traceback__
+        if close_manager:
+            manager.store.close.assert_awaited_once()
+    finally:
+        await asyncio.gather(manager.close(), return_exceptions=True)
+        await asyncio.gather(manager._writer.task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

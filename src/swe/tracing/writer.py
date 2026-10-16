@@ -164,10 +164,18 @@ class SpanWriter:
         except asyncio.TimeoutError as exc:
             self.task.cancel()
             # wait_for(task) would itself wait for cancellation indefinitely.
-            await asyncio.wait(
+            done, _ = await asyncio.wait(
                 {self.task},
                 timeout=min(self.config.shutdown_timeout, 1.0),
             )
+            for task in done:
+                if not task.cancelled():
+                    error = task.exception()
+                    if error is not None:
+                        logger.error(
+                            "Tracing writer failed during cancellation cleanup",
+                            exc_info=(type(error), error, error.__traceback__),
+                        )
             message = (
                 f"Tracing shutdown timed out: {len(self._entries)} "
                 f"unconfirmed spans ({self._bytes} estimated bytes)"

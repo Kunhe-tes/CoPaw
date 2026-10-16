@@ -49,3 +49,10 @@
 - Deferred store closure when the writer remains active, so pool cleanup cannot repeat the same indefinite wait. Storage closes after actual writer exit; late failures are logged.
 - Regression checks cover bounded return, retained pending data, no premature store close and eventual store closure after cancellation cleanup is released.
 - Validation: 287 affected tests passed in 15.03 seconds; both new cases passed again after formatting; changed-file pre-commit checks all passed. GitNexus staged change detection was run; its CRITICAL result still contains unrelated processes, so the source diff was also checked directly.
+
+## Review follow-up: cancellation cleanup exceptions
+
+- Reproduced missing cleanup-exception diagnostics for both direct writer close and manager close when the writer raises an ordinary exception within the cancellation grace.
+- Consume exceptions from the completed set returned by `asyncio.wait`, skipping cancelled tasks, and log the original exception with its traceback. Preserve the final `TimeoutError` and unconfirmed entries.
+- Regression cases verify error identity/traceback, timeout outcome and storage closure through the completed-task manager path.
+- Validation: all 249 tracing tests passed in 11.68 seconds; the 39 lifecycle/budget/transaction-seam cases also passed, and changed-file pre-commit checks passed. Existing unrelated working-tree changes are excluded from this fix.

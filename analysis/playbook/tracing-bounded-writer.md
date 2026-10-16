@@ -32,6 +32,7 @@ close 停止接纳、唤醒等待容量的生产者，然后等待排空。manag
 2. `Tracing writes remain unconfirmed`：确认屏障超时；检查数据库可用性、超大 payload 和前方失败批次。超时不等于数据库一定未提交。
 3. `Tracing shutdown timed out: ... unconfirmed spans`：排空未完成，关闭向上抛出 `TimeoutError`；不要把此日志解释为正常落库完成。
 4. `Failed to roll back cancelled transaction`：aiomysql 可能在取消查询后已关闭连接，rollback 再次失败。数据库适配器必须保留原 `CancelledError`，否则 writer 会误判为可重试错误，使关闭期限失效。
+5. `Tracing writer failed during cancellation cleanup`：writer 在取消宽限期内以异常退出。close 会读取任务异常并记录原 traceback，最终仍向调用方报告关闭超时及未确认数量；不能只调用 `asyncio.wait` 而不消费完成任务的异常。宽限期之后退出的异常由 manager 的延后关闭任务记录。
 
 持续非法 payload 或永久数据库错误会阻塞后续批次并最终触发背压/超时；本轮没有新增丢弃、死信或磁盘补偿策略。JSON 构造、深拷贝和 aiomysql 参数转义仍消耗 loop CPU，分块只限制普通批次工作量；单条超大数据仍可能产生长停顿。数据库迁移保持暂停。
 
