@@ -259,8 +259,10 @@ class ConnectionPool:
         # replacement connection nor reconnect may assume its capacity is free.
         pending = tuple(entry.pending)
         try:
-            # Uncertain connections must close their socket before pending I/O.
-            if entry.usable:
+            # Pending I/O can still own the socket, so force it closed first.
+            if pending:
+                await entry.connection.shutdown()
+            else:
                 try:
                     await entry.connection.close()
                 except asyncio.CancelledError:
@@ -268,8 +270,6 @@ class ConnectionPool:
                     raise
                 except Exception:
                     await entry.connection.shutdown()
-            else:
-                await entry.connection.shutdown()
         finally:
             # Do not release a slot while cancellation-resistant I/O still owns it.
             if pending:

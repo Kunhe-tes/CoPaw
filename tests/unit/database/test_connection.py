@@ -436,6 +436,9 @@ async def test_shutdown_failure_quarantines_slot_and_refuses_reconnect(db):
     await db.execute("QUERY")
     conn = Connection.instances[0]
     conn.ping = AsyncMock(side_effect=ConnectionError("lost socket"))
+    conn.close = AsyncMock(
+        side_effect=RuntimeError("prepared cursor close failed"),
+    )
     conn.shutdown = AsyncMock(side_effect=RuntimeError("shutdown unconfirmed"))
     with pytest.raises(TimeoutError):
         await db.execute("NEXT")
@@ -448,8 +451,8 @@ async def test_shutdown_failure_quarantines_slot_and_refuses_reconnect(db):
 
 @pytest.mark.asyncio
 async def test_close_failure_falls_back_to_shutdown_and_releases_slot(db):
-    entry = await db._pool.acquire()
-    conn = entry.connection
+    await db.execute("QUERY")
+    conn = Connection.instances[0]
 
     async def shutdown():
         conn.closed = True
@@ -459,11 +462,13 @@ async def test_close_failure_falls_back_to_shutdown_and_releases_slot(db):
     )
     conn.shutdown = AsyncMock(side_effect=shutdown)
 
-    await db._pool.discard(entry)
+    await db.close()
 
     assert conn.closed
+    conn.close.assert_awaited_once()
     conn.shutdown.assert_awaited_once()
     assert not db._pool._entries
+    await db.connect()
     assert await db.execute("NEXT") == 2
     assert len(Connection.instances) == 2
 
