@@ -43,6 +43,8 @@
 
 2026-10-16：本地双进程、独立合成数据迁移/回退及优化前`ddb683634`代码读写演练已通过，76项专项测试通过；[验收报告](../../../docs/superpowers/specs/2026-10-16-memory-storage-verification-report.md)记录完整摘要。用户确认当前没有Pod，因此真实两Pod/NAS、旧writer退出与部署灰度门禁仍未完成，6.3继续保持未勾选。
 
+真实历史副本补充：17个session与4份events-only日志共21个样本完成脱敏迁移/导出及旧源码读回追加，380个原文件hash未变；[报告](../../../docs/superpowers/specs/2026-10-16-memory-history-rehearsal-report.md)记录本地耗时、内存和文件数量。样本未触发冷turn或多分段，不能据此认定长会话收益，真实NAS与灰度门禁仍未完成。
+
 本文件记录实际实施与验收状态；不自动部署。生产门禁单列于6.3。
 
 

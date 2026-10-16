@@ -54,6 +54,8 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 
 每次验证使用唯一、全新共享测试子目录，不直接使用用户 session 目录；失败后保留现场，下一次换新目录。两份脚本 JSON 及 Pod 节点、镜像摘要、PVC/StorageClass 都须留档，单机两个进程不算两 Pod NAS 通过。2026-10-16 本地 76 项测试、迁移/旧格式导出及 `ddb683634` 旧源码继续写入已通过，详见[本地验收报告](../../docs/superpowers/specs/2026-10-16-memory-storage-verification-report.md)；真实 NAS 门禁仍未执行。
 
+真实历史副本入口为 `scripts/rehearse_memory_history.py`，源目录只读、输出目录必须全新且在源目录外，原始数据和私有指纹不得入库。2026-10-16 已完成 17 个 session、4 份 events-only 日志的脱敏迁移/导出及旧源码追加，380 个源文件 hash 未变化；[历史副本报告](../../docs/superpowers/specs/2026-10-16-memory-history-rehearsal-report.md)同时记录耗时、Python/RSS 峰值和文件数。样本最多 3 个 turn、77 条事件，不能把该结果当作长会话冷存储收益或真实 NAS 验收。
+
 按问题类型给出优先查看的路径，减少无效搜索。
 
 ## Shell 子进程 / Python runtime guard / `/opt/.swe`
