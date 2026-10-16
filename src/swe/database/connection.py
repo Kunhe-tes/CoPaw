@@ -4,6 +4,7 @@
 Provides async connection pool management for MySQL-compatible databases.
 """
 
+import asyncio
 import logging
 from contextvars import ContextVar
 from contextlib import asynccontextmanager
@@ -125,6 +126,15 @@ class DatabaseConnection:
             try:
                 await conn.begin()
                 yield conn
+            except asyncio.CancelledError:
+                try:
+                    await conn.rollback()
+                except Exception:
+                    logger.warning(
+                        "Failed to roll back cancelled transaction",
+                        exc_info=True,
+                    )
+                raise
             except Exception:
                 await conn.rollback()
                 raise

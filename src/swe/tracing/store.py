@@ -455,7 +455,7 @@ class TraceStore:
             spans: List of spans to create
 
         Returns:
-            Number of rows actually inserted
+            Number of spans confirmed, including idempotent retries
         """
         if not spans:
             return 0
@@ -505,16 +505,19 @@ class TraceStore:
                     normalize_bbk_id_to_primary(span.bbk_id),
                 ),
             )
-        rowcount = await self.db.execute_many(query, params_list)
-        # 验证写入结果，帮助排查偶现的 spans 写入失败问题
-        if rowcount != len(params_list):
-            logger.warning(
-                "batch_create_spans: expected %d rows, got %d. "
-                "This may indicate database connection issue or partial write failure.",
-                len(params_list),
-                rowcount,
-            )
-        return rowcount
+        # Retries after an unknown commit use the same Span identity and fields.
+        query += """
+            ON DUPLICATE KEY UPDATE
+                end_time = VALUES(end_time), duration_ms = VALUES(duration_ms),
+                input_tokens = VALUES(input_tokens), output_tokens = VALUES(output_tokens),
+                tool_output = VALUES(tool_output), error = VALUES(error),
+                event_type = VALUES(event_type)
+        """
+        # aiomysql may split a batch into several SQL statements.
+        async with self.db.transaction():
+            await self.db.execute_many(query, params_list)
+        # Upserts can report 0, 1 or 2 affected rows; success confirms all values.
+        return len(params_list)
 
     # Query operations
 
