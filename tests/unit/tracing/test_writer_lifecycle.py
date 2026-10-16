@@ -31,7 +31,8 @@ class GatedDatabase:
     async def transaction(self):
         yield self
 
-    async def execute_many(self, _query, params):
+    async def insert_prepared(self, _query, params, **_limits):
+        params = list(params)
         self.batches.append(list(params))
         self.rows.extend(params)
         self.started.set()
@@ -213,7 +214,7 @@ async def test_shutdown_returns_when_writer_cancellation_cleanup_stalls(
     store_closed = asyncio.Event()
     manager.store.close = AsyncMock(side_effect=store_closed.set)
 
-    async def stalled_cleanup(_query, _params):
+    async def stalled_cleanup(_query, _params, **_limits):
         db.started.set()
         try:
             await asyncio.Event().wait()
@@ -222,7 +223,7 @@ async def test_shutdown_returns_when_writer_cancellation_cleanup_stalls(
             await release_cleanup.wait()
             raise
 
-    db.execute_many = stalled_cleanup
+    db.insert_prepared = stalled_cleanup
     await emit(manager, trace_id)
     await db.started.wait()
     close = manager.close if close_manager else manager._writer.close
@@ -428,18 +429,18 @@ async def test_admission_freezes_input_before_caller_mutation():
 @pytest.mark.asyncio
 async def test_failed_insert_retries_latest_version_with_stable_identity():
     manager, db, trace_id = await new_manager(batch_size=1)
-    original = db.execute_many
+    original = db.insert_prepared
     failed = False
 
-    async def unknown_commit(query, params):
+    async def unknown_commit(query, params, **limits):
         nonlocal failed
-        count = await original(query, params)
+        count = await original(query, params, **limits)
         if not failed:
             failed = True
             raise OSError("commit acknowledgement lost")
         return count
 
-    db.execute_many = unknown_commit
+    db.insert_prepared = unknown_commit
     span_id = await emit(manager, trace_id)
     await db.started.wait()
     await manager.update_span(span_id, trace_id, tool_output="finished")
@@ -474,13 +475,13 @@ async def test_writer_does_not_inherit_request_transaction_or_trace():
 
     db = GatedDatabase()
     observed = []
-    original = db.execute_many
+    original = db.insert_prepared
 
-    async def check_context(query, params):
+    async def check_context(query, params, **limits):
         observed.append((_CURRENT_CONNECTION.get(), get_current_trace()))
-        return await original(query, params)
+        return await original(query, params, **limits)
 
-    db.execute_many = check_context
+    db.insert_prepared = check_context
     manager = TraceManager(
         TracingConfig(enabled=True, retention_days=0),
         db,

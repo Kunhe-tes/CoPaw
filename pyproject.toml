@@ -78,6 +78,9 @@ build-backend = "setuptools.build_meta"
 swe = "swe.cli.main:cli"
 
 [project.optional-dependencies]
+mysql = [
+    "mysql-connector-python==26.7.0",
+]
 dev = [
     "pytest>=8.3.5",
     "pytest-asyncio>=0.23.0",

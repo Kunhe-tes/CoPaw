@@ -7,7 +7,7 @@ Defines configuration classes for database connections.
 import os
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class DatabaseConfig(BaseModel):
@@ -23,13 +23,26 @@ class DatabaseConfig(BaseModel):
     database: str = Field(default="swe", description="Database name")
     min_connections: int = Field(
         default=2,
+        ge=0,
         description="Minimum connection pool size",
     )
     max_connections: int = Field(
         default=10,
+        gt=0,
         description="Maximum connection pool size",
     )
     charset: str = Field(default="utf8mb4", description="Character set")
+    acquire_timeout: float = Field(default=30, gt=0, allow_inf_nan=False)
+    connect_timeout: float = Field(default=10, gt=0, allow_inf_nan=False)
+    read_timeout: float = Field(default=30, gt=0, allow_inf_nan=False)
+    write_timeout: float = Field(default=30, gt=0, allow_inf_nan=False)
+    cleanup_timeout: float = Field(default=1, gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_pool_bounds(self):
+        if self.min_connections > self.max_connections:
+            raise ValueError("min_connections must not exceed max_connections")
+        return self
 
 
 def get_database_config(
@@ -90,7 +103,18 @@ def get_database_config(
             pass
         return default
 
+    def _get_timeout(name: str, default: float) -> float:
+        try:
+            return float(os.environ.get(name, default))
+        except (TypeError, ValueError):
+            return default
+
     return DatabaseConfig(
+        acquire_timeout=_get_timeout("SWE_DB_ACQUIRE_TIMEOUT", 30),
+        connect_timeout=_get_timeout("SWE_DB_CONNECT_TIMEOUT", 10),
+        read_timeout=_get_timeout("SWE_DB_READ_TIMEOUT", 30),
+        write_timeout=_get_timeout("SWE_DB_WRITE_TIMEOUT", 30),
+        cleanup_timeout=_get_timeout("SWE_DB_CLEANUP_TIMEOUT", 1),
         host=(
             host if host is not None else _get_str("SWE_DB_HOST", "localhost")
         ),

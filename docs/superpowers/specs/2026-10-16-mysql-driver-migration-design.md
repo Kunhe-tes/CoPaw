@@ -1,6 +1,6 @@
 # 核心 MySQL 驱动迁移设计
 
-日期：2026-10-16。源码基线：`a13bbfa88`。状态：设计草案，尚未实施。
+日期：2026-10-16。源码基线：`a13bbfa88`。状态：已完成本地实施与单元/协议回归；真实 TDSQL、部署矩阵及性能验收待执行。
 
 本文应用 brainstorming 与 GitNexus exploring 流程，核对项目源码、既有方案、Oracle 官方文档及固定版本驱动源码。用户已确认范围为核心 `src/swe` 共享数据库层，并确认生产 TDSQL MySQL 兼容版可以使用官方驱动。独立 market/monitor/scheduler 服务不迁移。
 
@@ -51,25 +51,13 @@ GitNexus 绑定仓库 `/Users/shixiangyi/code/Swe`（CoPaw），已运行 index-
 
 ## 4. 适配层与改动范围
 
-保留 DatabaseConnection/TDSQLConnection 导出、配置加载优先级及高层方法：connect、close、acquire、execute、execute_many、fetch_one、fetch_all、transaction、named_lock。
+保留 DatabaseConnection/TDSQLConnection 导出、配置加载优先级及原有高层方法。按用户补充要求收拢业务 Store 的原始连接操作：新增不可变 `ExecutionResult(affected_rows, lastrowid)`、`execute_result`、`insert`；`acquire` 与 `transaction` 返回 `DatabaseSession`，提供同一套参数化 SQL 接口，不向 Store 暴露驱动游标、begin、commit、rollback。接入示例见 [数据库操作](../../database-access.md)。
 
-新增一个仅供固定 INSERT 模板使用的 prepared 批量入口。接口接受可信 prefix、单行 placeholder 模板、固定 upsert suffix 和参数行迭代器；按行/字节/参数数分块。不得通过正则改写任意 SQL，不允许数据、表名或列名由用户输入拼接。高层 execute_many 仍保持现有 affected-row 语义，其他批量调用不顺带全部改为 prepared。
+七处 Store（skill_readiness、featured_case、workflow/config_store、goals、skill_result、asset_upload_record、feedback）使用共享 facade；Goals 删除自建事务包装。读取返回字典；插入保留 lastrowid 的 None/0 语义；写入返回影响行数。未引入 ORM、通用条件构造器或动态标识符拼接。Readiness 使用 `named_lock(..., exact_name=True)` 保留混合版本 Pod 之间原有的锁键，默认命名锁的哈希行为不变。
 
-acquire 借出官方连接；项目内所有直接调用点一并迁移，不伪装一套完整 aiomysql 连接：
+`insert_prepared` 接受模块级可信 `PreparedInsert(prefix, row_template, suffix)` 和参数行迭代器；数据库级入口包裹一次事务，Session 入口要求已有事务，错误或输入迭代失败使会话不可继续提交。业务 SQL、租户过滤、JSON 和模型映射仍由 Store 负责。普通 `execute_many` 保持 affected-row 语义。
 
-| 调用方 | 必要适配 |
-|---|---|
-| `app/skill_readiness/store.py` | 移除导入 aiomysql.DictCursor；dictionary=True；异步 cursor；事务入口 |
-| `app/featured_case/store.py` | start_transaction、异步 cursor；保留锁队列和 lastrowid |
-| `app/crons/workflow/config_store.py` | start_transaction、异步 cursor；保留发布原子性 |
-| `app/goals/store.py` | await get_autocommit / set_autocommit，异步 cursor；保留恢复 autocommit |
-| `app/skill_result/store.py` | 异步 cursor 与 lastrowid |
-| `app/asset_upload_record/store.py` | 异步 cursor 与 lastrowid |
-| `app/feedback/store.py` | 异步 cursor 与 lastrowid |
-
-cursor context 从 `async with conn.cursor()` 改为 `async with await conn.cursor(...)`，begin 对应 start_transaction。普通查询使用 buffered cursor，维持 aiomysql 已缓冲结果语义，避免 fetch_one 后剩余结果令后续命令报 unread result；字典查询显式 dictionary=True。prepared INSERT 使用其支持的 prepared cursor，不假定 prepared 与 buffered 可组合。
-
-普通游标 rowcount、lastrowid、description、tuple/dict、NULL、datetime、Decimal、bytes、Unicode、LIKE/DATE_FORMAT 的百分号、LIMIT/OFFSET、空参数均作为兼容性测试；不把 MySQL affected rows 当作 Span 确认数量。驱动异常类发生变化，项目有依赖 errno/重复键分类的地方必须核对，不以错误字符串替代 errno。
+普通查询使用 buffered dictionary cursor，维持已缓冲结果语义。实际游标创建为 `await conn.cursor(...)`，事务使用 `start_transaction`，均封装在数据库包内部。结果兼容、异常/取消和清理行为通过对应契约测试验证；真实数据类型及服务端协议仍需隔离库验收。
 
 ## 5. 最小异步连接池
 
@@ -105,15 +93,19 @@ named_lock 持有同一租约执行 GET_LOCK/RELEASE_LOCK。命名锁固定连�
 
 不能使用 prepared executemany。对于N块，要求恰好N次 COM_STMT_EXECUTE；首次形状可增加 PREPARE，官方实现可能每次还发送 RESET，BEGIN/COMMIT/PING也计数。不得宣传“整批只有一次数据库请求”。
 
-每物理连接最多缓存4个 INSERT prepared cursor，LRU 淘汰；SQL键由固定模板身份和行数组成，缓存存储原字符串对象，复用时传同一对象。禁止游标跨物理连接复用，禁止并发使用同一游标；断连、会话重置、重新建连时整体失效，淘汰/关闭时释放 handle，释放失败则丢弃连接。缓存上限因此为4×每Pod连接上限；还需计算Pod数量与其他服务占用，验收 max_prepared_stmt_count。
+每物理连接最多缓存4个 INSERT prepared cursor，LRU 淘汰；SQL键由固定模板身份和行数组成，缓存存储原字符串对象，复用时传同一对象。固定占位符在项目层直接转换为原生 `?`，避开官方 `%s` 转换正则对长 SQL 的重复扫描；不改写任意 SQL。禁止游标跨物理连接复用，禁止并发使用同一游标；断连、会话重置、重新建连时整体失效，淘汰/关闭时释放 handle，释放失败则丢弃连接。缓存上限因此为4×每Pod连接上限；还需计算Pod数量与其他服务占用，验收 max_prepared_stmt_count。
 
 缓存在物理连接租约内，prepared cursor 生命周期长于单次借出；不得在每批 async cursor context 退出时把它关闭。库内部字段只用于源码核对，不直接修改 _executed/_prepared 来绕过 RESET。
+
+26.7.0 的 prepared cursor.reset 会吞掉驱动 Error 类型的 statement-close 异常。为保证 LRU 淘汰失败可触发隔离，使用最小 `ManagedMySQLConnection` 子类覆盖公开 `cmd_stmt_close`，把这类失败包装为保留 cause 的 RuntimeError；没有改写私有游标字段或协议编码。
 
 ## 8. 取消、期限与资源回收
 
 引入明确的 acquire/connect/read/write/cleanup 期限，建议初始分别30/10/30/30/1秒，作为数据库配置而非隐式无限等待。它们是迁移建议值，测试应允许短期限注入；named_lock 的服务端等待仍使用原timeout。确认屏障与 writer shutdown 继续使用 TracingConfig 的现有期限，两者不互相替代。
 
 一旦查询/事务被取消或读写超时，先标记物理连接不可复用，再作有界最佳努力回滚；协议状态不明时优先 shutdown socket，避免正常 close 先发送 QUIT 又卡住。cleanup 采用 asyncio.wait 等硬截止等待，不使用会等待取消完成的无界 wait_for(task) 组合。无法及时退出的清理任务保留引用、记录异常及资源占用，不能虚假释放容量。
+
+清理会先 shutdown 帮助中断已有 I/O，等待已记录的操作实际退出；存在迟到操作时再 shutdown 一次，防止握手在首次关闭之后才创建 socket。最终关闭失败保留隔离槽位，同一数据库对象不能在残留连接存在时重新建池。取消请求按任务只发送一次，重复 close 不会再次打断清理。
 
 保留原 CancelledError 或主业务异常；rollback/close 的次级异常记录 traceback，不覆盖原异常。所有 done task 都读取结果；迟到异常也由持有任务的清理路径消费，不能产生无人读取的任务异常。
 
@@ -167,7 +159,7 @@ Python协作式取消不能强杀任意不响应的协程。pool close 也应有
 5. 真实TDSQL故障注入、容器/Python兼容矩阵和同负载A/B；提交原始数据及结论。
 6. 通过准入后小流量灰度，观察后扩大；任一正确性问题立即回滚镜像。
 
-本轮交付设计，不编写迁移实现、不替换依赖、不部署。具体TDSQL内核版本、是否经过代理、认证/TLS参数和服务端限制由隔离环境预检记录；用户已确认官方驱动可用，但这不代替prepared及故障验收。
+已交付本地迁移实现、固定依赖入口、接入文档和默认跳过的隔离库 smoke test；未部署。具体TDSQL内核版本、是否经过代理、认证/TLS参数和服务端限制由隔离环境预检记录；用户已确认官方驱动可用，但这不代替prepared及故障验收。
 
 ## 来源
 
