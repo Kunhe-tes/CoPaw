@@ -34,7 +34,7 @@ close 停止接纳、唤醒等待容量的生产者，然后等待排空。manag
 4. `Failed to roll back cancelled transaction`：aiomysql 可能在取消查询后已关闭连接，rollback 再次失败。数据库适配器必须保留原 `CancelledError`，否则 writer 会误判为可重试错误，使关闭期限失效。
 5. `Tracing writer failed during cancellation cleanup`：writer 在取消宽限期内以异常退出。close 会读取任务异常并记录原 traceback，最终仍向调用方报告关闭超时及未确认数量；不能只调用 `asyncio.wait` 而不消费完成任务的异常。宽限期之后退出的异常由 manager 的延后关闭任务记录。
 
-持续非法 payload 或永久数据库错误会阻塞后续批次并最终触发背压/超时；本轮没有新增丢弃、死信或磁盘补偿策略。JSON 构造、深拷贝和 aiomysql 参数转义仍消耗 loop CPU，分块只限制普通批次工作量；单条超大数据仍可能产生长停顿。数据库迁移保持暂停。
+持续非法 payload 或永久数据库错误会阻塞后续批次并最终触发背压/超时；本轮没有新增丢弃、死信或磁盘补偿策略。JSON 构造、深拷贝和 aiomysql 参数转义仍消耗 loop CPU，分块只限制普通批次工作量；单条超大数据仍可能产生长停顿。驱动迁移已恢复分析与设计，见 [核心驱动迁移草案](../../docs/superpowers/specs/2026-10-16-mysql-driver-migration-design.md)；当前运行代码仍使用 aiomysql。
 
 ## 验证
 
