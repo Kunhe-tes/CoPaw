@@ -259,8 +259,8 @@ class ConnectionPool:
         # replacement connection nor reconnect may assume its capacity is free.
         pending = tuple(entry.pending)
         try:
-            # Pending I/O can still own the socket, so force it closed first.
-            if pending:
+            # Failed operations can leave an unusable socket even after exit.
+            if pending or not entry.usable:
                 await entry.connection.shutdown()
             else:
                 try:
@@ -296,14 +296,17 @@ class ConnectionPool:
     async def close(self):
         self._closed = True
         async with self._condition:
+            idle = set(self._idle)
             self._idle.clear()
             self._condition.notify_all()
         tasks = set()
         for entry in tuple(self._entries):
-            entry.usable = False
             for task in tuple(entry.pending):
                 _request_cancel(task)
             if entry.disposing is None:
+                # Preserve the first close's policy across concurrent closes.
+                if entry not in idle:
+                    entry.usable = False
                 entry.disposing = self._retain(
                     asyncio.create_task(self._destroy(entry)),
                 )

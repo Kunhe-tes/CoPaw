@@ -436,17 +436,120 @@ async def test_shutdown_failure_quarantines_slot_and_refuses_reconnect(db):
     await db.execute("QUERY")
     conn = Connection.instances[0]
     conn.ping = AsyncMock(side_effect=ConnectionError("lost socket"))
-    conn.close = AsyncMock(
-        side_effect=RuntimeError("prepared cursor close failed"),
-    )
+    conn.close = AsyncMock(wraps=conn.close)
     conn.shutdown = AsyncMock(side_effect=RuntimeError("shutdown unconfirmed"))
     with pytest.raises(TimeoutError):
         await db.execute("NEXT")
     assert len(db._pool._entries) == 1
     assert len(Connection.instances) == 1
+    conn.close.assert_not_awaited()
     await asyncio.wait_for(db.close(), 0.2)
     with pytest.raises(RuntimeError, match="still shutting down"):
         await db.connect()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["ping", "query", "baseline"])
+async def test_completed_failure_forces_shutdown_before_replacing_connection(
+    db,
+    failure,
+):
+    await db.execute("WARM")
+    conn = Connection.instances[0]
+    finish_close = asyncio.Event()
+    conn.close = AsyncMock(side_effect=finish_close.wait)
+    conn.shutdown = AsyncMock(wraps=conn.shutdown)
+    if failure == "ping":
+        conn.ping = AsyncMock(side_effect=ConnectionError("lost socket"))
+    elif failure == "query":
+        conn.failure = ValueError("query failed")
+    else:
+        conn.sql_mode = "ANSI"
+    try:
+        if failure != "ping":
+            with pytest.raises((ValueError, RuntimeError)):
+                await db.execute("FAIL")
+        assert await db.execute("NEXT") == 2
+        conn.close.assert_not_awaited()
+        conn.shutdown.assert_awaited_once()
+        assert conn.closed
+        assert len(Connection.instances) == 2
+    finally:
+        finish_close.set()
+        await asyncio.gather(*tuple(db._pool._tasks), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_failed_handshake_forces_shutdown(db, monkeypatch):
+    finish_close = asyncio.Event()
+    close = AsyncMock(side_effect=finish_close.wait)
+    shutdown = AsyncMock()
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            Connection,
+            "connect",
+            AsyncMock(side_effect=ConnectionError("handshake failed")),
+        )
+        patch.setattr(Connection, "close", close)
+        patch.setattr(Connection, "shutdown", shutdown)
+        try:
+            with pytest.raises(ConnectionError, match="handshake failed"):
+                await db.execute("FAIL")
+            close.assert_not_awaited()
+            shutdown.assert_awaited_once()
+            assert not db._pool._entries
+        finally:
+            finish_close.set()
+            await asyncio.gather(
+                *tuple(db._pool._tasks),
+                return_exceptions=True,
+            )
+    assert await db.execute("NEXT") == 2
+
+
+@pytest.mark.asyncio
+async def test_pool_close_gracefully_closes_healthy_idle_connection(db):
+    await db.execute("QUERY")
+    conn = Connection.instances[0]
+    conn.close = AsyncMock(wraps=conn.close)
+    conn.shutdown = AsyncMock(wraps=conn.shutdown)
+
+    await db.close()
+
+    conn.close.assert_awaited_once()
+    conn.shutdown.assert_not_awaited()
+    assert conn.closed
+    assert not db._pool._entries
+
+
+@pytest.mark.asyncio
+async def test_concurrent_pool_close_keeps_idle_connection_graceful(db):
+    await db.execute("QUERY")
+    conn = Connection.instances[0]
+    conn.close = AsyncMock(wraps=conn.close)
+    conn.shutdown = AsyncMock(wraps=conn.shutdown)
+
+    await asyncio.gather(db.close(), db.close())
+
+    conn.close.assert_awaited_once()
+    conn.shutdown.assert_not_awaited()
+    assert not db._pool._entries
+
+
+@pytest.mark.asyncio
+async def test_pool_close_invalidates_and_shuts_down_outstanding_lease(db):
+    async with db.acquire() as session:
+        conn = session._connection
+        conn.close = AsyncMock(wraps=conn.close)
+        conn.shutdown = AsyncMock(wraps=conn.shutdown)
+
+        await db.close()
+
+        conn.close.assert_not_awaited()
+        conn.shutdown.assert_awaited_once()
+        assert not db._pool._entries
+        with pytest.raises(RuntimeError, match="session"):
+            await session.execute("AFTER CLOSE")
 
 
 @pytest.mark.asyncio
