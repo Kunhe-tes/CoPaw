@@ -4,6 +4,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -196,6 +197,56 @@ async def test_shutdown_deadline_reports_unconfirmed_work():
     assert manager._pending_spans
     assert manager._flush_task is None
     assert not db.trace_completed.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close_manager", [False, True])
+async def test_shutdown_returns_when_writer_cancellation_cleanup_stalls(
+    close_manager,
+):
+    manager, db, trace_id = await new_manager(
+        batch_size=1,
+        shutdown_timeout=0.02,
+    )
+    cancelling = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    store_closed = asyncio.Event()
+    manager.store.close = AsyncMock(side_effect=store_closed.set)
+
+    async def stalled_cleanup(_query, _params):
+        db.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelling.set()
+            await release_cleanup.wait()
+            raise
+
+    db.execute_many = stalled_cleanup
+    await emit(manager, trace_id)
+    await db.started.wait()
+    close = manager.close if close_manager else manager._writer.close
+    closing = asyncio.create_task(close())
+    await cancelling.wait()
+    try:
+        done, _ = await asyncio.wait({closing}, timeout=0.2)
+        assert done, "shutdown waited indefinitely for cancellation cleanup"
+        with pytest.raises(
+            TimeoutError,
+            match="unconfirmed.*writer still running",
+        ):
+            await closing
+        assert not manager._writer.task.done()
+        assert manager._pending_spans
+        assert not store_closed.is_set()
+    finally:
+        release_cleanup.set()
+        await asyncio.gather(manager._writer.task, return_exceptions=True)
+        await asyncio.gather(closing, return_exceptions=True)
+        if close_manager:
+            await asyncio.wait_for(store_closed.wait(), 0.2)
+        else:
+            await asyncio.gather(manager.close(), return_exceptions=True)
 
 
 @pytest.mark.asyncio

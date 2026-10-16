@@ -170,6 +170,7 @@ class TraceManager:
         # Background flush task
         self._flush_task: Optional[asyncio.Task] = None
         self._close_task: Optional[asyncio.Task] = None
+        self._store_close_task: Optional[asyncio.Task] = None
         self._cleanup_task: Optional[asyncio.Task] = None
         self._running = False
 
@@ -264,11 +265,35 @@ class TraceManager:
         try:
             await self._writer.close()
         finally:
-            self._flush_task = None
-            if self._store:
-                await self._store.close()
+            if self._writer.task is not None and not self._writer.task.done():
+                # Pool close can wait for the same stalled connection too.
+                self._store_close_task = Context().run(
+                    asyncio.create_task,
+                    self._close_store_after_writer(),
+                )
+            else:
+                self._flush_task = None
+                if self._store:
+                    await self._store.close()
 
         logger.info("TraceManager closed")
+
+    async def _close_store_after_writer(self) -> None:
+        """Defer resource release without extending the shutdown deadline."""
+        task = self._writer.task
+        assert task is not None
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if not task.done():
+                return
+        except Exception:
+            logger.exception("Tracing writer failed during deferred shutdown")
+        self._flush_task = None
+        try:
+            await self.store.close()
+        except Exception:
+            logger.exception("Failed to close tracing store after writer exit")
 
     # Trace lifecycle
 

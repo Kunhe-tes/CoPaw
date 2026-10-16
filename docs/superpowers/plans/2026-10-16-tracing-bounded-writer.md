@@ -41,3 +41,11 @@
 - Independent review found no remaining blocking issues after cancellation masking was fixed.
 - GitNexus impact could not resolve manager/transaction symbols; detect_changes mapped the database class to unrelated frontend processes and reported CRITICAL. The graph result is not a reliable scope check. Source diff and the targeted regression suite were reviewed directly.
 - No real MySQL integration or concurrent production load test was run. JSON serialization/driver escaping remain on the event loop; no production performance gain is claimed.
+
+## Review follow-up: bounded cancellation wait
+
+- Reproduced the P1 with two Event-gated cases: direct writer close and manager close both waited beyond the deadline while a database cancellation handler was stalled.
+- Replaced the unbounded post-cancel await with `asyncio.wait`, allowing at most `min(shutdown_timeout, 1 second)` extra grace. Timeout diagnostics retain unconfirmed counts and explicitly report a still-running writer.
+- Deferred store closure when the writer remains active, so pool cleanup cannot repeat the same indefinite wait. Storage closes after actual writer exit; late failures are logged.
+- Regression checks cover bounded return, retained pending data, no premature store close and eventual store closure after cancellation cleanup is released.
+- Validation: 287 affected tests passed in 15.03 seconds; both new cases passed again after formatting; changed-file pre-commit checks all passed. GitNexus staged change detection was run; its CRITICAL result still contains unrelated processes, so the source diff was also checked directly.
