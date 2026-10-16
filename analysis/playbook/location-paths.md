@@ -45,12 +45,14 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 ```
 
 检查必须同时证明：第二个 Pod 在持锁期间拿不到 `.verification.json.lock`、持锁进程被 SIGKILL 后可以接管、
-第二个 Pod 并发读取原子 JSON 替换时始终可解析且 revision 连续递增。失败时禁止以无锁写入或 Redis 锁替代；
+第二个 Pod 并发读取原子 JSON 替换时始终可解析且 revision 不倒退，写者逐次核对连续 revision，读者须实际读取中途水位并核对最终 revision。脚本也检查硬链接独占发布及删除暂存名后的内容保留。失败时禁止以无锁写入或 Redis 锁替代；
 先保留旧版本。Job 镜像必须是包含 `scripts/verify_session_nas_lock.py` 的本次 release 镜像；示例默认使用
 `agentscope/swe:latest`，生产环境应改为已验证的不可变 release tag。
 
 通过后暂停 cron dispatch，排空现有 session 请求，将旧 Runner Pod 缩容到零，再部署新版本，确认所有新 Pod
 使用同一绝对 session 路径后恢复 cron。禁止新旧 Runner writer 混跑，否则旧逻辑仍可能覆盖新事务快照。
+
+每次验证使用唯一、全新共享测试子目录，不直接使用用户 session 目录；失败后保留现场，下一次换新目录。两份脚本 JSON 及 Pod 节点、镜像摘要、PVC/StorageClass 都须留档，单机两个进程不算两 Pod NAS 通过。2026-10-16 本地 76 项测试、迁移/旧格式导出及 `ddb683634` 旧源码继续写入已通过，详见[本地验收报告](../../docs/superpowers/specs/2026-10-16-memory-storage-verification-report.md)；真实 NAS 门禁仍未执行。
 
 按问题类型给出优先查看的路径，减少无效搜索。
 

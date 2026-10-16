@@ -210,6 +210,42 @@ def test_failed_rotation_publication_rebuilds_stale_sidecar(
     assert [item.sequence for item in value.events(value.head())] == [1, 2, 3]
 
 
+def test_legacy_export_rejection_leaves_archive_writable(
+    tmp_path,
+    monkeypatch,
+):
+    from swe.agents.memory.conversation_archive import ConversationArchiveStore
+
+    monkeypatch.delenv("SWE_CHECKPOINT_V2_TENANTS", raising=False)
+    store = ConversationArchiveStore(tmp_path / "dialog")
+    store._append_checkpoint_event(CHAT, event(1))
+    source = store.path_for(CHAT)
+    before = {
+        path.relative_to(source): path.read_bytes()
+        for path in source.rglob("*")
+        if path.is_file()
+    }
+    destination = tmp_path / "export"
+
+    with pytest.raises(ValueError):
+        store.export_checkpoint_legacy(CHAT, destination)
+
+    assert {
+        path.relative_to(source): path.read_bytes()
+        for path in source.rglob("*")
+        if path.is_file()
+    } == before
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".export.export-*"))
+    store._append_checkpoint_event(CHAT, event(2))
+    assert [
+        item.sequence for item in store._read_checkpoint_state(CHAT).events
+    ] == [
+        1,
+        2,
+    ]
+
+
 def test_legacy_migration_strict_and_export_includes_new_epochs(tmp_path):
     from swe.agents.memory.conversation_archive import ConversationArchiveStore
 

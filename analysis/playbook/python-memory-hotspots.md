@@ -140,6 +140,8 @@ RSS 不一定在对象释放后立即回落，因此验收应同时看存活对�
 
 故障检查先看`state-v2.json`及quarantine，session看根revision/generation与`.turn-ledger/<generation>/pending.json`。不要手动删除pending：下一writer根据根提交点恢复；预览不会执行恢复。冷正文和reference缺失会报错，二者同时丢失需完整validate以计数检出。新格式恢复必须使用空目录，旧shell脚本主动拒绝。生产NAS锁/rename/fsync/硬链接及跨Pod退出恢复仍是启用门禁。
 
+`journal export`用于将v2日志导出为旧格式；正常legacy归档会被明确拒绝，源文件保持不变，后续仍可追加。格式判断必须先于v2根完整性读取：缺少`state-v2.json`不等于legacy数据损坏，不能因此写入quarantine。已有隔离标记需先核实原因，不能直接批量删除。
+
 
 ## 第二阶段运行指标
 
