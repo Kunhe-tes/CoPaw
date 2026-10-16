@@ -261,7 +261,13 @@ class ConnectionPool:
         try:
             # Uncertain connections must close their socket before pending I/O.
             if entry.usable:
-                await entry.connection.close()
+                try:
+                    await entry.connection.close()
+                except asyncio.CancelledError:
+                    await entry.connection.shutdown()
+                    raise
+                except Exception:
+                    await entry.connection.shutdown()
             else:
                 await entry.connection.shutdown()
         finally:
