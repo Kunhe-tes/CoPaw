@@ -1463,6 +1463,10 @@ _Avoid_: process env, backend env, system environment
 The user-invoked shell command execution path owned by Swe for a tenant-scoped request. **Built-in Shell Execution** is distinct from MCP `stdio` server launches and platform maintenance subprocesses.
 _Avoid_: arbitrary subprocess, MCP stdio launch, maintenance worker
 
+**Python Dependency Installation Denial**:
+The platform-mandated rejection, across tenants and Main Agents/SubAgents, of foreground, background, or source-overridden shell invocations whose submitted command visibly requests pip-family dependency installation, or cannot be reliably checked against that policy. It excludes ordinary text references and inspection of script/program internals; rejection occurs before execution with a reason and no approval option, allows the Agent to continue, and cannot be disabled by tenants.
+_Avoid_: installation approval, shell execution failure, terminal turn stop
+
 **Tenant Process Resource Limits**:
 A tenant-scoped policy that caps per-process CPU time and memory consumption for in-scope tenant subprocess launches. **Tenant Process Resource Limits** reduce host resource exhaustion risk; they are not a command intent classifier, command blacklist, or process-group aggregate resource budget.
 _Avoid_: command blacklist, shell denylist, resource timeout, process group quota

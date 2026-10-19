@@ -20,6 +20,7 @@
 | [my-mcp-manual-validation.md](my-mcp-manual-validation.md) | MyMCP 在本地环境下按用户、来源、应用和管理员身份进行手工验证的方法 |
 | [performance-optimization-plan.md](performance-optimization-plan.md) | freshness 扫描优化与官方 MySQL 异步驱动迁移的方案表、风险和验收标准 |
 | [python-memory-hotspots.md](python-memory-hotspots.md) | Python 后端前五内存热点、引用持有链、运行时验证与第一阶段生命周期及临时缓存设计入口 |
+| [python-installation-denial.md](python-installation-denial.md) | Shell pip 安装平台拒绝、语法识别边界、Hook 改写与前后台执行入口 |
 | [skill-freshness-and-span-write-performance.md](skill-freshness-and-span-write-performance.md) | 技能递归 freshness 检查与 Tracing 批量写入的 CPU 成本、隔离基准及优化边界 |
 | [skill-freshness-optimization-detail.md](skill-freshness-optimization-detail.md) | freshness 调用窗口、token 兼容性、锁优化、manifest 一致性及分阶段验收方案 |
 | [tool-result-truncation.md](tool-result-truncation.md) | MCP / read_file 工具返回出现 `<<<TRUNCATED>>>` 时的截断点和临时调大配置 |

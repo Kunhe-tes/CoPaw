@@ -1258,6 +1258,12 @@ def prepare_shell_command(
 
     cmd, _was_intercepted = intercept_command(cmd)
 
+    from ...security.shell_installation_policy import shell_installation_denial
+
+    policy_denial = shell_installation_denial(cmd)
+    if policy_denial:
+        _raise_shell_error("shell_policy_denied", policy_denial)
+
     try:
         working_dir = _resolve_cwd(cwd)
     except TenantPathBoundaryError as e:

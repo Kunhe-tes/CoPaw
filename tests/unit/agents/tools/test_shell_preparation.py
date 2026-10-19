@@ -26,6 +26,54 @@ def shell_roots(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("background", [False, True])
+async def test_installation_denied_before_any_process_starts(
+    monkeypatch,
+    shell_roots,
+    background,
+):
+    from swe.agents.tools import shell
+    from swe.agents.tools import background_process
+
+    tenant_root = shell_roots / "alice"
+    tenant_root.mkdir()
+    marker = tenant_root / "started"
+
+    async def unexpected_foreground(*args, **kwargs):
+        marker.touch()
+        return 0, "launched", ""
+
+    def unexpected_background(*args, **kwargs):
+        marker.touch()
+        raise AssertionError("background process was started")
+
+    monkeypatch.setattr(
+        shell,
+        "_execute_platform_subprocess",
+        unexpected_foreground,
+    )
+    monkeypatch.setattr(
+        background_process.subprocess,
+        "Popen",
+        unexpected_background,
+    )
+    with tenant_context(tenant_id="alice"):
+        with pytest.raises(
+            ToolExecutionError,
+            match="平台策略禁止",
+        ) as failure:
+            execute = (
+                background_process.start_background_process
+                if background
+                else shell.execute_shell_command
+            )
+            await execute("mkdir started && pip install requests")
+
+    assert failure.value.error_type == "shell_policy_denied"
+    assert not marker.exists()
+
+
+@pytest.mark.asyncio
 async def test_real_preparation_and_guard_cleanup_run_off_loop(
     monkeypatch,
     shell_roots,
