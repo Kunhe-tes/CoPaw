@@ -9,6 +9,7 @@
 | [ai-coding-session-retrospective.md](ai-coding-session-retrospective.md) | 近一周 AI Coding 会话复盘：返工原因、异步验收矩阵、测试选择与跨会话交接 |
 | [agent-config-read-consistency.md](agent-config-read-consistency.md) | agent 控制面读写一致性边界、排查入口和与 console agent switching 的职责分界 |
 | [agent-config-file-overwrite.md](agent-config-file-overwrite.md) | agent.json 手改后覆盖：回复整文件写回、模型规范化、引导自愈重建与并发丢失更新 |
+| [chat-history-preload-stall.md](chat-history-preload-stall.md) | 聊天历史触顶不继续加载：240px 区域锁、本地与归档分页衔接、复现证据与验收标准 |
 | [common-errors.md](common-errors.md) | 常见报错模式、典型触发点和第一落点 |
 | [cron-execution-final-marker.md](cron-execution-final-marker.md) | 执行记录最终标记、历史兼容、重试替换与 MySQL 验证入口 |
 | [database-pool-disposal.md](database-pool-disposal.md) | MySQL 故障连接强制关闭、健康空闲关闭、容量隔离及反复修复的测试盲区 |
