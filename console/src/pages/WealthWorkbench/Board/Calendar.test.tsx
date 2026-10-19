@@ -1,5 +1,11 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Plan, PlanItem } from "../types";
 import { Calendar } from "./Calendar";
 
@@ -37,21 +43,59 @@ const PLAN: Plan = {
 };
 
 describe("Calendar", () => {
-  it("日历事项显示当天命中的场景名而不是计划名", () => {
-    render(
-      <Calendar
-        visible={[PLAN]}
-        dimension="week"
-        anchor="2026-09-14"
-        onShift={vi.fn()}
-        onToday={vi.fn()}
-        onDimension={vi.fn()}
-        onShowDetails={vi.fn()}
-      />,
-    );
+  afterEach(cleanup);
 
-    expect(screen.getByText("高净值客户经营")).toBeTruthy();
-    expect(screen.getByText("理财到期提醒")).toBeTruthy();
-    expect(screen.queryAllByText("九月重点规划")).toHaveLength(0);
-  });
+  it.each(["week", "month"] as const)(
+    "%s 日历按维度展示标题与经营场景，保留当天详情入口",
+    async (dimension) => {
+      const onShowDetails = vi.fn();
+      render(
+        <Calendar
+          sources={["分行关注", "行长关注", "我的关注"]}
+          visible={[PLAN]}
+          planStat={() => null}
+          dimension={dimension}
+          anchor="2026-09-14"
+          onShift={vi.fn()}
+          onToday={vi.fn()}
+          onDimension={vi.fn()}
+          onShowDetails={onShowDetails}
+        />,
+      );
+
+      const events = screen.getAllByRole("button", {
+        name: `${PLAN.name}，2 个技能，点击查看详情`,
+      });
+      expect(events).toHaveLength(2);
+      expect(screen.getAllByText(PLAN.name)).toHaveLength(2);
+      for (const event of events) {
+        expect(event.querySelector("strong")).toHaveTextContent(PLAN.name);
+        expect(event).not.toHaveAttribute("title");
+      }
+      if (dimension === "week") {
+        expect(
+          screen.getAllByText("经营场景：高净值客户经营，理财到期提醒"),
+        ).toHaveLength(2);
+        expect(screen.queryByLabelText("2 个技能")).toBeNull();
+      } else {
+        expect(screen.getAllByLabelText("2 个技能")).toHaveLength(2);
+        for (const count of screen.getAllByLabelText("2 个技能")) {
+          expect(count).toHaveTextContent("2");
+        }
+        expect(screen.queryByText(/^经营场景：/)).toBeNull();
+      }
+      fireEvent.mouseEnter(events[0]);
+      const tooltip = await screen.findByRole("tooltip");
+      expect(
+        within(tooltip).getByText(`规划名称：${PLAN.name}`),
+      ).toBeInTheDocument();
+      expect(
+        within(tooltip).getByText("经营场景：高净值客户经营，理财到期提醒"),
+      ).toBeInTheDocument();
+      fireEvent.click(events[0]);
+      expect(onShowDetails).toHaveBeenCalledWith("2026-09-14", PLAN.id);
+      fireEvent.click(events[1]);
+      expect(onShowDetails).toHaveBeenCalledWith("2026-09-15", PLAN.id);
+    },
+  );
 });

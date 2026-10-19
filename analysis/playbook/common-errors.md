@@ -15,6 +15,34 @@
   同时覆盖阻塞 body send 和锁竞争，并断言释放订阅后 producer 继续运行；
   `tests/unit/routers/test_sse_response.py` 覆盖 callback 抛错时关闭 source。
 
+## 财富规划看板“全部”混入不适用岗位的关注来源
+
+- 可见范围：行长（含 RB0108 理财主管）查看本行“分行关注、行长关注”；中台只查看本行“分行关注”。客户经理仍按本行创建/分发关系查看规划。
+- 后端：`roles.py` 的 `get_visible_source_labels()` 同时用于 `WealthPlanStore.list_for_viewer()` 的内存/SQL 查询和详情接口的来源校验。仅隐藏前端分类无法阻止“全部”混入其他来源，也无法限制直接访问详情。
+- 前端：`permissions.ts` 的 `BOARD_SOURCES_BY_ROLE` 控制看板分类、概览数量、日历、列表和图例。前后端来源规则需同步；这是按规划来源过滤，不是按场景名称删除或合并不同规划。
+- 排查入口：`src/swe/app/wealth_plans/roles.py`、`store.py`、`router.py` 及 `console/src/pages/WealthWorkbench/Board/`。验证同分行、跨分行、创建人/目标用户，以及管理岗位别名。
+
+## 财富工作台在旧内核浏览器报 hidePopover is not a function
+
+- 原因：Toast 直接调用原生 Popover API；不支持该 API 的浏览器在组件初始化隐藏提示时就会报错，显示提示时也可能报 `showPopover is not a function`。
+- 处理：同时检测 `showPopover`、`hidePopover` 是否为函数，仅在完整支持时设置 `popover="manual"` 并调用原生方法；否则由 `hidden` 属性及现有 `.toast.visible` 样式控制提示。保留弹窗内 Portal，确保提示位于原生弹窗遮罩之上，关闭弹窗时保留自动消失计时。
+- 排查入口：`console/src/pages/WealthWorkbench/components/Toast.tsx`、`DialogHost.test.tsx`。回归覆盖两个方法均缺失、任一方法缺失、页面初始化、弹窗提示、重复提示及关闭弹窗后的计时。
+
+## 财富工作台确认发布后提示被弹窗遮住
+
+- 原因：`DialogHost` 使用原生 `dialog.showModal()` 进入浏览器顶层；普通页面 Toast 会被弹窗遮罩覆盖，提高页面 `z-index` 无法解决。发布失败时弹窗保留，因此失败信息容易被遮住。
+- 处理：`DialogHost` 承载单个 `Toast` 实例，弹窗打开时通过 React Portal 保持提示位于弹窗 DOM 内，再使用原生 `popover="manual"`、`showPopover()` 将悬浮提示提升到弹窗上方的浏览器顶层；关闭弹窗后恢复页面挂载，保留同一次提示的自动消失计时。弹窗使用 layout effect 打开，保证提示随后进入顶层。
+- 排查入口：`console/src/pages/WealthWorkbench/components/DialogHost.tsx`、`Toast.tsx` 及 `index.module.less` 的 `.toast`。浏览器验证需覆盖接口返回 409 后悬浮反馈、成功关闭弹窗后的页面反馈、`:popover-open` 状态和较小嵌入视口。
+
+## 财富工作台发布提示“以下经营场景已被选用”
+
+- 触发条件：所选场景 ID（外部 `skillId`，落库为 `scene_id`）与本分行已有规划重复，且已有规划符合当前发布人的角色占用规则、分发接收人员有交集。中台检查“分行关注”；行长检查“分行关注”和“行长关注”；客户经理检查这两类及本人创建的规划，不受其他客户经理个人规划限制。
+- 日期与状态规则：同一场景仅在任务起止日期区间重叠时占用，起止日期包含当天。例如 9 月 1 日至 9 月 30 日与 10 月 1 日至 10 月 31 日可分别建规划；9 月 30 日开始的新区间仍与九月规划重叠。缺失的日期边界按无界处理。发布失败不占用，发布中和已发布会占用；分发目标按 `swe_wealth_plan_targets.sap_id` 的交集判断，排程和经营方向不参与判断。中台仅给 A、B 支行人员发布时，不阻挡 C 支行向其他人员发布同场景规划。
+- 编辑规则：排除正在编辑的规划自身；检查新增场景及日期发生变化的原场景，日期未变的原场景不重新检查冲突。
+- 排查入口：前端 `console/src/pages/WealthWorkbench/utils.ts` 的 `filterSceneConflictPlans()`、`findSceneConflicts()`，后端 `src/swe/app/wealth_plans/router.py` 的 `_validate_scene_conflicts()` 与 `src/swe/app/wealth_plans/store.py` 的 `find_scene_conflicts()`。
+- 排查方式：按提示中的规划名核对 `swe_wealth_plans` 的 `bbk_id`、`source_label`、`sap_id`、`status`，关联 `swe_wealth_plan_scenes.scene_id`。前端使用已加载的可见规划预判并禁用确认按钮；后端检查本行符合角色规则的完整数据，冲突返回 HTTP 409。前端无提示而后端拒绝时，应检查可见范围与列表是否已刷新。
+- 处理方式：不同月份可使用相同场景分别建规划，但各场景的任务日期区间不能重叠；需要调整已有任务时从规划看板编辑。排查时同时核对场景子表的 `start_date`、`end_date`，不要仅看规划名称或创建月份。
+
 ## Cron callback 报 Job not found
 
 - 症状：外部调度调用 `/api/internal/cron/callback`，收到 HTTP 500 和
@@ -766,7 +794,7 @@
 
 ## 财富规划看板「已生成任务」数量不准确
 
-- **口径**：单个规划按各场景对应日期区间查询外部 `skill-stats`，累加响应中的 `generatedTaskCount`；规划概览再累加当前周期内各规划的结果。
-- **角色参数**：客户经理（`RB0101`）调用外部统计接口时必须附带本人 `sapId`；行长和分行中台不传 `sapId`，沿用机构范围统计。
-- **第一落点**：检查 `src/swe/app/wealth_plans/router.py` 的 `_fetch_external_skill_stats()` 是否按角色组装外部请求体，以及前端看板是否仍按 `skillId + startDate + endDate` 汇总。
-- **不可用处理**：外部统计接口不可用时返回空结果，前端显示 `--`，不要回退为规划分发记录或本地估算值。
+- **口径**：前端直接 POST 同源 `/api/agent/workspace/skill-stats`，请求体的 `planIds` 为当前范围内去重的规划 ID 数组，不再传 `skills` 或日期区间。按返回项 `planId` 关联规划，`targetCustomerCount` 展示目标客户，`targetTaskCount` 映射为展示模型的 `generatedTaskCount`；规划概览累加当前周期内各规划的结果，不再按场景累加。
+- **请求参数**：所有角色的统计请求体都只传 `planIds`，不传 `bbkId` 或 `sapId`；登录态与上下文仍通过统一请求头携带。
+- **第一落点**：检查 `console/src/pages/WealthWorkbench/api.ts` 的 `fetchSkillStats()` 与 `Board/usePlanStats.ts`；该请求不经过 CoPaw 后端，需要 Nginx 将上述路径转发到外部服务。保留外部响应封装 `code: 200, data: { items: [...] }`，请求携带登录态及机构上下文。
+- **不可用处理**：请求失败或该规划未返回统计时显示 `--`，真实零值显示 `0`；后台更新失败保留已有成功数据。不要回退为规划分发记录或本地估算值。

@@ -4,14 +4,15 @@
  */
 import { useEffect, useRef, useState } from "react";
 import cx from "classnames";
+import { Tooltip } from "antd";
 import styles from "../index.module.less";
 import type { Plan } from "../types";
 import {
   addCalendarDays,
   calendarDate,
   calendarRange,
-  planItemScheduledOn,
   planFrequency,
+  planPublishLabel,
   planScheduledOn,
   todayKey,
 } from "../utils";
@@ -19,15 +20,8 @@ import { Icon } from "../components/Icon";
 
 const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 
-function scheduledSceneName(plan: Plan, day: string): string {
-  const sceneNames = (plan.items ?? [])
-    .filter((item) => planItemScheduledOn(plan, item, day))
-    .map((item) => item.sceneName)
-    .filter(Boolean);
-  return sceneNames.join(" / ") || "未命名场景";
-}
-
 export function Calendar({
+  sources,
   visible,
   dimension,
   anchor,
@@ -35,7 +29,9 @@ export function Calendar({
   onToday,
   onDimension,
   onShowDetails,
+  planStat,
 }: {
+  sources: readonly string[];
   visible: Plan[];
   dimension: "week" | "month";
   anchor: string;
@@ -43,6 +39,7 @@ export function Calendar({
   onToday: () => void;
   onDimension: (d: "week" | "month") => void;
   onShowDetails: (day: string, id?: string) => void;
+  planStat: (plan: Plan) => { customers: number; tasks: number } | null;
 }) {
   const todayCellRef = useRef<HTMLDivElement>(null);
   const [shouldFocusToday, setShouldFocusToday] = useState(false);
@@ -122,9 +119,12 @@ export function Calendar({
             <span>
               <i></i>分行关注
             </span>
-            <span>
-              <i className={styles.purple}></i>行长 / 我的关注
-            </span>
+            {sources.some((source) => source !== "分行关注") && (
+              <span>
+                <i className={styles.purple}></i>
+                {sources.includes("我的关注") ? "行长 / 我的关注" : "行长关注"}
+              </span>
+            )}
           </div>
           <div className={styles.switch} aria-label="日历维度">
             <button
@@ -193,32 +193,69 @@ export function Calendar({
                   </span>
                 </div>
                 {shown.map((p) => {
-                  const sceneName = scheduledSceneName(p, day);
+                  const stat = planStat(p);
+                  const sceneNames =
+                    (p.items ?? [])
+                      .map((item) => item.sceneName)
+                      .filter(Boolean)
+                      .join("，") || "未配置";
                   return (
-                    <button
+                    <Tooltip
                       key={p.id}
-                      className={cx(
-                        styles.calendarEvent,
-                        p.source !== "分行关注" && styles.purple,
-                      )}
-                      title={`${sceneName} · ${p.status} · 点击查看详情`}
-                      onClick={() => onShowDetails(day, p.id)}
+                      placement="topLeft"
+                      trigger={["hover", "focus"]}
+                      title={
+                        <div className={styles.calendarEventTooltip}>
+                          <div>规划名称：{p.name}</div>
+                          <div>经营场景：{sceneNames}</div>
+                          <div>{planPublishLabel(p)} · 点击查看详情</div>
+                        </div>
+                      }
                     >
-                      <span className={styles.calendarEventTitle}>
-                        <strong>{sceneName}</strong>
-                        <span className={styles.calendarFrequency}>
-                          {planFrequency(p)}
+                      <button
+                        className={cx(
+                          styles.calendarEvent,
+                          p.source !== "分行关注" && styles.purple,
+                        )}
+                        aria-label={`${p.name}，${
+                          p.items?.length ?? 0
+                        } 个技能，点击查看详情`}
+                        onClick={() => onShowDetails(day, p.id)}
+                      >
+                        <span className={styles.calendarEventTitle}>
+                          {dimension === "month" ? (
+                            <span className={styles.calendarPlanIdentity}>
+                              <strong>{p.name}</strong>
+                              <span
+                                className={styles.calendarSkillCount}
+                                aria-label={`${p.items?.length ?? 0} 个技能`}
+                              >
+                                {p.items?.length ?? 0}
+                              </span>
+                            </span>
+                          ) : (
+                            <strong>{p.name}</strong>
+                          )}
+                          <span className={styles.calendarFrequency}>
+                            {planFrequency(p)}
+                          </span>
                         </span>
-                      </span>
-                      {dimension === "week" && (
-                        <small>
-                          {p.source} · {p.customers} 位目标客户
-                          <br />
-                          已生成 {p.tasks} 项任务 · {p.rate}%<br />
-                          {p.status}
-                        </small>
-                      )}
-                    </button>
+                        {dimension === "week" && (
+                          <span className={styles.calendarEventScenes}>
+                            经营场景：{sceneNames}
+                          </span>
+                        )}
+                        {dimension === "week" && (
+                          <small>
+                            {p.source} · {stat?.customers ?? "--"} 位目标客户
+                            <br />
+                            已生成 {stat?.tasks ?? "--"} 项任务
+                            <br />
+                            {planPublishLabel(p)}
+                          </small>
+                        )}
+                      </button>
+                    </Tooltip>
                   );
                 })}
                 {dimension === "month" && items.length > 3 && (

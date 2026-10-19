@@ -18,6 +18,52 @@ from swe.app.wealth_plans.models import (
 from swe.app.wealth_plans.store import WealthPlanStore, new_plan_id
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("database", [False, True])
+@pytest.mark.parametrize(
+    "start,end,conflict",
+    [
+        ("2026-10-01", "2026-10-31", False),
+        ("2026-08-01", "2026-08-31", False),
+        ("2026-09-30", "2026-10-31", True),
+        ("2026-08-01", "2026-09-01", True),
+        ("2026-09-10", "2026-09-20", True),
+        ("2026-08-01", "2026-10-31", True),
+        (None, None, True),
+    ],
+)
+async def test_scene_conflicts_use_task_date_overlap(
+    database: bool,
+    start: str | None,
+    end: str | None,
+    conflict: bool,
+) -> None:
+    plan = make_plan()
+    scene = plan.scenes[0]
+    scene.start_date, scene.end_date = "2026-09-01", "2026-09-30"
+    db = AsyncMock() if database else None
+    store = WealthPlanStore(db)
+    if database:
+        db.fetch_all.return_value = [
+            {
+                "scene_id": scene.scene_id,
+                "plan_name": plan.name,
+                "start_date": scene.start_date,
+                "end_date": scene.end_date,
+            },
+        ]
+    else:
+        await store.create(plan)
+    conflicts = await store.find_scene_conflicts(
+        "rm",
+        "zhangwl",
+        "100",
+        {scene.scene_id},
+        scene_ranges={scene.scene_id: (start, end)},
+    )
+    assert bool(conflicts) is conflict
+
+
 def make_plan(
     plan_id: str = "plan-1",
     sap_id: str = "zhangwl",
@@ -245,8 +291,15 @@ async def test_list_for_viewer_branch_wide_for_president_and_middle() -> None:
     rm_view = await store.list_for_viewer("wangly", "rm", "100")
     no_bbk_view = await store.list_for_viewer("wangly", "president", None)
 
-    assert {r.id for r in president_view} == {"plan-1", "plan-2"}
-    assert {r.id for r in middle_view} == {"plan-1", "plan-2"}
+    assert president_view == []
+    assert {
+        r.id
+        for r in await store.list_for_viewer("zhangwl", "president", "100")
+    } == {"plan-1"}
+    assert {
+        r.id for r in await store.list_for_viewer("liuxt", "president", "100")
+    } == {"plan-2"}
+    assert middle_view == []
     assert rm_view == []
     assert no_bbk_view == []
 
@@ -281,8 +334,9 @@ async def test_list_for_viewer_database_query_is_branch_wide_for_management() ->
     sql, params = db.fetch_all.await_args.args
     normalized_sql = " ".join(sql.split())
     assert "WHERE p.bbk_id = %s" in normalized_sql
-    assert "p.sap_id" not in normalized_sql
-    assert params == ("100",)
+    assert "p.source_label <> %s OR p.sap_id = %s" in normalized_sql
+    assert "p.source_label IN (%s, %s)" in normalized_sql
+    assert params == ("100", "分行关注", "行长关注", "行长关注", "wangly")
 
 
 @pytest.mark.asyncio
@@ -360,3 +414,89 @@ def test_new_plan_id_format() -> None:
     plan_id = new_plan_id()
     assert plan_id.startswith("plan-")
     assert len(plan_id) == len("plan-") + 12
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "role,expected",
+    [
+        ("president", {"branch", "president"}),
+        ("middle", {"branch"}),
+        ("rm", {"branch", "president", "personal"}),
+    ],
+)
+async def test_list_sources_excludes_lower_role_plans_even_for_creator_or_target(
+    role: str,
+    expected: set[str],
+) -> None:
+    store = WealthPlanStore()
+    for plan_id, source in [
+        ("branch", "分行关注"),
+        ("president", "行长关注"),
+        ("personal", "我的关注"),
+    ]:
+        await store.create(
+            make_plan(plan_id, sap_id="viewer", source_label=source),
+        )
+        await store.create(
+            make_plan(
+                f"outside-{plan_id}",
+                sap_id="viewer",
+                bbk_id="200",
+                source_label=source,
+            ),
+        )
+    await store.create(
+        make_plan(
+            "target-personal",
+            sap_id="other",
+            targets=["viewer"],
+            source_label="我的关注",
+        ),
+    )
+    records = await store.list_for_viewer("viewer", role, "100")
+    if role == "rm":
+        expected = expected | {"target-personal"}
+    assert {record.id for record in records} == expected
+
+
+@pytest.mark.asyncio
+async def test_middle_database_query_filters_branch_focus_only() -> None:
+    db = AsyncMock()
+    db.fetch_all.return_value = []
+    store = WealthPlanStore(db)
+    assert await store.list_for_viewer("viewer", "middle", "100") == []
+    sql, params = db.fetch_all.await_args.args
+    assert "p.source_label IN (%s)" in " ".join(sql.split())
+    assert params == ("100", "分行关注")
+
+
+@pytest.mark.asyncio
+async def test_scene_conflicts_filter_recipient_intersection_in_memory() -> (
+    None
+):
+    store = WealthPlanStore()
+    await store.create(make_plan(source_label="分行关注", targets=["a", "b"]))
+    args = ("president", "c-president", "100", {"skill-wealth-insurance-1"})
+    assert await store.find_scene_conflicts(*args, target_sap_ids={"c"}) == {}
+    assert await store.find_scene_conflicts(*args, target_sap_ids=set()) == {}
+    assert await store.find_scene_conflicts(*args, target_sap_ids={"a", "c"})
+
+
+@pytest.mark.asyncio
+async def test_scene_conflicts_database_filters_targets_with_exists() -> None:
+    db = AsyncMock()
+    db.fetch_all.return_value = []
+    store = WealthPlanStore(db)
+    await store.find_scene_conflicts(
+        "president",
+        "c-president",
+        "100",
+        {"scene"},
+        target_sap_ids={"c-rm"},
+        exclude_plan_id="editing",
+    )
+    sql, params = db.fetch_all.await_args.args
+    assert "AND EXISTS" in sql
+    assert "t.plan_id = p.id AND t.sap_id IN (%s)" in sql
+    assert params[-2:] == ("c-rm", "editing")

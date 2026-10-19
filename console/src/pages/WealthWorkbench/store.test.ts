@@ -3,7 +3,7 @@
  * request 层用内存夹具 mock（规划接口已不做假数据回退）；
  * 场景接口按 category 返回 SceneSkillItem 夹具，账户/草稿走真实实现。
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetMockDb } from "./api";
 import { request } from "../../api/request";
 import { useIframeStore } from "../../stores/iframeStore";
@@ -14,11 +14,33 @@ import {
   planScheduledOn,
 } from "./store";
 import { cycleRange, DEFAULT_SCHEDULE, todayKey } from "./utils";
-import type { Plan, PlanItem } from "./types";
+import type { Customer, Plan, PlanItem } from "./types";
 
 vi.mock("../../api/request", () => ({ request: vi.fn() }));
 
-const mockRequest = vi.mocked(request);
+// 统一记录两种传输，验证规划请求与原生名单请求的执行顺序。
+const mockRequest =
+  vi.fn<(path: string, options?: RequestInit) => Promise<unknown>>();
+
+afterEach(() => vi.unstubAllGlobals());
+
+function mockTransports() {
+  vi.mocked(request).mockImplementation(
+    (path, options) => mockRequest(path, options) as never,
+  );
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string, options?: RequestInit) => {
+      const result = (await mockRequest(path, options)) as {
+        items?: unknown[];
+      };
+      const { items, ...fields } = result;
+      return new Response(
+        JSON.stringify({ code: 200, data: { ...fields, list: items ?? [] } }),
+      );
+    }),
+  );
+}
 
 const INSURANCE = "skill-wealth-insurance-1";
 const INSURANCE_2 = "skill-wealth-insurance-2";
@@ -181,11 +203,9 @@ async function requestHandler(
         : SCENE_FIXTURES,
     };
   }
-  if (path.startsWith("/wealth/name-list")) {
-    const skillId =
-      new URL(path, "http://test").searchParams.get("skill_id") ?? "";
-    // 客户视角（无 skill_id）或 LOAN 技能返回夹具，其余技能为空
-    return { items: !skillId || skillId === LOAN ? NAME_LIST_FIXTURE : [] };
+  if (path.startsWith("/api/agent/workspace/name-list")) {
+    const skillIds = JSON.parse(String(options.body)).skillIds as string[];
+    return { items: skillIds.includes(LOAN) ? NAME_LIST_FIXTURE : [] };
   }
   if (path === "/wealth/plans" && method === "GET") {
     return { items: planViews };
@@ -259,8 +279,30 @@ function makeTodayPlan(): Plan {
   };
 }
 
+function makeTodayPlanView(): FixturePlanView {
+  const today = todayKey();
+  return makeView({
+    period_start: today,
+    period_end: today,
+    scenes: [
+      {
+        scene_id: LOAN,
+        scene_name: "信贷需求挖掘",
+        category: "loan",
+        category_label: "贷款",
+        start_date: today,
+        end_date: today,
+        cron_expr: "0 9 * * *",
+        mcp_relations: [],
+      },
+    ],
+  });
+}
+
 async function initStore() {
   resetMockDb();
+  mockRequest.mockReset();
+  mockTransports();
   planViews = fixturePlanViews();
   mockRequest.mockImplementation(requestHandler as never);
   // 显式声明测试身份为客户经理（RB0101），不依赖 FALLBACK_ROLE 兜底
@@ -272,6 +314,7 @@ async function initStore() {
     scenesLoading: false,
     plans: [],
     customers: [],
+    todaySkillId: "",
     customersLoading: false,
     pendingCustomers: [],
     pendingLoading: false,
@@ -310,6 +353,138 @@ function seedDraft() {
 }
 
 describe("WealthWorkbench store", () => {
+  it("三个模块的名单和统计一起保存，经营视角统计不被聚合查询覆盖", async () => {
+    planViews = [makeTodayPlanView()];
+    await useWealthStore.getState().refreshPlans();
+    const counts = {
+      targetCusCount: 100,
+      todayTouchCount: 4,
+      sevenDayTouchCount: 20,
+      unTouchedCount: 90,
+    };
+    mockRequest.mockResolvedValueOnce({ items: NAME_LIST_FIXTURE, ...counts });
+    mockRequest.mockResolvedValueOnce({
+      items: NAME_LIST_FIXTURE,
+      ...counts,
+      targetCusCount: 200,
+    });
+    await useWealthStore.getState().loadTodayCustomers("business", LOAN);
+    expect(useWealthStore.getState().todayCounts).toEqual(counts);
+    const pendingCounts = { ...counts, unTouchedCount: 80 };
+    mockRequest.mockResolvedValueOnce({
+      items: NAME_LIST_FIXTURE,
+      ...pendingCounts,
+    });
+    await useWealthStore.getState().loadPendingCustomers();
+    const doneCounts = { ...counts, sevenDayTouchCount: 30 };
+    mockRequest.mockResolvedValueOnce({
+      items: NAME_LIST_FIXTURE,
+      ...doneCounts,
+    });
+    await useWealthStore.getState().loadDoneCustomers();
+    expect(useWealthStore.getState().pendingCounts).toEqual(pendingCounts);
+    expect(useWealthStore.getState().doneCounts).toEqual(doneCounts);
+    expect(useWealthStore.getState().todayCounts).toEqual(counts);
+  });
+
+  it("当天没有工作任务时，各模块及角标清空且不查询范围外客户", async () => {
+    useWealthStore.setState({ plans: [], todayCustomerCount: 9 });
+    mockRequest.mockClear();
+    const state = useWealthStore.getState();
+    await state.loadTodayCustomers("business");
+    await state.loadPendingCustomers();
+    await state.loadDoneCustomers();
+    await state.loadTodayCustomerCount();
+    expect(mockRequest).not.toHaveBeenCalled();
+    expect(useWealthStore.getState()).toMatchObject({
+      customers: [],
+      pendingCustomers: [],
+      doneCustomers: [],
+      todayCustomerCount: 0,
+    });
+  });
+
+  it("快速切换场景时旧响应不覆盖所选场景，标签切回保留当前技能", async () => {
+    useIframeStore.setState({ userId: "10086" });
+    const plan = makeTodayPlan();
+    useWealthStore.setState({
+      plans: [
+        {
+          ...plan,
+          items: [
+            plan.items![0],
+            { ...plan.items![0], id: FINANCE, sceneName: "理财场景" },
+          ],
+        },
+      ],
+    });
+    let finish!: (response: unknown) => void;
+    mockRequest.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const older = useWealthStore
+      .getState()
+      .loadTodayCustomers("business", LOAN);
+    await useWealthStore.getState().loadTodayCustomers("business", FINANCE);
+    finish({ items: NAME_LIST_FIXTURE });
+    await older;
+    expect(useWealthStore.getState()).toMatchObject({
+      customers: [],
+      todaySkillId: FINANCE,
+      customersLoading: false,
+    });
+    planViews = [makeTodayPlanView()];
+    planViews[0].scenes.push({
+      ...planViews[0].scenes[0],
+      scene_id: FINANCE,
+      scene_name: "理财场景",
+    });
+    mockRequest.mockClear();
+    await useWealthStore.getState().refreshTaskLists();
+    const calls = mockRequest.mock.calls.filter(([path]) =>
+      String(path).startsWith("/api/agent/workspace/name-list"),
+    );
+    expect(JSON.parse(String(calls[0][1]?.body)).skillIds).toEqual([FINANCE]);
+  });
+
+  it("经营视角只查询所选场景，其他模块和角标使用全部当天技能", async () => {
+    useIframeStore.setState({ userId: "10086" });
+    const plan = makeTodayPlan();
+    useWealthStore.setState({
+      plans: [
+        {
+          ...plan,
+          items: [
+            plan.items[0],
+            { ...plan.items[0], id: FINANCE, sceneName: "理财场景" },
+          ],
+        },
+      ],
+    });
+    mockRequest.mockClear();
+    const state = useWealthStore.getState();
+    await state.loadTodayCustomers("business", FINANCE);
+    const skillArrays = () =>
+      mockRequest.mock.calls
+        .filter(([path]) =>
+          String(path).startsWith("/api/agent/workspace/name-list"),
+        )
+        .map(([, options]) => JSON.parse(String(options?.body)).skillIds);
+    expect(skillArrays()).toEqual([[FINANCE], [LOAN, FINANCE]]);
+    mockRequest.mockClear();
+    await state.loadTodayCustomers("customer");
+    await state.loadPendingCustomers();
+    await state.loadDoneCustomers();
+    expect(skillArrays()).toEqual([
+      [LOAN, FINANCE],
+      [LOAN, FINANCE],
+      [LOAN, FINANCE],
+    ]);
+  });
+
   beforeEach(async () => {
     await initStore();
   });
@@ -564,15 +739,16 @@ describe("WealthWorkbench store", () => {
     useWealthStore.setState({ plans: [makeTodayPlan()] });
     const nameListCalls = () =>
       mockRequest.mock.calls
-        .filter(([p]) => String(p).startsWith("/wealth/name-list"))
-        .map(([p]) => String(p));
+        .filter(([p]) => String(p).startsWith("/api/agent/workspace/name-list"))
+        .map(([, options]) => JSON.parse(String(options?.body)));
 
     await useWealthStore.getState().loadTodayCustomers("business");
-    const bizCall = nameListCalls().slice(-1)[0] ?? "";
-    expect(bizCall).toContain("sap_id=10086");
-    expect(bizCall).toContain(`skill_id=${LOAN}`);
+    const bizCall = nameListCalls()[0];
+    expect(bizCall.sapId).toBe("10086");
+    expect(bizCall.skillIds).toEqual([LOAN]);
     const bizCustomers = useWealthStore.getState().customers;
     expect(bizCustomers).toHaveLength(2);
+    expect(useWealthStore.getState().todayCustomerCount).toBe(2);
     expect(bizCustomers[0]).toMatchObject({
       id: `${LOAN}|CUST001`,
       task: "信贷需求挖掘",
@@ -582,16 +758,60 @@ describe("WealthWorkbench store", () => {
     });
 
     await useWealthStore.getState().loadTodayCustomers("customer");
-    const custCall = nameListCalls().slice(-1)[0] ?? "";
-    expect(custCall).toContain("sap_id=10086");
-    expect(custCall).not.toContain("skill_id=");
+    const custCall = nameListCalls().slice(-1)[0];
+    expect(custCall.sapId).toBe("10086");
+    expect(custCall.skillIds).toEqual([LOAN]);
     const custCustomers = useWealthStore.getState().customers;
     expect(custCustomers).toHaveLength(2);
+    expect(useWealthStore.getState().todayCustomerCount).toBe(
+      custCustomers.length,
+    );
     expect(custCustomers[0]).toMatchObject({
       id: "CUST001",
       label: "我的关注",
       task: "信贷需求挖掘",
     });
+  });
+
+  it("侧栏总人数使用客户聚合查询，保留页面经营名单及视角", async () => {
+    useIframeStore.setState({ userId: "10086" });
+    const customers = [{ id: "business-1" }] as Customer[];
+    useWealthStore.setState({
+      plans: [makeTodayPlan()],
+      customers,
+      todayCustomerView: "business",
+      todayCustomerCount: 0,
+    });
+    mockRequest.mockClear();
+    await useWealthStore.getState().loadTodayCustomerCount();
+    expect(mockRequest).toHaveBeenCalledWith(
+      "/api/agent/workspace/name-list",
+      expect.objectContaining({
+        method: "POST",
+      }),
+    );
+    const paths = mockRequest.mock.calls.map(([, options]) =>
+      JSON.parse(String(options?.body)),
+    );
+    expect(paths.every((body) => body.skillIds.includes(LOAN))).toBe(true);
+    expect(paths.some((body) => body.touched === 2)).toBe(true);
+    expect(useWealthStore.getState().todayCustomerCount).toBe(2);
+    expect(useWealthStore.getState().customers).toBe(customers);
+    expect(useWealthStore.getState().todayCustomerView).toBe("business");
+  });
+
+  it("经营视角名单为空时，角标仍使用客户视角查询人数", async () => {
+    useIframeStore.setState({ userId: "10086" });
+    const plan = makeTodayPlan();
+    useWealthStore.setState({
+      plans: [
+        { ...plan, items: [{ ...plan.items[0], id: FINANCE }, plan.items[0]] },
+      ],
+      todayCustomerCount: 0,
+    });
+    await useWealthStore.getState().loadTodayCustomers("business");
+    expect(useWealthStore.getState().customers).toHaveLength(0);
+    expect(useWealthStore.getState().todayCustomerCount).toBe(2);
   });
 
   it("刷新先等待最新规划，再用新技能查询名单，期间拦截重复刷新", async () => {
@@ -630,9 +850,9 @@ describe("WealthWorkbench store", () => {
     expect(mockRequest).toHaveBeenCalledTimes(1);
     finishPlans({ items: [latest] });
     await refresh;
-    expect(String(mockRequest.mock.calls[1]?.[0])).toContain(
-      `skill_id=${LOAN}`,
-    );
+    expect(
+      JSON.parse(String(mockRequest.mock.calls[1]?.[1]?.body)).skillIds,
+    ).toEqual([LOAN]);
     expect(useWealthStore.getState().customers[0].task).toBe(
       "新发布的信贷任务",
     );
@@ -640,13 +860,18 @@ describe("WealthWorkbench store", () => {
   });
 
   it("客户视角刷新规划后只查询一次聚合名单", async () => {
+    planViews = [makeTodayPlanView()];
     useWealthStore.setState({ customersLoading: false });
     mockRequest.mockClear();
     await useWealthStore.getState().refreshTodayCustomers("customer");
     expect(mockRequest.mock.calls).toHaveLength(2);
     expect(mockRequest.mock.calls[0][0]).toBe("/wealth/plans");
-    expect(String(mockRequest.mock.calls[1][0])).toContain("/wealth/name-list");
-    expect(String(mockRequest.mock.calls[1][0])).not.toContain("skill_id=");
+    expect(String(mockRequest.mock.calls[1][0])).toContain(
+      "/api/agent/workspace/name-list",
+    );
+    expect(
+      JSON.parse(String(mockRequest.mock.calls[1][1]?.body)).skillIds,
+    ).toEqual([LOAN]);
     expect(useWealthStore.getState().customersLoading).toBe(false);
   });
 
@@ -660,24 +885,120 @@ describe("WealthWorkbench store", () => {
     expect(mockRequest).not.toHaveBeenCalled();
   });
 
-  it("loadPendingCustomers / loadDoneCustomers 按 touched 拉取各自名单", async () => {
+  it("loadPendingCustomers / loadDoneCustomers 按各自触达参数查询名单", async () => {
     useIframeStore.setState({ userId: "10086" });
     useWealthStore.setState({ plans: [makeTodayPlan()] });
     const nameListCalls = () =>
       mockRequest.mock.calls
-        .filter(([p]) => String(p).startsWith("/wealth/name-list"))
-        .map(([p]) => String(p));
+        .filter(([p]) => String(p).startsWith("/api/agent/workspace/name-list"))
+        .map(([, options]) => JSON.parse(String(options?.body)));
 
+    mockRequest.mockResolvedValueOnce({
+      items: [{ ...NAME_LIST_FIXTURE[0], touched: 0 }],
+    });
     await useWealthStore.getState().loadPendingCustomers();
+    mockRequest.mockResolvedValueOnce({
+      items: [{ ...NAME_LIST_FIXTURE[1], touched: 1 }],
+    });
     await useWealthStore.getState().loadDoneCustomers();
 
     const calls = nameListCalls();
-    expect(calls.some((c) => c.includes("touched=0"))).toBe(true);
-    expect(calls.some((c) => c.includes("touched=1"))).toBe(true);
-    expect(useWealthStore.getState().pendingCustomers).toHaveLength(2);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].touched).toBe(0);
+    expect(calls[1].touched).toBe(1);
+    expect(useWealthStore.getState().pendingCustomers).toHaveLength(1);
+    expect(useWealthStore.getState().pendingCustomers[0].touched).toBe(0);
     const done = useWealthStore.getState().doneCustomers;
-    expect(done).toHaveLength(2);
+    expect(done).toHaveLength(1);
+    expect(done[0].touched).toBe(1);
     expect(done.every((c) => c.done)).toBe(true);
+  });
+
+  it("标签页切回直接刷新三个名单，沿用今日客户视角和登录人", async () => {
+    planViews = [makeTodayPlanView()];
+    useWealthStore.setState({ plans: [makeTodayPlan()] });
+    useIframeStore.setState({ userId: "10086" });
+    await useWealthStore.getState().loadTodayCustomers("customer");
+    mockRequest.mockClear();
+    await useWealthStore.getState().refreshTaskLists();
+    const paths = mockRequest.mock.calls.map(([path]) => String(path));
+    expect(paths[0]).toBe("/wealth/plans");
+    const lists = mockRequest.mock.calls
+      .filter(([path]) =>
+        String(path).startsWith("/api/agent/workspace/name-list"),
+      )
+      .map(([, options]) => JSON.parse(String(options?.body)));
+    expect(lists).toHaveLength(3);
+    expect(lists.map((body) => body.touched)).toEqual([2, 0, 1]);
+    expect(lists.every((body) => body.sapId === "10086")).toBe(true);
+    expect(lists.every((body) => body.skillIds.includes(LOAN))).toBe(true);
+    expect(useWealthStore.getState().taskListsRefreshing).toBe(false);
+  });
+
+  it("三个名单刷新期间忽略重复请求，完成后可以再次刷新", async () => {
+    planViews = [makeTodayPlanView()];
+    useWealthStore.setState({
+      todayCustomerView: "customer",
+      todayCustomerCount: 0,
+    });
+    let finishPlans!: (value: unknown) => void;
+    mockRequest.mockClear();
+    mockRequest.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishPlans = resolve;
+        }),
+    );
+    const refresh = useWealthStore.getState().refreshTaskLists();
+    await useWealthStore.getState().refreshTaskLists();
+    expect(mockRequest).toHaveBeenCalledTimes(1);
+    finishPlans({ items: planViews });
+    await refresh;
+    expect(mockRequest).toHaveBeenCalledTimes(4);
+    await useWealthStore.getState().refreshTaskLists();
+    expect(mockRequest).toHaveBeenCalledTimes(8);
+  });
+
+  it("人数相同也刷新客户明细，不再先查询数量", async () => {
+    planViews = [makeTodayPlanView()];
+    useWealthStore.setState({ plans: [makeTodayPlan()] });
+    await useWealthStore.getState().loadTodayCustomers("customer");
+    const originalCount = useWealthStore.getState().todayCustomerCount;
+    const updated = NAME_LIST_FIXTURE.map((item, index) => ({
+      ...item,
+      custNm: `最新客户${index}`,
+      touched: index,
+    }));
+    mockRequest.mockClear();
+    mockRequest.mockResolvedValueOnce({ items: planViews });
+    mockRequest.mockResolvedValueOnce({ items: updated });
+    mockRequest.mockResolvedValueOnce({ items: [updated[0]] });
+    mockRequest.mockResolvedValueOnce({ items: [updated[1]] });
+    await useWealthStore.getState().refreshTaskLists();
+    expect(mockRequest).toHaveBeenCalledTimes(4);
+    expect(mockRequest.mock.calls[0][0]).toBe("/wealth/plans");
+    expect(useWealthStore.getState().todayCustomerCount).toBe(originalCount);
+    expect(useWealthStore.getState().customers[0].name).toBe("最新客户0");
+    expect(useWealthStore.getState().pendingCustomers[0].name).toBe(
+      "最新客户0",
+    );
+    expect(useWealthStore.getState().doneCustomers[0].name).toBe("最新客户1");
+    expect(useWealthStore.getState().taskListsRefreshing).toBe(false);
+  });
+
+  it.each([
+    { initialized: false },
+    { plansLoaded: false },
+    { accountId: "president" as const },
+    { accountId: "unknown" as const },
+    { customersLoading: true },
+    { pendingLoading: true },
+    { doneLoading: true },
+  ])("身份或初始规划未就绪、无任务权限时不刷新：%j", async (state) => {
+    useWealthStore.setState(state);
+    mockRequest.mockClear();
+    await useWealthStore.getState().refreshTaskLists();
+    expect(mockRequest).not.toHaveBeenCalled();
   });
 
   it("editPlan 将规划内容载入草稿并设置编辑态", () => {
@@ -743,5 +1064,35 @@ describe("WealthWorkbench store", () => {
     };
     expect(planScheduledOn(plan, "2026-09-08")).toBe(true);
     expect(planScheduledOn(plan, "2026-08-31")).toBe(false);
+  });
+  it("看板严格刷新失败时保留已有规划", async () => {
+    const previous = useWealthStore.getState().plans;
+    mockRequest.mockRejectedValue(new Error("offline"));
+    await expect(useWealthStore.getState().refreshPlans(true)).rejects.toThrow(
+      "offline",
+    );
+    expect(useWealthStore.getState().plans).toBe(previous);
+  });
+  it("被取消的规划请求即使晚返回也不覆盖新规划", async () => {
+    let resolve!: (value: unknown) => void;
+    mockRequest.mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done;
+      }),
+    );
+    const controller = new AbortController();
+    const refresh = useWealthStore
+      .getState()
+      .refreshPlans(true, controller.signal);
+    const rejection = expect(refresh).rejects.toThrow();
+    controller.abort();
+    const latest = [...useWealthStore.getState().plans];
+    useWealthStore.setState({ plans: latest });
+    resolve({ items: [] });
+    await rejection;
+    expect(useWealthStore.getState().plans).toBe(latest);
+    expect(mockRequest).toHaveBeenCalledWith("/wealth/plans", {
+      signal: controller.signal,
+    });
   });
 });

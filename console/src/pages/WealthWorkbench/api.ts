@@ -5,9 +5,12 @@
 import { parseCron, serializeCron } from "@/utils/parseCron";
 import { request } from "../../api/request";
 import { buildAuthHeaders } from "../../api/authHeaders";
+import { getWPlusCookie } from "../../utils/cookie-utils";
+import { getIframeContext } from "../../stores/iframeStore";
+import { DEFAULT_BBK_ID } from "../../constants/identity";
 // import { Base64 } from "js-base64";
 import { SCENE_CATEGORIES } from "./mock/data";
-import { DEFAULT_SCHEDULE, sceneStatKey } from "./utils";
+import { DEFAULT_SCHEDULE } from "./utils";
 import type {
   Account,
   Customer,
@@ -17,7 +20,6 @@ import type {
   PlanItem,
   Scene,
   SkillStat,
-  SkillStatQuery,
 } from "./types";
 
 /** 模拟网络延迟（毫秒），让离线 mock 的异步行为贴近真实接口 */
@@ -163,6 +165,11 @@ function mapPlan(view: PlanView): Plan {
     end: view.period_end ?? "",
     items,
     targetSapIds: view.targets.map((t) => t.sap_id),
+    targets: view.targets.map((t) => ({
+      sapId: t.sap_id,
+      name: t.name || t.sap_id,
+      orgName: "",
+    })),
   };
 }
 
@@ -206,57 +213,61 @@ export async function fetchAvailableSceneCount(): Promise<number | null> {
 }
 
 // ---------------------------------------------------------------------------
-// 技能统计：/wealth/skill-stats（外部接口代理）
+// 规划统计：同源直连，由 Nginx 转发到外部服务
 // ---------------------------------------------------------------------------
 
 interface SkillStatItemView {
-  skillId: string;
+  planId: string;
   targetCustomerCount: number;
-  generatedTaskCount: number;
+  targetTaskCount: number;
 }
 
 interface SkillStatsResponse {
-  items: SkillStatItemView[];
+  code: number | string;
+  data?: { items?: SkillStatItemView[] };
 }
 
 /**
- * 看板「目标客户 / 已生成任务」统计：按技能 + 区间批量查询。
- * 返回以 sceneStatKey 为键的结果表；接口不可达返回 null，由看板保持 "--" 占位。
+ * 按规划 ID 批量查询，返回以 planId 为键的结果表。
+ * 不经过 CoPaw 后端；请求失败返回 null，由看板保持 "--" 占位。
  */
 export async function fetchSkillStats(
-  queries: SkillStatQuery[],
+  planIds: string[],
+  signal?: AbortSignal,
 ): Promise<Record<string, SkillStat> | null> {
-  if (!queries.length) return {};
+  if (!planIds.length) return {};
   try {
-    const resp = await request<SkillStatsResponse>("/wealth/skill-stats", {
+    const auth = buildAuthHeaders();
+    const resp = await fetch("/api/agent/workspace/skill-stats", {
       method: "POST",
-      body: JSON.stringify({ skills: queries }),
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: getWPlusCookie("token") ?? "",
+      },
+      body: JSON.stringify({ planIds: [...new Set(planIds)] }),
+      signal,
     });
-    // 外部按请求顺序返回且我们入参字段齐全（不会跳项），按下标对齐；
-    // skillId 不一致时退化为按 skillId 查找兜底
-    const bySkill = new Map(resp.items.map((i) => [i.skillId, i]));
+    if (!resp.ok) throw new Error(`规划统计请求失败：HTTP ${resp.status}`);
+    const payload = (await resp.json()) as SkillStatsResponse;
+    if (String(payload.code) !== "200") {
+      throw new Error(`规划统计接口返回失败：${payload.code}`);
+    }
     const byKey: Record<string, SkillStat> = {};
-    queries.forEach((q, index) => {
-      const hit =
-        resp.items[index]?.skillId === q.skillId
-          ? resp.items[index]
-          : bySkill.get(q.skillId);
-      if (hit) {
-        byKey[sceneStatKey(q)] = {
-          targetCustomerCount: hit.targetCustomerCount,
-          generatedTaskCount: hit.generatedTaskCount,
-        };
-      }
-    });
+    for (const item of payload.data?.items ?? []) {
+      byKey[item.planId] = {
+        targetCustomerCount: item.targetCustomerCount,
+        generatedTaskCount: item.targetTaskCount,
+      };
+    }
     return byKey;
   } catch (error) {
-    console.warn("[Wealth] 技能统计接口不可用", error);
+    console.warn("[Wealth] 规划统计接口不可用", error);
     return null;
   }
 }
 
 // ---------------------------------------------------------------------------
-// 客户名单查询：/wealth/name-list（外部接口代理）
+// 客户名单查询：同源 /api/agent/workspace/name-list，由前端 Nginx 转发
 // ---------------------------------------------------------------------------
 
 interface NameListSkillView {
@@ -293,41 +304,96 @@ interface NameListItemView {
   fieldList?: NameListFieldValue[];
 }
 
-interface NameListResponse {
+export interface CustomerCounts {
+  targetCusCount: number | null;
+  todayTouchCount: number | null;
+  sevenDayTouchCount: number | null;
+  unTouchedCount: number | null;
+}
+
+export interface CustomerListResult {
+  customers: Customer[];
+  counts: CustomerCounts;
+}
+
+function customerCounts(response?: Partial<CustomerCounts>): CustomerCounts {
+  return {
+    targetCusCount: response?.targetCusCount ?? null,
+    todayTouchCount: response?.todayTouchCount ?? null,
+    sevenDayTouchCount: response?.sevenDayTouchCount ?? null,
+    unTouchedCount: response?.unTouchedCount ?? null,
+  };
+}
+
+const EMPTY_CUSTOMER_COUNTS: CustomerCounts = {
+  targetCusCount: 0,
+  todayTouchCount: 0,
+  sevenDayTouchCount: 0,
+  unTouchedCount: 0,
+};
+
+interface NameListResponse extends Partial<CustomerCounts> {
   items: NameListItemView[];
   skillFieldList?: NameListSkillFields[];
   allFields?: NameListField[];
 }
 
+interface ExternalNameListResponse {
+  code: string | number;
+  data?: Partial<CustomerCounts> & {
+    list?: NameListItemView[];
+    skillFieldList?: NameListSkillFields[];
+    allFields?: NameListField[];
+  };
+}
+
 /**
- * 查询客户名单。两个视角都传 sapId（当前登录客户经理）：
- * 传 skillId 为经营视角（按技能过滤）；不传为客户视角（该经理全部技能客户）。
- * touched 透传外部接口的触达状态过滤：0 未触达 / 1 已触达 / 2 全部；缺省不过滤。
- * 接口不可达时返回空列表，由页面展示空态，不做假数据兜底。
+ * 客户名单直接通过同源 Nginx 查询，使用 fetch 默认的同源凭证策略。
+ * 经营视角传当前场景，其余口径传当天任务树全部技能；空范围不查询。
  */
 export async function fetchNameList(
-  skillId?: string,
+  skillIds: string[],
   sapId?: string,
   touched?: number,
 ): Promise<NameListResponse> {
+  const ids = [...new Set(skillIds.map((id) => id.trim()).filter(Boolean))];
+  if (!ids.length) return { items: [] };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60000);
   try {
-    const params = new URLSearchParams();
-    if (skillId) {
-      params.set("skill_id", skillId);
+    const context = getIframeContext();
+    const resp = await fetch("/api/agent/workspace/name-list", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        skillIds: ids,
+        bbkId: context.bbk || DEFAULT_BBK_ID,
+        platformSource: "WP",
+        pageSource: "WP_AGENT_WORKSPACE_TASK_LIST",
+        ...(touched !== undefined ? { touched } : {}),
+        ...(sapId ? { sapId } : {}),
+        ...(context.orgCode ? { subBbkId: context.orgCode } : {}),
+        ...(context.positionId ? { posId: context.positionId } : {}),
+      }),
+      signal: controller.signal,
+    });
+    if (!resp.ok) throw new Error(`客户名单请求失败：HTTP ${resp.status}`);
+    const payload = (await resp.json()) as ExternalNameListResponse;
+    if (String(payload.code) !== "200") {
+      throw new Error(`客户名单接口返回失败：${payload.code}`);
     }
-    if (sapId) {
-      params.set("sap_id", sapId);
-    }
-    if (touched !== undefined) {
-      params.set("touched", String(touched));
-    }
-    const resp = await request<NameListResponse>(
-      `/wealth/name-list?${params.toString()}`,
-    );
-    return resp;
+    const data = payload.data;
+    return {
+      ...customerCounts(data),
+      items: (data?.list ?? []).filter((item) => Boolean(item?.custUid)),
+      skillFieldList: data?.skillFieldList ?? [],
+      allFields: data?.allFields ?? [],
+    };
   } catch (error) {
     console.warn("[Wealth] 客户名单接口不可用，返回空列表", error);
     return { items: [] };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -389,14 +455,14 @@ const CUSTOMER_LABEL_BY_PLAN_SOURCE: Record<string, string> = {
 
 /**
  * 拉取今日任务对应的客户经营清单。
- * 经营视角：按技能去重并发查询（skillId + sapId），同一客户在同一任务下只出现一次；
- * 客户视角：一次查询该经理名下全部技能客户（仅 sapId），直接使用外部已聚合名单。
+ * 经营视角由调用方传入当前场景；客户视角传入当天任务树全部场景。
+ * 两个口径都传技能 ID 数组和 sapId，客户视角直接使用外部聚合名单。
  */
 export async function fetchTodayCustomers(
   tasks: TodayTaskRef[],
   sapId: string | undefined,
   view: "business" | "customer",
-): Promise<Customer[]> {
+): Promise<CustomerListResult> {
   const uniqueTasks = [...new Map(tasks.map((t) => [t.skillId, t])).values()];
   if (view === "customer") {
     return fetchCustomerViewCustomers(uniqueTasks, sapId, {
@@ -406,7 +472,7 @@ export async function fetchTodayCustomers(
   const groups = await Promise.all(
     uniqueTasks.map(async (t) => ({
       task: t,
-      response: await fetchNameList(t.skillId, sapId, TOUCHED_ALL),
+      response: await fetchNameList([t.skillId], sapId, TOUCHED_ALL),
     })),
   );
   const seen = new Set<string>();
@@ -428,6 +494,7 @@ export async function fetchTodayCustomers(
         reason,
         category: task.category,
         task: task.sceneName,
+        touched: item.touched,
         done: item.touched === 1,
         channel: item.touchMethod ?? "",
         time: item.strongContactTime ?? "",
@@ -439,7 +506,12 @@ export async function fetchTodayCustomers(
       });
     }
   }
-  return customers;
+  return {
+    customers,
+    counts: groups.length
+      ? customerCounts(groups[0].response)
+      : { ...EMPTY_CUSTOMER_COUNTS },
+  };
 }
 
 /** 触达状态过滤（外部接口 touched 字段）：0 未触达 / 1 已触达 / 2 全部 */
@@ -447,19 +519,21 @@ const TOUCHED_PENDING = 0;
 const TOUCHED_DONE = 1;
 const TOUCHED_ALL = 2;
 
-/** 待触达客户名单：客户视角口径（仅 sapId + touched=0） */
+/** 待触达客户名单：当天技能数组 + sapId + touched=0。 */
 export async function fetchPendingCustomers(
   tasks: TodayTaskRef[],
   sapId?: string,
-): Promise<Customer[]> {
-  return fetchCustomerViewCustomers(tasks, sapId, { touched: TOUCHED_PENDING });
+): Promise<CustomerListResult> {
+  return fetchCustomerViewCustomers(tasks, sapId, {
+    touched: TOUCHED_PENDING,
+  });
 }
 
-/** 已完成名单：客户视角口径（仅 sapId + touched=1），名单内客户均为已触达。 */
+/** 已完成客户名单：当天技能数组 + sapId + touched=1。 */
 export async function fetchDoneCustomers(
   tasks: TodayTaskRef[],
   sapId?: string,
-): Promise<Customer[]> {
+): Promise<CustomerListResult> {
   return fetchCustomerViewCustomers(tasks, sapId, {
     touched: TOUCHED_DONE,
     done: true,
@@ -467,7 +541,7 @@ export async function fetchDoneCustomers(
 }
 
 /**
- * 客户视角名单：一次查询（不带 skillId），直接映射外部已聚合的 data.list。
+ * 客户视角名单：按当天技能数组一次查询，映射外部聚合的 data.list。
  * 重点标签列按命中技能所属规划的创建角色展示；不在今日任务树中的
  * 技能无法关联本地规划来源，因此不产生标签。
  */
@@ -475,10 +549,14 @@ async function fetchCustomerViewCustomers(
   tasks: TodayTaskRef[],
   sapId?: string,
   opts: { touched?: number; done?: boolean } = {},
-): Promise<Customer[]> {
+): Promise<CustomerListResult> {
   const sceneBySkill = new Map(tasks.map((t) => [t.skillId, t]));
-  const response = await fetchNameList(undefined, sapId, opts.touched);
-  return response.items.map((item) => {
+  const response = await fetchNameList(
+    tasks.map((task) => task.skillId),
+    sapId,
+    opts.touched,
+  );
+  const customers = response.items.map((item) => {
     const skillList = item.skillList ?? [];
     const skillIds = [...new Set(skillList.map((s) => s.skillId))];
     const skillNames = [
@@ -501,11 +579,13 @@ async function fetchCustomerViewCustomers(
       skillId: scenes[0]?.skillId ?? skillIds[0] ?? "",
       name: item.custNm,
       label: labels.join("、"),
+      skillNames,
       reason,
       category: scenes[0]?.category ?? "",
       task: opts.done
         ? skillNames.join("、")
         : scenes.map((t) => t.sceneName).join("、"),
+      touched: item.touched,
       done: item.touched == null ? opts.done ?? false : item.touched === 1,
       channel: item.touchMethod ?? "",
       time: item.strongContactTime ?? "",
@@ -516,6 +596,12 @@ async function fetchCustomerViewCustomers(
       ...customerFields(item, response),
     };
   });
+  return {
+    customers,
+    counts: tasks.length
+      ? customerCounts(response)
+      : { ...EMPTY_CUSTOMER_COUNTS },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -539,21 +625,15 @@ function isDevEnv(): boolean {
 }
 
 function signBaseUrl(): string {
-  return isDevEnv()
-    ? "https://xxx.st.xxxx.cn"
-    : "https://xxx.as.xxxx.cn";
+  return isDevEnv() ? "https://xxx.st.xxxx.cn" : "https://xxx.as.xxxx.cn";
 }
 
 function insightBaseUrl(): string {
-  return isDevEnv()
-    ? "https://xxx.st.xxxx.cn/#"
-    : "https://xxx.oa.xxxx.cn/#";
+  return isDevEnv() ? "https://xxx.st.xxxx.cn/#" : "https://xxx.oa.xxxx.cn/#";
 }
 
 function telBaseUrl(): string {
-  return isDevEnv()
-    ? "https://xxx.st.xxxx.cn"
-    : "https://xxx.oa.xxxx.cn";
+  return isDevEnv() ? "https://xxx.st.xxxx.cn" : "https://xxx.oa.xxxx.cn";
 }
 
 /**
@@ -571,13 +651,14 @@ export async function fetchSchemeSignature(
 ): Promise<string> {
   const auth = buildAuthHeaders();
   console.log("auth", auth);
-  const resp = await fetch(`${signBaseUrl()}/expert/get-sign`, {
+  const resp = await fetch(`/expert/get-sign`, {
     method: "POST",
     credentials: "include",
     headers: {
       "Content-Type": "application/json",
+      Authorization: getWPlusCookie("token") ?? "",
       "x-header-cookie": auth["x-header-cookie"] ?? "",
-      "Cookie": auth["x-header-cookie"] ?? ""
+      Cookie: auth["x-header-cookie"] ?? "",
     },
     body: JSON.stringify({ bbkOrgId, custUid }),
   });
@@ -665,25 +746,32 @@ function buildScenePayload(item: PlanItem): PlanScenePayload {
   };
 }
 
-async function fetchPlans(): Promise<Plan[]> {
-  const resp = await request<PlanListResponse>("/wealth/plans");
+async function fetchPlans(signal?: AbortSignal): Promise<Plan[]> {
+  const resp = await request<PlanListResponse>(
+    "/wealth/plans",
+    signal ? { signal } : undefined,
+  );
   return resp.items.map(mapPlan);
 }
 
 /** 轮询场景的接口告警只打一次，恢复后重置 */
 let planListErrorWarned = false;
 
-/** 看板轮询用：拉取最新规划列表，接口不可达时返回空（read 路径容忍，绝不回退假数据） */
-export async function fetchPlanList(): Promise<Plan[]> {
+/** 默认容错读取返回空；严格刷新上抛错误，由调用方保留已有规划并提示。 */
+export async function fetchPlanList(
+  throwOnError = false,
+  signal?: AbortSignal,
+): Promise<Plan[]> {
   try {
-    const plans = await fetchPlans();
+    const plans = await fetchPlans(signal);
     planListErrorWarned = false;
     return plans;
   } catch (error) {
     if (!planListErrorWarned) {
-      console.warn("[Wealth] 规划接口不可用，返回空列表", error);
+      console.warn("[Wealth] 规划接口不可用", error);
       planListErrorWarned = true;
     }
+    if (throwOnError) throw error;
     return [];
   }
 }

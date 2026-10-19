@@ -4,7 +4,21 @@
  */
 import type { CronParts } from "@/utils/parseCron";
 import type { WealthRole } from "./permissions";
-import type { Draft, Plan, PlanItem, SkillStatQuery } from "./types";
+import type { Draft, Plan, PlanItem } from "./types";
+
+/** 规划展示状态只反映发布生命周期，不展示后端聚合的分发结果。 */
+export function planPublishLabel(plan: Plan): string {
+  switch (plan.publishStatus) {
+    case "publishing":
+      return "发布中";
+    case "published":
+      return "发布成功";
+    case "publish_failed":
+      return "发布失败";
+    default:
+      return "状态未知";
+  }
+}
 
 export function calendarDate(value: string): Date {
   return new Date(value + "T12:00:00");
@@ -176,6 +190,7 @@ export function planScheduledOn(p: Plan, day: string): boolean {
 
 /** 今日任务树节点：一个排程到当天的场景条目 */
 export interface TaskTreeNode {
+  schedule: CronParts;
   sceneId: string;
   sceneName: string;
   /** 来源规划名（hover 提示用） */
@@ -210,6 +225,7 @@ export function buildTaskTree(plans: Plan[], day: string): TaskTreeGroup[] {
         groups.push(group);
       }
       group.nodes.push({
+        schedule: item.schedule,
         sceneId: item.id,
         sceneName: item.sceneName,
         planName: p.name,
@@ -248,64 +264,43 @@ export function filterSceneConflictPlans(
 
 /**
  * 发布前置冲突检查：草稿中的场景若已被其他
- * 已发布/发布中的规划占用，则不允许重复新建发布，应去编辑原规划。
- * 发布失败的规划不产生占用；编辑模式排除正在编辑的规划本身。
+ * 已发布/发布中的规划占用且任务区间重叠，则不允许重复发布。
+ * 发布失败不占用；编辑时排除自身及日期未变的原场景。
  */
 export function findSceneConflicts(
   plans: Plan[],
   draft: Draft,
   editingId: string | null,
+  targetSapIds?: readonly string[],
 ): SceneConflict[] {
-  const retainedSceneIds = new Set(
-    plans
-      .find((plan) => plan.id === editingId)
-      ?.items?.map((item) => item.id) ?? [],
-  );
-  const ownerBySceneId = new Map<string, string>();
-  for (const p of plans) {
-    if (p.id === editingId) continue;
-    if (p.publishStatus === "publish_failed") continue;
-    for (const item of p.items ?? []) {
-      if (!ownerBySceneId.has(item.id)) {
-        ownerBySceneId.set(item.id, p.name);
-      }
-    }
-  }
+  const retainedItems =
+    plans.find((plan) => plan.id === editingId)?.items ?? [];
   return draft.items
     .filter(
-      (item) => !retainedSceneIds.has(item.id) && ownerBySceneId.has(item.id),
+      (item) =>
+        !retainedItems.some(
+          (retained) =>
+            retained.id === item.id &&
+            retained.start === item.start &&
+            retained.end === item.end,
+        ),
     )
-    .map((x) => ({
-      scene: x,
-      planName: ownerBySceneId.get(x.id) ?? "",
-    }));
-}
-
-/** 场景统计键：技能 + 区间唯一确定一份统计结果 */
-export function sceneStatKey(q: SkillStatQuery): string {
-  return `${q.skillId}|${q.startDate}|${q.endDate}`;
-}
-
-/**
- * 收集看板规划列表的技能统计查询：按「技能 + 起止日期」去重；
- * 缺起止日期的场景无法统计，跳过。
- */
-export function collectSkillStatQueries(plans: Plan[]): SkillStatQuery[] {
-  const seen = new Set<string>();
-  const queries: SkillStatQuery[] = [];
-  for (const p of plans) {
-    for (const item of p.items ?? []) {
-      if (!item.start || !item.end) continue;
-      const query: SkillStatQuery = {
-        skillId: item.id,
-        startDate: item.start,
-        endDate: item.end,
-      };
-      const key = sceneStatKey(query);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      queries.push(query);
-    }
-  }
-  return queries;
+    .flatMap((scene) => {
+      const owner = plans.find(
+        (plan) =>
+          plan.id !== editingId &&
+          plan.publishStatus !== "publish_failed" &&
+          (targetSapIds === undefined ||
+            (plan.targetSapIds ?? []).some((id) =>
+              targetSapIds.includes(id),
+            )) &&
+          (plan.items ?? []).some(
+            (item) =>
+              item.id === scene.id &&
+              !(scene.start && item.end && scene.start > item.end) &&
+              !(scene.end && item.start && scene.end < item.start),
+          ),
+      );
+      return owner ? [{ scene, planName: owner.name }] : [];
+    });
 }

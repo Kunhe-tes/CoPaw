@@ -2,7 +2,7 @@
 """财富规划的发布编排与级联清理。
 
 发布 = 每个已选场景创建一个定时任务（CronJobSpec），
-再复用 cron 广播机制分发到各分发目标租户，全部异步执行；
+再复用 cron 广播机制分发到各分发目标租户并启用批调度，全部异步执行；
 创建接口落库后立即返回，编排结果回写规划状态与场景关联 id。
 """
 
@@ -16,11 +16,11 @@ from fastapi import Request
 
 from ..crons.api import (
     CronBroadcastRequest,
-    _build_broadcast_context,
+    _bind_workflow_config,
     _build_child_management_context,
     _list_broadcast_children_for_tenants,
-    _normalize_broadcast_targets,
-    _schedule_broadcast_task,
+    _workflow_store,
+    broadcast_job,
     get_cron_manager,
 )
 from ..crons.models import (
@@ -99,6 +99,17 @@ async def _run_publish(
     if plan is None:
         logger.warning("wealth plan %s vanished before publish", plan_id)
         return
+    logger.info(
+        "wealth plan publish loaded: plan=%s creator=%s position=%s "
+        "source=%s agent=%s scene_count=%d target_count=%d",
+        plan.id,
+        plan.sap_id,
+        request.headers.get("X-Position-Id"),
+        plan.source_id,
+        plan.agent_id,
+        len(plan.scenes),
+        len(plan.targets),
+    )
     try:
         await _publish_all_scenes(request, store, plan)
     except Exception as exc:  # pylint: disable=broad-except
@@ -147,6 +158,8 @@ async def _publish_all_scenes(
     for scene in plan.scenes:
         job_id = scene.cron_job_id or str(uuid4())
         job = _build_job_spec(request, plan, scene, job_id)
+        if job.task_type == "workflow":
+            job = await _bind_workflow_config(job, _workflow_store(request))
         await mgr.create_or_replace_job(job)
         broadcast_task_id = await _broadcast_scene_job(
             request,
@@ -235,25 +248,39 @@ async def _broadcast_scene_job(
     plan: WealthPlanRecord,
     job: CronJobSpec,
 ) -> str | None:
-    """把场景任务广播到分发目标；目标仅创建人本人时跳过（源任务即在本人租户）。"""
+    """按原排程分发场景任务并启用批调度；目标仅创建人本人时跳过。"""
     target_ids = [t.sap_id for t in plan.targets if t.sap_id != plan.sap_id]
+    logger.info(
+        "wealth plan cron broadcast requested: plan=%s source_job=%s "
+        "target_count=%d",
+        plan.id,
+        job.id,
+        len(target_ids),
+    )
     if not target_ids:
         return None
-    body = CronBroadcastRequest(target_tenant_ids=target_ids)
-    normalized, identity_by_tenant = _normalize_broadcast_targets(body)
-    context = _build_broadcast_context(
-        request,
-        job,
-        normalized,
-        identity_by_tenant,
+    body = CronBroadcastRequest(
+        target_tenant_ids=target_ids,
+        enable_batch_dispatch=True,
+        enable_offset=False,
+        offset_window_hours=0,
     )
-    snapshot, _reused = await _schedule_broadcast_task(
+    response = await broadcast_job(
         request,
-        job,
-        context,
-        normalized,
+        job.id,
+        body,
+        mgr=await get_cron_manager(request),
     )
-    return snapshot.task_id
+    logger.info(
+        "wealth plan cron broadcast scheduled: plan=%s source_job=%s "
+        "task=%s tenant_count=%d reused=%s",
+        plan.id,
+        job.id,
+        response.task_id,
+        response.tenant_count,
+        response.reused,
+    )
+    return response.task_id
 
 
 async def _delete_scene_job(

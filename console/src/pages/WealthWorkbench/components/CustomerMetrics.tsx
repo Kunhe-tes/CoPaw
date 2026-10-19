@@ -36,7 +36,7 @@ export function CustomerMetrics({ fields = [] }: { fields?: CustomerField[] }) {
           aria-controls={id}
           onClick={() => setExpanded(!expanded)}
         >
-          {expanded ? "收起" : `展开全部（${fields.length}项）`}
+          {expanded ? "收起" : `展开剩余 ${fields.length - PREVIEW_COUNT} 项`}
         </button>
       )}
     </div>

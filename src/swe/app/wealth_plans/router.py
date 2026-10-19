@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
 
 from ..crons.broadcast_task_store import CronBroadcastTaskStore
 from .market_dispatch import (
@@ -58,7 +59,13 @@ from .publish import (
     delete_removed_scene_jobs,
     launch_publish,
 )
-from .roles import ROLE_RM, can_view_branch_wide, resolve_role
+from .roles import (
+    ROLE_PRESIDENT,
+    ROLE_RM,
+    can_view_branch_wide,
+    get_visible_source_labels,
+    resolve_role,
+)
 from .store import WealthPlanStore, new_plan_id
 
 logger = logging.getLogger(__name__)
@@ -73,6 +80,7 @@ _SKILL_CONFIG_PATH = "/api/agent/workspace/skill-config/list"
 _SKILL_STATS_PATH = "/api/agent/workspace/skill-stats"
 _NAME_LIST_PATH = "/api/agent/workspace/name-list"
 _SKILL_CONFIG_TIMEOUT_SECONDS = 8
+_SHARED_SCENE_BBK_ID = "100"
 
 _SNAP_RUNNING = "running"
 _SNAP_COMPLETED = "completed"
@@ -231,29 +239,49 @@ def _parse_skill_stat(row: Any) -> SkillStatItem | None:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/name-list", response_model=NameListResponse)
+class NameListQueryRequest(BaseModel):
+    """名单查询参数通过 JSON 传递，避免技能数组受 URL 长度限制。"""
+
+    skill_id: list[str]
+    sap_id: str = ""
+    touched: int | None = None
+
+
+@router.post("/name-list", response_model=NameListResponse)
 async def list_name_list(
     request: Request,
-    skill_id: str = "",
-    sap_id: str = "",
-    touched: int | None = None,
+    body: NameListQueryRequest,
 ) -> NameListResponse:
     """客户名单查询；两个视角都传 sap_id（当前登录客户经理）。
 
-    skill_id 非空为经营视角（按技能过滤）；为空为客户视角
-    （该经理名下全部技能客户，一次查全）。
+    skill_id 必传数组；经营视角传当前场景，其余口径传当天全部场景。
     touched 透传外部接口的触达状态过滤：0 未触达（待触达）/
     1 已触达（已完成）/ 2 全部（今日任务）；缺省不过滤。
     外部接口不可用时返回空列表，由前端展示空态，不做假数据兜底。
     """
-    if touched is not None and touched not in (0, 1, 2):
+    if body.touched is not None and body.touched not in (0, 1, 2):
         raise HTTPException(status_code=400, detail="invalid touched")
-    return await _fetch_external_name_list(request, skill_id, sap_id, touched)
+    skill_ids = list(
+        dict.fromkeys(
+            value.strip() for value in body.skill_id if value.strip()
+        ),
+    )
+    if not skill_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="skill_id must not be empty",
+        )
+    return await _fetch_external_name_list(
+        request,
+        skill_ids,
+        body.sap_id,
+        body.touched,
+    )
 
 
 async def _fetch_external_name_list(
     request: Request,
-    skill_id: str,
+    skill_id: list[str],
     sap_id: str,
     touched: int | None,
 ) -> NameListResponse:
@@ -262,14 +290,13 @@ async def _fetch_external_name_list(
         return NameListResponse()
     bbk_id = getattr(request.state, "bbk_id", None) or ""
     body: dict[str, Any] = {
+        "skillIds": skill_id,
         "bbkId": bbk_id,
         "platformSource": "WP",
         "pageSource": "WP_AGENT_WORKSPACE_TASK_LIST",
     }
     if touched is not None:
         body["touched"] = touched
-    if skill_id:
-        body["skillId"] = skill_id
     if sap_id:
         body["sapId"] = sap_id
     sub_bbk_id = request.headers.get("X-Org-Code")
@@ -309,6 +336,10 @@ def _parse_name_list_response(payload: dict[str, Any]) -> NameListResponse:
             items.append(item)
     return NameListResponse(
         items=items,
+        targetCusCount=data.get("targetCusCount"),
+        todayTouchCount=data.get("todayTouchCount"),
+        sevenDayTouchCount=data.get("sevenDayTouchCount"),
+        unTouchedCount=data.get("unTouchedCount"),
         skillFieldList=data.get("skillFieldList") or [],
         allFields=data.get("allFields") or [],
     )
@@ -332,7 +363,7 @@ async def _validate_plan_scenes_for_branch(
     request: Request,
     body: PlanUpsertRequest,
 ) -> None:
-    """仅允许规划使用当前登录用户所属分行的技能场景。"""
+    """允许规划使用当前分行及 bbkId=100 的共享技能场景。"""
     current_bbk_id = str(
         getattr(request.state, "bbk_id", None) or "",
     ).strip()
@@ -350,7 +381,8 @@ async def _validate_plan_scenes_for_branch(
         (item.skillId, item.category)
         for group in scene_groups
         for item in group
-        if str(item.bbkId or "").strip() == current_bbk_id
+        if str(item.bbkId or "").strip()
+        in {current_bbk_id, _SHARED_SCENE_BBK_ID}
     }
     if any(
         (scene.scene_id, scene.category) not in allowed_scenes
@@ -358,7 +390,7 @@ async def _validate_plan_scenes_for_branch(
     ):
         raise HTTPException(
             status_code=403,
-            detail="所选经营场景不属于当前分行或已失效",
+            detail="所选经营场景不属于当前分行或共享场景（100），或已失效",
         )
 
 
@@ -382,6 +414,11 @@ async def _validate_scene_conflicts(
         getattr(request.state, "bbk_id", None),
         checked_scene_ids,
         exclude_plan_id=exclude_plan_id,
+        target_sap_ids={target.sap_id for target in body.targets},
+        scene_ranges={
+            scene.scene_id: (scene.start_date, scene.end_date)
+            for scene in body.scenes
+        },
     )
     if not conflicts:
         return
@@ -392,7 +429,7 @@ async def _validate_scene_conflicts(
     )
     raise HTTPException(
         status_code=409,
-        detail=f"以下经营场景已被选用：{items}，请调整后重新发布",
+        detail=f"以下经营场景已被选用且任务周期重叠：{items}，请调整后重新发布",
     )
 
 
@@ -455,13 +492,21 @@ async def update_plan(
     if old.status == PUBLISH_STATUS_PUBLISHING:
         raise HTTPException(status_code=409, detail="规划发布中，请稍后再修改")
     await _validate_plan_scenes_for_branch(request, body)
+    retained_ranges = {
+        (scene.scene_id, scene.start_date, scene.end_date)
+        for scene in old.scenes
+    }
     await _validate_scene_conflicts(
         request,
         store,
         body,
         exclude_plan_id=plan_id,
-        scene_ids={scene.scene_id for scene in body.scenes}
-        - {scene.scene_id for scene in old.scenes},
+        scene_ids={
+            scene.scene_id
+            for scene in body.scenes
+            if (scene.scene_id, scene.start_date, scene.end_date)
+            not in retained_ranges
+        },
     )
     record = _build_record(request, body, plan_id=plan_id)
     _carry_scene_links(old, record)
@@ -508,6 +553,15 @@ async def _get_visible_plan(
     if record is None:
         raise HTTPException(status_code=404, detail="plan not found")
     if not bbk_id or record.bbk_id != bbk_id:
+        raise HTTPException(status_code=403, detail="forbidden")
+    if (
+        role == ROLE_PRESIDENT
+        and record.source_label == SOURCE_LABEL_BY_ROLE[ROLE_PRESIDENT]
+        and record.sap_id != viewer
+    ):
+        raise HTTPException(status_code=403, detail="forbidden")
+    source_labels = get_visible_source_labels(role)
+    if source_labels is not None and record.source_label not in source_labels:
         raise HTTPException(status_code=403, detail="forbidden")
     is_creator = record.sap_id == viewer
     is_target = any(target.sap_id == viewer for target in record.targets)

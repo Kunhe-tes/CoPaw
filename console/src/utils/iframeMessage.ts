@@ -20,7 +20,7 @@ import {
 import { getWPlusCookie } from "./cookie-utils";
 import { authApi } from "../api/modules/auth";
 import { buildAuthHeaders as buildCookieHeaders } from "../api/authHeaders";
-// import mmj from 'xxxx'
+// import mmjTrack from 'xxxx'
 
 /**
  * 允许的来源白名单
@@ -52,7 +52,6 @@ export interface ReportRequestHandler {
 
 /** 当前注册的报告下载请求处理器（同一时刻只有一个 ReportView 实例注册） */
 let reportRequestHandler: ReportRequestHandler | null = null;
-
 /**
  * 注册报告下载请求处理器
  *
@@ -309,6 +308,8 @@ function handleMessage(event: MessageEvent): void {
 
   switch (message.type) {
     case "USER_DATA":
+      // 打印iframe传过来的消息内容
+      console.log("[Claw IframeMessage] USER_DATA:", message);
       // 异步处理，等待 userName 获取完成后再标记 initialized
       void handleUserDataMessage(message, event.origin);
       break;
@@ -560,22 +561,23 @@ async function initFromUrlParams(userId: string): Promise<void> {
   startCookieRefreshTimer();
 }
 
-// async function initMmj()
-// 省略实现
 
-
-
-
-
-
-
-
-
-
-
-
-
-// 省略实现结束
+// async function initMmj(userId) {
+//   if (mmjTrack) {
+//     mmjTrack.setConfig({
+//       appName: "xxxx",
+//       userId: userId,
+//       userIdType: '02', // 用户编号的类型，参考下表，如果是一事通号则是02
+//       productCode: 'xxxx',
+//       businessId: 'xxxx',
+//       firstLoadDB: true,
+//       openAllTrace: true,
+//       serviceUnitId: window.__env__.serviceUnitId, // 前端服务单元：必传！注意传对！（案例：LF39.18@cfzz_web_PRD_PRD）
+//       errorCode: 'MMJ0001', // 错误码
+//       env: window.__env__.env,
+//     })
+//   }
+// }
 
 /**
  * 从 cookie 参数调用客户信息接口

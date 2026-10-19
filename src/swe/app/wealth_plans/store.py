@@ -21,7 +21,12 @@ from .models import (
     PlanTargetRecord,
     WealthPlanRecord,
 )
-from .roles import ROLE_MIDDLE, ROLE_PRESIDENT, ROLE_RM, can_view_branch_wide
+from .roles import (
+    ROLE_MIDDLE,
+    ROLE_PRESIDENT,
+    ROLE_RM,
+    get_visible_source_labels,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +49,20 @@ _SCENE_RESERVING_SOURCE_LABELS_BY_ROLE = {
         },
     ),
 }
+
+
+def _scene_dates_overlap(
+    requested: tuple[str | None, str | None],
+    start: str | None,
+    end: str | None,
+) -> bool:
+    """任务区间按闭区间比较；缺失边界视为无界。"""
+    requested_start, requested_end = requested
+    return not (
+        (requested_start and end and requested_start > end)
+        or (requested_end and start and requested_end < start)
+    )
+
 
 # 建表 SQL 见 scripts/sql/wealth_plan_tables.sql，由运维手动导入，启动时不自动建表。
 
@@ -204,31 +223,39 @@ class WealthPlanStore:
     ) -> list[WealthPlanRecord]:
         """按所属分行及角色可见范围查询，并按创建时间倒序。
 
-        行长/中台查看本行全部规划；其余角色仅查看自己创建或分发给自己的
-        本行规划。bbk_id 缺失时不返回数据。
+        行长查看本行分行关注及自己创建的行长关注，中台仅查看分行关注；其余角色仅查看
+        自己创建或分发给自己的本行规划。bbk_id 缺失时不返回数据。
         """
         if not bbk_id:
             return []
-        branch_wide = can_view_branch_wide(role)
+        source_labels = get_visible_source_labels(role)
         if not self.is_available:
             records = [
                 record
                 for record in self._plans.values()
-                if self._visible_to(record, sap_id, branch_wide, bbk_id)
+                if self._visible_to(record, sap_id, role, bbk_id)
             ]
             records.sort(
                 key=lambda r: r.created_at or datetime.min,
                 reverse=True,
             )
             return copy.deepcopy(records)
-        if branch_wide:
+        if source_labels is not None:
+            placeholders = ", ".join(["%s"] * len(source_labels))
+            creator_filter = ""
+            params = (bbk_id, *source_labels)
+            if role == ROLE_PRESIDENT:
+                creator_filter = "AND (p.source_label <> %s OR p.sap_id = %s)"
+                params += (SOURCE_LABEL_BY_ROLE[ROLE_PRESIDENT], sap_id)
             rows = await self.db.fetch_all(
                 f"""
                 SELECT p.* FROM {_PLAN_TABLE} p
                 WHERE p.bbk_id = %s
+                  AND p.source_label IN ({placeholders})
+                  {creator_filter}
                 ORDER BY p.created_at DESC
                 """,
-                (bbk_id,),
+                params,
             )
         else:
             rows = await self.db.fetch_all(
@@ -258,33 +285,26 @@ class WealthPlanStore:
         scene_ids: set[str],
         *,
         exclude_plan_id: str | None = None,
+        scene_ranges: dict[str, tuple[str | None, str | None]] | None = None,
+        target_sap_ids: set[str] | None = None,
     ) -> dict[str, str]:
-        """按发布角色查询不可重复使用的场景及其占用规划名。"""
-        if not bbk_id or not scene_ids:
+        """按发布角色查询任务日期重叠的场景及其占用规划名。"""
+        if not bbk_id or not scene_ids or target_sap_ids == set():
             return {}
         source_labels = _SCENE_RESERVING_SOURCE_LABELS_BY_ROLE.get(role)
         if not source_labels:
             return {}
+        ranges = scene_ranges or {}
         if not self.is_available:
-            records = sorted(
-                self._plans.values(),
-                key=lambda record: record.created_at or datetime.min,
-                reverse=True,
+            return self._find_scene_conflicts_in_memory(
+                role,
+                sap_id,
+                bbk_id,
+                scene_ids,
+                exclude_plan_id,
+                ranges,
+                target_sap_ids,
             )
-            conflicts: dict[str, str] = {}
-            for record in records:
-                if not self._reserves_scene(
-                    record,
-                    role,
-                    sap_id,
-                    bbk_id,
-                    exclude_plan_id,
-                ):
-                    continue
-                for scene in record.scenes:
-                    if scene.scene_id in scene_ids:
-                        conflicts.setdefault(scene.scene_id, record.name)
-            return conflicts
 
         ordered_scene_ids = sorted(scene_ids)
         scene_placeholders = ", ".join(["%s"] * len(ordered_scene_ids))
@@ -300,17 +320,27 @@ class WealthPlanStore:
             params.append(sap_id)
         params.extend(sorted(source_labels))
         params.extend(ordered_scene_ids)
+        target_sql = ""
+        if target_sap_ids is not None:
+            placeholders = ", ".join(["%s"] * len(target_sap_ids))
+            target_sql = f"""AND EXISTS (
+                SELECT 1 FROM {_TARGET_TABLE} t
+                WHERE t.plan_id = p.id AND t.sap_id IN ({placeholders})
+            )"""
+            params.extend(sorted(target_sap_ids))
         if exclude_plan_id:
             params.append(exclude_plan_id)
         rows = await self.db.fetch_all(
             f"""
-            SELECT p.name AS plan_name, s.scene_id
+            SELECT p.name AS plan_name, s.scene_id,
+                   s.start_date, s.end_date
             FROM {_PLAN_TABLE} p
             INNER JOIN {_SCENE_TABLE} s ON s.plan_id = p.id
             WHERE p.bbk_id = %s
               AND p.status <> %s
               AND {reservation_sql}
               AND s.scene_id IN ({scene_placeholders})
+              {target_sql}
               {exclude_sql}
             ORDER BY p.created_at DESC
             """,
@@ -318,7 +348,51 @@ class WealthPlanStore:
         )
         conflicts = {}
         for row in rows:
-            conflicts.setdefault(row["scene_id"], row["plan_name"])
+            if _scene_dates_overlap(
+                ranges.get(row["scene_id"], (None, None)),
+                row.get("start_date"),
+                row.get("end_date"),
+            ):
+                conflicts.setdefault(row["scene_id"], row["plan_name"])
+        return conflicts
+
+    def _find_scene_conflicts_in_memory(
+        self,
+        role: str,
+        sap_id: str,
+        bbk_id: str,
+        scene_ids: set[str],
+        exclude_plan_id: str | None,
+        ranges: dict[str, tuple[str | None, str | None]],
+        target_sap_ids: set[str] | None = None,
+    ) -> dict[str, str]:
+        """内存模式按创建时间倒序查找日期重叠的占用规划。"""
+        records = sorted(
+            self._plans.values(),
+            key=lambda record: record.created_at or datetime.min,
+            reverse=True,
+        )
+        conflicts: dict[str, str] = {}
+        for record in records:
+            if not self._reserves_scene(
+                record,
+                role,
+                sap_id,
+                bbk_id,
+                exclude_plan_id,
+            ):
+                continue
+            if target_sap_ids is not None and not any(
+                t.sap_id in target_sap_ids for t in record.targets
+            ):
+                continue
+            for scene in record.scenes:
+                if scene.scene_id in scene_ids and _scene_dates_overlap(
+                    ranges.get(scene.scene_id, (None, None)),
+                    scene.start_date,
+                    scene.end_date,
+                ):
+                    conflicts.setdefault(scene.scene_id, record.name)
         return conflicts
 
     async def update(self, record: WealthPlanRecord) -> None:
@@ -541,11 +615,20 @@ class WealthPlanStore:
     def _visible_to(
         record: WealthPlanRecord,
         sap_id: str,
-        branch_wide: bool,
+        role: str,
         bbk_id: str,
     ) -> bool:
         if record.bbk_id != bbk_id:
             return False
-        if branch_wide or record.sap_id == sap_id:
+        if (
+            role == ROLE_PRESIDENT
+            and record.source_label == SOURCE_LABEL_BY_ROLE[ROLE_PRESIDENT]
+            and record.sap_id != sap_id
+        ):
+            return False
+        source_labels = get_visible_source_labels(role)
+        if source_labels is not None:
+            return record.source_label in source_labels
+        if record.sap_id == sap_id:
             return True
         return any(target.sap_id == sap_id for target in record.targets)

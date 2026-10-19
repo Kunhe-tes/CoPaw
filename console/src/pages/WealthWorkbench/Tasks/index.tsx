@@ -3,21 +3,24 @@
  * 对应原型 tasksHTML：经营/客户双视角、任务树、重点标签表头筛选、
  * 经营方案/触达记录两类弹窗，执行列外链跳转电访与客户洞察。
  */
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { Tooltip } from "antd";
-import { RotateCw } from "lucide-react";
+import { ChevronDown, RotateCw } from "lucide-react";
 import cx from "classnames";
 import DOMPurify from "dompurify";
 import styles from "../index.module.less";
 import { Icon } from "../components/Icon";
 import { CustomerSchemePreview } from "../components/CustomerSchemePreview";
 import { CustomerMetrics } from "../components/CustomerMetrics";
+import { CustomerScenes } from "../components/CustomerScenes";
 import { buildCustomerGroups } from "./customerGroups";
+import { ContactStatusFilter } from "./ContactStatusFilter";
+import { contactStatusOf, type ContactStatusFilterValue } from "./contactStatus";
 import { buildInsightUrl, buildTelUrl, fetchSchemeSignature } from "../api";
 import { useCanAccess, useWealthStore } from "../store";
 import type { Customer } from "../types";
-import { buildTaskTree, dateKey } from "../utils";
+import { buildTaskTree, dateKey, scheduleLabel } from "../utils";
 // import { htmlPreviewEventsApi } from "@/api/modules/htmlPreviewEvents";
 // import type { HtmlTrackerPayloadType } from "@/api/types/htmlPreviewEvents";
 
@@ -212,6 +215,10 @@ async function openOutboundLink(kind: "dial" | "insight", c: Customer) {
 //   });
 // }
 
+function contactMethodLabel(method: string) {
+  return method === "强接触" ? "已接触" : method;
+}
+
 function labelTagClass(label: string) {
   return label === "总行重点"
     ? styles.red
@@ -222,15 +229,21 @@ function labelTagClass(label: string) {
 
 /** 重点标签单元格：空值使用低强调度占位标签，避免表格出现空洞。 */
 export function CustomerLabel({ label }: { label: string }) {
-  const value = label.trim();
+  const labels = label
+    .split("、")
+    .map((value) => value.trim())
+    .filter(Boolean);
   return (
-    <span
-      className={cx(
-        styles.tag,
-        value ? labelTagClass(value) : styles.emptyTag,
+    <span className={styles.customerLabels}>
+      {labels.length ? (
+        labels.map((value) => (
+          <span key={value} className={cx(styles.tag, labelTagClass(value))}>
+            {value}
+          </span>
+        ))
+      ) : (
+        <span className={cx(styles.tag, styles.emptyTag)}>暂无标签</span>
       )}
-    >
-      {value || "暂无标签"}
     </span>
   );
 }
@@ -238,11 +251,19 @@ export function CustomerLabel({ label }: { label: string }) {
 export default function Tasks({ page }: { page: TaskPageKind }) {
   const canViewTasks = useCanAccess("tasks");
   const customers = useWealthStore((s) => s.customers);
+  const counts = useWealthStore((s) =>
+    page === "done"
+      ? s.doneCounts
+      : page === "pending"
+        ? s.pendingCounts
+        : s.todayCounts,
+  );
   const customersLoading = useWealthStore((s) => s.customersLoading);
   const pendingCustomers = useWealthStore((s) => s.pendingCustomers);
   const pendingLoading = useWealthStore((s) => s.pendingLoading);
   const doneCustomers = useWealthStore((s) => s.doneCustomers);
   const doneLoading = useWealthStore((s) => s.doneLoading);
+  const taskListsRefreshing = useWealthStore((s) => s.taskListsRefreshing);
   const plans = useWealthStore((s) => s.plans);
   const plansLoaded = useWealthStore((s) => s.plansLoaded);
   const refreshTodayCustomers = useWealthStore((s) => s.refreshTodayCustomers);
@@ -253,6 +274,9 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   const navigate = useNavigate();
   const [view, setView] = useState<"business" | "customer">("business");
   const [taskLabel, setTaskLabel] = useState("全部");
+  const [contactStatus, setContactStatus] = useState<ContactStatusFilterValue>(
+    "全部",
+  );
   const [search, setSearch] = useState("");
   const [selectedTask, setSelectedTask] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("");
@@ -264,6 +288,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const lastLoadedPageRef = useRef<TaskPageKind | null>(null);
+  const lastLoadedViewRef = useRef(view);
   const groupTablesId = useId();
   /**
    * 经营方案 iframe 自增序列：作为 _t 时间戳附加到 URL 强制刷新加载，
@@ -275,10 +300,17 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
 
   const isBiz = view === "business" && page === "today";
   const doneView = page === "done";
+  const showScenes = !isBiz;
 
   /** 工作任务树：从「已发布且今日有排程」的规划场景实时推导 */
   const today = dateKey(new Date());
   const taskTree = useMemo(() => buildTaskTree(plans, today), [plans, today]);
+  const selectedNode =
+    taskTree
+      .find((group) => group.category === selectedCategory)
+      ?.nodes.find((node) => node.sceneName === selectedTask) ??
+    taskTree[0]?.nodes[0];
+  const selectedSkillId = selectedNode?.sceneId;
 
   // 规划变更/移除后选中节点可能失效：回退到树的第一个节点
   useEffect(() => {
@@ -296,15 +328,25 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   }, [isBiz, taskTree, selectedTask, selectedCategory]);
 
   /** 当前页的名单数据源：今日=customers；待触达/已完成=各自接口名单 */
+  const loading =
+    !plansLoaded ||
+    (!taskListsRefreshing &&
+      (page === "done"
+        ? doneLoading
+        : page === "pending"
+          ? pendingLoading
+          : customersLoading));
   const pool =
-    page === "done"
-      ? doneCustomers
-      : page === "pending"
-        ? pendingCustomers
-        : customers;
+    loading
+      ? []
+      : page === "done"
+        ? doneCustomers
+        : page === "pending"
+          ? pendingCustomers
+          : customers;
 
   /** 原型 customerList：ignoreLabel 用于标签浮层计数 */
-  const buildList = (ignoreLabel: boolean) => {
+  const buildList = (ignoreLabel: boolean, ignoreContactStatus = false) => {
     let list = page === "pending" ? pool.filter((c) => !c.done) : pool;
     if (isBiz)
       list = list.filter(
@@ -322,31 +364,61 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
       );
     if (!ignoreLabel && taskLabel !== "全部")
       list = list.filter((c) => matchLabel(c.label, taskLabel));
+    if (page === "today" && !ignoreContactStatus && contactStatus !== "全部")
+      list = list.filter((c) => contactStatusOf(c.touched) === contactStatus);
     return list;
   };
 
   const list = useMemo(
     () => buildList(false),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [page, pool, isBiz, selectedTask, selectedCategory, search, taskLabel],
+    [
+      page,
+      pool,
+      isBiz,
+      selectedTask,
+      selectedCategory,
+      search,
+      taskLabel,
+      contactStatus,
+    ],
   );
-  const groups = useMemo(() => buildCustomerGroups(list, isBiz), [list, isBiz]);
-  const columnCount = (doneView ? 6 : isBiz ? 4 : 5) + 1;
+  const groups = useMemo(() => {
+    const grouped = buildCustomerGroups(list, isBiz);
+    if (page === "today") {
+      for (const group of grouped) {
+        group.customers.sort(
+          (a, b) => Number(a.touched === 1) - Number(b.touched === 1),
+        );
+      }
+    }
+    return grouped;
+  }, [list, isBiz, page]);
+  const showContactStatus = page === "today";
+  const contactStatusCustomers = buildList(false, true);
+  const columnCount = (isBiz ? 5 : 7) + Number(showContactStatus);
   const tableGroups = groups.length
     ? groups
     : [{ key: "empty", fields: [], customers: [] }];
 
-  // 进入今日任务或切回经营视角更新规划；页内切到客户视角仅查询聚合名单。
-  useEffect(() => {
+  // 进入今日任务或切回经营视角更新规划；场景切换仅查询所选技能。
+  // 绘制前启动查询，避免新视角短暂显示旧名单和统计。
+  useLayoutEffect(() => {
     if (!plansLoaded) {
       return;
     }
     const enteringToday =
       page === "today" && lastLoadedPageRef.current !== "today";
+    const switchingView = lastLoadedViewRef.current !== view;
     lastLoadedPageRef.current = page;
+    lastLoadedViewRef.current = view;
     if (page === "today") {
-      if (enteringToday || view === "business") {
-        void refreshTodayCustomers(view);
+      if (enteringToday || (view === "business" && switchingView)) {
+        if (view === "business" && selectedSkillId)
+          void refreshTodayCustomers(view, selectedSkillId);
+        else void refreshTodayCustomers(view);
+      } else if (view === "business" && selectedSkillId) {
+        void loadTodayCustomers(view, selectedSkillId);
       } else {
         void loadTodayCustomers(view);
       }
@@ -360,16 +432,13 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   }, [
     page,
     view,
+    selectedSkillId,
     plansLoaded,
     refreshTodayCustomers,
     loadTodayCustomers,
     loadPendingCustomers,
     loadDoneCustomers,
   ]);
-
-  const doneToday = customers.filter(
-    (c) => c.done && (taskLabel === "全部" || matchLabel(c.label, taskLabel)),
-  ).length;
 
   // 标签筛选浮层：外部点击 / Escape / 滚动 / 缩放时关闭
   useEffect(() => {
@@ -516,7 +585,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
             </div>
             <div>
               <small>触达方式</small>
-              {c.channel}
+              {contactMethodLabel(c.channel)}
             </div>
             <div>
               <small>完成时间</small>
@@ -563,7 +632,11 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                   aria-label="刷新工作任务"
                   disabled={!plansLoaded || customersLoading}
                   aria-busy={customersLoading}
-                  onClick={() => void refreshTodayCustomers("business")}
+                  onClick={() =>
+                    void (selectedSkillId
+                      ? refreshTodayCustomers("business", selectedSkillId)
+                      : refreshTodayCustomers("business"))
+                  }
                 >
                   <RotateCw
                     size={16}
@@ -585,25 +658,39 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                   <Icon name="up" className={styles.arrow} />
                 </summary>
                 {g.nodes.map((n) => (
-                  <button
+                  <Tooltip
                     key={n.sceneId}
-                    className={cx(
-                      styles.treeItem,
-                      selectedTask === n.sceneName &&
-                      selectedCategory === g.category &&
-                      styles.active,
-                    )}
-                    title={`来源规划：${n.planName}`}
-                    onClick={() => {
-                      setSelectedTask(n.sceneName);
-                      setSelectedCategory(g.category);
-                    }}
+                    placement="right"
+                    trigger={["hover", "focus"]}
+                    title={
+                      <div className={styles.taskTreeTooltip}>
+                        <div>技能名称：{n.sceneName}</div>
+                        <div>来源规划：{n.planName}</div>
+                      </div>
+                    }
                   >
-                    <span className={cx(styles.tag, sourceTagClass(n.source))}>
-                      {n.source}
-                    </span>
-                    {n.sceneName}
-                  </button>
+                    <button
+                      className={cx(
+                        styles.treeItem,
+                        selectedTask === n.sceneName &&
+                          selectedCategory === g.category &&
+                          styles.active,
+                      )}
+                      onClick={() => {
+                        setSelectedTask(n.sceneName);
+                        setSelectedCategory(g.category);
+                      }}
+                    >
+                      <span
+                        className={cx(styles.tag, sourceTagClass(n.source))}
+                      >
+                        {n.source}
+                      </span>
+                      <span className={styles.treeSkillName}>
+                        {n.sceneName}
+                      </span>
+                    </button>
+                  </Tooltip>
                 ))}
               </details>
             ))
@@ -656,7 +743,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
             <Icon name={doneView ? "check" : "list"} />
           </div>
           <div>
-            <h3>
+            <h3 className={styles.taskSummaryTitle}>
               {doneView
                 ? "客户经营任务已完成"
                 : page === "pending"
@@ -666,34 +753,36 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                       ? "当前任务：" + selectedTask
                       : "今日暂无排程中的任务"
                     : "今日任务：客户经营"}
+              {isBiz &&
+                !loading &&
+                !customersLoading &&
+                selectedNode &&
+                !pool.length && (
+                  <span className={styles.taskExecutionTime}>
+                    执行时间：{scheduleLabel(selectedNode.schedule)}
+                  </span>
+                )}
             </h3>
             <div className={styles.summaryMetrics}>
-              {doneView ? (
-                <>
-                  <span>
-                    累计已完成 <b>{list.length}</b> 人
-                  </span>
-                  <span>
-                    今日已完成 <b>{doneToday}</b> 人
-                  </span>
-                </>
-              ) : (
-                <>
-                  <span>
-                    目标客户 <b>{list.length}</b> 人
-                  </span>
-                  <span>
-                    今日已触达 <b>{list.filter((c) => c.done).length}</b> 人
-                  </span>
-                  <span>
-                    待处理{" "}
-                    <b className={styles.red}>
-                      {list.filter((c) => !c.done).length}
-                    </b>{" "}
-                    人
-                  </span>
-                </>
-              )}
+              <span>
+                目标客户 <b>{loading ? "--" : (counts?.targetCusCount ?? "--")}</b>{" "}
+                人
+              </span>
+              <span>
+                今日已触达{" "}
+                <b>{loading ? "--" : (counts?.todayTouchCount ?? "--")}</b> 人
+              </span>
+              <span>
+                七日内已触达{" "}
+                <b>{loading ? "--" : (counts?.sevenDayTouchCount ?? "--")}</b> 人
+              </span>
+              <span>
+                待处理{" "}
+                <b className={styles.red}>
+                  {loading ? "--" : (counts?.unTouchedCount ?? "--")}
+                </b>{" "}
+                人
+              </span>
             </div>
           </div>
         </div>
@@ -745,7 +834,14 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                         })
                       }
                     >
-                      <span aria-hidden="true">{collapsed ? "▸" : "▾"}</span>
+                      <ChevronDown
+                        size={18}
+                        aria-hidden="true"
+                        className={cx(
+                          styles.customerGroupChevron,
+                          collapsed && styles.customerGroupChevronCollapsed,
+                        )}
+                      />
                       <span className={styles.customerGroupTitle}>
                         {groupTitle}
                       </span>
@@ -768,6 +864,9 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                         ? styles.completedTable
                         : styles.opportunityTable,
                       styles.metricsTable,
+                      showScenes && styles.sceneTable,
+                      page === "today" && !isBiz && styles.todayCustomerTable,
+                      showContactStatus && styles.todayTaskTable,
                     )}
                   >
                     <thead>
@@ -814,13 +913,35 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                             )}
                           </th>
                         )}
-                        <th className={styles.opportunityCol}>
-                          {doneView ? "经营任务" : "经营机会"}
-                        </th>
+                        {showScenes && (
+                          <th scope="col" className={styles.sceneCol}>
+                            经营场景
+                          </th>
+                        )}
+                        {!doneView && (
+                          <th className={styles.opportunityCol}>经营机会</th>
+                        )}
                         <th scope="col" className={styles.metricsCol}>
                           客户指标
                         </th>
-                        <th>{doneView ? "触达方式" : "经营方案"}</th>
+                        <th className={doneView ? styles.channelCol : undefined}>
+                          {doneView ? "触达方式" : "经营方案"}
+                        </th>
+                        {showContactStatus && (
+                          <th
+                            scope="col"
+                            className={cx(
+                              styles.contactStatusCol,
+                              styles.tagFilterHeading,
+                            )}
+                          >
+                            <ContactStatusFilter
+                              value={contactStatus}
+                              customers={contactStatusCustomers}
+                              onChange={setContactStatus}
+                            />
+                          </th>
+                        )}
                         <th className={styles.executionCol}>
                           {doneView ? "完成时间" : "执行"}
                         </th>
@@ -837,20 +958,25 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                                 <CustomerLabel label={c.label} />
                               </td>
                             )}
-                            <td className={styles.reason}>
-                              {doneView ? (
-                                c.task
-                              ) : (
+                            {showScenes && (
+                              <td className={styles.sceneCol}>
+                                <CustomerScenes key={c.id} names={c.skillNames} />
+                              </td>
+                            )}
+                            {!doneView && (
+                              <td className={styles.reason}>
                                 <Opportunities customer={c} multiple={!isBiz} />
-                              )}
-                            </td>
+                              </td>
+                            )}
                             <td className={styles.metricsCol}>
                               <CustomerMetrics
                                 key={c.id}
                                 fields={c.dynamicFields}
                               />
                             </td>
-                            <td>
+                            <td
+                              className={doneView ? styles.channelCol : undefined}
+                            >
                               {doneView ? (
                                 <>
                                   <Icon
@@ -863,7 +989,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                                     }
                                   />
                                   {"　"}
-                                  {c.channel}
+                                  {contactMethodLabel(c.channel)}
                                 </>
                               ) : (
                                 <button
@@ -874,6 +1000,20 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                                 </button>
                               )}
                             </td>
+                            {showContactStatus && (
+                              <td className={styles.contactStatusCol}>
+                                <span
+                                  className={cx(
+                                    styles.tag,
+                                    c.touched === 1
+                                      ? styles.green
+                                      : styles.emptyTag,
+                                  )}
+                                >
+                                  {contactStatusOf(c.touched)}
+                                </span>
+                              </td>
+                            )}
                             <td className={styles.executionCol}>
                               {doneView ? (
                                 c.time
@@ -913,16 +1053,13 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                       ) : (
                         <tr>
                           <td colSpan={columnCount}>
-                            <div className={styles.empty}>
-                              {(
-                                page === "pending"
-                                  ? pendingLoading
-                                  : page === "done"
-                                  ? doneLoading
-                                  : customersLoading
-                              )
+                            <div
+                              className={styles.empty}
+                              role={loading ? "status" : undefined}
+                            >
+                              {loading
                                 ? "客户清单加载中…"
-                                : isBiz && selectedTask && !search.trim()
+                                : isBiz && selectedTask && !search.trim() && contactStatus === "全部"
                                 ? `「${selectedTask}」暂无客户名单，待定时任务执行后生成`
                                 : "暂无符合条件的客户"}
                             </div>
@@ -938,7 +1075,9 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
         </div>
 
         <div className={styles.pagination}>
-          <span className={styles.total}>共 {list.length} 条记录</span>
+          <span className={styles.total}>
+            共 {loading ? "--" : list.length} 条记录
+          </span>
         </div>
       </section>
 

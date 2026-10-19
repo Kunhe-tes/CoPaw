@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import httpx
 import pytest
 from pydantic import ValidationError
@@ -68,6 +69,75 @@ async def test_workflow_engine_maps_request_and_extracts_result():
     assert outcome.display_text == "完成"
     assert outcome.selected_result == {"result": "完成"}
     assert "user-1" not in str(outcome.input_snapshot)
+
+
+@pytest.mark.asyncio
+async def test_workflow_engine_maps_execution_ids_to_body_and_headers():
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200, json={"code": "OK", "data": {"result": "done"}}
+        )
+
+    engine = WorkflowEngine(
+        allowed_hosts={"workflow.example"},
+        client_factory=lambda timeout: httpx.AsyncClient(
+            transport=httpx.MockTransport(respond), timeout=timeout
+        ),
+    )
+    await engine.execute(
+        _config(
+            headers={
+                "traceid": {"source": "runtime", "key": "trace_id"},
+                "cron_job_id": {"source": "runtime", "key": "cron_job_id"},
+            },
+            body={
+                "inputParams": {
+                    "traceId": {"source": "runtime", "key": "trace_id"},
+                    "cronJobId": {"source": "runtime", "key": "cron_job_id"},
+                },
+            },
+        ),
+        env={"sapId": "user-1"},
+        target_user_id="user-1",
+        runtime={"trace_id": "trace-1", "cron_job_id": "job-1"},
+    )
+
+    assert len(requests) == 1
+    assert requests[0].headers["traceid"] == "trace-1"
+    assert requests[0].headers["cron_job_id"] == "job-1"
+    assert json.loads(requests[0].content) == {
+        "inputParams": {"traceId": "trace-1", "cronJobId": "job-1"}
+    }
+
+
+@pytest.mark.asyncio
+async def test_workflow_trace_mapping_requires_real_trace_before_http():
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"code": "OK"})
+
+    engine = WorkflowEngine(
+        allowed_hosts={"workflow.example"},
+        client_factory=lambda timeout: httpx.AsyncClient(
+            transport=httpx.MockTransport(respond), timeout=timeout
+        ),
+    )
+    with pytest.raises(ValueError, match="runtime value missing: trace_id"):
+        await engine.execute(
+            _config(
+                body={"traceId": {"source": "runtime", "key": "trace_id"}},
+            ),
+            env={"sapId": "user-1"},
+            target_user_id="user-1",
+            runtime={"trace_id": ""},
+        )
+
+    assert requests == []
 
 
 @pytest.mark.asyncio

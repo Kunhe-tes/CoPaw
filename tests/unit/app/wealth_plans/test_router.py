@@ -17,6 +17,124 @@ from swe.app.wealth_plans.store import WealthPlanStore
 VIEWER = {"X-User-Id": "zhangwl", "X-Bbk-Id": "100"}
 
 
+async def test_create_and_update_shared_scene_keep_current_plan_branch(
+    monkeypatch: pytest.MonkeyPatch,
+    store: WealthPlanStore,
+) -> None:
+    async def fetch_shared_scene(request, category):
+        return [
+            SceneSkillItem(
+                skillId="skill-wealth-insurance-1",
+                senceName="保障潜客经营",
+                category="insurance",
+                bbkId="100",
+            ),
+        ]
+
+    monkeypatch.setattr(
+        wealth_router,
+        "_fetch_external_scene_skills",
+        fetch_shared_scene,
+    )
+    monkeypatch.setattr(wealth_router, "launch_publish", lambda *args: None)
+    request = SimpleNamespace(
+        state=SimpleNamespace(bbk_id="110"),
+        headers=VIEWER,
+        app=SimpleNamespace(state=SimpleNamespace(wealth_plan_store=store)),
+    )
+    body = PlanUpsertRequest(**plan_payload())
+
+    created = await wealth_router.create_plan(request, body)
+    await store.set_publish_status(created.id, "published")
+    updated = await wealth_router.update_plan(request, created.id, body)
+
+    assert updated.id == created.id
+    record = await store.get(created.id)
+    assert record.bbk_id == "110"
+    assert record.scenes[0].scene_id == "skill-wealth-insurance-1"
+
+
+@pytest.mark.parametrize(
+    "start,end,expected_status",
+    [
+        ("2026-10-01", "2026-10-31", 200),
+        ("2026-09-30", "2026-10-31", 409),
+    ],
+)
+def test_create_same_scene_in_separate_task_periods(
+    client: TestClient,
+    start: str,
+    end: str,
+    expected_status: int,
+) -> None:
+    headers = {**VIEWER, "X-Position-Id": "RB1101"}
+    assert (
+        client.post(
+            "/api/wealth/plans",
+            json=plan_payload(),
+            headers=headers,
+        ).status_code
+        == 200
+    )
+    payload = plan_payload(name="十月规划")
+    payload["scenes"][0].update(start_date=start, end_date=end)
+    response = client.post(
+        "/api/wealth/plans",
+        json=payload,
+        headers=headers,
+    )
+    assert response.status_code == expected_status
+    if expected_status == 409:
+        assert "任务周期重叠" in response.json()["detail"]
+
+
+async def test_edit_scene_dates_rechecks_overlap(
+    client: TestClient,
+    store: WealthPlanStore,
+) -> None:
+    headers = {**VIEWER, "X-Position-Id": "RB1101"}
+    september = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(),
+        headers=headers,
+    ).json()
+    await store.set_publish_status(september["id"], "published")
+    october = plan_payload(name="十月规划")
+    october["scenes"][0].update(
+        start_date="2026-10-01",
+        end_date="2026-10-31",
+    )
+    assert (
+        client.post(
+            "/api/wealth/plans",
+            json=october,
+            headers=headers,
+        ).status_code
+        == 200
+    )
+    assert (
+        client.put(
+            f"/api/wealth/plans/{september['id']}",
+            json=october,
+            headers=headers,
+        ).status_code
+        == 409
+    )
+    november = plan_payload(name="十一月规划")
+    november["scenes"][0].update(
+        start_date="2026-11-01",
+        end_date="2026-11-30",
+    )
+    assert (
+        client.put(
+            f"/api/wealth/plans/{september['id']}",
+            json=november,
+            headers=headers,
+        ).status_code
+        == 200
+    )
+
+
 @pytest.fixture()
 def store() -> WealthPlanStore:
     return WealthPlanStore()
@@ -270,8 +388,10 @@ def test_create_plan_derives_source_label_from_request_role(
     assert plans[0]["source_label"] == "我的关注"
 
 
+@pytest.mark.parametrize("skill_bbk_id", ["110", "100"])
 async def test_scene_branch_validation_accepts_current_branch_skill(
     monkeypatch: pytest.MonkeyPatch,
+    skill_bbk_id: str,
 ) -> None:
     request = SimpleNamespace(state=SimpleNamespace(bbk_id="110"))
     body = PlanUpsertRequest(**plan_payload())
@@ -282,7 +402,7 @@ async def test_scene_branch_validation_accepts_current_branch_skill(
                 skillId="skill-wealth-insurance-1",
                 senceName="保障潜客经营",
                 category="insurance",
-                bbkId="110",
+                bbkId=skill_bbk_id,
             ),
         ]
 
@@ -407,11 +527,58 @@ def test_list_personal_roles_visible_by_branch_and_relation(
     assert other_branch_items["items"] == []
 
 
+def test_financial_supervisor_has_president_scope(client: TestClient) -> None:
+    """RB0108 沿用行长的创建人隔离，发布来源为行长关注。"""
+    created = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(),
+        headers={**VIEWER, "X-Bbk-Id": "100", "X-Position-Id": "RB1101"},
+    ).json()
+    supervisor = {
+        "X-User-Id": "supervisor",
+        "X-Bbk-Id": "100",
+        "X-Position-Id": "RB0108",
+    }
+    items = client.get("/api/wealth/plans", headers=supervisor).json()["items"]
+    assert items == []
+    assert (
+        client.get(
+            f"/api/wealth/plans/{created['id']}",
+            headers=supervisor,
+        ).status_code
+        == 403
+    )
+    assert (
+        client.get(
+            "/api/wealth/plans",
+            headers={**supervisor, "X-Bbk-Id": "200"},
+        ).json()["items"]
+        == []
+    )
+
+    supervisor_payload = plan_payload(name="主管规划")
+    supervisor_payload["scenes"][0].update(
+        start_date="2026-10-01",
+        end_date="2026-10-31",
+    )
+    published = client.post(
+        "/api/wealth/plans",
+        json=supervisor_payload,
+        headers=supervisor,
+    )
+    assert published.status_code == 200
+    detail = client.get(
+        f"/api/wealth/plans/{published.json()['id']}",
+        headers=supervisor,
+    ).json()
+    assert detail["source_label"] == "行长关注"
+
+
 def test_list_branch_wide_for_president_and_middle(client: TestClient) -> None:
     created = client.post(
         "/api/wealth/plans",
         json=plan_payload(),
-        headers={**VIEWER, "X-Bbk-Id": "100"},
+        headers={**VIEWER, "X-Bbk-Id": "100", "X-Position-Id": "RB0301"},
     ).json()
 
     president = {
@@ -448,7 +615,7 @@ def test_detail_visibility_combines_branch_and_role_scope(
     created = client.post(
         "/api/wealth/plans",
         json=plan_payload(),
-        headers={**VIEWER, "X-Bbk-Id": "100"},
+        headers={**VIEWER, "X-Bbk-Id": "100", "X-Position-Id": "RB1101"},
     ).json()
     management_peer = {
         "X-User-Id": "wangly",
@@ -460,8 +627,21 @@ def test_detail_visibility_combines_branch_and_role_scope(
         f"/api/wealth/plans/{created['id']}",
         headers=management_peer,
     )
-    assert detail.status_code == 200
-    assert detail.json()["editable"] is False
+    assert detail.status_code == 403
+    assert (
+        client.get(
+            f"/api/wealth/plans/{created['id']}",
+            headers={**VIEWER, "X-Position-Id": "RB1101"},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.get(
+            "/api/wealth/plans",
+            headers=management_peer,
+        ).json()["items"]
+        == []
+    )
 
     target = {
         "X-User-Id": "chenjy",
@@ -723,36 +903,105 @@ def test_scene_skills_allows_empty_category(client: TestClient) -> None:
 
 
 def test_name_list_allows_empty_skill_id(client: TestClient) -> None:
-    """skill_id 为空表示客户视角（该经理名下全部技能客户），参数合法。"""
-    resp = client.get("/api/wealth/name-list?sap_id=10086")
+    """数组含空条目时忽略空值，查询仍限定在有效技能内。"""
+    resp = client.post(
+        "/api/wealth/name-list",
+        json={"sap_id": "10086", "skill_id": ["", "skill-a"]},
+    )
 
     assert resp.status_code == 200
-    assert resp.json() == {"items": [], "skillFieldList": [], "allFields": []}
+    assert resp.json() == {
+        "items": [],
+        "skillFieldList": [],
+        "allFields": [],
+        "targetCusCount": None,
+        "todayTouchCount": None,
+        "sevenDayTouchCount": None,
+        "unTouchedCount": None,
+    }
+
+
+def test_name_list_requires_skill_ids(client: TestClient) -> None:
+    for body, status in [
+        ({"sap_id": "10086"}, 422),
+        ({"skill_id": [""]}, 400),
+        ({"skill_id": []}, 400),
+        ({"skill_id": "skill-a"}, 422),
+    ]:
+        assert (
+            client.post("/api/wealth/name-list", json=body).status_code
+            == status
+        )
+
+
+def test_name_list_accepts_large_skill_array(client, monkeypatch):
+    captured = {}
+
+    async def fetch(request, skill_ids, sap_id, touched):
+        captured["skill_ids"] = skill_ids
+        return wealth_router.NameListResponse()
+
+    monkeypatch.setattr(wealth_router, "_fetch_external_name_list", fetch)
+    skills = [f"skill-{index}" for index in range(2000)]
+    response = client.post(
+        "/api/wealth/name-list",
+        json={"skill_id": skills, "sap_id": "10086", "touched": 2},
+    )
+    assert response.status_code == 200
+    assert captured["skill_ids"] == skills
 
 
 def test_name_list_empty_when_external_absent(client: TestClient) -> None:
     """外部接口未配置/不可达时返回空列表，不做假数据兜底。"""
-    resp = client.get("/api/wealth/name-list?skill_id=loan_verify")
+    resp = client.post(
+        "/api/wealth/name-list",
+        json={"skill_id": ["loan_verify"]},
+    )
 
     assert resp.status_code == 200
-    assert resp.json() == {"items": [], "skillFieldList": [], "allFields": []}
+    assert resp.json() == {
+        "items": [],
+        "skillFieldList": [],
+        "allFields": [],
+        "targetCusCount": None,
+        "todayTouchCount": None,
+        "sevenDayTouchCount": None,
+        "unTouchedCount": None,
+    }
 
 
 def test_name_list_allows_empty_sap_id(client: TestClient) -> None:
     """sap_id 可空（缺省场景/兼容调用），参数合法。"""
-    resp = client.get("/api/wealth/name-list?skill_id=loan_verify&sap_id=")
+    resp = client.post(
+        "/api/wealth/name-list",
+        json={"skill_id": ["loan_verify"], "sap_id": ""},
+    )
 
     assert resp.status_code == 200
-    assert resp.json() == {"items": [], "skillFieldList": [], "allFields": []}
+    assert resp.json() == {
+        "items": [],
+        "skillFieldList": [],
+        "allFields": [],
+        "targetCusCount": None,
+        "todayTouchCount": None,
+        "sevenDayTouchCount": None,
+        "unTouchedCount": None,
+    }
 
 
 def test_name_list_rejects_invalid_touched(client: TestClient) -> None:
     """touched 仅接受 0 未触达 / 1 已触达 / 2 全部。"""
-    resp = client.get("/api/wealth/name-list?touched=3")
+    resp = client.post(
+        "/api/wealth/name-list",
+        json={"skill_id": ["skill-a"], "touched": 3},
+    )
 
     assert resp.status_code == 400
 
-    ok = client.get("/api/wealth/name-list?touched=2")
+    ok = client.post(
+        "/api/wealth/name-list",
+        json={"skill_id": ["skill-a"], "touched": 2},
+    )
     assert ok.status_code == 200
 
 
@@ -805,6 +1054,10 @@ def test_name_list_forwards_touch_filter_context(
                         },
                     ],
                     "allFields": [{"filedName": "age", "filedNameCn": "年龄"}],
+                    "targetCusCount": 100,
+                    "todayTouchCount": 0,
+                    "sevenDayTouchCount": 25,
+                    "unTouchedCount": 80,
                 },
             }
 
@@ -832,8 +1085,13 @@ def test_name_list_forwards_touch_filter_context(
     monkeypatch.setenv("SWE_SKILL_CONFIG_API_BASE", "http://external.test")
     monkeypatch.setattr(wealth_router.httpx, "AsyncClient", FakeClient)
 
-    resp = client.get(
-        "/api/wealth/name-list?skill_id=SKILL0001&sap_id=80280256&touched=0",
+    resp = client.post(
+        "/api/wealth/name-list",
+        json={
+            "skill_id": ["SKILL0001", "SKILL0002", "SKILL0001"],
+            "sap_id": "80280256",
+            "touched": 0,
+        },
         headers={
             **VIEWER,
             "X-Bbk-Id": "755",
@@ -850,12 +1108,19 @@ def test_name_list_forwards_touch_filter_context(
         "platformSource": "WP",
         "pageSource": "WP_AGENT_WORKSPACE_TASK_LIST",
         "touched": 0,
-        "skillId": "SKILL0001",
+        "skillIds": ["SKILL0001", "SKILL0002"],
         "sapId": "80280256",
         "subBbkId": "755480",
         "posId": "RB0101",
     }
     assert captured["headers"] == {"Cookie": "session=active"}
+    for key, count in {
+        "targetCusCount": 100,
+        "todayTouchCount": 0,
+        "sevenDayTouchCount": 25,
+        "unTouchedCount": 80,
+    }.items():
+        assert resp.json()[key] == count
     assert resp.json()["items"] == [
         {
             "custUid": "PNCIF6571543777",
@@ -1114,3 +1379,83 @@ async def test_board_status_distributing_while_running(
     creator_view = client.get("/api/wealth/plans", headers=VIEWER).json()
 
     assert creator_view["items"][0]["board_status"] == "分发中"
+
+
+@pytest.mark.parametrize(
+    "position,allowed_sources",
+    [
+        ("RB1101", {"分行关注", "行长关注"}),
+        ("RB0306", {"分行关注", "行长关注"}),
+        ("RB0108", {"分行关注", "行长关注"}),
+        ("RB0301", {"分行关注"}),
+        ("RB0305", {"分行关注"}),
+    ],
+)
+async def test_management_list_and_detail_share_source_scope(
+    client: TestClient,
+    store: WealthPlanStore,
+    position: str,
+    allowed_sources: set[str],
+) -> None:
+    from swe.app.wealth_plans.models import PlanTargetRecord, WealthPlanRecord
+
+    records = [
+        WealthPlanRecord(
+            id=plan_id,
+            sap_id=creator,
+            name=plan_id,
+            bbk_id="100",
+            source_label=source,
+            targets=[PlanTargetRecord(sap_id="viewer")],
+        )
+        for plan_id, creator, source in [
+            ("branch", "viewer", "分行关注"),
+            ("president", "viewer", "行长关注"),
+            ("personal", "viewer", "我的关注"),
+            ("target-personal", "other", "我的关注"),
+            ("peer-president", "other", "行长关注"),
+            ("peer-branch", "other", "分行关注"),
+        ]
+    ]
+    for record in records:
+        await store.create(record)
+    headers = {
+        "X-User-Id": "viewer",
+        "X-Bbk-Id": "100",
+        "X-Position-Id": position,
+    }
+    items = client.get("/api/wealth/plans", headers=headers).json()["items"]
+    assert {item["source_label"] for item in items} == allowed_sources
+    assert "peer-president" not in {item["id"] for item in items}
+    assert "peer-branch" in {item["id"] for item in items}
+    for record in records:
+        response = client.get(
+            f"/api/wealth/plans/{record.id}",
+            headers=headers,
+        )
+        assert response.status_code == (
+            200
+            if record.source_label in allowed_sources
+            and record.id != "peer-president"
+            else 403
+        )
+
+
+@pytest.mark.parametrize("target,expected", [("c-rm", 200), ("a-rm", 409)])
+def test_middle_ab_plan_allows_c_branch_recipients(client, target, expected):
+    created = client.post(
+        "/api/wealth/plans",
+        headers={**VIEWER, "X-Position-Id": "RB0301"},
+        json=plan_payload(targets=[{"sap_id": "a-rm"}, {"sap_id": "b-rm"}]),
+    )
+    assert created.status_code == 200
+    response = client.post(
+        "/api/wealth/plans",
+        headers={
+            **VIEWER,
+            "X-User-Id": "c-president",
+            "X-Position-Id": "RB1101",
+        },
+        json=plan_payload(targets=[{"sap_id": target}]),
+    )
+    assert response.status_code == expected

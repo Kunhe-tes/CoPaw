@@ -5,31 +5,32 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import cx from "classnames";
+import { DatePicker, Tooltip } from "antd";
+import { RotateCw } from "lucide-react";
+import dayjs from "dayjs";
 import styles from "../index.module.less";
 import { Icon } from "../components/Icon";
 import {
   addCalendarDays,
   calendarDate,
   calendarRange,
-  collectSkillStatQueries,
   cycleRange,
   dateKey,
   planFrequency,
+  planPublishLabel,
   planScheduledOn,
-  sceneStatKey,
   scheduleLabel,
   todayKey,
 } from "../utils";
 import { selectCurrentAccount, useWealthStore } from "../store";
-import { fetchAvailableSceneCount, fetchSkillStats } from "../api";
-import type { Plan, SkillStat } from "../types";
+import { fetchAvailableSceneCount } from "../api";
+import type { Plan } from "../types";
+import { BOARD_SOURCES_BY_ROLE } from "../permissions";
 import { Calendar } from "./Calendar";
+import { usePlanStats } from "./usePlanStats";
+import { useBoardRefresh } from "./useBoardRefresh";
 
-const BOARD_TABS = ["全部", "分行关注", "行长关注", "我的关注"];
-const PERIODS = ["本季", "本月", "本周", "今日", "T+1日"];
-
-/** 发布中轮询间隔（毫秒） */
-const PUBLISH_POLL_INTERVAL = 3000;
+const PERIODS = ["本季", "本月", "本周", "今日", "T+1日", "自定义"];
 
 /** 状态着色：失败→红；发布中/分发中→蓝；已下发等稳定态→默认 */
 function statusClass(status: string) {
@@ -44,6 +45,8 @@ function statusClass(status: string) {
 
 export default function Board() {
   const account = useWealthStore(selectCurrentAccount);
+  const boardSources = BOARD_SOURCES_BY_ROLE[account.id];
+  const boardTabs = ["全部", ...boardSources];
   const plans = useWealthStore((s) => s.plans);
   const plansLoaded = useWealthStore((s) => s.plansLoaded);
   const openDialog = useWealthStore((s) => s.openDialog);
@@ -55,8 +58,11 @@ export default function Board() {
 
   const [boardTab, setBoardTab] = useState("全部");
   const [period, setPeriod] = useState("本月");
+  const [customRange, setCustomRange] = useState<[string, string]>(
+    () => cycleRange("本月")!,
+  );
   const [boardMode, setBoardMode] = useState<"calendar" | "list">("calendar");
-  const [dimension, setDimension] = useState<"week" | "month">("month");
+  const [dimension, setDimension] = useState<"week" | "month">("week");
   const [anchor, setAnchor] = useState(todayKey);
   const [availableScenes, setAvailableScenes] = useState<number | null>(null);
 
@@ -74,12 +80,20 @@ export default function Board() {
   const range: [string, string] =
     boardMode === "calendar"
       ? calendarRange(anchor, dimension)
+      : period === "自定义"
+      ? customRange
       : cycleRange(period) ?? [todayKey(), todayKey()];
   const [rangeStart, rangeEnd] = range;
 
   const all = useMemo(
-    () => plans.filter((p) => p.start <= rangeEnd && p.end >= rangeStart),
-    [plans, rangeStart, rangeEnd],
+    () =>
+      plans.filter(
+        (p) =>
+          boardSources.includes(p.source) &&
+          p.start <= rangeEnd &&
+          p.end >= rangeStart,
+      ),
+    [plans, boardSources, rangeStart, rangeEnd],
   );
   const visible = useMemo(
     () => all.filter((p) => boardTab === "全部" || p.source === boardTab),
@@ -91,42 +105,34 @@ export default function Board() {
     all.flatMap((p) => p.items?.map((x) => x.id) ?? []),
   ).size;
 
-  // 目标客户 / 已生成任务：按「技能 + 区间」批量查询技能统计接口；
-  // 接口不可达时 planStat 返回 null，对应位置保持 "--" 占位
-  const [sceneStats, setSceneStats] = useState<Record<
-    string,
-    SkillStat
-  > | null>(null);
-  const statQueries = useMemo(() => collectSkillStatQueries(all), [all]);
-  useEffect(() => {
-    let alive = true;
-    void fetchSkillStats(statQueries).then((result) => {
-      if (alive) setSceneStats(result);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [statQueries]);
+  const hasActive = plans.some(
+    (p) =>
+      p.publishStatus === "publishing" ||
+      p.status.includes("发布中") ||
+      p.status.includes("分发中"),
+  );
+  const { refreshing, statsRefreshVersion, manualRefresh } = useBoardRefresh(
+    hasActive,
+    refreshPlans,
+  );
 
-  /** 单个规划的统计汇总：各场景目标客户/已生成任务求和 */
+  // 目标客户 / 已生成任务：按规划 ID 批量查询统计接口；
+  // 接口不可达时 planStat 返回 null，对应位置保持 "--" 占位
+  const { sceneStats, statsLoading, statsUpdating, statsFailed } = usePlanStats(
+    all,
+    plans,
+    account.id,
+    statsRefreshVersion,
+  );
+
+  const boardRefreshing = refreshing || statsLoading || statsUpdating;
+
+  /** 直接使用接口返回的规划统计，不再按场景累加。 */
   const planStat = (p: Plan): { customers: number; tasks: number } | null => {
-    if (sceneStats == null) return null;
-    let customers = 0;
-    let tasks = 0;
-    for (const item of p.items ?? []) {
-      if (!item.start || !item.end) continue;
-      const hit =
-        sceneStats[
-          sceneStatKey({
-            skillId: item.id,
-            startDate: item.start,
-            endDate: item.end,
-          })
-        ];
-      customers += hit?.targetCustomerCount ?? 0;
-      tasks += hit?.generatedTaskCount ?? 0;
-    }
-    return { customers, tasks };
+    const hit = sceneStats?.[p.id];
+    return hit
+      ? { customers: hit.targetCustomerCount, tasks: hit.generatedTaskCount }
+      : null;
   };
 
   const customersText = (p: Plan) => {
@@ -138,22 +144,9 @@ export default function Board() {
     return stat == null ? "--" : `${stat.tasks} 个`;
   };
   const generatedTotal =
-    sceneStats == null
+    sceneStats == null || all.some((p) => planStat(p) == null)
       ? null
       : all.reduce((sum, p) => sum + (planStat(p)?.tasks ?? 0), 0);
-
-  // 发布中/分发中的规划都需要轮询，直至发布与分发状态收敛
-  const hasActive = plans.some(
-    (p) =>
-      p.publishStatus === "publishing" ||
-      p.status.includes("发布中") ||
-      p.status.includes("分发中"),
-  );
-  useEffect(() => {
-    if (!hasActive) return;
-    const timer = setInterval(() => void refreshPlans(), PUBLISH_POLL_INTERVAL);
-    return () => clearInterval(timer);
-  }, [hasActive, refreshPlans]);
 
   const onEditPlan = (id: string) => {
     editPlan(id);
@@ -217,7 +210,7 @@ export default function Board() {
                   <th>目标客户</th>
                   <th>已生成任务</th>
                   {/* <th>任务执行率</th> */}
-                  <th>状态</th>
+                  <th>发布状态</th>
                   <th>操作</th>
                 </tr>
               </thead>
@@ -261,20 +254,23 @@ export default function Board() {
                       </td>
                       <td>{customersText(p)}</td>
                       <td>{tasksText(p)}</td>
-                      <td>
+                      {/* <td>
                         <div className={styles.progressLine}>
                           <div className={styles.progress}>
                             <span style={{ width: `${p.rate}%` }}></span>
                           </div>
                           <b>{p.rate}%</b>
                         </div>
-                      </td>
+                      </td> */}
                       <td>
                         <span
-                          className={cx(styles.status, statusClass(p.status))}
+                          className={cx(
+                            styles.status,
+                            statusClass(planPublishLabel(p)),
+                          )}
                         >
                           <i className={styles.dot}></i>
-                          {p.status}
+                          {planPublishLabel(p)}
                         </span>
                       </td>
                       <td>
@@ -386,9 +382,37 @@ export default function Board() {
         ) : (
           <span className={styles.label}>看板周期</span>
         )}
-        <div className={styles.datebox}>
-          <Icon name="calendar" />
-          {range.map((x) => x.replace(/-/g, ".")).join(" — ")}
+        <div
+          className={cx(
+            styles.datebox,
+            boardMode === "list" && period === "自定义" && styles.customDatebox,
+          )}
+        >
+          {boardMode === "list" && period === "自定义" ? (
+            <DatePicker.RangePicker
+              className={cx(styles.taskDatePicker, styles.boardDateRange)}
+              classNames={{ popup: { root: styles.taskDatePopup } }}
+              aria-label="自定义规划周期"
+              inputReadOnly
+              allowClear={false}
+              format="YYYY-MM-DD"
+              placeholder={["开始日期", "结束日期"]}
+              value={[dayjs(customRange[0]), dayjs(customRange[1])]}
+              onChange={(values) => {
+                if (values?.[0] && values[1]) {
+                  setCustomRange([
+                    values[0].format("YYYY-MM-DD"),
+                    values[1].format("YYYY-MM-DD"),
+                  ]);
+                }
+              }}
+            />
+          ) : (
+            <>
+              <Icon name="calendar" />
+              {range.map((x) => x.replace(/-/g, ".")).join(" — ")}
+            </>
+          )}
         </div>
         {/* 暂不需要展示岗位 */}
         {/* <div className={styles.role}>
@@ -397,7 +421,40 @@ export default function Board() {
       </div>
 
       <section className={`${styles.panel} ${styles.overview}`}>
-        <h2>本期规划概览</h2>
+        <div className={styles.sectionHead}>
+          <h2>本期规划概览</h2>
+          <Tooltip
+            placement="topRight"
+            trigger={["hover", "focus"]}
+            title={boardRefreshing ? "正在刷新看板" : "刷新看板"}
+          >
+            <span>
+              <button
+                type="button"
+                className={styles.taskRefresh}
+                aria-label="刷新看板"
+                disabled={!plansLoaded || boardRefreshing}
+                aria-busy={boardRefreshing}
+                onClick={() => void manualRefresh()}
+              >
+                <RotateCw
+                  size={16}
+                  aria-hidden="true"
+                  className={
+                    boardRefreshing ? styles.taskRefreshBusy : undefined
+                  }
+                />
+              </button>
+            </span>
+          </Tooltip>
+        </div>
+        {statsFailed && (
+          <p className={styles.readonlyHint} role="status">
+            {sceneStats === null
+              ? "客户与任务统计加载失败"
+              : "统计更新失败，暂显示上次数据"}
+          </p>
+        )}
         <div className={styles.stats}>
           {stats.map((s) => (
             <div className={styles.stat} key={s.title}>
@@ -421,7 +478,7 @@ export default function Board() {
         <div className={styles.sectionHead}>
           <h2>当前工作重点</h2>
           <div className={styles.tabs}>
-            {BOARD_TABS.map((t) => (
+            {boardTabs.map((t) => (
               <button
                 key={t}
                 className={cx(styles.tab, boardTab === t && styles.active)}
@@ -465,7 +522,9 @@ export default function Board() {
           </div>
         ) : boardMode === "calendar" ? (
           <Calendar
+            sources={boardSources}
             visible={visible}
+            planStat={planStat}
             dimension={dimension}
             anchor={anchor}
             onShift={(delta) => {
@@ -513,11 +572,11 @@ export default function Board() {
                         </span>
                       </div>
                     </div>
-                    <div className={styles.metric}>
+                    <div className={styles.metric} aria-busy={statsLoading}>
                       <small>目标客户</small>
                       <strong>{customersText(p)}</strong>
                     </div>
-                    <div className={styles.metric}>
+                    <div className={styles.metric} aria-busy={statsLoading}>
                       <small>已生成任务</small>
                       <strong>{tasksText(p)}</strong>
                     </div>
@@ -534,10 +593,13 @@ export default function Board() {
                     <div className={styles.metric}>
                       <small>状态</small>
                       <span
-                        className={cx(styles.status, statusClass(p.status))}
+                        className={cx(
+                          styles.status,
+                          statusClass(planPublishLabel(p)),
+                        )}
                       >
                         <i className={styles.dot}></i>
-                        {p.status}
+                        {planPublishLabel(p)}
                       </span>
                     </div>
                     <div className={styles.actions}>

@@ -82,6 +82,8 @@ export interface Plan {
   items?: PlanItem[];
   /** 发布时的分发目标 sapId 列表；客户经理为本人 userId */
   targetSapIds?: string[];
+  /** 已保存的分发目标信息，用于编辑回显及重新发布。 */
+  targets?: DistributeTarget[];
 }
 
 /** 创建计划页的草稿（会话级，不持久化） */
@@ -90,21 +92,14 @@ export interface Draft {
   items: PlanItem[];
 }
 
-/** 技能统计查询项（/wealth/skill-stats 入参）：技能 + 起止日期 yyyy-MM-dd */
-export interface SkillStatQuery {
-  skillId: string;
-  startDate: string;
-  endDate: string;
-}
-
-/** 技能统计结果：目标客户数 / 已生成任务数 */
+/** 规划统计展示模型：targetTaskCount 映射为 generatedTaskCount。 */
 export interface SkillStat {
   targetCustomerCount: number;
   generatedTaskCount: number;
 }
 
 /** 分发目标用户（行长/中台发布规划时选择的下属客户经理） */ export interface DistributeTarget {
-  /** 用户 ID（sapId，即 /user-info/tenants/by-source 返回的 tenant_id） */
+  /** 发布目标 SAP ID（机构岗位人员接口返回的 sapID） */
   sapId: string;
   name: string;
   /** 所属机构名称（可能为空） */
@@ -132,6 +127,10 @@ export interface Customer {
   reason: string;
   category: string;
   task: string;
+  /** 客户名单接口 skillList 返回的去重技能名称 */
+  skillNames?: string[];
+  /** 接口原始接触状态：0 未接触、1 已接触，其余或缺失为未知。 */
+  touched?: number | null;
   done: boolean;
   channel: string;
   time: string;

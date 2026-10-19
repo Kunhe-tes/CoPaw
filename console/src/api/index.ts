@@ -125,3 +125,4 @@ export * from "./modules/myMcp";
 export * from "./modules/marketMcp";
 export * from "./modules/skillReadiness";
 export * from "./modules/approval";
+export * from "./modules/snapAi";

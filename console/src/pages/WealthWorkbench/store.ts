@@ -20,7 +20,10 @@ import {
   type WealthPage,
   type WealthRole,
 } from "./permissions";
-import { fetchDistributeTargets } from "./distributeTargets";
+import {
+  fetchDistributeTargets,
+  type DistributeBranch,
+} from "./distributeTargets";
 import {
   buildTaskTree,
   CYCLE_LABELS,
@@ -76,13 +79,23 @@ interface WealthState {
   /** 规划基础数据已完成首次加载（失败时也会以空列表完成） */
   plansLoaded: boolean;
   customers: Customer[];
+  todayCounts: api.CustomerCounts | null;
+  /** 今日任务客户视角聚合名单的总人数，独立于当前页面视角。 */
+  todayCustomerCount: number;
   /** 客户名单查询中（今日任务视角切换时重新拉取） */
   customersLoading: boolean;
+  /** 最近查询的今日任务视角，用于标签页切回时保持名单口径。 */
+  todayCustomerView: "business" | "customer";
+  /** 最近查询的经营场景，用于刷新时保持当前选择。 */
+  todaySkillId: string;
+  taskListsRefreshing: boolean;
   /** 待触达客户名单（/wealth/name-list，touched=0） */
   pendingCustomers: Customer[];
+  pendingCounts: api.CustomerCounts | null;
   pendingLoading: boolean;
   /** 已完成客户名单（/wealth/name-list，touched=1） */
   doneCustomers: Customer[];
+  doneCounts: api.CustomerCounts | null;
   doneLoading: boolean;
   draft: Draft;
   savedAt: string;
@@ -90,6 +103,9 @@ interface WealthState {
   /** 分发目标用户池（仅行长/中台加载） */
   targets: DistributeTarget[];
   targetsLoaded: boolean;
+  /** 中台当前浏览的支行；targets 保留跨支行人员信息用于发布。 */
+  targetBranch: DistributeBranch | null;
+  branchTargetSapIds: string[];
   /** 已选中的分发目标 sapId 列表 */
   targetSapIds: string[];
   dialog: DialogState | null;
@@ -100,21 +116,29 @@ interface WealthState {
 
   init: () => Promise<void>;
   /** 看板轮询：有规划处于发布中时刷新列表 */
-  refreshPlans: () => Promise<void>;
+  refreshPlans: (throwOnError?: boolean, signal?: AbortSignal) => Promise<void>;
   /**
    * 拉取今日任务的客户经营清单（/wealth/name-list）。
-   * 两个视角都传当前登录人 sapId；经营视角（business）另带 skillId 按技能过滤，
-   * 客户视角（customer）不带 skillId 一次查全。仅客户经理可访问任务页。
+   * 两个视角都传 sapId 与技能数组；经营视角仅当前场景，其他口径为当天全部。
    */
-  loadTodayCustomers: (view: "business" | "customer") => Promise<void>;
-  refreshTodayCustomers: (view: "business" | "customer") => Promise<void>;
+  loadTodayCustomers: (
+    view: "business" | "customer",
+    skillId?: string,
+  ) => Promise<void>;
+  loadTodayCustomerCount: () => Promise<void>;
+  refreshTodayCustomers: (
+    view: "business" | "customer",
+    skillId?: string,
+  ) => Promise<void>;
+  refreshTaskLists: () => Promise<void>;
   /** 加载待触达客户名单（仅客户经理；touched=0） */
   loadPendingCustomers: () => Promise<void>;
   /** 加载已完成客户名单（仅客户经理；touched=1） */
   loadDoneCustomers: () => Promise<void>;
 
   // —— 分发目标（行长/中台） ——
-  loadTargets: () => Promise<void>;
+  loadTargets: (branch?: DistributeBranch) => Promise<void>;
+  resetTargetBranch: () => void;
   toggleTarget: (sapId: string) => void;
 
   // —— 经营场景（按分类点击查询，每次都取最新数据） ——
@@ -248,6 +272,9 @@ export {
   validTaskDate,
 } from "./utils";
 
+let targetRequestSeq = 0;
+let todayCustomersRequestSeq = 0;
+
 export const useWealthStore = create<WealthState>()((set, get) => ({
   initialized: false,
   accountId: "rm",
@@ -256,16 +283,25 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
   plans: [],
   plansLoaded: false,
   customers: [],
+  todayCounts: null,
+  todayCustomerCount: 0,
   customersLoading: false,
+  todayCustomerView: "business",
+  todaySkillId: "",
+  taskListsRefreshing: false,
   pendingCustomers: [],
+  pendingCounts: null,
   pendingLoading: false,
   doneCustomers: [],
+  doneCounts: null,
   doneLoading: false,
   draft: { name: "", items: [] },
   savedAt: "",
   editingId: null,
   targets: [],
   targetsLoaded: false,
+  targetBranch: null,
+  branchTargetSapIds: [],
   targetSapIds: [],
   dialog: null,
   acting: false,
@@ -286,19 +322,22 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
     set({ ...data, plansLoaded: true });
   },
 
-  refreshPlans: async () => {
-    const plans = await api.fetchPlanList();
+  refreshPlans: async (throwOnError = false, signal) => {
+    const plans = await api.fetchPlanList(throwOnError, signal);
+    signal?.throwIfAborted();
     set({ plans });
   },
 
-  refreshTodayCustomers: async (view) => {
+  refreshTodayCustomers: async (view, skillId) => {
     const state = get();
     if (!canAccessPage(state.accountId, "tasks") || state.customersLoading)
       return;
+    const requestSeq = ++todayCustomersRequestSeq;
     set({ customersLoading: true });
     try {
       await get().refreshPlans();
-      await get().loadTodayCustomers(view);
+      if (requestSeq !== todayCustomersRequestSeq) return;
+      await get().loadTodayCustomers(view, skillId ?? state.todaySkillId);
     } catch (error) {
       get().toast(
         error instanceof Error
@@ -306,22 +345,84 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
           : "刷新失败，请重试",
       );
     } finally {
-      set({ customersLoading: false });
+      if (requestSeq === todayCustomersRequestSeq)
+        set({ customersLoading: false });
     }
   },
 
-  loadTodayCustomers: async (view) => {
+  refreshTaskLists: async () => {
+    const state = get();
+    if (
+      !state.initialized ||
+      !state.plansLoaded ||
+      !canAccessPage(state.accountId, "tasks") ||
+      state.taskListsRefreshing ||
+      state.customersLoading ||
+      state.pendingLoading ||
+      state.doneLoading
+    )
+      return;
+    set({ taskListsRefreshing: true });
+    try {
+      await get().refreshTodayCustomers(state.todayCustomerView);
+      const results = await Promise.allSettled([
+        get().pendingLoading ? Promise.resolve() : get().loadPendingCustomers(),
+        get().doneLoading ? Promise.resolve() : get().loadDoneCustomers(),
+      ]);
+      if (results.some((result) => result.status === "rejected")) {
+        get().toast("任务名单刷新失败，请重试");
+      }
+    } finally {
+      set({ taskListsRefreshing: false });
+    }
+  },
+
+  loadTodayCustomers: async (view, skillId) => {
     const { accountId, plans } = get();
     // 仅客户经理有任务页；行长/中台不发名单查询
     if (!canAccessPage(accountId, "tasks")) return;
-    set({ customersLoading: true });
     const sapId = useIframeStore.getState().userId || undefined;
-    const customers = await api.fetchTodayCustomers(
+    const tasks = todayTaskRefs(plans);
+    const selected =
+      tasks.find((task) => task.skillId === (skillId ?? get().todaySkillId)) ??
+      tasks[0];
+    const queryTasks =
+      view === "business" ? (selected ? [selected] : []) : tasks;
+    const requestSeq = ++todayCustomersRequestSeq;
+    set({
+      customersLoading: true,
+      todayCustomerView: view,
+      ...(view === "business" ? { todaySkillId: selected?.skillId ?? "" } : {}),
+    });
+    try {
+      const [result, customerViewResult] = await Promise.all([
+        api.fetchTodayCustomers(queryTasks, sapId, view),
+        view === "business"
+          ? api.fetchTodayCustomers(tasks, sapId, "customer")
+          : Promise.resolve(null),
+      ]);
+      if (requestSeq !== todayCustomersRequestSeq) return;
+      set({
+        customers: result.customers,
+        todayCounts: result.counts,
+        todayCustomerCount: (customerViewResult ?? result).customers.length,
+      });
+    } finally {
+      if (requestSeq === todayCustomersRequestSeq)
+        set({ customersLoading: false });
+    }
+  },
+
+  loadTodayCustomerCount: async () => {
+    const { accountId, plans } = get();
+    if (!canAccessPage(accountId, "tasks")) return;
+    const sapId = useIframeStore.getState().userId || undefined;
+    const result = await api.fetchTodayCustomers(
       todayTaskRefs(plans),
       sapId,
-      view,
+      "customer",
     );
-    set({ customers, customersLoading: false });
+    set({ todayCustomerCount: result.customers.length });
   },
 
   loadPendingCustomers: async () => {
@@ -329,11 +430,15 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
     if (!canAccessPage(accountId, "tasks")) return;
     set({ pendingLoading: true });
     const sapId = useIframeStore.getState().userId || undefined;
-    const pendingCustomers = await api.fetchPendingCustomers(
+    const result = await api.fetchPendingCustomers(
       todayTaskRefs(plans),
       sapId,
     );
-    set({ pendingCustomers, pendingLoading: false });
+    set({
+      pendingCustomers: result.customers,
+      pendingCounts: result.counts,
+      pendingLoading: false,
+    });
   },
 
   loadDoneCustomers: async () => {
@@ -341,17 +446,45 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
     if (!canAccessPage(accountId, "tasks")) return;
     set({ doneLoading: true });
     const sapId = useIframeStore.getState().userId || undefined;
-    const doneCustomers = await api.fetchDoneCustomers(
+    const result = await api.fetchDoneCustomers(
       todayTaskRefs(plans),
       sapId,
     );
-    set({ doneCustomers, doneLoading: false });
+    set({
+      doneCustomers: result.customers,
+      doneCounts: result.counts,
+      doneLoading: false,
+    });
   },
 
-  loadTargets: async () => {
-    if (get().targetsLoaded) return;
-    const targets = await fetchDistributeTargets();
-    set({ targets, targetsLoaded: true });
+  resetTargetBranch: () => {
+    targetRequestSeq += 1;
+    set({ targetBranch: null, branchTargetSapIds: [], targetsLoaded: false });
+  },
+
+  loadTargets: async (branch) => {
+    if (get().accountId === "middle" && !branch) return;
+    if (!branch && get().targetsLoaded) return;
+    const requestSeq = ++targetRequestSeq;
+    set({
+      targetsLoaded: false,
+      targetBranch: branch ?? null,
+      branchTargetSapIds: [],
+    });
+    const targets = await fetchDistributeTargets(branch);
+    if (requestSeq !== targetRequestSeq) return;
+    set((state) => ({
+      targets:
+        branch || state.editingId
+          ? Array.from(
+              new Map(
+                [...state.targets, ...targets].map((t) => [t.sapId, t]),
+              ).values(),
+            )
+          : targets,
+      branchTargetSapIds: targets.map((t) => t.sapId),
+      targetsLoaded: true,
+    }));
   },
 
   toggleTarget: (sapId) => {
@@ -468,9 +601,9 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
         items: draft.items.map((x) =>
           x.id === id
             ? {
-              ...x,
-              schedule: { ...(x.schedule ?? DEFAULT_SCHEDULE), ...patch },
-            }
+                ...x,
+                schedule: { ...(x.schedule ?? DEFAULT_SCHEDULE), ...patch },
+              }
             : x,
         ),
       },
@@ -504,8 +637,25 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
     if (!p) return;
     const items = p.items ? JSON.parse(JSON.stringify(p.items)) : [];
     const draft = normalizeItems({ name: p.name, items });
-    // 分发目标不回填：编辑时以当前选择为准重新发布
-    set({ draft, editingId: id, targetSapIds: p.targetSapIds ?? [] });
+    const targetSapIds = p.targetSapIds ?? [];
+    const targets = targetSapIds.map(
+      (sapId) =>
+        p.targets?.find((target) => target.sapId === sapId) ?? {
+          sapId,
+          name: sapId,
+          orgName: "",
+        },
+    );
+    targetRequestSeq += 1;
+    set({
+      draft,
+      editingId: id,
+      targetSapIds,
+      targets,
+      targetsLoaded: false,
+      targetBranch: null,
+      branchTargetSapIds: [],
+    });
   },
 
   /** 离开创建页时清除编辑态（与原型 navigate() 行为一致：草稿本身保留） */

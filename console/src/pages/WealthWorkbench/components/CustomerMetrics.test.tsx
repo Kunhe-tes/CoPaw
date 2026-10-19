@@ -15,7 +15,7 @@ describe("客户指标", () => {
     expect(container.querySelectorAll("dt")).toHaveLength(6);
     expect(container.querySelector("dt")).toHaveTextContent("指标0：");
     expect(container.querySelector("dd")).toHaveTextContent("0");
-    fireEvent.click(screen.getByRole("button", { name: "展开全部（8项）" }));
+    fireEvent.click(screen.getByRole("button", { name: "展开剩余 2 项" }));
     expect(container.querySelectorAll("dt")).toHaveLength(8);
     expect(screen.getByRole("button", { name: "收起" })).toHaveAttribute(
       "aria-expanded",

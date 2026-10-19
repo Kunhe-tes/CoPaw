@@ -126,6 +126,9 @@ async def test_workflow_adapter_persists_result_once_and_returns_cron_result(
         async def execute(self, *_args, **_kwargs):
             self.calls += 1
             assert _kwargs["secrets"] == {"auth_token": "target-token"}
+            assert _kwargs["runtime"]["trace_id"] == "trace-1"
+            assert _kwargs["runtime"]["cron_job_id"] == "job-1"
+            assert _kwargs["runtime"]["job_id"] == "job-1"
             return WorkflowOutcome(
                 display_text="报告已生成",
                 selected_result={"result": "报告已生成"},
@@ -147,7 +150,11 @@ async def test_workflow_adapter_persists_result_once_and_returns_cron_result(
         },
         trace_manager=lambda: trace,
     )
-    dispatch_meta = {"scheduled_fire_at": "2026-09-24T09:00:00+08:00"}
+    dispatch_meta = {
+        "scheduled_fire_at": "2026-09-24T09:00:00+08:00",
+        "trace_id": "untrusted-trace",
+        "cron_job_id": "untrusted-job",
+    }
 
     first = await executor.execute(_job(), dispatch_meta)
     second = await executor.execute(_job(), dispatch_meta)

@@ -167,6 +167,56 @@ def is_registered_workflow_renderer(name: str) -> bool:
     return name in _REGISTERED_RENDERERS
 
 
+def _extract_and_render_response(
+    config: WorkflowConfig,
+    response_bytes: bytearray,
+    renderer: Renderer,
+) -> tuple[dict[str, Any], str]:
+    try:
+        document = json.loads(response_bytes)
+    except ValueError as exc:
+        raise WorkflowCallError(
+            "技能任务结果不可用",
+            error_code="invalid_json",
+        ) from exc
+    if config.success_rule is not None:
+        try:
+            actual = _read_path(document, config.success_rule.path)
+        except RuntimeError as exc:
+            raise WorkflowCallError(
+                "技能任务执行失败",
+                error_code="business_failure",
+            ) from exc
+        if actual != config.success_rule.equals:
+            raise WorkflowCallError(
+                "技能任务执行失败",
+                error_code="business_failure",
+            )
+
+    try:
+        selected = {
+            name: _read_path(document, path)
+            for name, path in config.result_fields.items()
+        }
+    except RuntimeError as exc:
+        raise WorkflowCallError(
+            "技能任务结果不可用",
+            error_code="missing_result",
+        ) from exc
+    try:
+        display_text = renderer(selected)
+    except Exception as exc:
+        raise WorkflowCallError(
+            "技能任务结果展示失败",
+            error_code="render_failure",
+        ) from exc
+    if not isinstance(display_text, str) or not display_text.strip():
+        raise RuntimeError("workflow renderer returned empty text")
+    if len(display_text) > MAX_RENDERED_CHARS:
+        raise RuntimeError("workflow rendered result exceeds size limit")
+    return selected, display_text
+
+
 class WorkflowEngine:
     """Execute configured HTTP calls without constructing an Agent."""
 
@@ -242,6 +292,47 @@ class WorkflowEngine:
         request_url = urlunsplit(
             (parsed_url.scheme, parsed_url.netloc, request_path, "", ""),
         )
+        response_bytes, http_status = await self._request_json(
+            config,
+            request_url,
+            headers,
+            query,
+            body,
+            timeout_seconds,
+        )
+        selected, display_text = _extract_and_render_response(
+            config,
+            response_bytes,
+            renderer,
+        )
+        return WorkflowOutcome(
+            display_text=display_text,
+            selected_result=selected,
+            input_snapshot={
+                "workflow_binding_id": config.binding_id,
+                "workflow_version": config.version,
+                "query": {
+                    name: _redact_template(value.model_dump())
+                    for name, value in config.query.items()
+                },
+                "path_params": {
+                    name: _redact_template(value.model_dump())
+                    for name, value in config.path_params.items()
+                },
+                "body": _redact_template(config.body),
+            },
+            http_status=http_status,
+        )
+
+    async def _request_json(
+        self,
+        config: WorkflowConfig,
+        request_url: str,
+        headers: dict[str, str],
+        query: dict[str, Any],
+        body: Any,
+        timeout_seconds: float | None,
+    ) -> tuple[bytearray, int]:
         timeout = min(float(config.timeout_seconds), timeout_seconds or 7200.0)
         try:
             async with self._client_factory(timeout) as client:
@@ -276,63 +367,4 @@ class WorkflowEngine:
             ) from exc
         except httpx.RequestError as exc:
             raise WorkflowCallError("技能任务执行失败") from exc
-        try:
-            document = json.loads(response_bytes)
-        except ValueError as exc:
-            raise WorkflowCallError(
-                "技能任务结果不可用",
-                error_code="invalid_json",
-            ) from exc
-        if config.success_rule is not None:
-            try:
-                actual = _read_path(document, config.success_rule.path)
-            except RuntimeError as exc:
-                raise WorkflowCallError(
-                    "技能任务执行失败",
-                    error_code="business_failure",
-                ) from exc
-            if actual != config.success_rule.equals:
-                raise WorkflowCallError(
-                    "技能任务执行失败",
-                    error_code="business_failure",
-                )
-
-        try:
-            selected = {
-                name: _read_path(document, path)
-                for name, path in config.result_fields.items()
-            }
-        except RuntimeError as exc:
-            raise WorkflowCallError(
-                "技能任务结果不可用",
-                error_code="missing_result",
-            ) from exc
-        try:
-            display_text = renderer(selected)
-        except Exception as exc:
-            raise WorkflowCallError(
-                "技能任务结果展示失败",
-                error_code="render_failure",
-            ) from exc
-        if not isinstance(display_text, str) or not display_text.strip():
-            raise RuntimeError("workflow renderer returned empty text")
-        if len(display_text) > MAX_RENDERED_CHARS:
-            raise RuntimeError("workflow rendered result exceeds size limit")
-        return WorkflowOutcome(
-            display_text=display_text,
-            selected_result=selected,
-            input_snapshot={
-                "workflow_binding_id": config.binding_id,
-                "workflow_version": config.version,
-                "query": {
-                    name: _redact_template(value.model_dump())
-                    for name, value in config.query.items()
-                },
-                "path_params": {
-                    name: _redact_template(value.model_dump())
-                    for name, value in config.path_params.items()
-                },
-                "body": _redact_template(config.body),
-            },
-            http_status=http_status,
-        )
+        return response_bytes, http_status

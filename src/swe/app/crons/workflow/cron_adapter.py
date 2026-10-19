@@ -20,7 +20,7 @@ from ..auth_state import resolve_auth_token_for_execution
 from ..models import CronJobSpec
 from ...tenant_context import bind_tenant_context
 from .engine import WorkflowCallError, WorkflowEngine, WorkflowOutcome
-from .models import WorkflowValueMapping
+from .models import WorkflowConfig, WorkflowValueMapping
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +145,6 @@ class WorkflowCronExecutor:
         if job.task_type != "workflow" or not job.workflow_binding_id:
             raise ValueError("workflow job requires workflow_binding_id")
         meta = dict(dispatch_meta or {})
-        version = meta.get("workflow_config_version")
         trace = self._trace_manager()
         trace_id = ""
         span_id = ""
@@ -165,46 +164,8 @@ class WorkflowCronExecutor:
             scope_id=job.scope_id,
         ):
             try:
-                if trace is not None and getattr(trace, "enabled", False):
-                    try:
-                        trace_id = await trace.start_trace(
-                            user_id=target.user_id,
-                            session_id=target.session_id,
-                            channel=job.dispatch.channel,
-                            source_id=job.source_id or "default",
-                            user_name=job.tenant_name,
-                            bbk_id=job.bbk_id,
-                            session_name=job.name,
-                        )
-                    except Exception:
-                        logger.warning(
-                            "workflow trace start failed: job_id=%s",
-                            job.id,
-                            exc_info=True,
-                        )
-                if (
-                    meta.get("source") == "dispatch_service"
-                    and version is None
-                ):
-                    raise ValueError(
-                        "batch workflow requires frozen configuration version",
-                    )
-                config = (
-                    await self._config_store.get_version(
-                        job.workflow_binding_id,
-                        int(version),
-                        source_id=job.source_id,
-                    )
-                    if version is not None
-                    else await self._config_store.get_current(
-                        job.workflow_binding_id,
-                        source_id=job.source_id,
-                    )
-                )
-                if config.skill_id != job.skill_ids.split(",", 1)[0]:
-                    raise ValueError(
-                        "workflow binding no longer matches first skill",
-                    )
+                trace_id = await self._start_trace(trace, job)
+                config = await self._load_config(job, meta)
                 execution_meta["workflow"].update(
                     {
                         "version": config.version,
@@ -213,23 +174,9 @@ class WorkflowCronExecutor:
                         "model_id": config.model_id,
                     },
                 )
-                if trace_id:
-                    try:
-                        span_id = await trace.emit_skill_invocation(
-                            trace_id=trace_id,
-                            skill_name=config.skill_id,
-                            skill_id=config.skill_id,
-                            source_id=job.source_id or "default",
-                            user_id=target.user_id,
-                            session_id=target.session_id,
-                            channel=job.dispatch.channel,
-                        )
-                    except Exception:
-                        logger.warning(
-                            "workflow skill trace failed: job_id=%s",
-                            job.id,
-                            exc_info=True,
-                        )
+                span_id = await self._start_skill_span(
+                    trace, trace_id, config, job
+                )
                 env = self._env_loader(job)
                 result = await self._engine.execute(
                     config,
@@ -242,6 +189,8 @@ class WorkflowCronExecutor:
                     target_user_id=target.user_id,
                     runtime={
                         "job_id": job.id,
+                        "cron_job_id": job.id,
+                        "trace_id": trace_id,
                         "tenant_id": job.tenant_id,
                         "source_id": job.source_id,
                         "user_id": target.user_id,
@@ -272,27 +221,9 @@ class WorkflowCronExecutor:
                     result.display_text[:512],
                 )
             except BaseException as exc:
-                if isinstance(exc, WorkflowCallError):
-                    execution_meta["workflow"]["error_code"] = exc.error_code
-                    if exc.status_code is not None:
-                        execution_meta["workflow"][
-                            "http_status"
-                        ] = exc.status_code
-                if trace_id:
-                    status = (
-                        TraceStatus.CANCELLED
-                        if isinstance(exc, asyncio.CancelledError)
-                        else TraceStatus.ERROR
-                    )
-                    await self._finish_trace(
-                        trace,
-                        trace_id,
-                        span_id,
-                        status,
-                        str(exc)[:512],
-                    )
-                    setattr(exc, "cron_trace_id", trace_id)
-                setattr(exc, "cron_execution_meta", execution_meta)
+                await self._record_failure(
+                    exc, execution_meta, trace, trace_id, span_id
+                )
                 raise
 
         return ExecutionResult(
@@ -307,6 +238,107 @@ class WorkflowCronExecutor:
                 "workflow_http_status": result.http_status,
             },
         )
+
+    @staticmethod
+    async def _start_trace(trace: Any, job: CronJobSpec) -> str:
+        if trace is None or not getattr(trace, "enabled", False):
+            return ""
+        target = job.dispatch.target
+        try:
+            return await trace.start_trace(
+                user_id=target.user_id,
+                session_id=target.session_id,
+                channel=job.dispatch.channel,
+                source_id=job.source_id or "default",
+                user_name=job.tenant_name,
+                bbk_id=job.bbk_id,
+                session_name=job.name,
+            )
+        except Exception:
+            logger.warning(
+                "workflow trace start failed: job_id=%s",
+                job.id,
+                exc_info=True,
+            )
+            return ""
+
+    async def _load_config(
+        self,
+        job: CronJobSpec,
+        meta: Mapping[str, Any],
+    ) -> WorkflowConfig:
+        version = meta.get("workflow_config_version")
+        if meta.get("source") == "dispatch_service" and version is None:
+            raise ValueError(
+                "batch workflow requires frozen configuration version",
+            )
+        config = (
+            await self._config_store.get_version(
+                job.workflow_binding_id,
+                int(version),
+                source_id=job.source_id,
+            )
+            if version is not None
+            else await self._config_store.get_current(
+                job.workflow_binding_id,
+                source_id=job.source_id,
+            )
+        )
+        if config.skill_id != job.skill_ids.split(",", 1)[0]:
+            raise ValueError("workflow binding no longer matches first skill")
+        return config
+
+    @staticmethod
+    async def _start_skill_span(
+        trace: Any,
+        trace_id: str,
+        config: WorkflowConfig,
+        job: CronJobSpec,
+    ) -> str:
+        if not trace_id:
+            return ""
+        target = job.dispatch.target
+        try:
+            return await trace.emit_skill_invocation(
+                trace_id=trace_id,
+                skill_name=config.skill_id,
+                skill_id=config.skill_id,
+                source_id=job.source_id or "default",
+                user_id=target.user_id,
+                session_id=target.session_id,
+                channel=job.dispatch.channel,
+            )
+        except Exception:
+            logger.warning(
+                "workflow skill trace failed: job_id=%s",
+                job.id,
+                exc_info=True,
+            )
+            return ""
+
+    async def _record_failure(
+        self,
+        exc: BaseException,
+        execution_meta: dict[str, Any],
+        trace: Any,
+        trace_id: str,
+        span_id: str,
+    ) -> None:
+        if isinstance(exc, WorkflowCallError):
+            execution_meta["workflow"]["error_code"] = exc.error_code
+            if exc.status_code is not None:
+                execution_meta["workflow"]["http_status"] = exc.status_code
+        if trace_id:
+            status = (
+                TraceStatus.CANCELLED
+                if isinstance(exc, asyncio.CancelledError)
+                else TraceStatus.ERROR
+            )
+            await self._finish_trace(
+                trace, trace_id, span_id, status, str(exc)[:512]
+            )
+            setattr(exc, "cron_trace_id", trace_id)
+        setattr(exc, "cron_execution_meta", execution_meta)
 
     @staticmethod
     async def _finish_trace(

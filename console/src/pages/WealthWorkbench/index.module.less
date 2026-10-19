@@ -1066,6 +1066,11 @@
     flex-direction: column;
     gap: 12px;
   }
+  .branchSelect {
+    width: 230px;
+    max-width: 100%;
+    height: 36px;
+  }
   .targetToolbar {
     display: flex;
     align-items: center;
@@ -1074,6 +1079,9 @@
   }
   .targetToolbar .input {
     width: 260px;
+    max-width: 100%;
+    height: 36px;
+    box-sizing: border-box;
   }
   .targetCount {
     font-size: 13px;
@@ -1089,6 +1097,12 @@
     gap: 10px;
     max-height: 264px;
     overflow: auto;
+  }
+  .targetList > .empty {
+    grid-column: 1 / -1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow-x: auto;
   }
   .targetItem {
     display: flex;
@@ -1337,6 +1351,19 @@
   .treeItem .tag {
     font-size: 11px;
     padding: 2px 5px;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .treeSkillName {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .taskTreeTooltip {
+    max-width: 360px;
+    overflow-wrap: anywhere;
   }
   .treeItem.active {
     border-left-color: var(--blue);
@@ -1409,8 +1436,21 @@
     font-size: 18px;
     margin-bottom: 9px;
   }
+  .taskSummaryTitle {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 8px 24px;
+  }
+  .taskExecutionTime {
+    font-size: 14px;
+    font-weight: 400;
+    color: var(--text);
+    overflow-wrap: anywhere;
+  }
   .summaryMetrics {
     display: flex;
+    flex-wrap: wrap;
     gap: 25px;
     color: var(--text);
     align-items: center;
@@ -1674,6 +1714,8 @@
   }
   .toast {
     position: fixed;
+    inset: auto;
+    margin: 0;
     bottom: 30px;
     left: 50%;
     transform: translateX(-50%) translateY(20px);
@@ -1688,6 +1730,7 @@
     transition: 0.2s;
     z-index: 100;
     max-width: 80vw;
+    overflow-wrap: anywhere;
   }
   .toast.visible {
     opacity: 1;
@@ -2558,6 +2601,16 @@
     margin-top: 3px;
     opacity: 0.85;
   }
+  .calendarEventScenes {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    margin-top: 4px;
+    font-size: 11px;
+    line-height: 1.6;
+  }
   .calendarMore {
     border: 0;
     background: transparent;
@@ -2852,6 +2905,15 @@
     font-size: 12px;
     cursor: pointer;
   }
+  .customDatebox {
+    padding: 0;
+    border: 0;
+    background: transparent;
+  }
+  .boardDateRange:global(.ant-picker) {
+    width: 270px;
+    height: 34px;
+  }
   .taskDatePicker:global(.ant-picker) :global(.ant-picker-suffix) {
     color: var(--muted);
     font-size: 13px;
@@ -3045,6 +3107,21 @@
     flex: 1;
     min-width: 0;
   }
+  .calendarPlanIdentity {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+    min-width: 0;
+  }
+  .calendarPlanIdentity strong {
+    flex: 0 1 auto;
+  }
+  .calendarSkillCount {
+    flex-shrink: 0;
+    font-size: 12px;
+    line-height: 1.5;
+  }
   .calendarFrequency {
     font-size: 10px;
     line-height: 1.5;
@@ -3179,6 +3256,7 @@
   max-height: 320px;
   overflow: auto;
   white-space: normal;
+  overflow-wrap: anywhere;
   line-height: 1.65;
 }
 
@@ -3367,6 +3445,93 @@
     width: 520px;
     white-space: normal;
   }
+  .customerTable.metricsTable.todayTaskTable {
+    min-width: 1275px;
+    .contactStatusCol {
+      width: 135px;
+    }
+  }
+  .customerTable.metricsTable.sceneTable {
+    min-width: 1510px;
+    th:nth-child(1),
+    td:nth-child(1),
+    th:nth-child(6),
+    td:nth-child(6) {
+      width: 100px;
+    }
+    th:nth-child(2),
+    td:nth-child(2) {
+      width: 135px;
+      white-space: normal;
+    }
+    td:nth-child(2) .tag {
+      box-sizing: border-box;
+      max-width: 100%;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+    .sceneCol {
+      width: 160px;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+    .opportunityPreview {
+      -webkit-line-clamp: 3;
+      line-clamp: 3;
+      max-height: 4.95em;
+    }
+    .metricsCol {
+      width: auto;
+    }
+    &.opportunityTable .opportunityCol,
+    &.opportunityTable .reason {
+      width: 240px;
+      min-width: 0;
+    }
+    &.todayCustomerTable th:nth-child(6),
+    &.todayCustomerTable td:nth-child(6) {
+      width: 135px;
+    }
+    &.todayCustomerTable th:nth-child(2),
+    &.todayCustomerTable td:nth-child(2) {
+      width: 125px;
+    }
+    &.opportunityTable:not(.todayCustomerTable) {
+      min-width: 1565px;
+      .opportunityCol,
+      .reason {
+        width: 260px;
+      }
+      th:nth-child(6),
+      td:nth-child(6) {
+        width: 135px;
+      }
+    }
+    &.completedTable {
+      // 固定操作列合计 965px，指标区至少保留 520px（窄屏 356px）。
+      min-width: 1485px;
+      th:first-child,
+      td:first-child {
+        width: 150px;
+      }
+      .sceneCol {
+        width: 180px;
+      }
+      .channelCol {
+        width: 150px;
+        white-space: normal;
+      }
+      .executionCol {
+        width: 190px;
+        white-space: normal;
+        overflow-wrap: anywhere;
+      }
+      th:last-child,
+      td:last-child {
+        width: 160px;
+      }
+    }
+  }
   .customerTable.metricsTable.opportunityTable .executionCol {
     position: sticky;
     right: 0;
@@ -3375,8 +3540,11 @@
     border-left: 1px solid var(--console-management-border, #e5e7eb);
     z-index: 1;
   }
+  .customerTable.metricsTable.sceneTable.todayTaskTable {
+    min-width: 1635px;
+  }
   .customerTable.metricsTable.opportunityTable th.executionCol {
-    background: var(--console-management-surface-subtle, #f7f9fc);
+    background: linear-gradient(100deg, #f0f8ff, #edf6ff);
   }
   .customerTable.metricsTable .reason {
     min-width: 0;
@@ -3384,6 +3552,27 @@
   }
   .customerMetrics {
     width: 100%;
+  }
+  .customerLabels {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: flex-start;
+  }
+  .customerScenes {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    li {
+      min-width: 0;
+    }
+    .metricItem:focus-visible {
+      outline: 2px solid var(--blue);
+      outline-offset: 2px;
+    }
   }
   .metricGrid {
     display: grid;
@@ -3454,20 +3643,53 @@
   .customerGroupTitle {
     min-width: 0;
     overflow-wrap: anywhere;
+    color: var(--console-management-primary-hover, #2957dc);
+    font-size: 15px;
+    line-height: 24px;
+  }
+  .customerGroupChevron {
+    flex-shrink: 0;
+    color: var(--console-management-primary-hover, #2957dc);
+    transition: transform 160ms ease;
+  }
+  .customerGroupChevronCollapsed {
+    transform: rotate(-90deg);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .customerGroupChevron {
+      transition: none;
+    }
   }
   .customerGroupCount {
     flex-shrink: 0;
     margin-left: auto;
-    color: var(--console-management-text-secondary, #4b5563);
-    font-size: 13px;
-    font-weight: 400;
+    color: var(--console-management-primary-hover, #2957dc);
+    font-size: 14px;
+    font-weight: 500;
   }
   @media (max-width: 1600px) {
     .customerTable.metricsTable {
       min-width: 960px;
     }
+    .customerTable.metricsTable.sceneTable {
+      min-width: 1346px;
+    }
+    .customerTable.metricsTable.sceneTable.opportunityTable:not(
+        .todayCustomerTable
+      ) {
+      min-width: 1401px;
+    }
+    .customerTable.metricsTable.sceneTable.completedTable {
+      min-width: 1321px;
+    }
     .tasksLayout.business .customerTable.metricsTable {
       min-width: 960px;
+    }
+    .customerTable.metricsTable.sceneTable.todayTaskTable {
+      min-width: 1471px;
+    }
+    .tasksLayout.business .customerTable.metricsTable.todayTaskTable {
+      min-width: 1095px;
     }
     .customerTable.metricsTable .metricsCol {
       width: 356px;
@@ -3821,5 +4043,32 @@
   :global(.ant-picker-today-btn) {
     color: var(--console-management-primary, #3769fc);
     font-size: 12px;
+  }
+}
+
+.calendarEventTooltip {
+  max-width: 320px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+// 嵌入入口 hideLogo=true：移除整个品牌头部及其占位，保留信息播报。
+.root.withoutHeader {
+  .wealthTicker {
+    top: 0;
+  }
+  .sidebar {
+    top: 42px;
+  }
+  .main {
+    padding-top: 62px;
+  }
+  .formSection {
+    scroll-margin-top: 60px;
+  }
+  @media (max-width: 950px) {
+    .main {
+      padding-top: 59px;
+    }
   }
 }
