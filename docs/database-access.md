@@ -93,9 +93,27 @@ count = await db.insert_prepared(
 |---|---:|
 | `SWE_DB_ACQUIRE_TIMEOUT` | 30 |
 | `SWE_DB_CONNECT_TIMEOUT` | 10 |
-| `SWE_DB_READ_TIMEOUT` | 30 |
-| `SWE_DB_WRITE_TIMEOUT` | 30 |
+| `SWE_DB_READ_TIMEOUT` | 600 |
+| `SWE_DB_WRITE_TIMEOUT` | 600 |
 | `SWE_DB_CLEANUP_TIMEOUT` | 1 |
+
+连接参数按当前部署的 JDBC 配置设置，支持以下环境变量覆盖：
+
+| 变量 | 默认值 | 含义 |
+|---|---|---|
+| `SWE_DB_CHARSET` | `utf8mb4` | UTF-8 字符集，支持 emoji |
+| `SWE_DB_USE_UNICODE` | `true` | 文本解码为 Unicode |
+| `SWE_DB_SSL_DISABLED` | `true` | 对应 `useSSL=false`；需要 TLS 的部署设为 `false` |
+| `SWE_DB_TIME_ZONE` | `+08:00` | 数据库会话使用北京时间，无需服务端命名时区表 |
+
+布尔值接受 `true/false`、`1/0` 等 Pydantic 支持的形式；空字符串沿用默认值，
+其他无法识别的值会在配置校验时报错。读写超时同时用于驱动和连接池外层操作期限；
+连接超时保持 10 秒，连接池获取超时仍为 30 秒。
+
+`serverTimezone=Asia/Shanghai` 是 JDBC 对时间值的解释配置；这里显式设置的是
+MySQL 会话时区，会影响 `NOW()` 与 `TIMESTAMP` 的会话转换，不转换已保存的
+`DATETIME` 数据。`passwordCharacterEncoding` 与 `tdsqlSendClientInfoEnable`
+没有可直接照搬的官方 Python 驱动参数，本次不适配。
 
 期限须为有限正数；池大小满足 `0 <= min <= max` 且 `max > 0`。取消不代表驱动已完成清理，迟到任务保留引用并消费异常，连接实际退出前仍占池容量。关闭在清理预算后返回，残留连接计数写日志。
 
