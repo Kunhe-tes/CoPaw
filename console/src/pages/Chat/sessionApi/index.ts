@@ -29,6 +29,7 @@ import {
   resolveMessageTimestamp,
 } from "../messageMeta";
 import { toDisplayUrl } from "../utils";
+import { readStopAppendMetadata, stopAppendBubbleId } from "../stopAppend";
 import { applyPreferredSessionSelection } from "./preferredSession";
 import { shouldNotifySessionSelected } from "./sessionRaceGuard";
 import { filterStaleTaskSessions } from "./taskSessions";
@@ -313,6 +314,12 @@ const toOutputMessage = (msg: Message): OutputMessage => ({
 });
 
 function isStandaloneOutputMessage(message: Message | OutputMessage): boolean {
+  return (
+    Boolean(readStopAppendMetadata(message)) || isCronTaskOutputMessage(message)
+  );
+}
+
+function isCronTaskOutputMessage(message: Message | OutputMessage): boolean {
   const metadata =
     message.metadata && typeof message.metadata === "object"
       ? (message.metadata as Record<string, unknown>)
@@ -405,7 +412,7 @@ function getLatestTaskSessionResultKey(messages: Message[]): string | null {
       return;
     }
 
-    if (isStandaloneOutputMessage(message)) {
+    if (isCronTaskOutputMessage(message)) {
       const candidate = {
         latestScore: score,
         runIndex: index,
@@ -431,14 +438,13 @@ function getLatestTaskSessionResultKey(messages: Message[]): string | null {
 function hasTaskSessionResultMessages(messages: Message[]): boolean {
   return messages.some(
     (message) =>
-      getTaskRunMetadata(message) !== null ||
-      isStandaloneOutputMessage(message),
+      getTaskRunMetadata(message) !== null || isCronTaskOutputMessage(message),
   );
 }
 
 function isTaskSessionResultMessage(message: Message): boolean {
   return (
-    getTaskRunMetadata(message) !== null || isStandaloneOutputMessage(message)
+    getTaskRunMetadata(message) !== null || isCronTaskOutputMessage(message)
   );
 }
 
@@ -574,6 +580,10 @@ const buildResponseCard = (
     content: normalizeOutputMessageContent(msg.content),
   }));
   const stableId = stableResponseId(normalizedMessages);
+  const appendMarker =
+    normalizedMessages.length === 1
+      ? readStopAppendMetadata(normalizedMessages[0])
+      : null;
 
   const cardTraceId = normalizedMessages.reduce<string | null>((found, msg) => {
     if (found) return found;
@@ -636,13 +646,17 @@ const buildResponseCard = (
     });
   }
 
-  cards.push({
-    code: CARD_RESPONSE_FEEDBACK,
-    data: cards[0].data,
-  });
+  if (!appendMarker) {
+    cards.push({
+      code: CARD_RESPONSE_FEEDBACK,
+      data: cards[0].data,
+    });
+  }
 
   return {
-    id: `history-response-${stableId}`,
+    id: appendMarker
+      ? stopAppendBubbleId(appendMarker)
+      : `history-response-${stableId}`,
     role: ROLE_ASSISTANT,
     cards,
     msgStatus: "finished",
@@ -650,6 +664,9 @@ const buildResponseCard = (
 };
 
 function stableResponseId(messages: OutputMessage[]): string {
+  const appendMarker =
+    messages.length === 1 ? readStopAppendMetadata(messages[0]) : null;
+  if (appendMarker) return appendMarker.message_id;
   const persistedIds = messages
     .map((message) => message.id)
     .filter((id): id is string => typeof id === "string" && id.length > 0);
@@ -676,12 +693,15 @@ export const convertMessages = (
       result.push(buildUserCard(messages[i++]));
     } else {
       if (isStandaloneOutputMessage(messages[i])) {
-        result.push(
-          buildResponseCard(
-            [toOutputMessage(messages[i++])],
-            submittedPlanReviews,
-          ),
+        const card = buildResponseCard(
+          [toOutputMessage(messages[i++])],
+          submittedPlanReviews,
         );
+        const existingIndex = result.findIndex(
+          (message) => message.id === card.id,
+        );
+        if (existingIndex >= 0) result[existingIndex] = card;
+        else result.push(card);
         continue;
       }
 
@@ -872,7 +892,7 @@ function convertMessagesForSession(
   let index = 0;
 
   while (index < messages.length) {
-    if (isStandaloneOutputMessage(messages[index])) {
+    if (isCronTaskOutputMessage(messages[index])) {
       result.push(
         ...buildStandaloneTaskRunCard(
           messages[index],

@@ -29,6 +29,8 @@ from .query_contracts import (
     _QueryRuntime,
 )
 from .retry_classifier import is_query_retryable
+from .stop_append import StopAppendPersistenceError
+from ...agents.hook_runtime.append import log_append_diagnostic
 
 logger = logging.getLogger(__name__)
 
@@ -533,6 +535,26 @@ async def _stream_retry_attempt(
         attempt_state.should_return = True
         return
     except Exception as exc:
+        if getattr(outcome, "stop_append_started", False):
+            log_append_diagnostic(
+                "Stop append finalization failed category=%s trace_id=%s",
+                type(exc).__name__,
+                trace_id,
+            )
+            try:
+                await owner._end_trace_if_needed(
+                    trace_id,
+                    TraceStatus.ERROR,
+                    error="Stop append finalization failed",
+                )
+            except Exception:
+                log_append_diagnostic(
+                    "Stop append error trace closure failed trace_id=%s",
+                    trace_id,
+                )
+            if isinstance(exc, StopAppendPersistenceError):
+                raise
+            raise RuntimeError("Stop append finalization failed") from None
         if not owner._should_retry(
             retry_attempt,
             max_retry_attempts,

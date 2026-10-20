@@ -45,6 +45,10 @@ async def execute_handler(
     *,
     workspace_dir: Path,
 ) -> HookHandlerResult:
+    if handler.output_append:
+        from .append import execute_append_handler
+
+        return await execute_append_handler(handler, context, workspace_dir)
     logger.debug(
         "Executing hook handler id=%s type=%s context=%s",
         handler.id,

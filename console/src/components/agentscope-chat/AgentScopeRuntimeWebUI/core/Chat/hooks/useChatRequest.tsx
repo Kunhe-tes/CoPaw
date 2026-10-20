@@ -17,6 +17,10 @@ import {
 } from "@/pages/Chat/taskProgressEvents";
 import { emitSubAgentRunsRefreshIfPresent } from "@/pages/Chat/subAgentRunEvents";
 import {
+  readStopAppendMetadata,
+  stopAppendBubbleId,
+} from "@/pages/Chat/stopAppend";
+import {
   extractPlanInteractionCard,
   type ChatRuntimeResponseCardData,
 } from "@/pages/Chat/messageMeta";
@@ -574,6 +578,13 @@ export default function useChatRequest(options: UseChatRequestOptions) {
             continue;
           }
 
+          const appendedMessages = (res.output ?? []).flatMap((message) => {
+            const marker = readStopAppendMetadata(message);
+            return marker && message.content?.length
+              ? [{ message, marker }]
+              : [];
+          });
+
           const canUpdateLiveResponse = Boolean(
             currentQARef.current.response &&
               isOwnerActive() &&
@@ -585,6 +596,9 @@ export default function useChatRequest(options: UseChatRequestOptions) {
               extractPlanInteractionCard(res);
             const responseData = {
               ...withResponseHeaderMeta(res, responseHeaderTimestamp),
+              output: (res.output ?? []).filter(
+                (message) => !readStopAppendMetadata(message),
+              ),
               planReviewCard:
                 planInteractionCard?.card_type === "plan_review"
                   ? planInteractionCard
@@ -623,16 +637,46 @@ export default function useChatRequest(options: UseChatRequestOptions) {
 
             currentQARef.current.response.cards = cards;
 
-            if (
-              res.status === AgentScopeRuntimeRunStatus.Completed ||
-              res.status === AgentScopeRuntimeRunStatus.Failed ||
-              res.status === AgentScopeRuntimeRunStatus.Canceled
-            ) {
-              emitTaskProgressUpdate(null, owner);
-              finishOnce();
-            } else {
+            if (!isTerminalResponse || appendedMessages.length > 0) {
               updateMessage(currentQARef.current.response);
             }
+          }
+
+          // Publish the main body first. Only the UI bubble uses the persisted
+          // ID; runtime/content IDs stay intact for SSE builder aggregation.
+          for (const { message, marker } of appendedMessages) {
+            updateMessage({
+              id: stopAppendBubbleId(marker),
+              role: "assistant",
+              msgStatus:
+                message.status === AgentScopeRuntimeRunStatus.Completed
+                  ? "finished"
+                  : "generating",
+              cards: [
+                {
+                  code: "AgentScopeRuntimeResponseCard",
+                  data: {
+                    ...withResponseHeaderMeta(res, responseHeaderTimestamp),
+                    id: `response_${marker.message_id}`,
+                    output: [message],
+                    status: message.status,
+                  },
+                },
+              ],
+            });
+          }
+
+          if (
+            isTerminalResponse &&
+            (canUpdateLiveResponse || appendedMessages.length > 0)
+          ) {
+            if (!canUpdateLiveResponse && appendedMessages.length > 0) {
+              // Recovery history owns the body now; finish must not reinsert
+              // the obsolete live response through the controller callback.
+              currentQARef.current.response = undefined;
+            }
+            emitTaskProgressUpdate(null, owner);
+            finishOnce();
           }
         }
         if (

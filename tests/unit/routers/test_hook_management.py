@@ -21,6 +21,78 @@ from swe.app.routers import hook_management
 from swe.config.context import encode_scope_id
 
 
+@pytest.mark.parametrize("assistant_response", ["approved answer", "  ", None])
+def test_manual_append_real_service_returns_only_safe_summary(
+    monkeypatch,
+    tmp_path,
+    assistant_response,
+):
+    client, _, reload = _client(monkeypatch)
+    workspace = tmp_path / "default"
+    scripts = workspace / "hooks" / "scripts"
+    scripts.mkdir(parents=True)
+    agent_path = workspace / "agent.json"
+    agent_path.write_text('{"id":"default"}', encoding="utf-8")
+    (scripts / "append.py").write_text(
+        "import json\n"
+        "print(json.dumps({'decision': 'allow', 'reason': 'private reason', "
+        "'hookSpecificOutput': {'appendText': '附加🙂'}}))\n",
+        encoding="utf-8",
+    )
+    service = HookManagementService(workspace, tenant_id="tenant-a")
+    monkeypatch.setattr(
+        hook_management,
+        "_service_for_request",
+        lambda _: service,
+    )
+    before = agent_path.read_bytes()
+
+    response = client.post(
+        "/hook-management/manual-test",
+        json={
+            "confirmRealExecution": True,
+            "handler": {
+                "id": "append",
+                "type": "command",
+                "argv": ["python", "hooks/scripts/append.py"],
+                "outputAppend": True,
+                "failPolicy": "block",
+            },
+            "context": {
+                "session_id": "manual-only",
+                "transcript_path": "",
+                "cwd": str(workspace),
+                "hook_event_name": "Stop",
+                "tenant_id": "tenant-a",
+                "effective_tenant_id": "tenant-a",
+                "user_id": "user-a",
+                "agent_id": "default",
+                "channel": "test",
+                "assistant_response": assistant_response,
+            },
+        },
+    )
+
+    if assistant_response == "approved answer":
+        assert response.status_code == 200
+        assert set(response.json()) == {"redacted_summary"}
+        summary = response.json()["redacted_summary"]
+        assert summary["output_append"] is True
+        assert summary["append_applied"] is True
+        assert summary["append_bytes"] == 10
+        assert summary["effective_fail_policy"] == "allow"
+        assert isinstance(summary["duration_ms"], int)
+        assert "附加" not in response.text
+        assert "private reason" not in response.text
+    else:
+        assert response.status_code == 422
+        assert "assistant_response" in response.json()["detail"]
+    assert agent_path.read_bytes() == before
+    assert not (workspace / "sessions").exists()
+    assert not (workspace / "memory").exists()
+    reload.assert_not_called()
+
+
 class _FakeService:
     def __init__(self) -> None:
         self.snapshot = HookConfigurationSnapshot(

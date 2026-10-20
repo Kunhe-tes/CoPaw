@@ -75,6 +75,7 @@ from . import (
     query_preflight,
     query_runtime,
     session_lifecycle,
+    stop_append,
     turn_lifecycle,
 )
 from .session import SafeJSONSession, SESSION_SKILL_SNAPSHOT_STATE_KEY
@@ -296,6 +297,8 @@ class _QueryTurnOutcome:
     buffered_assistant_messages: list[Msg] = field(default_factory=list)
     assistant_memory_start: int = 0
     goal_finalization_fallback: bool = False
+    stop_append_approved: bool = False
+    stop_append_started: bool = False
 
 
 def _match_command_with_optional_id(
@@ -5428,6 +5431,23 @@ class AgentRunner(Runner):
     def _build_stop_incomplete_msg(reason: str) -> Msg:
         return _build_stop_incomplete_msg(reason)
 
+    async def _stream_stop_appended_messages(
+        self,
+        *,
+        request: AgentRequest,
+        runtime: _QueryRuntime,
+        plan: _TurnPlan,
+        outcome: _QueryTurnOutcome,
+    ) -> AsyncGenerator[tuple[Msg, bool], None]:
+        async for item in stop_append.stream_stop_appended_messages(
+            self,
+            request=request,
+            runtime=runtime,
+            plan=plan,
+            outcome=outcome,
+        ):
+            yield item
+
     async def _emit_stop_hook_if_needed(
         self,
         *,
@@ -5610,6 +5630,7 @@ class AgentRunner(Runner):
         *,
         trace_id: str | None,
         agent: SWEAgent | None,
+        assistant_response: str | None = None,
     ) -> None:
         """有 trace 时把最终模型输出写入 Monitor。"""
         if not trace_id or agent is None:
@@ -5620,7 +5641,8 @@ class AgentRunner(Runner):
             trace_id,
             type(agent).__name__,
         )
-        assistant_response = _extract_assistant_response(agent)
+        if assistant_response is None:
+            assistant_response = _extract_assistant_response(agent)
         logger.debug(
             "Extracted assistant response: trace_id=%s, response_len=%d",
             trace_id,
@@ -5672,7 +5694,10 @@ class AgentRunner(Runner):
                     error=error,
                 )
         except Exception as trace_err:
-            logger.warning("Failed to end trace: %s", trace_err)
+            logger.warning(
+                "Failed to end trace category=%s",
+                type(trace_err).__name__,
+            )
 
     async def _handle_query_cancelled(
         self,
@@ -5960,7 +5985,11 @@ class AgentRunner(Runner):
         ):
             return
 
-        assistant_response = _extract_assistant_response(runtime.agent)
+        assistant_response = (
+            outcome.assistant_response
+            if outcome.stop_append_started
+            else _extract_assistant_response(runtime.agent)
+        )
         user_message = query
         if not assistant_response or not user_message:
             logger.debug(
@@ -6130,6 +6159,11 @@ class AgentRunner(Runner):
         await self._index_model_output_if_needed(
             trace_id=trace_id,
             agent=runtime.agent,
+            assistant_response=(
+                outcome.assistant_response
+                if outcome.stop_append_started
+                else None
+            ),
         )
         await self._end_trace_if_needed(
             trace_id,

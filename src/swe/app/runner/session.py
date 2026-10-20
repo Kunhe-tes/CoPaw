@@ -516,12 +516,16 @@ class SessionExecution:
             self._set_committed_state(exc.state, revision)
             raise
         except asyncio.CancelledError:
-            while not task.done():
-                try:
-                    await asyncio.shield(task)
-                except asyncio.CancelledError:
-                    continue
-            result = task.result()
+            try:
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        continue
+                result = task.result()
+            except PublishedLedgerCommitError as exc:
+                self._set_committed_state(exc.state, revision)
+                raise
             self._set_committed_state(result, revision)
             raise
 

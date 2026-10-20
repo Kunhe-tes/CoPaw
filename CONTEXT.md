@@ -657,6 +657,22 @@ _Avoid_: audit database table, hook execution log, full script archive, hook pay
 A lifecycle-hook configuration owned by exactly one **Agent Profile**. It applies only while that Agent Profile runs, rather than across a tenant or through a reusable Skill.
 _Avoid_: agent-level hook, tenant hook, skill hook
 
+**Stop Appended Message**:
+A separate user-visible text or Markdown message contributed by a Stop Hook after the final completion attempt is approved. It belongs to the same Answer Turn as the approved response and is retained in both Chat history and subsequent model context; rejected attempts contribute no appended messages.
+_Avoid_: Stop Response Replacement, response suffix, new Answer Turn, follow-up model answer
+
+**Stop Append Phase**:
+The post-approval part of completion in which dedicated Stop Handlers produce Stop Appended Messages before the Answer Turn ends. It runs only after Stop validation approves the final response and does not itself require withholding that response's live text.
+_Avoid_: Stop Validation Phase, output transformation, post-request background task
+
+**Best-effort Stop Append**:
+The completion rule under which an append Handler failure contributes no message and neither rejects the approved response nor starts a model follow-up. Other append Handlers remain eligible to contribute messages, and appended content never starts another Stop evaluation.
+_Avoid_: completion veto, fail-closed append, recursive Stop validation
+
+**Stop Append Delivery Boundary**:
+The point at which one Stop Appended Message is durably retained with its Answer Turn and model context before live publication. A message past this boundary remains delivered even when the client has not received it; stopping discards only contributions that have not crossed the boundary.
+_Avoid_: browser receipt acknowledgement, optimistic stream-only delivery, append rollback after commit
+
 **Stop Response Replacement**:
 The complete replacement text supplied by a Stop Hook for one candidate Assistant Response. A replacement-capable Stop Hook makes that candidate subject to Strict Completion Finalization, so only the approved or replacement text is retained and delivered; it is not a patch, token-stream transformation, or an instruction for the Agent to produce a later answer.
 _Avoid_: output patch, stream rewrite, follow-up response, completion block

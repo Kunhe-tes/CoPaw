@@ -781,6 +781,12 @@ class HookRuntimeRunningConfig(BaseModel):
         gt=0,
         description="Stop 输出变换流水线的总时限（秒）",
     )
+    max_stop_append_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Stop 追加消息阶段的总时限（秒）",
+    )
 
     @model_validator(mode="before")
     @classmethod
