@@ -186,7 +186,11 @@ async def stream_stop_appended_messages(
     for contribution in contributions:
         if await stop_requested():
             return
-        msg = Msg(name="Friday", role="assistant", content=contribution.text)
+        msg = Msg(
+            name="Friday",
+            role="assistant",
+            content=[{"type": "text", "text": contribution.text}],
+        )
         msg.id = str(uuid4())
         msg.metadata = {
             "stop_append": {

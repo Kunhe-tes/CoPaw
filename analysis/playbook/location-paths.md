@@ -335,6 +335,12 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 
 今日任务经营视角原始客户名单为空且查询完成时，在当前任务标题旁展示执行时间；使用 `plans.items[].scenes[].cron_expr` 经 `mapSceneItem` 解析的排程，由任务树节点透传 `schedule` 并复用 `scheduleLabel`。日/周排程显示具体时分，小时排程显示“每小时整点”，自定义排程显示原表达式。搜索或接触状态筛选导致的空列表不触发展示；客户视角、待触达、已完成不显示。`plans` 不返回实际执行状态，空名单不能严格证明任务尚未执行。
 
+## Stop 追加消息仅最后一条实时可见
+
+- 入口：`src/swe/app/runner/stop_append.py::stream_stop_appended_messages`。每条追加消息必须使用结构化文本块 `[{"type": "text", "text": ...}]`，不能直接传字符串。
+- AgentScope 实时流适配器会将裸字符串缓存到源生成器结束，新消息覆盖旧缓存；因此多条追加可能只显示最后一条，后续持久化失败时甚至一条也不显示，而历史中仍能恢复已提交消息。
+- 回归入口：`tests/unit/app/test_runner_stop_append.py::test_live_adapter_publishes_each_append_before_next_save`，通过真实适配器验证多条成功追加逐条发送，以及第二条保存失败时第一条已送达。
+
 ## 财富工作台嵌入头部控制
 
 - 父应用通过 iframe URL 的 `hideLogo=true` 隐藏整个财富工作台头部（品牌及标题），例如 `/wealth/board?hideLogo=true`；未传或传 `false` 时正常显示。

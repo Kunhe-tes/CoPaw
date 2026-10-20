@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -12,6 +13,14 @@ from uuid import UUID
 import pytest
 from agentscope.message import Msg
 from agentscope.memory import InMemoryMemory
+from agentscope_runtime.adapters.agentscope.stream import (
+    adapt_agentscope_message_stream,
+)
+from agentscope_runtime.engine.schemas.agent_schemas import (
+    Message,
+    MessageType,
+    RunStatus,
+)
 
 from swe.agents.hook_runtime.models import (
     HookConfig,
@@ -248,6 +257,63 @@ async def test_append_commits_before_publish_and_enters_real_memory(
         )
     ] == []
     assert emitter.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_second_save", [False, True])
+async def test_live_adapter_publishes_each_append_before_next_save(
+    tmp_path,
+    monkeypatch,
+    fail_second_save,
+):
+    owner, runtime, request, outcome, _ = await _setup(tmp_path)
+    outcome.stop_append_approved = True
+    contributions = _contributions() + [
+        _contributions()[0].model_copy(
+            update={"handler_id": "second", "order": 1, "text": "第二条补充"},
+        ),
+    ]
+    monkeypatch.setattr(
+        "swe.app.runner.runner._build_stop_hook_runtime",
+        lambda **_: SimpleNamespace(
+            emit_stop_append=AsyncMock(return_value=contributions),
+        ),
+    )
+    owner.save_job_session_state.side_effect = [True, not fail_second_save]
+    source = owner._stream_stop_appended_messages(
+        request=request,
+        runtime=runtime,
+        plan=SimpleNamespace(original_user_message="q"),
+        outcome=outcome,
+    )
+    delivered = []
+    save_counts = []
+    expected_error = (
+        pytest.raises(RuntimeError, match="Stop append persistence failed")
+        if fail_second_save
+        else nullcontext()
+    )
+    with expected_error:
+        async for event in adapt_agentscope_message_stream(source):
+            if (
+                isinstance(event, Message)
+                and event.type == MessageType.MESSAGE
+                and event.status == RunStatus.Completed
+            ):
+                delivered.append(event)
+                save_counts.append(owner.save_job_session_state.await_count)
+    expected = contributions[:1] if fail_second_save else contributions
+    assert [event.content[0].text for event in delivered] == [
+        item.text for item in expected
+    ]
+    assert save_counts == list(range(1, len(expected) + 1))
+    assert [
+        event.metadata["stop_append"]["handler_id"] for event in delivered
+    ] == [item.handler_id for item in expected]
+    persisted = await runtime.agent.memory.get_memory()
+    assert [
+        event.metadata["stop_append"]["message_id"] for event in delivered
+    ] == [msg.id for msg in persisted]
 
 
 @pytest.mark.asyncio
@@ -964,7 +1030,9 @@ async def test_real_session_commit_preserves_appends_and_other_state(  # pylint:
     reloaded = await owner.session.get_session_state_dict("s", user_id="u")
     raw = reloaded["agent"]["memory"]["content"][-1][0]
     assert raw["id"] == marker["message_id"]
-    assert raw["content"] == _contributions()[0].text
+    assert raw["content"] == [
+        {"type": "text", "text": _contributions()[0].text},
+    ]
     restored = InMemoryMemory()
     restored.load_state_dict(reloaded["agent"]["memory"])
     assert (await restored.get_memory())[

@@ -201,7 +201,7 @@ async def appended_session(  # pylint: disable=too-many-statements
                 outcome=outcome,
             )
         ]
-        assert [msg.content for msg in delivered] == [
+        assert [msg.get_text_content() for msg in delivered] == [
             original.content,
             APPEND_TEXT,
         ]
