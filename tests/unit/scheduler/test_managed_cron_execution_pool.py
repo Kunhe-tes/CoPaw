@@ -13,7 +13,7 @@ from tests.unit.scheduler.test_managed_cron_management import create_payload
 @pytest.mark.parametrize(
     "slot,expected",
     [
-        (None, ("default", "default")),
+        (None, ("tenant-provider", "tenant-model")),
         (
             {"provider_id": "provider-a", "model": "model-a"},
             ("provider-a", "model-a"),

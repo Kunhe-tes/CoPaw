@@ -27,8 +27,8 @@ async def test_feedback_waits_for_async_and_counts_observed_completion_once(
         "now_utc": now + timedelta(minutes=1),
         "scope": {
             "source_id": "bank",
-            "provider_id": "default",
-            "model_id": "default",
+            "provider_id": "tenant-provider",
+            "model_id": "tenant-model",
         },
     }
     value = await feedback.summarize(**args)
@@ -65,7 +65,11 @@ async def test_managed_only_scopes_are_visible_but_legacy_protocol_is_not(
     feedback = ManagedCapacityFeedback(db)
     scopes = await feedback.scopes(now_utc=utc_now())
     assert scopes == [
-        {"source_id": "bank", "provider_id": "default", "model_id": "default"},
+        {
+            "source_id": "bank",
+            "provider_id": "tenant-provider",
+            "model_id": "tenant-model",
+        },
     ]
     await db.execute(
         "UPDATE swe_cron_execution_runs SET dispatch_meta_json='{}' WHERE execution_id=%s",
@@ -94,8 +98,8 @@ async def test_feedback_is_scope_isolated_and_uses_settled_time_not_primary_time
     }
     scope = {
         "source_id": "bank",
-        "provider_id": "default",
-        "model_id": "default",
+        "provider_id": "tenant-provider",
+        "model_id": "tenant-model",
     }
     assert (await feedback.summarize(**args, scope=scope))[
         "success_count"
@@ -141,7 +145,15 @@ async def test_one_capacity_controller_merges_old_and_new_feedback_once(
     )
     legacy = _DispatchStore([])
     legacy.scopes = (
-        [WorkerScope(source_id="bank")] if legacy_scope_exists else []
+        [
+            WorkerScope(
+                source_id="bank",
+                provider_id="tenant-provider",
+                model_id="tenant-model",
+            ),
+        ]
+        if legacy_scope_exists
+        else []
     )
     legacy.latest_capacity = None
     legacy.feedback = {"success_count": 9, "failure_count": 0}
@@ -194,7 +206,13 @@ async def test_partial_feedback_failure_never_publishes_half_a_capacity_decision
     db, _, _ = execution_setup
     await completed(execution_setup)
     legacy = _DispatchStore([])
-    legacy.scopes = [WorkerScope(source_id="bank")]
+    legacy.scopes = [
+        WorkerScope(
+            source_id="bank",
+            provider_id="tenant-provider",
+            model_id="tenant-model",
+        ),
+    ]
     legacy.latest_capacity = None
     new = ManagedCapacityFeedback(db)
 
@@ -233,7 +251,13 @@ async def test_failed_parallel_feedback_reaps_the_other_read(execution_setup):
     db, _, _ = execution_setup
     await completed(execution_setup)
     legacy = _DispatchStore([])
-    legacy.scopes = [WorkerScope(source_id="bank")]
+    legacy.scopes = [
+        WorkerScope(
+            source_id="bank",
+            provider_id="tenant-provider",
+            model_id="tenant-model",
+        ),
+    ]
     legacy.latest_capacity = None
     started, cleaned, release = (
         asyncio.Event(),

@@ -225,7 +225,7 @@ async def test_async_pending_keeps_the_shared_model_slot(
     async def available():
         return await capacity_claim.available_capacity(
             Cursor(db),
-            ("bank", "default", "default"),
+            ("bank", "tenant-provider", "tenant-model"),
             "worker",
             now,
             policy,

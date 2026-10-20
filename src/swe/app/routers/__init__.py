@@ -17,6 +17,7 @@ _ROUTER_MODULES = (
     (".external_jobs", "router"),
     ("..crons.migration_api", "router"),
     ("..crons.managed_api", "router"),
+    ("..crons.managed_model_api", "router"),
     ("..crons.managed_execution_api", "router"),
     ("..crons.skill_job_lookup", "router"),
     ("..crons.batch_operations", "router"),

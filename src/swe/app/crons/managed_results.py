@@ -59,6 +59,19 @@ def utc_now():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def effective_model_values(outcome):
+    slot = (outcome.execution_meta or {}).get("effective_model_slot")
+    if not isinstance(slot, dict):
+        return {}
+    provider, model = slot.get("provider_id"), slot.get("model")
+    if not all(
+        isinstance(value, str) and value.strip() not in {"", "default"}
+        for value in (provider, model)
+    ):
+        return {}
+    return {"provider_id": provider.strip(), "model_id": model.strip()}
+
+
 async def _update(db, table, values, where, params):
     # 表名、字段名和条件均来自内部常量，禁止拼接 HTTP 输入。
     setters = ", ".join(f"`{name}`=%s" for name in values)
@@ -302,6 +315,7 @@ class ExecutionWriter:
                     default=str,
                 ),
                 "run_lease_until": None,
+                **effective_model_values(outcome),
             },
         )
         if not definition["deleted_at"]:

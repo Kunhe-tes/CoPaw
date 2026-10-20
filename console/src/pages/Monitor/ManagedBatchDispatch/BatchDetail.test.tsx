@@ -58,6 +58,8 @@ it("详情不展示任务数说明行，成员保留子任务状态文案", asyn
   expect(screen.queryByText(/任务数.*含父任务/)).toBeNull();
   expect(screen.getByRole("tab", { name: "执行成员 (1)" })).toBeInTheDocument();
   expect(screen.getByText("子任务状态：success")).toBeInTheDocument();
+  expect(screen.getByText("parent")).toBeInTheDocument();
+  expect(screen.queryByText("exec")).toBeNull();
   expect(screen.queryByText(/收敛/)).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: /expand|展开/i }));
   expect(screen.queryByText(/；收敛/)).toBeNull();

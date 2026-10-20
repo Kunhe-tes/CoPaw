@@ -15,6 +15,7 @@ from .repository import IDENTITY_FIELDS, ManagedCronRepository
 from .storage import insert, transaction
 from .views import public_value
 from .dispatch_events import append_run_event
+from .model_resolution import resolve_agent_model
 from ..workflow_binding import resolve_workflow_batch_jobs
 
 RUN_TABLE = "swe_cron_execution_runs"
@@ -106,16 +107,19 @@ def _not_before_time(command):
 async def _snapshot(tx, current, command, execution_id):
     spec = copy.deepcopy(json.loads(current["spec_json"]))
     meta = public_value(copy.deepcopy(command.dispatch_meta or {}))
-    slot = spec.get("model_slot") or {}
+    # 纯文本不调用模型，沿用原有容量分组；Agent 使用解析后的真实模型。
+    slot = {"provider_id": "default", "model": "default"}
+    if spec["task_type"] == "agent":
+        slot = await resolve_agent_model(current, spec)
+        spec["model_slot"] = slot
     meta.update(
         {
             "protocol": "scheduler_managed_v1",
             "source": "managed_scheduler",
             "cron_execution_key": execution_id,
             "cron_is_manual": command.kind == "manual",
-            "provider_id": str(slot.get("provider_id") or "").strip()
-            or "default",
-            "model_id": str(slot.get("model") or "").strip() or "default",
+            "provider_id": slot.get("provider_id", ""),
+            "model_id": slot.get("model", ""),
         },
     )
     when = _scheduled_time(command)

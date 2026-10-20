@@ -68,13 +68,31 @@ class ExecutionDatabase(ManagementDatabase):
         return await super().fetch_one(query, params)
 
 
+def stub_execution_models(monkeypatch):
+    from scheduler.app.services.cron.managed import executions
+
+    async def resolve_model(current, spec):
+        return spec.get("model_slot") or {
+            "provider_id": "tenant-provider",
+            "model": "tenant-model",
+        }
+
+    monkeypatch.setattr(executions, "resolve_agent_model", resolve_model)
+
+
 @pytest.fixture
-def execution_setup():
+def execution_model_resolver(monkeypatch):
+    stub_execution_models(monkeypatch)
+
+
+@pytest.fixture
+def execution_setup(monkeypatch):
     from scheduler.app.services.cron.managed.identity import CallerIdentity
     from scheduler.app.services.cron.managed.management import (
         ManagementService,
     )
 
+    stub_execution_models(monkeypatch)
     db = ExecutionDatabase()
     caller = CallerIdentity("alice", "bank", "default", "alice")
     management = ManagementService(db, ResourceClient(), PlatformClient())

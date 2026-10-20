@@ -8,7 +8,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.unit.scheduler.test_managed_cron_executions import execution_setup
+from tests.unit.scheduler.test_managed_cron_executions import (
+    execution_setup,
+    execution_model_resolver,
+)
 from tests.unit.scheduler.test_managed_cron_management import create_payload
 
 
@@ -228,6 +231,7 @@ async def test_stale_fact_observed_before_resume_cannot_disable_again(
 @pytest.mark.asyncio
 async def test_background_keeps_causal_actor_without_forging_manager_role(
     monkeypatch,
+    execution_model_resolver,
 ):
     from tests.unit.scheduler.test_managed_cron_callbacks import (
         CallbackDatabase,
@@ -371,7 +375,10 @@ async def test_interrupted_auto_pause_resumes_original_operation_without_running
 
 
 @pytest.mark.asyncio
-async def test_runtime_tick_processes_auto_pause_lane(monkeypatch):
+async def test_runtime_tick_processes_auto_pause_lane(
+    monkeypatch,
+    execution_model_resolver,
+):
     from tests.unit.scheduler.test_managed_cron_dispatch_state import (
         ModeDatabase,
         ModePlatform,
