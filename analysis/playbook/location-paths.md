@@ -350,6 +350,10 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 - 父应用直达：`/wealth/board?origin=Y&hideLogo=true` 为看板，`/wealth/create?origin=Y&hideLogo=true` 为新建。部署在 `/console` 下时各地址加此前缀。
 - 编辑仅由工作台内部触发：看板列表或日历操作调用 `editPlan(id)` 回填草稿和分发目标，再跳转 `/wealth/create`。父应用不提供编辑链接，不引入 `planId` URL 参数；编辑态沿用原有内存机制。
 
+## 财富规划经营方向输入框边界
+
+- 创建计划第 2 步的输入框位于 `console/src/pages/WealthWorkbench/Create/index.tsx`，样式为同级工作台 `index.module.less` 的 `.direction input`。默认使用常显边框和白色底色，悬停、聚焦时加强边框；排查输入框难以识别时，先检查默认边框是否被设为透明，以及覆盖样式是否影响键盘焦点轮廓。
+
 ## 财富规划 Java 网关迁移
 
 - 2026-10-20 浏览器规划路径统一增加 `/zt` 前缀；需同步网关 location 和测试夹具。Java 上游仍是 `/wealth/plans` 时由网关剥离 `/zt`；Java 同时有此前缀时原样转发。不修改工作台页面路由或其他接口前缀。
