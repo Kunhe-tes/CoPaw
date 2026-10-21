@@ -73,7 +73,7 @@ async def test_two_claimers_cannot_overbook_shared_model_capacity(
     rows = [await run_for(execution_setup, index) for index in range(3)]
     service = dispatcher(db, [utc_now()], monkeypatch)
     db.conn.execute(
-        "INSERT INTO swe_cron_dispatch_intents VALUES (1,'bank','default','default','dispatched')",
+        "INSERT INTO swe_cron_dispatch_intents VALUES (1,'bank','tenant-provider','tenant-model','dispatched')",
     )
     result = await asyncio.gather(*(service._claim(row, True) for row in rows))
     assert sum(row is not None for row in result) == 1

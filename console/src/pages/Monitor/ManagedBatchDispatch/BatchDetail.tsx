@@ -51,8 +51,8 @@ const memberColumns: ColumnsType<ManagedBatchMember> = [
     render: (_, item) => (
       <div className={styles.stackCell}>
         <strong>{item.job_name || item.job_id}</strong>
-        <Tooltip title={item.execution_id}>
-          <span>{item.execution_id}</span>
+        <Tooltip title={`定时任务 ID：${item.job_id}`}>
+          <span>{item.job_id}</span>
         </Tooltip>
         <span>
           第 {item.business_attempt} 次业务尝试 · {item.dispatch_attempt} 次投递
@@ -81,7 +81,7 @@ const memberColumns: ColumnsType<ManagedBatchMember> = [
     width: 180,
     render: (_, item) => (
       <div className={styles.stackCell}>
-        <strong>
+        <strong title={`${item.provider_id || "-"} / ${item.model_id || "-"}`}>
           {item.provider_id || "-"} / {item.model_id || "-"}
         </strong>
         <span>热度 {item.viewer_heat_score ?? "未记录"}</span>

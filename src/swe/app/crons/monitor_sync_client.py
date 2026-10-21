@@ -100,7 +100,9 @@ class MonitorSyncClient:
         Args:
             base_url: Monitor API base URL. If None, uses get_monitor_api_url().
         """
-        self._base_url = get_monitor_api_url() if base_url is None else base_url
+        self._base_url = (
+            get_monitor_api_url() if base_url is None else base_url
+        )
         self._scheduler_base_url = (
             get_scheduler_api_url()
             if scheduler_base_url is None
@@ -623,14 +625,13 @@ class MonitorSyncClient:
             self._execution_needs_notification(job, status)
             and not suppress_notification
         )
-        is_read = is_manual and status == "success"
+        is_read = False
         read_at = None
-        if is_read and end_time:
-            read_at = self._format_optional_time(end_time)
-
         notification_due_time = None
         if needs_notification:
-            notification_due_time = notification_due_at or end_time or actual_time
+            notification_due_time = (
+                notification_due_at or end_time or actual_time
+            )
 
         source_id = getattr(job, "source_id", "")
         source_id = source_id if isinstance(source_id, str) else ""

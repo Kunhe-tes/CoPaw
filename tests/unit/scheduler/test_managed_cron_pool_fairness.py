@@ -71,10 +71,10 @@ async def test_full_hot_pool_does_not_starve_later_model_pool(
     )
     runtime, client = worker(mode_setup, monkeypatch)
     db.conn.execute(
-        "INSERT INTO swe_cron_dispatch_intents VALUES (1,'bank','default','default','dispatched')",
+        "INSERT INTO swe_cron_dispatch_intents VALUES (1,'bank','tenant-provider','tenant-model','dispatched')",
     )
     db.conn.execute(
-        "INSERT INTO swe_cron_dispatch_intents VALUES (2,'bank','default','default','dispatched')",
+        "INSERT INTO swe_cron_dispatch_intents VALUES (2,'bank','tenant-provider','tenant-model','dispatched')",
     )
     db.conn.execute(
         "INSERT INTO swe_cron_dispatch_scope_leases VALUES ('bank','z-provider','z-model','worker',?)",
@@ -164,7 +164,7 @@ async def test_accepted_work_is_retried_even_when_its_pool_is_full(
     )
     runtime, client = worker(mode_setup, monkeypatch)
     db.conn.execute(
-        "INSERT INTO swe_cron_dispatch_intents VALUES (1,'bank','default','default','dispatched')",
+        "INSERT INTO swe_cron_dispatch_intents VALUES (1,'bank','tenant-provider','tenant-model','dispatched')",
     )
     await runtime._dispatch()
     assert client.calls == [row["execution_id"]]
@@ -229,7 +229,7 @@ async def test_invalid_policy_in_one_scope_does_not_abort_other_scopes(
     resolve = policy._resolve_worker_strategy
 
     async def invalid_first(scope, now):
-        if scope.provider_id == "default":
+        if scope.provider_id == "tenant-provider":
             raise ValueError("invalid policy")
         return await resolve(scope, now)
 

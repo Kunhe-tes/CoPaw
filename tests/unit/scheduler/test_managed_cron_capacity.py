@@ -45,11 +45,11 @@ def configure_pool(db, now):
         );
     """)
     db.conn.execute(
-        "INSERT INTO swe_cron_dispatch_scope_leases VALUES ('bank','default','default','worker',?)",
+        "INSERT INTO swe_cron_dispatch_scope_leases VALUES ('bank','tenant-provider','tenant-model','worker',?)",
         ((now + timedelta(minutes=5)).isoformat(" "),),
     )
     db.conn.execute(
-        "INSERT INTO swe_cron_dispatch_worker_capacity VALUES (1,'bank','default','default','default',2,?)",
+        "INSERT INTO swe_cron_dispatch_worker_capacity VALUES (1,'bank','tenant-provider','tenant-model','default',2,?)",
         (now.isoformat(" "),),
     )
 
@@ -82,7 +82,7 @@ async def test_shared_capacity_counts_new_and_old_occupants_under_same_scope_loc
     async def available():
         return await capacity_claim.available_capacity(
             Cursor(db),
-            ("bank", "default", "default"),
+            ("bank", "tenant-provider", "tenant-model"),
             "worker",
             now,
             policy,
@@ -96,7 +96,7 @@ async def test_shared_capacity_counts_new_and_old_occupants_under_same_scope_loc
         )
         assert await available() == 1
     db.conn.execute(
-        "INSERT INTO swe_cron_dispatch_intents VALUES (1,'bank','default','default','dispatched')",
+        "INSERT INTO swe_cron_dispatch_intents VALUES (1,'bank','tenant-provider','tenant-model','dispatched')",
     )
     assert await available() == 0
     db.conn.execute("UPDATE swe_cron_execution_runs SET status='error'")
@@ -106,7 +106,7 @@ async def test_shared_capacity_counts_new_and_old_occupants_under_same_scope_loc
     )
     assert await available() == 1
     db.conn.execute(
-        "UPDATE swe_cron_execution_runs SET model_id='default', dispatch_meta_json='{}'",
+        "UPDATE swe_cron_execution_runs SET model_id='tenant-model', dispatch_meta_json='{}'",
     )
     assert await available() == 1
     db.conn.execute(

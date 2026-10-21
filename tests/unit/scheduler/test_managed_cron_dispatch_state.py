@@ -2,6 +2,9 @@
 """验证三态目标、逐对象生效方式及失败后的原操作续办。"""
 
 import pytest
+from tests.unit.scheduler.test_managed_cron_executions import (
+    stub_execution_models,
+)
 
 from tests.unit.scheduler.test_managed_cron_distribution import (
     DistributionDatabase,
@@ -53,12 +56,13 @@ class ModePlatform(PlatformClient):
 
 
 @pytest.fixture
-def mode_setup():
+def mode_setup(monkeypatch):
     from scheduler.app.services.cron.managed.identity import CallerIdentity
     from scheduler.app.services.cron.managed.management import (
         ManagementService,
     )
 
+    stub_execution_models(monkeypatch)
     db = ModeDatabase()
     caller = CallerIdentity("alice", "bank", "default", "alice")
     service = ManagementService(db, ResourceClient(), ModePlatform())
