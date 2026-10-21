@@ -349,6 +349,12 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 - `hideLogo=true` 对所有角色统一隐藏整个侧栏（包含规划入口及任务导航）并移除占位，正文填满可用宽度；不带该参数时侧栏行为保持不变。内部导航仅延续隐藏设置，不额外补回 `origin=Y`，身份初始化保持原有行为。
 - 父应用直达：`/wealth/board?origin=Y&hideLogo=true` 为看板，`/wealth/create?origin=Y&hideLogo=true` 为新建。部署在 `/console` 下时各地址加此前缀。
 - 编辑仅由工作台内部触发：看板列表或日历操作调用 `editPlan(id)` 回填草稿和分发目标，再跳转 `/wealth/create`。父应用不提供编辑链接，不引入 `planId` URL 参数；编辑态沿用原有内存机制。
+- 新建与修改共用页面，但侧栏「创建计划」先调用 `resetPlanForm()` 清空名称、场景、排程及分发目标，再跳转；即使已在修改页也执行重置。离开表单页同样清空状态，避免取消、发布或切换页面后再次新建沿用旧内容；修改入口仍由 `editPlan(id)` 回填。回归入口为 `Create/draftLifecycle.test.tsx`。
+- 同路由新建也会更新 `planFormVersion`，重新挂载分发目标选择器，避免行长人员列表清空后不再查询，或中台保留旧支行路径/搜索条件。旧人员请求通过序号失效；发布返回仅在表单代次相同时回填状态并允许跳转，已切换表单时只更新规划列表，发布失败保留当前草稿供重试。回归入口还包括 `planFormIsolation.test.ts`。
+
+## 财富规划经营方向输入框边界
+
+- 创建计划第 2 步的输入框位于 `console/src/pages/WealthWorkbench/Create/index.tsx`，样式为同级工作台 `index.module.less` 的 `.direction input`。默认使用常显边框和白色底色，悬停、聚焦时加强边框；排查输入框难以识别时，先检查默认边框是否被设为透明，以及覆盖样式是否影响键盘焦点轮廓。
 
 ## 财富规划 Java 网关迁移
 
