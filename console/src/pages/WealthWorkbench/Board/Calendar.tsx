@@ -252,13 +252,6 @@ export function Calendar({
                               </span>
                             )}
                           </span>
-                          {dimension === "month" && firstSkillId && (
-                            <span className={styles.calendarEventFooter}>
-                              <span className={styles.calendarFrequency}>
-                                {planFrequency(p)}
-                              </span>
-                            </span>
-                          )}
                           {dimension === "week" && (
                             <span className={styles.calendarEventScenes}>
                               经营场景：{sceneNames}

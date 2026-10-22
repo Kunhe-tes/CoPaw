@@ -89,14 +89,7 @@ describe("Calendar", () => {
         const event = jump.parentElement!.querySelector(
           `.${styles.calendarEvent}`,
         )!;
-        expect(
-          event.querySelector(`.${styles.calendarEventFooter}`),
-        ).not.toBeNull();
-        expect(
-          event.querySelector(
-            `.${styles.calendarEventTitle} .${styles.calendarFrequency}`,
-          ),
-        ).toBeNull();
+        expect(event.querySelector(`.${styles.calendarFrequency}`)).toBeNull();
       }
       fireEvent.click(jump);
       expect(onViewCustomers).toHaveBeenCalledExactlyOnceWith("first");
@@ -117,9 +110,6 @@ describe("Calendar", () => {
         for (const event of screen.getAllByRole("button", {
           name: /点击查看详情/,
         })) {
-          expect(
-            event.querySelector(`.${styles.calendarEventFooter}`),
-          ).toBeNull();
           expect(
             event.querySelector(
               `.${styles.calendarEventTitle} .${styles.calendarFrequency}`,

@@ -2647,30 +2647,16 @@
     position: relative;
     min-width: 0;
   }
-  .calendarEventFooter,
   .calendarPublishStatus {
     display: block;
     min-height: 24px;
     line-height: 24px;
   }
-  .calendarEventFooter {
-    display: flex;
-    align-items: center;
-    margin-top: 4px;
-  }
   .calendarGrid.week .calendarEventWithAction .calendarPublishStatus {
     padding-right: 72px;
   }
-  .calendarGrid.month .calendarEventWithAction .calendarEventFooter {
+  .calendarGrid.month .calendarEventWithAction .calendarEventTitle {
     padding-right: 72px;
-  }
-  .calendarEventFooter .calendarFrequency {
-    display: block;
-    min-width: 0;
-    max-width: 100%;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
   }
   .calendarViewCustomers {
     position: absolute;
@@ -2702,6 +2688,11 @@
   }
   .calendarGrid.week .calendarViewCustomers {
     bottom: 10px;
+  }
+  .calendarGrid.month .calendarViewCustomers {
+    top: 50%;
+    bottom: auto;
+    transform: translateY(-50%);
   }
   .calendarNote {
     display: flex;
