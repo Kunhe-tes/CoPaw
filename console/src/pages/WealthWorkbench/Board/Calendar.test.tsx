@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Plan, PlanItem } from "../types";
 import { Calendar } from "./Calendar";
 import { addCalendarDays, todayKey } from "../utils";
+import styles from "../index.module.less";
 
 function makeItem(id: string, sceneName: string, start: string): PlanItem {
   return {
@@ -84,6 +85,19 @@ describe("Calendar", () => {
       });
       expect(jump.closest("[data-date]")).toHaveAttribute("data-date", day);
       expect(jump.parentElement?.closest("button")).toBeNull();
+      if (dimension === "month") {
+        const event = jump.parentElement!.querySelector(
+          `.${styles.calendarEvent}`,
+        )!;
+        expect(
+          event.querySelector(`.${styles.calendarEventFooter}`),
+        ).not.toBeNull();
+        expect(
+          event.querySelector(
+            `.${styles.calendarEventTitle} .${styles.calendarFrequency}`,
+          ),
+        ).toBeNull();
+      }
       fireEvent.click(jump);
       expect(onViewCustomers).toHaveBeenCalledExactlyOnceWith("first");
       expect(onShowDetails).not.toHaveBeenCalled();
@@ -99,6 +113,20 @@ describe("Calendar", () => {
       expect(
         screen.queryByRole("button", { name: /客户名单/ }),
       ).not.toBeInTheDocument();
+      if (dimension === "month") {
+        for (const event of screen.getAllByRole("button", {
+          name: /点击查看详情/,
+        })) {
+          expect(
+            event.querySelector(`.${styles.calendarEventFooter}`),
+          ).toBeNull();
+          expect(
+            event.querySelector(
+              `.${styles.calendarEventTitle} .${styles.calendarFrequency}`,
+            ),
+          ).not.toBeNull();
+        }
+      }
     },
   );
 

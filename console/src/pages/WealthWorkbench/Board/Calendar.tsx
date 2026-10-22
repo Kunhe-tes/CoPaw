@@ -246,13 +246,13 @@ export function Calendar({
                             ) : (
                               <strong>{p.name}</strong>
                             )}
-                            {dimension === "week" && (
+                            {(dimension === "week" || !firstSkillId) && (
                               <span className={styles.calendarFrequency}>
                                 {planFrequency(p)}
                               </span>
                             )}
                           </span>
-                          {dimension === "month" && (
+                          {dimension === "month" && firstSkillId && (
                             <span className={styles.calendarEventFooter}>
                               <span className={styles.calendarFrequency}>
                                 {planFrequency(p)}
