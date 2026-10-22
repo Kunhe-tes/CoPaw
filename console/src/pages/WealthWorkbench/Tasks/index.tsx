@@ -4,7 +4,7 @@
  * 经营方案/触达记录两类弹窗，执行列外链跳转电访与客户洞察。
  */
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Navigate, useNavigate } from "react-router-dom";
+import { Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { Tooltip } from "antd";
 import { ChevronDown, RotateCw } from "lucide-react";
 import cx from "classnames";
@@ -16,6 +16,7 @@ import { CustomerMetrics } from "../components/CustomerMetrics";
 import { CustomerScenes } from "../components/CustomerScenes";
 import { buildCustomerGroups } from "./customerGroups";
 import { ContactStatusFilter } from "./ContactStatusFilter";
+import { SceneFilter } from "./SceneFilter";
 import { contactStatusOf, type ContactStatusFilterValue } from "./contactStatus";
 import { buildInsightUrl, buildTelUrl, fetchSchemeSignature } from "../api";
 import { useCanAccess, useWealthStore } from "../store";
@@ -272,13 +273,17 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   const loadDoneCustomers = useWealthStore((s) => s.loadDoneCustomers);
   const openDialog = useWealthStore((s) => s.openDialog);
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [view, setView] = useState<"business" | "customer">("business");
   const [taskLabel, setTaskLabel] = useState("全部");
   const [contactStatus, setContactStatus] = useState<ContactStatusFilterValue>(
     "全部",
   );
   const [search, setSearch] = useState("");
-  const [selectedSceneId, setSelectedSceneId] = useState("");
+  const [sceneFilter, setSceneFilter] = useState<string | null>(null);
+  const [selectedSceneId, setSelectedSceneId] = useState(
+    () => searchParams.get("skillId") ?? "",
+  );
   const [tagFilterOpen, setTagFilterOpen] = useState(false);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
     new Set(),
@@ -314,11 +319,11 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
 
   // 规划变更/移除后选中节点可能失效：回退到树的第一个节点
   useEffect(() => {
-    if (!isBiz) return;
+    if (!isBiz || !plansLoaded) return;
     if (selectedSceneId !== (selectedSkillId ?? "")) {
       setSelectedSceneId(selectedSkillId ?? "");
     }
-  }, [isBiz, selectedSceneId, selectedSkillId]);
+  }, [isBiz, plansLoaded, selectedSceneId, selectedSkillId]);
 
   /** 当前页的名单数据源：今日=customers；待触达/已完成=各自接口名单 */
   const loading =
@@ -343,6 +348,8 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
     let list = page === "pending" ? pool.filter((c) => !c.done) : pool;
     if (isBiz)
       list = list.filter((c) => c.skillId === selectedSkillId);
+    if (showScenes && sceneFilter !== null)
+      list = list.filter((c) => c.skillNames?.includes(sceneFilter));
     if (search.trim())
       list = list.filter((c) =>
         (
@@ -368,6 +375,8 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
       pool,
       isBiz,
       selectedSkillId,
+      showScenes,
+      sceneFilter,
       search,
       taskLabel,
       contactStatus,
@@ -386,6 +395,8 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   }, [list, isBiz, page]);
   const showContactStatus = page === "today";
   const contactStatusCustomers = buildList(false, true);
+  const sceneOptions = [...new Set(pool.flatMap((c) => c.skillNames ?? []))]
+    .filter(Boolean);
   const columnCount = (isBiz ? 5 : 7) + Number(showContactStatus);
   const tableGroups = groups.length
     ? groups
@@ -900,7 +911,11 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                         )}
                         {showScenes && (
                           <th scope="col" className={styles.sceneCol}>
-                            经营场景
+                            <SceneFilter
+                              value={sceneFilter}
+                              options={sceneOptions}
+                              onChange={setSceneFilter}
+                            />
                           </th>
                         )}
                         {!doneView && (

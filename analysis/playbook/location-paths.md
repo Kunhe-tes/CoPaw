@@ -280,6 +280,8 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 
 ## 财富工作台看板与列表标题
 
+- 看板模式周、月日历仅在“今天”的已发布规划卡片右下角显示名单入口：周视图“查看名单”与发布状态同行；月视图首行展示规划名和技能数，第二行左侧排程、右侧“查看名单”，排程过长时省略，卡片 Tooltip 提供完整执行频率。周、月入口文字跟随卡片色调（蓝色卡片深蓝、紫色卡片深紫），搭配 10px Ant Design 右箭头，悬停显示下划线；入口悬停或聚焦提示“查看客户名单”，且仅向拥有任务页权限的客户经理展示。入口与卡片详情按钮为并列控件，点击不触发详情；按 `buildTaskTree([plan], today)` 取该规划首个当天有效场景 ID，通过 `/wealth/today?skillId=...` 进入经营视角。任务页使用 ID 初始化选择，规划异步加载期间保留该参数，失效后回退任务树首项。其他日期和无当天有效场景的规划不显示入口。回归入口为 `Board/Calendar.test.tsx`、`Board/index.test.tsx` 和 `Tasks/loading.test.tsx`。
+
 - 规划列表、日历提示与详情主状态通过 `utils.ts` 的 `planPublishLabel` 按 `publishStatus` 展示“发布中 / 发布成功 / 发布失败”，缺失或未知值展示“状态未知”。列表、日历提示和详情均不展示分发结果。`Plan.status` 仍保留Java `boardStatus` 聚合结果，继续供自动轮询和统计失效判断使用；不要用展示文案替换底层分发状态。
 
 - 列表入口为 `console/src/pages/WealthWorkbench/Board/index.tsx`，标题使用 `Plan.name`（规划名称）。日历入口为同目录的 `Calendar.tsx`，周视图卡片标题使用规划名，下方显示“经营场景：”并汇总该规划的 `PlanItem.sceneName`，多项场景用中文逗号连接，最多两行，超出省略。月视图标题同样使用规划名，名称后用纯数字表示该规划关联的全部技能数量，不新增场景正文；两种视图统一使用 Ant Design Tooltip，悬停或键盘聚焦时分行展示完整规划名、经营场景与状态，长名称自动换行；移除原生 `title`，避免重复提示。
@@ -291,6 +293,8 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 - 看板仅在存在发布中/分发中规划时自动查询：`Board/useBoardRefresh.ts` 在上一轮完成后等待 5 秒再查询，每次连续处理周期最多 3 分钟；到期静默暂停，手动“刷新看板”不会重新启动自动轮询。看板的规划与统计单次请求均由 `Board/requestTimeout.ts` 限制为 60 秒：超时取消底层请求并释放等待，保留已有数据；离开看板会立即取消在途规划请求；被取消的规划请求即使晚返回也不更新 store。自动与手动规划刷新共用在途请求，刷新入口使用图标按钮（无障碍名称“刷新看板”），在规划或统计请求期间旋转并禁用；手动成功刷新会绕过统计有效期更新当前统计。看板刷新使用严格读取，接口失败保留规划，不额外展示暂停或规划刷新失败文案，其他读取仍保持原有容错行为。回归入口：`Board/useBoardRefresh.test.ts`。
 
 ## 财富任务名单动态字段
+
+- 今日任务客户视角、待触达和已完成的“经营场景”列提供单选筛选，选项从当前模块原始名单的 `skillNames` 去重生成，按展示名称精确匹配任一场景；不使用客户的首个 `skillId` 代表全部场景。同名场景合并为一个筛选项。选中标签单行显示，超长省略；悬停或键盘聚焦通过 Tooltip 查看完整名称，清除按钮不收缩。支持“全部场景”和清除，与搜索、重点标签、接触状态筛选叠加；仅过滤表格，不重算顶部后端汇总。经营视角不应用该列筛选。入口为 `Tasks/SceneFilter.tsx` 和 `Tasks/index.tsx`，回归入口为 `Tasks/groupTables.test.tsx`。
 
 - 今日任务经营视角以场景 ID 作为唯一选中依据，高亮、名单查询、客户筛选和分类折叠状态均关联该 ID，名称仅用于展示。同分类同名但 ID 不同的场景可独立选择；场景改名或调整分类保留选择，选中 ID 失效后回退首个场景。入口为 `Tasks/index.tsx`，回归入口为 `Tasks/groupTables.test.tsx`。
 

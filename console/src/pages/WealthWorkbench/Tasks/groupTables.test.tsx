@@ -99,6 +99,65 @@ beforeEach(() => {
 });
 
 describe("经营分类独立表格", () => {
+  it.each(["today", "pending", "done"] as const)(
+    "%s 经营场景筛选匹配任一场景，可叠加标签并清除，汇总保持不变",
+    (page) => {
+      const customer = state.customers[0];
+      state.customers = [
+        {
+          ...customer,
+          id: "a",
+          name: "多场景客户",
+          skillNames: ["场景甲", "场景乙"],
+          label: "行长指派",
+        },
+        {
+          ...customer,
+          id: "b",
+          name: "单场景客户",
+          skillNames: ["场景甲"],
+          label: "我的关注",
+        },
+        { ...customer, id: "c", name: "其他场景客户", skillNames: ["场景丙"] },
+        { ...customer, id: "d", name: "缺少场景客户", skillNames: undefined },
+      ].map((item) => ({ ...item, groupFields: [], done: page === "done" }));
+      state.pendingCustomers = state.doneCustomers = state.customers;
+      render(
+        <MemoryRouter>
+          <Tasks page={page} />
+        </MemoryRouter>,
+      );
+      if (page === "today") {
+        expect(
+          screen.queryByRole("button", { name: "筛选经营场景" }),
+        ).not.toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "客户视角" }));
+      }
+      fireEvent.click(screen.getByRole("button", { name: "筛选经营场景" }));
+      const menu = screen.getByRole("menu", { name: "筛选经营场景" });
+      expect(within(menu).getAllByText("场景甲")).toHaveLength(1);
+      fireEvent.click(within(menu).getByText("场景乙"));
+      expect(screen.getByText("多场景客户")).toBeInTheDocument();
+      expect(screen.queryByText("单场景客户")).not.toBeInTheDocument();
+      expect(screen.queryByText("其他场景客户")).not.toBeInTheDocument();
+      expect(screen.queryByText("缺少场景客户")).not.toBeInTheDocument();
+      expect(screen.getByText(/目标客户/)).toHaveTextContent("目标客户 42 人");
+      fireEvent.click(screen.getByRole("button", { name: "筛选重点标签" }));
+      fireEvent.click(
+        within(screen.getByRole("dialog", { name: "筛选重点标签" })).getByRole(
+          "button",
+          { name: /^我的关注/ },
+        ),
+      );
+      expect(screen.getByText("暂无符合条件的客户")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "清除重点标签筛选" }));
+      expect(screen.getByText("多场景客户")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "清除经营场景筛选" }));
+      expect(screen.getByText("单场景客户")).toBeInTheDocument();
+      expect(screen.getByText("缺少场景客户")).toBeInTheDocument();
+    },
+  );
+
   it("同分类同名场景按 ID 独立选中、查询和筛选，改名保留选择，移除后回退", () => {
     const first = state.plans[0].items[0];
     state.plans[0].items.push({ ...first, id: "skill-2" });
