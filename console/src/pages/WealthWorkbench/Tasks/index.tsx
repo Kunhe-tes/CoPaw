@@ -278,8 +278,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
     "全部",
   );
   const [search, setSearch] = useState("");
-  const [selectedTask, setSelectedTask] = useState("");
-  const [selectedCategory, setSelectedCategory] = useState("");
+  const [selectedSceneId, setSelectedSceneId] = useState("");
   const [tagFilterOpen, setTagFilterOpen] = useState(false);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
     new Set(),
@@ -307,25 +306,19 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   const taskTree = useMemo(() => buildTaskTree(plans, today), [plans, today]);
   const selectedNode =
     taskTree
-      .find((group) => group.category === selectedCategory)
-      ?.nodes.find((node) => node.sceneName === selectedTask) ??
+      .flatMap((group) => group.nodes)
+      .find((node) => node.sceneId === selectedSceneId) ??
     taskTree[0]?.nodes[0];
   const selectedSkillId = selectedNode?.sceneId;
+  const selectedTask = selectedNode?.sceneName ?? "";
 
   // 规划变更/移除后选中节点可能失效：回退到树的第一个节点
   useEffect(() => {
     if (!isBiz) return;
-    const stillValid = taskTree.some(
-      (g) =>
-        g.category === selectedCategory &&
-        g.nodes.some((n) => n.sceneName === selectedTask),
-    );
-    if (!stillValid) {
-      const first = taskTree[0];
-      setSelectedTask(first?.nodes[0]?.sceneName ?? "");
-      setSelectedCategory(first?.category ?? "");
+    if (selectedSceneId !== (selectedSkillId ?? "")) {
+      setSelectedSceneId(selectedSkillId ?? "");
     }
-  }, [isBiz, taskTree, selectedTask, selectedCategory]);
+  }, [isBiz, selectedSceneId, selectedSkillId]);
 
   /** 当前页的名单数据源：今日=customers；待触达/已完成=各自接口名单 */
   const loading =
@@ -349,9 +342,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   const buildList = (ignoreLabel: boolean, ignoreContactStatus = false) => {
     let list = page === "pending" ? pool.filter((c) => !c.done) : pool;
     if (isBiz)
-      list = list.filter(
-        (c) => c.task === selectedTask && c.category === selectedCategory,
-      );
+      list = list.filter((c) => c.skillId === selectedSkillId);
     if (search.trim())
       list = list.filter((c) =>
         (
@@ -376,8 +367,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
       page,
       pool,
       isBiz,
-      selectedTask,
-      selectedCategory,
+      selectedSkillId,
       search,
       taskLabel,
       contactStatus,
@@ -672,14 +662,9 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                     <button
                       className={cx(
                         styles.treeItem,
-                        selectedTask === n.sceneName &&
-                          selectedCategory === g.category &&
-                          styles.active,
+                        selectedSkillId === n.sceneId && styles.active,
                       )}
-                      onClick={() => {
-                        setSelectedTask(n.sceneName);
-                        setSelectedCategory(g.category);
-                      }}
+                      onClick={() => setSelectedSceneId(n.sceneId)}
                     >
                       <span
                         className={cx(styles.tag, sourceTagClass(n.source))}
@@ -806,7 +791,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
 
         <div className={styles.customerGroups}>
           {tableGroups.map((group, index) => {
-            const groupKey = `${selectedCategory}|${selectedTask}|${group.key}`;
+            const groupKey = `${selectedSkillId ?? ""}|${group.key}`;
             const collapsed = collapsedGroups.has(groupKey);
             const tableId = `${groupTablesId}-${index}`;
             const groupTitle = group.fields

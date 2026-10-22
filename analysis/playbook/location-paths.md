@@ -292,6 +292,8 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 
 ## 财富任务名单动态字段
 
+- 今日任务经营视角以场景 ID 作为唯一选中依据，高亮、名单查询、客户筛选和分类折叠状态均关联该 ID，名称仅用于展示。同分类同名但 ID 不同的场景可独立选择；场景改名或调整分类保留选择，选中 ID 失效后回退首个场景。入口为 `Tasks/index.tsx`，回归入口为 `Tasks/groupTables.test.tsx`。
+
 - 侧栏“今日任务”红色数字角标与客户视角口径一致：`fetchTodayCustomers(..., "customer")` 查询 `/api/agent/workspace/name-list`，传当前用户 sapId、当天工作任务树全部去重技能 ID 数组与 touched=2，统计该范围内聚合名单总人数（包含已接触客户），为 0 时隐藏。store 独立保存 `todayCustomerCount`，避免经营视角按技能查询影响总数；侧栏首次加载及今日名单刷新时更新。待触达和已完成角标分别来自对应客户名单长度。入口为 `components/Sidebar.tsx` 和 `store.ts`，回归入口为 `components/Sidebar.test.tsx` 和 `store.test.ts`。
 
 - 今日任务在 `Tasks/index.tsx` 分组后对每个分类的名单稳定排序：`touched === 1` 的已接触客户排后，其余待处理（未接触及未知状态）排前。同类状态保持接口顺序，分类顺序和 store 原始名单不变；客户视角同样适用，待触达/已完成不参与此排序。回归入口为 `Tasks/groupTables.test.tsx`。
@@ -346,8 +348,9 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 - 入口与参数延续逻辑位于 `console/src/pages/WealthWorkbench/index.tsx`。内部导航省略参数时补回入口隐藏设置并保留其他查询参数，支持导航后刷新；不写入 sessionStorage，不影响独立打开的工作台。
 - `.root.withoutHeader` 位于同目录 `index.module.less`，同步消除头部和播报占位，调整侧栏、正文与表单锚点偏移；全局 `MainLayout` 的 `hideMenu` 不控制该独立骨架。
 
-- `hideLogo=true` 对所有角色统一隐藏整个侧栏（包含规划入口及任务导航）并移除占位，正文填满可用宽度；不带该参数时侧栏行为保持不变。内部导航仅延续隐藏设置，不额外补回 `origin=Y`，身份初始化保持原有行为。
+- `hideLogo=true` 对所有角色统一隐藏整个侧栏（包含规划入口及任务导航）并移除占位，正文填满可用宽度；不带该参数时侧栏行为保持不变。内部导航仅延续隐藏设置，不额外补回 `origin=Y`。
 - 父应用直达：`/wealth/board?origin=Y&hideLogo=true` 为看板，`/wealth/create?origin=Y&hideLogo=true` 为新建。部署在 `/console` 下时各地址加此前缀。
+- `origin=Y` 初始化时若 URL 的 `hideLogo` 严格为 `true`，沿用前面已设置的初始上下文和导航参数，仅标记初始化完成后返回，跳过 `initFromUrlParams`：不查询客户信息、不初始化 Agent、不调用 `/auth/cron-auth`，也不启动客户信息刷新定时器。其他参数值沿用原流程；实现及回归位于 `console/src/utils/iframeMessage.ts` 和同名测试文件。
 - 编辑仅由工作台内部触发：看板列表或日历操作调用 `editPlan(id)` 回填草稿和分发目标，再跳转 `/wealth/create`。父应用不提供编辑链接，不引入 `planId` URL 参数；编辑态沿用原有内存机制。
 - 新建与修改共用页面，但侧栏「创建计划」先调用 `resetPlanForm()` 清空名称、场景、排程及分发目标，再跳转；即使已在修改页也执行重置。离开表单页同样清空状态，避免取消、发布或切换页面后再次新建沿用旧内容；修改入口仍由 `editPlan(id)` 回填。回归入口为 `Create/draftLifecycle.test.tsx`。
 - 同路由新建也会更新 `planFormVersion`，重新挂载分发目标选择器，避免行长人员列表清空后不再查询，或中台保留旧支行路径/搜索条件。旧人员请求通过序号失效；发布返回仅在表单代次相同时回填状态并允许跳转，已切换表单时只更新规划列表，发布失败保留当前草稿供重试。回归入口还包括 `planFormIsolation.test.ts`。
