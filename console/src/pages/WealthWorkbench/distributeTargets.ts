@@ -1,13 +1,12 @@
 /**
  * 智能财富工作台 —— 分发目标用户池
  *
- * 行长/中台发布规划前选择分发对象，通过后端代理查询机构岗位人员。
+ * 行长/中台发布规划前选择分发对象，通过同源 Nginx 查询机构岗位人员。
  * 机构参数取自 iframeStore 中由 cookie 初始化的 bbk/orgCode/orgLvl。
  *
  * 机构参数缺失或接口查询失败时返回空列表，
  * 由页面展示无数据态，不做假数据兜底。
  */
-import { request } from "../../api/request";
 import { useIframeStore } from "../../stores/iframeStore";
 import type { DistributeTarget } from "./types";
 
@@ -16,6 +15,45 @@ export interface DistributeBranch {
   mOrgName: string;
   mOrgLvl: number;
   leaf: boolean;
+}
+
+const USER_POSITION_PATH = "/zt/wealth/wmadm/getUserPostionByBrn";
+const BRANCH_TREE_PATH = "/zt/wealth/wmadm/branchTreeInfo";
+
+interface DistributionResponse<T> {
+  code: string;
+  message: string;
+  data: T[];
+}
+
+/** 网关凭证由 Nginx 附加，浏览器沿用默认同源 Cookie。 */
+async function fetchDistributionData<T>(
+  path: string,
+  body: Record<string, string | number>,
+): Promise<T[]> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60000);
+  try {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`分发查询失败：HTTP ${response.status}`);
+    }
+    const result = (await response.json()) as DistributionResponse<T>;
+    if (result.code !== "200") {
+      throw new Error(result.message || "分发查询失败");
+    }
+    if (!Array.isArray(result.data) || result.data.length === 0) {
+      return [];
+    }
+    return result.data;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 /** 按当前登录分行查询可选择的下属机构。 */
@@ -29,13 +67,10 @@ export async function fetchDistributeBranches(
   const mOrgLvl = Number(level);
   if (!Number.isInteger(mOrgLvl) || mOrgLvl < 0) return branch ? null : [];
   try {
-    return await request<DistributeBranch[]>("/user-info/branches/by-branch", {
-      method: "POST",
-      body: JSON.stringify({
-        mOrgCode,
-        mOrgLvl,
-        sysId,
-      }),
+    return await fetchDistributionData<DistributeBranch>(BRANCH_TREE_PATH, {
+      mmOrgCode: mOrgCode,
+      mmOrgLvl: mOrgLvl,
+      sysId,
     });
   } catch (error) {
     console.warn("[Wealth] 分发支行查询失败", error);
@@ -43,15 +78,11 @@ export async function fetchDistributeBranches(
   }
 }
 
-interface UserPositionResponse {
-  code: string;
-  errMsg: string | null;
-  data: Array<{
-    sapID: string;
-    userName: string;
-    branchName: string | null;
-    subBranchName: string | null;
-  }> | null;
+interface UserPosition {
+  sapID: string;
+  userName: string;
+  branchName: string | null;
+  subBranchName: string | null;
 }
 
 /**
@@ -70,15 +101,15 @@ export async function fetchDistributeTargets(
   const mOrgLvl = Number(level);
   if (!Number.isInteger(mOrgLvl) || mOrgLvl < 0) return [];
   try {
-    const response = await request<UserPositionResponse>(
-      "/user-info/positions/by-branch",
+    const users = await fetchDistributionData<UserPosition>(
+      USER_POSITION_PATH,
       {
-        method: "POST",
-        body: JSON.stringify({ bbkOrgId: bbk, mOrgCode, mOrgLvl }),
+        bbkOrgId: bbk,
+        mmOrgCode: mOrgCode,
+        mmOrgLvl: mOrgLvl,
       },
     );
-    if (response.code !== "success") return [];
-    return (response.data ?? [])
+    return users
       .filter((user) => user.sapID)
       .map((user) => ({
         sapId: user.sapID,

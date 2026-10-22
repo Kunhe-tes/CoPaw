@@ -17,26 +17,33 @@ const mockRequest = vi.mocked(request);
 const planView = {
   id: "edit-plan",
   name: "待修改规划",
-  publish_status: "published",
-  board_status: "已自动下发",
+  publishStatus: "published",
+  boardStatus: "已自动下发",
   editable: true,
   scenes: [],
   targets: [
-    { sap_id: "0001", name: "张三" },
-    { sap_id: "0002", name: "李四" },
+    { sapId: "0001", name: "张三" },
+    { sapId: "0002", name: "李四" },
   ],
 };
 
 beforeEach(() => {
   mockRequest.mockReset();
-  useIframeStore
-    .getState()
-    .setContext({
-      bbk: "755",
-      orgCode: "755480",
-      orgLvl: "70",
-      sysId: "retail",
-    });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      async (path: string, options?: RequestInit) =>
+        new Response(
+          JSON.stringify(await mockRequest(path.split("?")[0], options)),
+        ),
+    ),
+  );
+  useIframeStore.getState().setContext({
+    bbk: "755",
+    orgCode: "755480",
+    orgLvl: "70",
+    sysId: "retail",
+  });
   useWealthStore.setState({
     accountId: "middle",
     plans: [],
@@ -48,10 +55,16 @@ beforeEach(() => {
     editingId: null,
   });
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 async function openEditPlan() {
-  mockRequest.mockResolvedValueOnce({ items: [planView] });
+  mockRequest.mockResolvedValueOnce({
+    code: "200",
+    data: { items: [planView] },
+  });
   const { plans } = await fetchBootstrap("middle");
   useWealthStore.setState({ plans });
   useWealthStore.getState().editPlan("edit-plan");
@@ -60,7 +73,12 @@ async function openEditPlan() {
 describe("修改规划分发人员回显", () => {
   it("无人员缓存时从规划接口恢复姓名，支行列表初始化不清空已选人员", async () => {
     await openEditPlan();
-    mockRequest.mockResolvedValueOnce([]);
+    mockRequest.mockResolvedValueOnce({
+      code: "200",
+      message: "ok",
+      success: true,
+      data: [],
+    });
     render(<TargetPicker />);
     expect(
       screen.getByRole("button", { name: "移除张三" }),
@@ -80,7 +98,9 @@ describe("修改规划分发人员回显", () => {
     await openEditPlan();
     useWealthStore.setState({ accountId: "president" });
     mockRequest.mockResolvedValueOnce({
-      code: "success",
+      code: "200",
+      message: "ok",
+      success: true,
       data: [
         {
           sapID: "0001",
@@ -111,7 +131,12 @@ describe("修改规划分发人员回显", () => {
       ],
     });
     useWealthStore.getState().editPlan("old-plan");
-    mockRequest.mockResolvedValueOnce([]);
+    mockRequest.mockResolvedValueOnce({
+      code: "200",
+      message: "ok",
+      success: true,
+      data: [],
+    });
     render(<TargetPicker />);
     expect(
       screen.getByRole("button", { name: "移除0003" }),
