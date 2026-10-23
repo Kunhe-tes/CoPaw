@@ -10,6 +10,7 @@ import { DEFAULT_BBK_ID, DEFAULT_SOURCE_ID } from "../../constants/identity";
 import { getUserId } from "../../utils/identity";
 import { useAgentStore } from "../../stores/agentStore";
 import { resolveRole } from "./permissions";
+import { throwIfRequestAborted } from "./abortSignal";
 // import { Base64 } from "js-base64";
 import { SCENE_CATEGORIES } from "./mock/data";
 import { DEFAULT_SCHEDULE } from "./utils";
@@ -759,7 +760,7 @@ async function requestPlan<T>(
   path: string,
   options: RequestInit = {},
 ): Promise<T> {
-  options.signal?.throwIfAborted();
+  throwIfRequestAborted(options.signal);
   const response = await fetch(path, {
     ...options,
     headers: {
@@ -770,7 +771,7 @@ async function requestPlan<T>(
   const payload = (await response
     .json()
     .catch(() => null)) as PlanResult<T> | null;
-  options.signal?.throwIfAborted();
+  throwIfRequestAborted(options.signal);
   if (!payload) {
     throw Object.assign(
       new Error(`规划接口响应格式错误：HTTP ${response.status}`),

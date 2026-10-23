@@ -11,6 +11,7 @@ import type { ReactNode } from "react";
 import type { CronParts } from "@/utils/parseCron";
 import { useIframeStore } from "../../stores/iframeStore";
 import * as api from "./api";
+import { throwIfRequestAborted } from "./abortSignal";
 import {
   canAccessPage,
   FALLBACK_ROLE,
@@ -332,7 +333,7 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
 
   refreshPlans: async (throwOnError = false, signal) => {
     const plans = await api.fetchPlanList(throwOnError, signal);
-    signal?.throwIfAborted();
+    throwIfRequestAborted(signal);
     set({ plans });
   },
 

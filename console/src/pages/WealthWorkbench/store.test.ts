@@ -1203,6 +1203,9 @@ describe("WealthWorkbench store", () => {
       }),
     );
     const controller = new AbortController();
+    Object.defineProperty(controller.signal, "throwIfAborted", {
+      value: undefined,
+    });
     const refresh = useWealthStore
       .getState()
       .refreshPlans(true, controller.signal);
@@ -1219,5 +1222,19 @@ describe("WealthWorkbench store", () => {
         signal: controller.signal,
       }),
     );
+  });
+
+  it("旧内核缺少 throwIfAborted 时刷新能发出请求并更新规划", async () => {
+    const controller = new AbortController();
+    Object.defineProperty(controller.signal, "throwIfAborted", {
+      value: undefined,
+    });
+    mockRequest.mockResolvedValueOnce({ items: [] });
+    await useWealthStore.getState().refreshPlans(true, controller.signal);
+    expect(mockRequest).toHaveBeenCalledWith(
+      "/zt/wealth/plans",
+      expect.objectContaining({ signal: controller.signal }),
+    );
+    expect(useWealthStore.getState().plans).toEqual([]);
   });
 });

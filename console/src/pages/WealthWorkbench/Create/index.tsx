@@ -231,13 +231,23 @@ export function ScheduleEditor({
   };
 
   return (
-    <div className={styles.scheduleBlock}>
+    <div
+      className={cx(
+        styles.scheduleBlock,
+        (type === "weekly" || type === "custom") && styles.expandedSchedule,
+      )}
+    >
       <div className={styles.cycle}>
         <span>执行频率</span>
-        <div className={styles.cycleGroup}>
+        <div
+          className={styles.cycleGroup}
+          role="group"
+          aria-label={`${sceneName}执行频率`}
+        >
           {SCHEDULE_TYPES.map((option) => (
             <button
               key={option.value}
+              type="button"
               className={type === option.value ? styles.active : ""}
               aria-pressed={type === option.value}
               onClick={() =>
@@ -301,43 +311,45 @@ export function ScheduleEditor({
       )}
       {type === "custom" && (
         <div className={styles.customScheduleFields}>
-          <label className={styles.scheduleField}>
-            <span>重复规则</span>
-            <select
-              aria-label={`${sceneName}自定义重复规则`}
-              value={customRepeatMode}
-              onChange={(event) =>
-                selectCustomRepeatMode(event.target.value as CustomRepeatMode)
-              }
-            >
-              {customRepeatMode === "" && (
-                <option value="" disabled>
-                  旧版自定义规则
-                </option>
-              )}
-              {CUSTOM_REPEAT_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          {(customConfig?.mode === "daily" ||
-            customConfig?.mode === "weekly" ||
-            customConfig?.mode === "monthly" ||
-            customConfig?.mode === "yearly") && (
-            <div className={styles.scheduleField}>
-              <span>执行时刻</span>
-              <TimeField
-                hour={customConfig.hour}
-                minute={customConfig.minute}
-                onChange={(hour, minute) =>
-                  updateCustomSchedule({ ...customConfig, hour, minute })
+          <div className={styles.customScheduleRow}>
+            <label className={styles.scheduleField}>
+              <span>重复规则</span>
+              <select
+                aria-label={`${sceneName}自定义重复规则`}
+                value={customRepeatMode}
+                onChange={(event) =>
+                  selectCustomRepeatMode(event.target.value as CustomRepeatMode)
                 }
-                ariaLabel={`${sceneName}自定义执行时刻`}
-              />
-            </div>
-          )}
+              >
+                {customRepeatMode === "" && (
+                  <option value="" disabled>
+                    旧版自定义规则
+                  </option>
+                )}
+                {CUSTOM_REPEAT_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {(customConfig?.mode === "daily" ||
+              customConfig?.mode === "weekly" ||
+              customConfig?.mode === "monthly" ||
+              customConfig?.mode === "yearly") && (
+              <div className={styles.scheduleField}>
+                <span>执行时刻</span>
+                <TimeField
+                  hour={customConfig.hour}
+                  minute={customConfig.minute}
+                  onChange={(hour, minute) =>
+                    updateCustomSchedule({ ...customConfig, hour, minute })
+                  }
+                  ariaLabel={`${sceneName}自定义执行时刻`}
+                />
+              </div>
+            )}
+          </div>
           {customConfig?.mode === "weekly" && (
             <div className={styles.scheduleField}>
               <span>执行日</span>
@@ -478,11 +490,6 @@ export function ScheduleEditor({
           )}
         </div>
       )}
-      {type === "custom" && (
-        <div className={styles.taskRangeLabel}>
-          {customScheduleLabel(schedule.rawCron)}
-        </div>
-      )}
     </div>
   );
 }
@@ -503,15 +510,20 @@ export function TaskSchedule({
       <div className={styles.taskCycleBlock}>
         <div className={styles.cycle}>
           <span>任务周期</span>
-          <div className={styles.cycleGroup}>
-            {CYCLES.map((c) => (
+          <div
+            className={styles.cycleGroup}
+            role="group"
+            aria-label={`${scene.name}任务周期`}
+          >
+            {CYCLES.map((cycle) => (
               <button
-                key={c}
-                className={item.cycle === c ? styles.active : ""}
-                aria-pressed={item.cycle === c}
-                onClick={() => setTaskCycle(scene.id, c)}
+                key={cycle}
+                type="button"
+                className={item.cycle === cycle ? styles.active : ""}
+                aria-pressed={item.cycle === cycle}
+                onClick={() => setTaskCycle(scene.id, cycle)}
               >
-                {c}
+                {cycle}
               </button>
             ))}
           </div>
@@ -552,7 +564,7 @@ export function TaskSchedule({
           </div>
         ) : (
           <div className={styles.taskRangeLabel}>
-            {item.start} 至 {item.end}
+            {item.start} ~ {item.end}
           </div>
         )}
       </div>
@@ -887,10 +899,15 @@ export default function Create() {
             <div className={styles.selectedList}>
               {draft.items.length > 0 && (
                 <div className={styles.selectedListHeader}>
-                  <span>经营场景与方向</span>
+                  <span>经营场景</span>
+                  <span>
+                    经营方向 <b style={{ color: "var(--red)" }}>·</b>
+                  </span>
                   <span>任务周期</span>
-                  <span>执行排程</span>
-                  <span>推送客户数（选填）</span>
+                  <span>执行频率</span>
+                  <span title="不填写则不限制推送客户数">
+                    推送客户数（选填）
+                  </span>
                 </div>
               )}
               {draft.items.length ? (
@@ -933,15 +950,18 @@ export default function Create() {
                       <span className={styles.order}>{i + 1}</span>
                       <div className={styles.selectedMain}>
                         <div className={styles.selectedTitle}>
-                          {x.sceneName}
+                          <span
+                            className={styles.selectedSceneName}
+                            title={x.sceneName}
+                          >
+                            {x.sceneName}
+                          </span>
                           <span className={styles.tag}>{x.categoryLabel}</span>
                         </div>
                         <label className={styles.direction}>
-                          <span>
-                            经营方向 <b style={{ color: "var(--red)" }}>·</b>
-                          </span>
                           <input
                             aria-label={`${x.sceneName}的经营方向`}
+                            title={x.direction}
                             value={x.direction}
                             maxLength={120}
                             onChange={(e) =>
@@ -983,6 +1003,7 @@ export default function Create() {
                         </div>
                         <small
                           id={`cust-num-hint-${i}`}
+                          hidden={isValidCustNum(x.custNum)}
                           className={
                             !isValidCustNum(x.custNum)
                               ? styles.customerLimitError
