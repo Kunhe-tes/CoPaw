@@ -2888,25 +2888,32 @@
     min-width: 0;
   }
   .selectedList {
-    --selected-columns: 16px 27px minmax(210px, 1fr) 344px 334px 152px 96px;
-    gap: 0;
+    --selected-columns: 16px 27px minmax(230px, 3fr) minmax(140px, 2fr)
+      max-content max-content 110px 82px;
+    grid-template-columns: var(--selected-columns);
+    column-gap: 25px;
+    row-gap: 0;
     overflow-x: auto;
+    > .empty {
+      grid-column: 1 / -1;
+    }
   }
   .selectedListHeader,
   .selectedRow {
-    grid-template-columns: var(--selected-columns);
-    gap: 14px;
-    min-width: 1285px;
+    grid-column: 1 / -1;
+    grid-template-columns: subgrid;
+    column-gap: 25px;
+    min-width: 0;
   }
   .selectedListHeader {
     display: grid;
-    padding: 10px 10px;
+    padding: 10px;
     border: 1px solid transparent;
     border-block-color: #e6edf7;
     background: #f7faff;
     color: #596e8c;
     font-size: 12px;
-    font-weight: 500;
+    font-weight: 600;
     line-height: 18px;
     white-space: nowrap;
     > span:first-child {
@@ -2914,55 +2921,67 @@
     }
   }
   .selectedRow {
-    min-height: 92px;
-    align-items: start;
-    padding: 12px 10px;
+    min-height: 56px;
+    align-items: center;
+    padding: 10px;
     border: 1px solid transparent;
     border-top: 0;
     border-bottom-color: #e6edf7;
     border-radius: 0;
   }
-  .selectedRow .selectedTitle,
-  .selectedRow .taskCycleBlock > .cycle,
-  .selectedRow .scheduleBlock > .cycle {
+  .selectedRow .taskCycleBlock,
+  .selectedRow .scheduleBlock,
+  .selectedRow .customScheduleFields {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+  }
+  .selectedRow .selectedMain {
+    display: contents;
+  }
+  .selectedRow .selectedTitle {
     display: flex;
     align-items: center;
-    min-height: 32px;
+    min-width: 0;
+    flex: 1;
+    white-space: nowrap;
+    .tag {
+      flex-shrink: 0;
+    }
   }
-  .selectedRow .drag,
-  .selectedRow .order,
-  .selectedRow .rowTools {
-    align-self: center;
+  .selectedSceneName {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .selectedRow .scheduleBlock {
+    width: max-content;
     margin-top: 0;
   }
-  .selectedRow .selectedMain,
-  .selectedRow .scheduleBlock,
-  .selectedRow .customerLimitField {
-    gap: 6px;
-  }
-  .selectedRow .taskCycleBlock {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
+  .selectedRow .taskCycleBlock,
+  .selectedRow .scheduleField,
+  .selectedRow .customFrequencyControls,
+  .selectedRow .scheduleDateParts {
+    flex-shrink: 0;
+    width: max-content;
   }
   .selectedRow .direction,
   .selectedRow .scheduleField,
   .selectedRow .taskRangeLabel,
-  .selectedRow .taskCustomDates,
-  .selectedRow .customerLimitField > small {
+  .selectedRow .taskCustomDates {
     display: flex;
     align-items: center;
     min-height: 32px;
     margin: 0;
+    white-space: nowrap;
   }
   .selectedRow .direction {
-    display: grid;
-    grid-template-columns: max-content minmax(0, 1fr);
+    display: block;
+    width: 100%;
   }
   .selectedRow .direction input {
-    width: 95%;
+    width: 100%;
     height: 32px;
   }
   .selectedRow .taskCycleBlock > .cycle > span,
@@ -2971,6 +2990,36 @@
   }
   .selectedRow .taskRangeLabel {
     padding-left: 0;
+  }
+  .selectedRow .taskDatePicker:global(.ant-picker) {
+    width: 108px;
+  }
+  .selectedRow .expandedSchedule {
+    display: grid;
+    grid-template-columns: max-content max-content;
+    gap: 8px;
+    > .cycle {
+      min-height: 32px;
+    }
+    > .scheduleField:last-child,
+    > .customScheduleFields {
+      grid-column: 1 / -1;
+    }
+  }
+  .selectedRow .cycleGroup button {
+    padding: 5px 6px;
+  }
+  .selectedRow .scheduleNumber {
+    flex: 0 0 44px !important;
+    width: 44px;
+  }
+  .selectedRow .customFrequencyControls select {
+    flex: 0 0 70px;
+    width: 70px;
+  }
+  .selectedRow .scheduleDateParts select {
+    flex: 0 0 60px;
+    width: 60px;
   }
   .selectedRow .rowTools {
     display: flex;
