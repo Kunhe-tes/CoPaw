@@ -48,6 +48,42 @@ describe("StepIndicator", () => {
 });
 
 describe("ScheduleEditor", () => {
+  it.each([
+    ["daily", "0 9 * * *"],
+    ["weekly", "0 9 * * mon"],
+    ["monthly", "0 9 15 * *"],
+    ["yearly", "0 9 15 6 *"],
+  ])("自定义 %s 并排展示规则与时刻，不重复展示摘要", (mode, rawCron) => {
+    const item: PlanItem = {
+      id: "scene-compact",
+      sceneName: "紧凑排程场景",
+      categoryLabel: "理财",
+      categoryCode: "finance",
+      mcpRelations: [],
+      direction: "优先经营",
+      cycle: "本月",
+      schedule: { type: "custom", rawCron },
+    };
+    const { container, unmount } = render(
+      <ScheduleEditor item={item} sceneName={item.sceneName} />,
+    );
+    const repeatRule = screen.getByLabelText("紧凑排程场景自定义重复规则");
+    const time = screen.getByRole("button", {
+      name: "紧凑排程场景自定义执行时刻",
+    });
+    expect(repeatRule).toHaveValue(mode);
+    expect(repeatRule.closest(`.${styles.customScheduleRow}`)).toContainElement(
+      time,
+    );
+    expect(container.querySelector(`.${styles.taskRangeLabel}`)).toBeNull();
+    if (mode === "weekly")
+      expect(screen.getByRole("button", { name: "一" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+    unmount();
+  });
+
   it("保留原执行频率按钮，只在自定义区展示可读规则", () => {
     const item: PlanItem = {
       id: "scene-1",
@@ -157,7 +193,9 @@ describe("Create", () => {
       </MemoryRouter>,
     );
     expect(screen.getByText("经营场景与方向")).toBeInTheDocument();
-    expect(screen.getByText("执行排程")).toBeInTheDocument();
+    expect(screen.getByText("经营场景与方向").parentElement).toHaveTextContent(
+      "执行频率",
+    );
     expect(screen.getByText("推送客户数（选填）")).toBeInTheDocument();
     expect(screen.queryByText("每日 09:00")).not.toBeInTheDocument();
     const input = screen.getByRole("spinbutton", {

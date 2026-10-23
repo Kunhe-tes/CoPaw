@@ -301,43 +301,45 @@ export function ScheduleEditor({
       )}
       {type === "custom" && (
         <div className={styles.customScheduleFields}>
-          <label className={styles.scheduleField}>
-            <span>重复规则</span>
-            <select
-              aria-label={`${sceneName}自定义重复规则`}
-              value={customRepeatMode}
-              onChange={(event) =>
-                selectCustomRepeatMode(event.target.value as CustomRepeatMode)
-              }
-            >
-              {customRepeatMode === "" && (
-                <option value="" disabled>
-                  旧版自定义规则
-                </option>
-              )}
-              {CUSTOM_REPEAT_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          {(customConfig?.mode === "daily" ||
-            customConfig?.mode === "weekly" ||
-            customConfig?.mode === "monthly" ||
-            customConfig?.mode === "yearly") && (
-            <div className={styles.scheduleField}>
-              <span>执行时刻</span>
-              <TimeField
-                hour={customConfig.hour}
-                minute={customConfig.minute}
-                onChange={(hour, minute) =>
-                  updateCustomSchedule({ ...customConfig, hour, minute })
+          <div className={styles.customScheduleRow}>
+            <label className={styles.scheduleField}>
+              <span>重复规则</span>
+              <select
+                aria-label={`${sceneName}自定义重复规则`}
+                value={customRepeatMode}
+                onChange={(event) =>
+                  selectCustomRepeatMode(event.target.value as CustomRepeatMode)
                 }
-                ariaLabel={`${sceneName}自定义执行时刻`}
-              />
-            </div>
-          )}
+              >
+                {customRepeatMode === "" && (
+                  <option value="" disabled>
+                    旧版自定义规则
+                  </option>
+                )}
+                {CUSTOM_REPEAT_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {(customConfig?.mode === "daily" ||
+              customConfig?.mode === "weekly" ||
+              customConfig?.mode === "monthly" ||
+              customConfig?.mode === "yearly") && (
+              <div className={styles.scheduleField}>
+                <span>执行时刻</span>
+                <TimeField
+                  hour={customConfig.hour}
+                  minute={customConfig.minute}
+                  onChange={(hour, minute) =>
+                    updateCustomSchedule({ ...customConfig, hour, minute })
+                  }
+                  ariaLabel={`${sceneName}自定义执行时刻`}
+                />
+              </div>
+            )}
+          </div>
           {customConfig?.mode === "weekly" && (
             <div className={styles.scheduleField}>
               <span>执行日</span>
@@ -478,11 +480,12 @@ export function ScheduleEditor({
           )}
         </div>
       )}
-      {type === "custom" && (
-        <div className={styles.taskRangeLabel}>
-          {customScheduleLabel(schedule.rawCron)}
-        </div>
-      )}
+      {type === "custom" &&
+        (customRepeatMode === "frequency" || !customConfig) && (
+          <div className={styles.taskRangeLabel}>
+            {customScheduleLabel(schedule.rawCron)}
+          </div>
+        )}
     </div>
   );
 }
@@ -889,7 +892,7 @@ export default function Create() {
                 <div className={styles.selectedListHeader}>
                   <span>经营场景与方向</span>
                   <span>任务周期</span>
-                  <span>执行排程</span>
+                  <span>执行频率</span>
                   <span>推送客户数（选填）</span>
                 </div>
               )}
