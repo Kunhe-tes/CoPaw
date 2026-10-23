@@ -31,7 +31,11 @@ import {
   useWealthStore,
   validateDraft,
 } from "../store";
-import { filterSceneConflictPlans, findSceneConflicts } from "../utils";
+import {
+  filterSceneConflictPlans,
+  findSceneConflicts,
+  isValidCustNum,
+} from "../utils";
 import type { PlanItem, Scene } from "../types";
 
 const STEP_DEFS = [
@@ -474,11 +478,11 @@ export function ScheduleEditor({
           )}
         </div>
       )}
-      <div className={styles.taskRangeLabel}>
-        {type === "custom"
-          ? customScheduleLabel(schedule.rawCron)
-          : scheduleLabel(schedule)}
-      </div>
+      {type === "custom" && (
+        <div className={styles.taskRangeLabel}>
+          {customScheduleLabel(schedule.rawCron)}
+        </div>
+      )}
     </div>
   );
 }
@@ -571,6 +575,7 @@ export default function Create() {
   const moveScene = useWealthStore((s) => s.moveScene);
   const dropScene = useWealthStore((s) => s.dropScene);
   const setItemDirection = useWealthStore((s) => s.setItemDirection);
+  const setItemCustNum = useWealthStore((s) => s.setItemCustNum);
   const setDraftName = useWealthStore((s) => s.setDraftName);
   const normalizeDraft = useWealthStore((s) => s.normalizeDraft);
   const resetPlanForm = useWealthStore((s) => s.resetPlanForm);
@@ -694,6 +699,9 @@ export default function Create() {
                   : scheduleLabel(x.schedule)}
                 <br />
                 经营方向：{x.direction}
+                <br />
+                推送客户数：
+                {x.custNum === undefined ? "不限" : `${x.custNum} 人`}
               </p>
             </div>
           ))}
@@ -877,6 +885,14 @@ export default function Create() {
               </span>
             </h3>
             <div className={styles.selectedList}>
+              {draft.items.length > 0 && (
+                <div className={styles.selectedListHeader}>
+                  <span>经营场景与方向</span>
+                  <span>任务周期</span>
+                  <span>执行排程</span>
+                  <span>推送客户数（选填）</span>
+                </div>
+              )}
               {draft.items.length ? (
                 draft.items.map((x, i) => {
                   const s = allScenes.find((sc) => sc.id === x.id);
@@ -935,6 +951,49 @@ export default function Create() {
                         </label>
                       </div>
                       <TaskSchedule item={x} scene={display} />
+                      <div className={styles.customerLimitField}>
+                        <div
+                          className={cx(
+                            styles.customerLimitControl,
+                            !isValidCustNum(x.custNum) &&
+                              styles.invalidCustomerLimit,
+                          )}
+                        >
+                          <input
+                            id={`cust-num-input-${i}`}
+                            type="number"
+                            inputMode="numeric"
+                            min={1}
+                            step={1}
+                            placeholder="不限"
+                            aria-label={`${x.sceneName}的推送客户数`}
+                            aria-describedby={`cust-num-hint-${i}`}
+                            aria-invalid={!isValidCustNum(x.custNum)}
+                            value={x.custNum ?? ""}
+                            onChange={(event) =>
+                              setItemCustNum(
+                                x.id,
+                                event.target.value === ""
+                                  ? undefined
+                                  : Number(event.target.value),
+                              )
+                            }
+                          />
+                          <span>人</span>
+                        </div>
+                        <small
+                          id={`cust-num-hint-${i}`}
+                          className={
+                            !isValidCustNum(x.custNum)
+                              ? styles.customerLimitError
+                              : undefined
+                          }
+                        >
+                          {isValidCustNum(x.custNum)
+                            ? "留空不限"
+                            : "请输入正整数"}
+                        </small>
+                      </div>
                       <div className={styles.rowTools}>
                         <button
                           className={styles.iconbtn}

@@ -2888,12 +2888,141 @@
     min-width: 0;
   }
   .selectedList {
+    --selected-columns: 16px 27px minmax(210px, 1fr) 344px 334px 152px 96px;
     overflow-x: auto;
   }
+  .selectedListHeader,
   .selectedRow {
-    grid-template-columns: 16px 27px minmax(210px, 1fr) 318px 300px 78px;
-    gap: 8px;
-    min-width: 1000px;
+    grid-template-columns: var(--selected-columns);
+    gap: 14px;
+    min-width: 1285px;
+  }
+  .selectedListHeader {
+    display: grid;
+    padding: 8px 10px;
+    border: 1px solid transparent;
+    border-block-color: var(--line);
+    background: #f7faff;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 500;
+    white-space: nowrap;
+    > span:first-child {
+      grid-column: 3;
+    }
+  }
+  .selectedRow {
+    min-height: 92px;
+    align-items: start;
+    padding: 12px 10px;
+  }
+  .selectedRow .selectedTitle,
+  .selectedRow .taskCycleBlock > .cycle,
+  .selectedRow .scheduleBlock > .cycle {
+    display: flex;
+    align-items: center;
+    min-height: 32px;
+  }
+  .selectedRow .drag,
+  .selectedRow .order,
+  .selectedRow .rowTools {
+    align-self: center;
+  }
+  .selectedRow .scheduleBlock {
+    margin-top: 0;
+  }
+  .selectedRow .selectedMain,
+  .selectedRow .scheduleBlock,
+  .selectedRow .customerLimitField {
+    gap: 6px;
+  }
+  .selectedRow .taskCycleBlock {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .selectedRow .direction,
+  .selectedRow .scheduleField,
+  .selectedRow .taskRangeLabel,
+  .selectedRow .taskCustomDates,
+  .selectedRow .customerLimitField > small {
+    display: flex;
+    align-items: center;
+    min-height: 32px;
+    margin: 0;
+  }
+  .selectedRow .direction {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+  }
+  .selectedRow .direction input {
+    width: 95%;
+    height: 32px;
+  }
+  .selectedRow .taskCycleBlock > .cycle > span,
+  .selectedRow .scheduleBlock > .cycle > span {
+    display: none;
+  }
+  .selectedRow .taskRangeLabel {
+    padding-left: 0;
+  }
+  .selectedRow .rowTools {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 2px;
+  }
+  .customerLimitField {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    min-width: 0;
+    small {
+      font-size: 11px;
+      color: var(--text);
+    }
+    small.customerLimitError {
+      color: var(--red);
+    }
+  }
+  .customerLimitControl {
+    display: flex;
+    align-items: center;
+    height: 32px;
+    border: 1px solid var(--console-management-border-strong, #d0d7e2);
+    border-radius: 4px;
+    &:focus-within {
+      border-color: var(--blue);
+      box-shadow: 0 0 0 2px var(--console-management-primary-soft, #eef4ff);
+    }
+    &.invalidCustomerLimit {
+      border-color: var(--red);
+    }
+    input {
+      min-width: 0;
+      width: 100%;
+      border: 0;
+      padding: 5px 8px;
+      background: transparent;
+      color: var(--text);
+      font-size: 12px;
+      appearance: textfield;
+    }
+    input::-webkit-inner-spin-button,
+    input::-webkit-outer-spin-button {
+      appearance: none;
+      margin: 0;
+    }
+    input:focus-visible {
+      outline: none;
+    }
+    > span {
+      flex-shrink: 0;
+      padding: 0 8px;
+      border-left: 1px solid var(--line);
+      font-size: 12px;
+      color: var(--text);
+    }
   }
   .selectedMain {
     display: flex;
@@ -3490,20 +3619,20 @@
   }
   .customerTable.metricsTable {
     table-layout: fixed;
-    min-width: 1140px;
+    min-width: 1308px;
   }
   .customerTable.metricsTable .metricsCol {
     width: 520px;
     white-space: normal;
   }
   .customerTable.metricsTable.todayTaskTable {
-    min-width: 1275px;
+    min-width: 1443px;
     .contactStatusCol {
       width: 135px;
     }
   }
   .customerTable.metricsTable.sceneTable {
-    min-width: 1510px;
+    min-width: 1678px;
     th:nth-child(1),
     td:nth-child(1),
     th:nth-child(6),
@@ -3548,7 +3677,7 @@
       width: 125px;
     }
     &.opportunityTable:not(.todayCustomerTable) {
-      min-width: 1565px;
+      min-width: 1733px;
       .opportunityCol,
       .reason {
         width: 260px;
@@ -3559,8 +3688,8 @@
       }
     }
     &.completedTable {
-      // 固定操作列合计 965px，指标区至少保留 520px（窄屏 356px）。
-      min-width: 1485px;
+      // 含最近接触时间的固定列合计 1133px，指标区至少保留 520px（窄屏 356px）。
+      min-width: 1653px;
       th:first-child,
       td:first-child {
         width: 150px;
@@ -3592,7 +3721,7 @@
     z-index: 1;
   }
   .customerTable.metricsTable.sceneTable.todayTaskTable {
-    min-width: 1635px;
+    min-width: 1803px;
   }
   .customerTable.metricsTable.opportunityTable th.executionCol {
     background: linear-gradient(100deg, #f0f8ff, #edf6ff);
@@ -3600,6 +3729,19 @@
   .customerTable.metricsTable .reason {
     min-width: 0;
     overflow-wrap: anywhere;
+  }
+  .customerTable.metricsTable th.recentContactCol,
+  .customerTable.metricsTable td.recentContactCol,
+  .customerTable.metricsTable.sceneTable th.recentContactCol,
+  .customerTable.metricsTable.sceneTable td.recentContactCol {
+    width: 168px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-variant-numeric: tabular-nums;
+  }
+  .customerTable td.recentContactCol {
+    font-size: 12px;
   }
   .customerMetrics {
     width: 100%;
@@ -3720,27 +3862,27 @@
   }
   @media (max-width: 1600px) {
     .customerTable.metricsTable {
-      min-width: 960px;
+      min-width: 1128px;
     }
     .customerTable.metricsTable.sceneTable {
-      min-width: 1346px;
+      min-width: 1514px;
     }
     .customerTable.metricsTable.sceneTable.opportunityTable:not(
         .todayCustomerTable
       ) {
-      min-width: 1401px;
+      min-width: 1569px;
     }
     .customerTable.metricsTable.sceneTable.completedTable {
-      min-width: 1321px;
+      min-width: 1489px;
     }
     .tasksLayout.business .customerTable.metricsTable {
-      min-width: 960px;
+      min-width: 1128px;
     }
     .customerTable.metricsTable.sceneTable.todayTaskTable {
-      min-width: 1471px;
+      min-width: 1639px;
     }
     .tasksLayout.business .customerTable.metricsTable.todayTaskTable {
-      min-width: 1095px;
+      min-width: 1263px;
     }
     .customerTable.metricsTable .metricsCol {
       width: 356px;
