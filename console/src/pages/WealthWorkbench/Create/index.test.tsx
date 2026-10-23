@@ -123,6 +123,65 @@ describe("TaskSchedule", () => {
 });
 
 describe("Create", () => {
+  it("推送客户数支持输入、清除、非法值提示并在发布确认展示", () => {
+    const item: PlanItem = {
+      id: "scene-limit",
+      sceneName: "数量设置场景",
+      categoryLabel: "理财",
+      categoryCode: "finance",
+      mcpRelations: [],
+      direction: "优先经营",
+      cycle: "本月",
+      start: "2026-09-01",
+      end: "2026-09-30",
+      schedule: { type: "daily", hour: 9, minute: 0 },
+    };
+    useIframeStore.setState({ positionId: "RB0101", userId: "rm-1" });
+    useWealthStore.setState({
+      accountId: "rm",
+      plansLoaded: true,
+      plans: [],
+      draft: {
+        name: "客户数设置规划",
+        items: [item, { ...item, id: "unlimited", sceneName: "不限场景" }],
+      },
+      scenesByCategory: { "": [] },
+      scenesLoading: false,
+      editingId: null,
+      dialog: null,
+      acting: false,
+    });
+    render(
+      <MemoryRouter>
+        <Create />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText("经营场景与方向")).toBeInTheDocument();
+    expect(screen.getByText("执行排程")).toBeInTheDocument();
+    expect(screen.getByText("推送客户数（选填）")).toBeInTheDocument();
+    expect(screen.queryByText("每日 09:00")).not.toBeInTheDocument();
+    const input = screen.getByRole("spinbutton", {
+      name: "数量设置场景的推送客户数",
+    });
+    expect(input).toHaveValue(null);
+    expect(input).toHaveAttribute("placeholder", "不限");
+    fireEvent.change(input, { target: { value: "500" } });
+    expect(useWealthStore.getState().draft.items[0].custNum).toBe(500);
+    fireEvent.change(input, { target: { value: "" } });
+    expect(useWealthStore.getState().draft.items[0].custNum).toBeUndefined();
+    fireEvent.change(input, { target: { value: "0" } });
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByText("请输入正整数")).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "发布规划" })[0]);
+    expect(useWealthStore.getState().dialog).toBeNull();
+    expect(useWealthStore.getState().toastText).toContain("正整数的推送客户数");
+    fireEvent.change(input, { target: { value: "500" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "发布规划" })[0]);
+    const { container } = render(<>{useWealthStore.getState().dialog?.body}</>);
+    expect(container).toHaveTextContent("推送客户数：500 人");
+    expect(container).toHaveTextContent("推送客户数：不限");
+  });
+
   it("客户经理选择已被规划占用的场景时列出冲突并禁止发布", () => {
     const item: PlanItem = {
       id: "scene-1",
