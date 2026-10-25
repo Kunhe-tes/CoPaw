@@ -5,6 +5,8 @@ import {
   initIframeMessageListener,
   handleUrlOriginParam,
   resetIframeContextForStandalone,
+  isWealthMessageEntry,
+  waitForWealthUserData,
 } from "./iframeMessage";
 import { useIframeStore } from "../stores/iframeStore";
 import { authApi } from "../api/modules/auth";
@@ -96,6 +98,145 @@ async function dispatchUserDataMessage(data: Record<string, unknown>) {
 }
 
 describe("fetchAndSetUserName", () => {
+  it.each([
+    ["/wealth/board", "RCZT"],
+    ["/wealth/create", "RMASSIST"],
+    ["/console/wealth/board", "NEW_CHANNEL"],
+  ])(
+    "%s 消息入口使用渠道 %s 初始化",
+    async (path, source) => {
+      window.history.pushState({}, "", path);
+      useIframeStore.getState().setContext({
+        userId: "old-user",
+        positionId: "RB0301",
+        source: "RMASSIST",
+      });
+      useIframeStore.getState().markInitialized();
+      mockInIframe();
+      initIframeMessageListener();
+      expect(useIframeStore.getState().userId).toBeNull();
+      expect(useIframeStore.getState().initialized).toBe(false);
+      const completed = vi.fn();
+      const ready = waitForWealthUserData().then(completed);
+      await Promise.resolve();
+      expect(completed).not.toHaveBeenCalled();
+
+      const data = {
+        type: "USER_DATA",
+        data: {
+          sapId: "00800001",
+          source,
+          hideLogo: "true",
+          userName: "张三",
+          bbkId: "100",
+          positionId: "RB0101",
+          orgCode: "ORG001",
+          subBranchId: "SUB001",
+          orgLvl: "4",
+          sysId: "SYS",
+        },
+      };
+      // 无关窗口及缺少有效渠道的消息不能解除等待。
+      window.dispatchEvent(new MessageEvent("message", { data, source: null }));
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: { ...data, data: { ...data.data, source: "" } },
+          source: window.parent,
+        }),
+      );
+      expect(useIframeStore.getState().initialized).toBe(false);
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data,
+          source: window.parent,
+          origin: "https://parent.example",
+        }),
+      );
+      await ready;
+      expect(useIframeStore.getState()).toMatchObject({
+        userId: "00800001",
+        source,
+        hideLogo: true,
+        userName: "张三",
+        bbk: "100",
+        positionId: "RB0101",
+        orgCode: "ORG001",
+        subBranchId: "SUB001",
+        orgLvl: "4",
+        sysId: "SYS",
+        isOriginY: false,
+        initialized: true,
+      });
+      await expect(waitForWealthUserData()).resolves.toBeUndefined();
+      window.dispatchEvent(
+        new MessageEvent("message", { data, source: window.parent }),
+      );
+      expect(completed).toHaveBeenCalledTimes(1);
+      expect(mockedFetchUserInfo).not.toHaveBeenCalled();
+      expect(mockedFetchUserInit).not.toHaveBeenCalled();
+      expect(mockedFetchCustomerInfo).not.toHaveBeenCalled();
+      expect(authApi.sendCronAuth).not.toHaveBeenCalled();
+      expect(
+        JSON.parse(sessionStorage.getItem("swe-iframe-context") || "null")
+          .state,
+      ).not.toHaveProperty("hideLogo");
+    },
+  );
+
+  it("origin=Y 财富入口保持 RMASSIST 和 Cookie 身份初始化", async () => {
+    mockInIframe();
+    window.history.pushState({}, "", "/wealth/board?origin=Y&hideLogo=true");
+    document.cookie = "userid=80000002; path=/";
+    document.cookie = "positionID=RB0101; path=/";
+    initIframeMessageListener();
+    expect(isWealthMessageEntry()).toBe(false);
+    await handleUrlOriginParam();
+    expect(useIframeStore.getState()).toMatchObject({
+      source: "RMASSIST",
+      userId: "80000002",
+      positionId: "RB0101",
+      isOriginY: true,
+    });
+    window.history.pushState({}, "", "/wealth/create");
+    expect(isWealthMessageEntry()).toBe(false);
+  });
+
+  it("Chat 中已有的 USER_DATA 即使 source 为 RCZT 仍沿用用户查询流程", async () => {
+    window.history.pushState({}, "", "/chat");
+    await dispatchUserDataMessage({ source: "RCZT", hideLogo: true, positionId: "RB0101" });
+    expect(mockedFetchUserInfo).toHaveBeenCalledWith("80000001");
+    expect(useIframeStore.getState()).toMatchObject({
+      source: "RCZT", userName: "张三", hideLogo: false, positionId: null,
+    });
+  });
+
+  it("RCZT 消息缺少有效用户时不初始化", () => {
+    mockInIframe();
+    window.history.pushState({}, "", "/wealth/board");
+    initIframeMessageListener();
+    for (const sapId of [null, "", " ", 123]) {
+      window.dispatchEvent(new MessageEvent("message", {
+        source: window.parent,
+        data: { type: "USER_DATA", data: { source: "RCZT", sapId } },
+      }));
+    }
+    expect(useIframeStore.getState().initialized).toBe(false);
+    expect(useIframeStore.getState().userId).toBeNull();
+  });
+
+  it.each([undefined, null, "", " ", 123])("缺少有效渠道时不初始化：%s", async (source) => {
+    mockInIframe();
+    window.history.pushState({}, "", "/wealth/board");
+    initIframeMessageListener();
+    window.dispatchEvent(new MessageEvent("message", {
+      source: window.parent,
+      data: { type: "USER_DATA", data: { source, sapId: "00800001" } },
+    }));
+    await Promise.resolve();
+    expect(useIframeStore.getState().initialized).toBe(false);
+    expect(useIframeStore.getState().source).toBeNull();
+  });
+
   beforeEach(() => {
     sessionStorage.clear();
     localStorage.clear();

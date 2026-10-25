@@ -383,3 +383,36 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 - 规划请求在 `console/src/pages/WealthWorkbench/api.ts` 使用同源原生 fetch `/zt/wealth/plans`，不走全局 request/baseUrl，也不拼接 `/api`。网关负责转 Java；创建后的任务编排、资源处理与状态回写由 Java 负责。
 - 列表通过 Query 传 sapId/role/bbkId；创建/更新通过 camelCase JSON 传身份和业务数据；删除通过 DELETE Body 传 sapId。响应解包 code/message/data，HTTP 200 的非 200 业务码也上抛。
 - 场景、名单、统计、机构人员、签名保持各自已有同源路径；不回退 Python 工作台 handler。网关必须优先匹配规划接口并透传 DELETE Body，避免 SPA 返回 HTML。具体评估与配置见 [Java 网关接入](../../docs/api/wealth-plans-java-gateway.md)，回归入口为 `planGateway.test.ts`、`store.test.ts`。
+
+### 财富工作台多渠道 iframe 消息入口
+
+- 父应用 iframe 地址为 `/wealth/board` 或 `/wealth/create`（部署在 `/console` 下时加此前缀），不带 `origin=Y`。父应用在每次 iframe `load` 后发送 `USER_DATA`，使用子页面的明确 origin 作为 `targetOrigin`；不新增 READY 握手。
+- 消息 `data.source` 必须为非空渠道字符串（本次为 `RCZT`，后续渠道直接传自身标识，无需修改子页面），`sapId`（兼容 `userId`）传非空字符串以保留前导零；传入 `userName`、`bbkId`（兼容 `bbkOrgId`）、`positionId` 以及业务需要的 `orgCode`、`subBranchId`、`orgLvl`、`sysId`。岗位缺失或未识别仍按原权限矩阵显示暂无访问权限。
+- `hideLogo: true`（兼容字符串 `"true"`）隐藏头部、播报与侧栏，内部导航持续生效，不补 URL 参数。身份和布局由消息提供；接口鉴权仍使用现有登录 Cookie，消息传参并不替代登录态。
+- 子页面在注册监听器时清除该入口残留的 iframe 上下文，收到父窗口的有效 USER_DATA 消息后才挂载工作台并加载业务数据。不查询用户信息、不初始化 Agent、不同步 cron-auth、不启动客户信息定时刷新。未收到有效消息时保持等待；每次 iframe 加载后由父应用发送一次初始化消息；切换用户或岗位时重新加载 iframe 后再发送。
+- 规划创建/更新请求体的 `sourceId` 使用消息传入的渠道（例如 `RCZT`）。原 `origin=Y` 财富入口继续使用 Cookie 初始化及 `RMASSIST` 来源，其他已有页面的 USER_DATA 行为不变。
+- 代码入口：`console/src/utils/iframeMessage.ts`、`console/src/main.tsx`、`console/src/pages/WealthWorkbench/index.tsx`。回归入口：`iframeMessage.test.ts`、财富 `index.test.tsx`、`planGateway.test.ts`。
+
+父应用示例（监听器先注册，再设置 iframe 地址）：
+
+```js
+const frame = document.createElement("iframe");
+const childOrigin = "https://实际子应用域名";
+frame.addEventListener("load", () => {
+  frame.contentWindow.postMessage({
+    type: "USER_DATA",
+    data: {
+      sapId: "00800001",
+      source: "RCZT",
+      hideLogo: true,
+      userName: "张三",
+      bbkId: "100",
+      positionId: "RB0101",
+      orgCode: "ORG001",
+      subBranchId: "SUB001",
+    },
+  }, childOrigin);
+});
+frame.src = `${childOrigin}/wealth/board`;
+document.body.appendChild(frame);
+```
