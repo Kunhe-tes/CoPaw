@@ -230,8 +230,20 @@ The Main Agent's choice of a **Skill-owned Stored SubAgent Definition** by compa
 _Avoid_: task-type labels, caller-authored subagent instruction, automatic delegation
 
 **Explicit SubAgent Intent Gate**:
-The requirement that the current user message explicitly mentions a SubAgent before the Main Agent receives Background SubAgent tools. Available **Skill-owned Stored SubAgent Definitions** do not independently expose delegation tools or cause automatic delegation.
-_Avoid_: definition-driven tool exposure, implicit background work, autonomous delegation
+The delegation entry that makes Background SubAgent tools available when the current user message contains a fixed SubAgent keyword or its request explicitly enables SubAgents, without automatically starting a worker. It applies in ordinary Chat, Plan Mode, and Goal Mode while retaining each mode's permissions, and permits Run-scoped SubAgent Definitions; Explicit Expert Selection remains a separate entry.
+_Avoid_: automatic worker launch, semantic intent classification, persistent expert authoring
+
+**Expert Autonomous Discovery Switch**:
+A Source-level, default-off choice controlling whether the Main Agent may choose enabled Agent-owned Stored SubAgent Definitions from the current tenant's current Agent Profile after the Explicit SubAgent Intent Gate opens. It does not control Run-scoped or Skill-owned SubAgent Definitions or prevent Explicit Expert Selection.
+_Avoid_: tenant-shared expert registry, cross-Profile expert access, delegation master switch
+
+**Goal SubAgent Delegation Intent**:
+The durable user authorization to delegate within one Goal, established by a real user message containing a fixed SubAgent keyword or an explicitly enabled request. It survives automatic turns and recovery, does not grant access to hidden experts, and does not authorize unrelated Goals or ordinary Chat turns.
+_Avoid_: model-generated authorization, implicit Goal autonomy, frozen expert visibility
+
+**Chat-owned SubAgent Management**:
+The Main Agent's ability to inspect, wait for, or cancel retained SubAgent Runs belonging to its current Chat and logical session without gaining permission to start new runs. It never grants access to another Chat's runs within the same Agent Profile.
+_Avoid_: Profile-wide run access, implicit new delegation, cross-Chat cancellation
 
 **Main-Agent-only Delegation**:
 The rule that Background SubAgent tools are never registered for a SubAgent, including a Skill-owned SubAgent with loaded Skills, MCPs, or mutable built-in tools. Only the Main Agent may create a further SubAgent Run.
@@ -366,7 +378,7 @@ The one-time initialization of a Chat's Session-scoped Expert Dependency View wh
 _Avoid_: per-turn dependency loading, Agent Profile installation, cross-chat dependency reuse
 
 **Explicit Expert Selection**:
-The per-message user action in the Chat composer's Expert control, displayed alongside the Model control, that selects one enabled Agent-owned or Received Community Expert. The selection clears after submission; without it, no expert directory or Background SubAgent tool is exposed to the Main Agent.
+The per-message user action in the Chat composer's Expert control, displayed alongside the Model control, that selects one enabled Agent-owned or Received Community Expert. The selection clears after submission and provides an entry independent of keyword-triggered delegation and the Expert Autonomous Discovery Switch.
 _Avoid_: mode control, intent-keyword delegation, implicit expert discovery, Main-Agent-selected expert, session-persistent expert selection
 
 **Composer Expert Catalog**:
