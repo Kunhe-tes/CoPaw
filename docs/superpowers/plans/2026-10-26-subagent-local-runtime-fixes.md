@@ -40,3 +40,11 @@
 - [x] 清理移至线程；每个 handle 保存共享取消任务，以 shield 隔离调用方取消，reap/重复 cancel/已有 wait_for_run 均等待相同清理流程。
 - [x] 补充清理失败保留句柄、后续取消可重试的测试；相关 40 项测试通过。
 - [x] 专项测试 223 通过、67 失败，与上一轮 JUnit 失败集合一致，无新增失败；只提交本次评审修复代码、5 项新测试和本计划。
+
+## Follow-up: restricted discovery and failed cleanup waiters
+
+- [x] 复现取消前/取消后启动的 waiter 对清理失败抛异常，Goal 唤醒也继承此异常；修复前新增两个参数用例均失败。
+- [x] `wait_for_run` 统一等待取消任务；普通清理异常返回当前持久化记录，保留 handle 和显式 cancel 的错误/重试语义；调用方 CancelledError 仍传播。
+- [x] 独立子进程测试分别执行真实枚举和主动 PermissionError 注入；真实环境枚举拒绝时验证不完整清理警告、worker 退出和 heartbeat，不再无条件断言不可枚举的 child 退出；finally 始终清理已知 child。
+- [x] 权限异常与清理超时均覆盖取消前/后 waiter、晚到 waiter 和 Goal 唤醒；取消专项测试共 10 项通过，静态检查通过。
+- [x] 完整专项为 228 通过、67 失败，JUnit 失败集合与上一轮一致，无新增失败。实现仅修改 waiter 的失败处理与回归测试；取消命令和状态机语义保持既有行为。

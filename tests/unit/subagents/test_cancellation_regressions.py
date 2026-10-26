@@ -102,7 +102,33 @@ async def test_discovery_failure_still_terminates_worker(
 
 
 @pytest.mark.asyncio
-async def test_real_descendant_wait_does_not_block_event_loop(tmp_path):
+@pytest.mark.parametrize("deny_discovery", [False, True])
+async def test_real_descendant_wait_does_not_block_event_loop(
+    tmp_path,
+    monkeypatch,
+    caplog,
+    deny_discovery,
+):
+    from swe.app.subagents import supervisor as module
+
+    discovery_errors = []
+    original_children = psutil.Process.children
+
+    def discover(process, *args, **kwargs):
+        try:
+            if deny_discovery:
+                raise PermissionError("process discovery denied")
+            return original_children(process, *args, **kwargs)
+        except (OSError, psutil.AccessDenied) as exc:
+            discovery_errors.append(exc)
+            raise
+
+    monkeypatch.setattr(psutil.Process, "children", discover)
+    monkeypatch.setattr(
+        module.logger,
+        "handlers",
+        [*module.logger.handlers, caplog.handler],
+    )
     marker = tmp_path / "child.pid"
     child_code = (
         "import os, signal, time; from pathlib import Path; "
@@ -140,12 +166,16 @@ async def test_real_descendant_wait_does_not_block_event_loop(tmp_path):
             result = await supervisor.cancel(scope, run_id)
             await asyncio.sleep(0.02)
             assert result.status == "cancelled"
+            assert worker.poll() is not None
             gaps = [right - left for left, right in zip(beats, beats[1:])]
             assert max(gaps) < 0.2
-            assert (
-                not child.is_running()
-                or child.status() == psutil.STATUS_ZOMBIE
-            )
+            if discovery_errors:
+                assert "descendant_cleanup=incomplete" in caplog.text
+            else:
+                assert (
+                    not child.is_running()
+                    or child.status() == psutil.STATUS_ZOMBIE
+                )
         finally:
             ticker.cancel()
             await asyncio.gather(ticker, return_exceptions=True)
@@ -240,4 +270,81 @@ async def test_cleanup_failure_retains_handle_and_cancel_can_retry(
         assert not supervisor.is_manageable(scope, run_id)
         assert (await store.get(run_id)).status == "cancelled"
     finally:
+        _stop(worker)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wait_before_cancel", [False, True])
+@pytest.mark.parametrize(
+    "cleanup_error",
+    [
+        PermissionError("descendant cleanup denied"),
+        subprocess.TimeoutExpired("cleanup", 1),
+    ],
+)
+async def test_failed_cleanup_waiters_return_persisted_state(
+    tmp_path,
+    monkeypatch,
+    wait_before_cancel,
+    cleanup_error,
+):
+    from swe.agents.tools.subagent_background import _wake_goal_after_subagent
+
+    worker = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        start_new_session=True,
+    )
+    supervisor = BackgroundSubAgentSupervisor()
+    scope, store, run_id = await _register(supervisor, tmp_path, worker)
+    entered, release = threading.Event(), threading.Event()
+
+    def incomplete(process):
+        _stop(process)
+        entered.set()
+        if not release.wait(5):
+            raise RuntimeError("test cleanup gate timed out")
+        raise cleanup_error
+
+    monkeypatch.setattr(supervisor, "_terminate_process_group", incomplete)
+    waiters = []
+    cancel = None
+    try:
+        if wait_before_cancel:
+            waiters.append(
+                asyncio.create_task(supervisor.wait_for_run(scope, run_id)),
+            )
+            await asyncio.sleep(0)
+        cancel = asyncio.create_task(supervisor.cancel(scope, run_id))
+        assert await asyncio.to_thread(entered.wait, 5)
+        if not wait_before_cancel:
+            waiters.append(
+                asyncio.create_task(supervisor.wait_for_run(scope, run_id)),
+            )
+        goal_waiter = asyncio.create_task(
+            _wake_goal_after_subagent(
+                supervisor=supervisor,
+                scope=scope,
+                goal_id="test-goal",
+                run_id=run_id,
+            ),
+        )
+        waiters.append(goal_waiter)
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(type(cleanup_error)):
+            await cancel
+        persisted = await store.get(run_id)
+        assert (await waiters[0]) == persisted
+        assert await goal_waiter is None
+        assert persisted.status == "running"
+        assert supervisor.is_manageable(scope, run_id)
+        # A waiter arriving after the failed cancellation sees the same state.
+        assert await supervisor.wait_for_run(scope, run_id) == persisted
+    finally:
+        release.set()
+        await asyncio.gather(
+            *waiters,
+            *([cancel] if cancel is not None else []),
+            return_exceptions=True,
+        )
         _stop(worker)

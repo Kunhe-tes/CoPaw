@@ -524,15 +524,30 @@ class BackgroundSubAgentSupervisor:
                 run_id,
             )
         if handle.cancel_task is not None:
-            return await asyncio.shield(handle.cancel_task)
+            return await self._wait_for_cancellation(handle, run_id)
         await asyncio.to_thread(handle.process.wait)
         if handle.cancel_task is not None:
-            return await asyncio.shield(handle.cancel_task)
+            return await self._wait_for_cancellation(handle, run_id)
         terminal_runs = await self._reap_scope(scope)
         return next(
             (item for item in terminal_runs if item.run_id == run_id),
             await PerRunSubAgentRunStore(scope.run_store_dir).get(run_id),
         )
+
+    async def _wait_for_cancellation(
+        self,
+        handle: _ActiveRun,
+        run_id: str,
+    ) -> BackgroundSubAgentRunRecord | None:
+        assert handle.cancel_task is not None
+        try:
+            return await asyncio.shield(handle.cancel_task)
+        except Exception:
+            # The cancellation observer logs cleanup failures. Waiters must
+            # still see persisted state; retain ownership for cancel retries.
+            return await PerRunSubAgentRunStore(
+                handle.scope.run_store_dir,
+            ).get(run_id)
 
     async def get(
         self,
