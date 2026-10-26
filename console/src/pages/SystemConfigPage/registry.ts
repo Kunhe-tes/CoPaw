@@ -106,6 +106,14 @@ export const CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES: CurrentSourceConfigSwitchDef
       description: "开启后，普通模式可使用计划澄清与计划提案提交工具。",
     },
     {
+      key: "feature_switches.subagent_expert_discovery_enabled",
+      path: ["feature_switches", "subagent_expert_discovery_enabled"],
+      defaultValue: false,
+      title: "允许自主选择我的专家",
+      description:
+        "表达子代理意图后，允许主 Agent 自主选择当前 Agent 已启用的专家；关闭不影响临时子代理、Skill 自带定义或显式选择专家。",
+    },
+    {
       key: "feature_switches.database_access_guard_enabled",
       path: ["feature_switches", "database_access_guard_enabled"],
       defaultValue: true,

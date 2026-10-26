@@ -78,8 +78,11 @@ async def _wake_goal_after_subagent(
 
 
 _START_SUBAGENT_DESCRIPTION = (
-    "Start a Background SubAgent Run. Use an exact listed Skill-qualified "
-    "name when delegating to a Skill-owned definition."
+    "Start a Background SubAgent Run. Use an exact listed name to reuse a "
+    "definition, including its Skill qualifier when present. For a temporary "
+    "worker, provide a new name, instruction, and objective; it is not saved "
+    "as an expert. A listed definition keeps its configured instruction. "
+    "Tool availability does not require delegation; follow the user's request."
 )
 
 
@@ -317,6 +320,11 @@ def _create_start_subagent_tool(
                 parent_policy=_parent_policy_from_config(
                     context.parent_agent_config,
                 ),
+                runtime_policy=(
+                    PermissionPolicy.readonly()
+                    if context.request_context.get("plan_mode_enabled") is True
+                    else None
+                ),
                 request_context=context.request_context,
                 definition=definition,
                 start_request=start_request,
@@ -444,6 +452,7 @@ def create_background_subagent_tools(
     skill_snapshot_signatures: dict[str, str] | None = None,
     skill_snapshot_dirs: Mapping[str, Path] | None = None,
     selected_expert_id: str | None = None,
+    expert_discovery_enabled: bool = False,
 ) -> dict[str, Callable[..., Any]]:
     """Create start/wait/get/cancel Background SubAgent tool callables."""
     tool_scope = build_background_subagent_scope(
@@ -456,6 +465,7 @@ def create_background_subagent_tools(
         effective_skill_names=effective_skill_names,
         skill_snapshot_dirs=skill_snapshot_dirs,
         selected_expert_id=selected_expert_id,
+        expert_discovery_enabled=expert_discovery_enabled,
     )
     directory = _format_skill_definition_directory(definition_catalog)
     context = _BackgroundSubagentToolContext(
@@ -487,6 +497,7 @@ def _build_definition_catalog(
     effective_skill_names: list[str] | None,
     skill_snapshot_dirs: Mapping[str, Path] | None = None,
     selected_expert_id: str | None = None,
+    expert_discovery_enabled: bool = False,
 ):
     """Build the catalog only for an explicit delegation-intent turn."""
     builtin_definitions = builtin_definition_provider().list_definitions()
@@ -525,7 +536,7 @@ def _build_definition_catalog(
         agent_owned_definitions=[
             package.definition
             for package in agent_packages
-            if package.definition is not None
+            if expert_discovery_enabled and package.definition is not None
         ],
     )
 

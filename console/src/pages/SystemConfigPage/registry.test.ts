@@ -28,6 +28,21 @@ import {
 } from "./registry";
 
 describe("SystemConfigPage registry compatibility", () => {
+  it("registers default-off autonomous expert discovery", () => {
+    const definition = CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES.find(
+      (item) =>
+        item.key === "feature_switches.subagent_expert_discovery_enabled",
+    );
+    expect(definition).toMatchObject({
+      path: ["feature_switches", "subagent_expert_discovery_enabled"],
+      defaultValue: false,
+      title: "允许自主选择我的专家",
+    });
+    expect(writeRegisteredSwitchValue({}, definition!, true)).toEqual({
+      feature_switches: { subagent_expert_discovery_enabled: true },
+    });
+  });
+
   const originalStructuredClone = globalThis.structuredClone;
 
   afterEach(() => {

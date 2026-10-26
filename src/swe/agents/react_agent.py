@@ -36,6 +36,7 @@ from .prompt import (
     system_prompt_file_snapshot,
 )
 from ..runtime_workers import run_runtime_state_work
+from ..app.subagents.intent import has_subagent_intent
 from .skills_manager import (
     apply_skill_config_env_overrides,
     ensure_skills_initialized,
@@ -235,6 +236,19 @@ def _plan_interaction_tools_enabled(plan_mode_enabled: bool) -> bool:
     )
 
     return is_normal_mode_plan_interaction_tools_enabled(
+        get_current_source_system_config(),
+    )
+
+
+def _subagent_expert_discovery_enabled() -> bool:
+    from ..app.source_system_config.registry import (
+        is_subagent_expert_discovery_enabled,
+    )
+    from ..app.source_system_config.runtime import (
+        get_current_source_system_config,
+    )
+
+    return is_subagent_expert_discovery_enabled(
         get_current_source_system_config(),
     )
 
@@ -921,6 +935,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 request_context.get("selected_expert_id") or "",
             ).strip()
             or None,
+            expert_discovery_enabled=_subagent_expert_discovery_enabled(),
         )
         names = self._background_subagent_tool_names(True)
         for name in names:
@@ -944,7 +959,13 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 request_context.get("agent_id")
                 or getattr(self._agent_config, "id", None)
             )
-            or not selected_expert_id
+            or not (
+                selected_expert_id
+                or has_subagent_intent(
+                    request_context.get("current_user_text"),
+                    request_context.get("enable_subagents", False),
+                )
+            )
         )
 
     @staticmethod

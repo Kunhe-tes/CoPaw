@@ -57,6 +57,7 @@ DEFAULT_EXPECTED_SOURCE_CONFIG = {
         "chat_task_progress_enabled": True,
         "database_access_guard_enabled": True,
         "normal_mode_plan_interaction_tools_enabled": False,
+        "subagent_expert_discovery_enabled": False,
     },
     "system_prompt_injections": [],
     "tool_result_compact": {
@@ -174,6 +175,7 @@ class TestSourceSystemConfigModels:
                 "chat_task_progress_enabled": False,
                 "database_access_guard_enabled": True,
                 "normal_mode_plan_interaction_tools_enabled": False,
+                "subagent_expert_discovery_enabled": False,
             },
             "provider_policy": {"default_model": "qwen-max"},
         }

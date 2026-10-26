@@ -1540,10 +1540,8 @@ class ToolGuardMixin:
         """Enforce Plan Mode and SubAgent policy before executing a tool."""
         request_context = getattr(self, "_request_context", {}) or {}
         agent_role = request_context.get("agent_role", "main")
-        reason: str | None = None
-        if agent_role != "subagent":
-            reason = self._plan_mode_policy_denial(tool_name, tool_input)
-        elif agent_role == "subagent":
+        reason = self._plan_mode_policy_denial(tool_name, tool_input)
+        if reason is None and agent_role == "subagent":
             policy_payload = request_context.get("subagent_policy")
             if not isinstance(policy_payload, dict):
                 reason = "missing SubAgent effective policy"
@@ -2014,7 +2012,8 @@ class ToolGuardMixin:
         executable_tool_call.pop(OPERATION_GROUP_INTERNAL_FIELD, None)
         if action is not None:
             return await self._execute_guard_action(
-                action, executable_tool_call
+                action,
+                executable_tool_call,
             )
         return await self._run_tool_call_with_hard_timeout(
             executable_tool_call,
