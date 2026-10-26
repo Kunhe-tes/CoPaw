@@ -113,6 +113,7 @@ class _ActiveRun:
     stderr_log_path: Path
     parent_chat_id: str = ""
     parent_msgid: str = ""
+    cancel_task: asyncio.Task[BackgroundSubAgentRunRecord] | None = None
 
 
 def _worker_parent_agent_config(
@@ -522,7 +523,11 @@ class BackgroundSubAgentSupervisor:
             return await PerRunSubAgentRunStore(scope.run_store_dir).get(
                 run_id,
             )
+        if handle.cancel_task is not None:
+            return await asyncio.shield(handle.cancel_task)
         await asyncio.to_thread(handle.process.wait)
+        if handle.cancel_task is not None:
+            return await asyncio.shield(handle.cancel_task)
         terminal_runs = await self._reap_scope(scope)
         return next(
             (item for item in terminal_runs if item.run_id == run_id),
@@ -549,14 +554,29 @@ class BackgroundSubAgentSupervisor:
         record = await store.get(run_id)
         if record is None:
             return None
-        if record.status in TERMINAL_BACKGROUND_RUN_STATUSES:
-            return record
         active = self._active_for_scope(scope)
         handle = active.get(run_id)
+        if handle is not None and handle.cancel_task is not None:
+            if not handle.cancel_task.done():
+                return await asyncio.shield(handle.cancel_task)
+        if record.status in TERMINAL_BACKGROUND_RUN_STATUSES:
+            return record
         if handle is None:
             return BackgroundSubAgentNotManageable(run_id=run_id)
-        self._terminate_process_group(handle.process)
-        active.pop(run_id, None)
+        handle.cancel_task = asyncio.create_task(
+            self._cancel_run(handle, run_id),
+        )
+        handle.cancel_task.add_done_callback(self._observe_cancel_result)
+        return await asyncio.shield(handle.cancel_task)
+
+    async def _cancel_run(
+        self,
+        handle: _ActiveRun,
+        run_id: str,
+    ) -> BackgroundSubAgentRunRecord:
+        """Keep ownership while blocking process cleanup runs off the loop."""
+        await asyncio.to_thread(self._terminate_process_group, handle.process)
+        scope = handle.scope
         _remove_private_launch_snapshot(
             str(scope.run_store_dir / f".{run_id}.mcp.json"),
             scope.run_store_dir,
@@ -567,7 +587,19 @@ class BackgroundSubAgentSupervisor:
             scope.run_store_dir,
             run_id,
         )
-        return await store.cancel(run_id)
+        record = await PerRunSubAgentRunStore(scope.run_store_dir).cancel(
+            run_id,
+        )
+        self._active_for_scope(scope).pop(run_id, None)
+        return record
+
+    @staticmethod
+    def _observe_cancel_result(task: asyncio.Task) -> None:
+        if not task.cancelled() and task.exception() is not None:
+            logger.error(
+                "background_subagent_cancel_cleanup_failed",
+                exc_info=task.exception(),
+            )
 
     def has_active_runs(self, scope: BackgroundSubAgentScope) -> bool:
         """Return whether this process currently manages runs in scope."""
@@ -604,6 +636,8 @@ class BackgroundSubAgentSupervisor:
         terminal_runs: list[BackgroundSubAgentRunRecord] = []
         store = PerRunSubAgentRunStore(scope.run_store_dir)
         for run_id, handle in list(active.items()):
+            if handle.cancel_task is not None:
+                continue
             if handle.process.poll() is None:
                 continue
             _remove_private_launch_snapshot(
@@ -681,6 +715,14 @@ class BackgroundSubAgentSupervisor:
         try:
             descendants = psutil.Process(process.pid).children(recursive=True)
         except psutil.NoSuchProcess:
+            descendants = []
+        except (OSError, psutil.Error) as exc:
+            logger.warning(
+                "background_subagent_descendant_discovery_failed "
+                "worker_pid=%s descendant_cleanup=incomplete error=%s",
+                process.pid,
+                exc,
+            )
             descendants = []
         try:
             try:

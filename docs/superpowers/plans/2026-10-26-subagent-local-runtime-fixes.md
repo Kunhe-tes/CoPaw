@@ -30,3 +30,13 @@
 - [x] 更新报告、优化方案和 `analysis/playbook/subagent-runtime.md`，记录实际测试结果；保留其他工作区修改。后续按用户要求提交四项修复代码、相关测试和本计划；遵循现有忽略规则，不强制加入 analysis 文档。
 
 实现没有增加 worker 信号处理、应用 shutdown、MySQL/Redis 协调或跨 Pod 取消。取消通过捕获已有后代进程并逐一清理来覆盖独立 Shell session，不将此能力描述为容器级强隔离。
+
+## Follow-up: cancellation review regressions
+
+评审确认 `a6485cc04` 引入两项取消回归：后代枚举拒绝会阻止 worker 终止；同步后代等待阻塞共享事件循环。
+
+- [x] 新增真实进程及故障注入测试，原实现 4 项失败，分别覆盖 PermissionError、psutil.AccessDenied、事件循环 heartbeat 和清理期间句柄保留。
+- [x] 枚举失败记录独立警告并继续 worker 终止，明确后代清理不完整。
+- [x] 清理移至线程；每个 handle 保存共享取消任务，以 shield 隔离调用方取消，reap/重复 cancel/已有 wait_for_run 均等待相同清理流程。
+- [x] 补充清理失败保留句柄、后续取消可重试的测试；相关 40 项测试通过。
+- [x] 专项测试 223 通过、67 失败，与上一轮 JUnit 失败集合一致，无新增失败；只提交本次评审修复代码、5 项新测试和本计划。
