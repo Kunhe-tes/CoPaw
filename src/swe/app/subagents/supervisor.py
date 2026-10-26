@@ -16,6 +16,7 @@ import time
 from typing import Any, Literal, Mapping
 from uuid import uuid4
 
+import psutil
 from pydantic import BaseModel, Field
 
 from ...config.config import AgentProfileConfig
@@ -165,7 +166,8 @@ class BackgroundSubAgentSupervisor:
         )
         self._popen_factory = popen_factory or subprocess.Popen
         self._cancel_grace_seconds = cancel_grace_seconds
-        self._active: dict[tuple[str, str], dict[str, _ActiveRun]] = {}
+        self._active: dict[tuple[str, str, str], dict[str, _ActiveRun]] = {}
+        self._starting: dict[tuple[str, str, str], set[str]] = {}
 
     async def start(
         self,
@@ -185,14 +187,61 @@ class BackgroundSubAgentSupervisor:
         start_request: SubAgentStartRequest | None = None,
         definition_match: DefinitionMatchMetadata | None = None,
     ) -> BackgroundSubAgentRunRecord | BackgroundSubAgentStartBlocked:
-        """Create a run file and launch a worker unless the scope is full."""
+        """Reserve capacity before any asynchronous launch preparation."""
         await self._reap_scope(scope)
         active = self._active_for_scope(scope)
-        if len(active) >= self._max_running_per_scope:
+        starting = self._starting.setdefault(self._scope_key(scope), set())
+        if len(set(active) | starting) >= self._max_running_per_scope:
             return BackgroundSubAgentStartBlocked(
                 limit=self._max_running_per_scope,
-                active_run_ids=sorted(active),
+                active_run_ids=sorted(set(active) | starting),
             )
+        # No await between the capacity check and reservation: admission is
+        # atomic for concurrent requests on this supervisor's event loop.
+        run_id = f"subagent-{uuid4().hex[:12]}"
+        starting.add(run_id)
+        try:
+            return await self._start_reserved(
+                scope=scope,
+                run_id=run_id,
+                spec=spec,
+                parent_agent_config=parent_agent_config,
+                workspace_dir=workspace_dir,
+                parent_policy=parent_policy,
+                workspace_policy=workspace_policy,
+                runtime_policy=runtime_policy,
+                request_context=request_context,
+                effective_skill_names=effective_skill_names,
+                skill_snapshot_signatures=skill_snapshot_signatures,
+                skill_snapshot_dirs=skill_snapshot_dirs,
+                definition=definition,
+                start_request=start_request,
+                definition_match=definition_match,
+            )
+        finally:
+            starting.discard(run_id)
+
+    async def _start_reserved(
+        self,
+        *,
+        scope: BackgroundSubAgentScope,
+        run_id: str,
+        spec: DelegationSpec,
+        parent_agent_config: AgentProfileConfig,
+        workspace_dir: Path,
+        parent_policy: PermissionPolicy | None = None,
+        workspace_policy: PermissionPolicy | None = None,
+        runtime_policy: PermissionPolicy | None = None,
+        request_context: dict[str, Any] | None = None,
+        effective_skill_names: list[str] | None = None,
+        skill_snapshot_signatures: dict[str, str] | None = None,
+        skill_snapshot_dirs: Mapping[str, Path] | None = None,
+        definition: SubAgentDefinition | None = None,
+        start_request: SubAgentStartRequest | None = None,
+        definition_match: DefinitionMatchMetadata | None = None,
+    ) -> BackgroundSubAgentRunRecord | BackgroundSubAgentStartBlocked:
+        """Prepare and launch a run whose capacity is already reserved."""
+        active = self._active_for_scope(scope)
         definition = definition or self._registry.resolve(spec.name)
         parent_policy = parent_policy or PermissionPolicy.readonly()
         definition_policy = build_definition_policy(definition, parent_policy)
@@ -205,7 +254,6 @@ class BackgroundSubAgentSupervisor:
         store = PerRunSubAgentRunStore(scope.run_store_dir)
         effective_budget = _effective_budget(definition.budget, spec.budget)
         nickname = assign_subagent_nickname(definition.nickname)
-        run_id = f"subagent-{uuid4().hex[:12]}"
         parent_skill_snapshot_dirs = skill_snapshot_dirs
         try:
             session_dependency_view = resolve_community_expert_dependency_view(
@@ -400,11 +448,6 @@ class BackgroundSubAgentSupervisor:
                 str(exc),
                 error_code="worker_start_failed",
             )
-        running = await store.mark_running(
-            record.run_id,
-            worker_pid=process.pid,
-            stderr_log_path=str(stderr_log_path),
-        )
         active[record.run_id] = _ActiveRun(
             scope=scope,
             process=process,
@@ -412,7 +455,11 @@ class BackgroundSubAgentSupervisor:
             parent_chat_id=spec.parent_chat_id,
             parent_msgid=spec.parent_msgid,
         )
-        return running
+        return await store.mark_running(
+            record.run_id,
+            worker_pid=process.pid,
+            stderr_log_path=str(stderr_log_path),
+        )
 
     async def cancel_turn_runs(
         self,
@@ -594,12 +641,21 @@ class BackgroundSubAgentSupervisor:
             active.pop(run_id, None)
         return terminal_runs
 
+    @staticmethod
+    def _scope_key(scope: BackgroundSubAgentScope) -> tuple[str, str, str]:
+        """Use the same physical scope boundary as persisted run records."""
+        return (
+            scope.tenant_id,
+            scope.agent_id,
+            str(scope.run_store_dir.resolve()),
+        )
+
     def _active_for_scope(
         self,
         scope: BackgroundSubAgentScope,
     ) -> dict[str, _ActiveRun]:
         return self._active.setdefault(
-            (scope.tenant_id, scope.agent_id),
+            self._scope_key(scope),
             {},
         )
 
@@ -620,22 +676,70 @@ class BackgroundSubAgentSupervisor:
         return process
 
     def _terminate_process_group(self, process: Any) -> None:
+        # Capture descendants before terminating the worker: independent Shell
+        # sessions stop being discoverable through it once they are orphaned.
         try:
-            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-        except Exception:
-            if hasattr(process, "terminate"):
-                process.terminate()
+            descendants = psutil.Process(process.pid).children(recursive=True)
+        except psutil.NoSuchProcess:
+            descendants = []
         try:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            except Exception:
+                if hasattr(process, "terminate"):
+                    process.terminate()
+            try:
+                process.wait(timeout=self._cancel_grace_seconds)
+                return
+            except subprocess.TimeoutExpired:
+                pass
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except Exception:
+                if hasattr(process, "kill"):
+                    process.kill()
             process.wait(timeout=self._cancel_grace_seconds)
-            return
-        except subprocess.TimeoutExpired:
-            pass
+        finally:
+            self._terminate_descendants(descendants)
+
+    def _terminate_descendants(
+        self,
+        descendants: list[psutil.Process],
+    ) -> None:
+        """Reap independent tool processes even when the worker exited first."""
+        for child in reversed(descendants):
+            try:
+                child.terminate()
+            except psutil.NoSuchProcess:
+                pass
+        _, alive = psutil.wait_procs(
+            descendants,
+            timeout=self._cancel_grace_seconds,
+        )
+        for child in alive:
+            try:
+                child.kill()
+            except psutil.NoSuchProcess:
+                pass
+        _, alive = psutil.wait_procs(
+            alive,
+            timeout=self._cancel_grace_seconds,
+        )
+        if any(self._descendant_is_alive(child) for child in alive):
+            raise subprocess.TimeoutExpired(
+                "SubAgent descendant cleanup",
+                self._cancel_grace_seconds,
+            )
+
+    @staticmethod
+    def _descendant_is_alive(process: psutil.Process) -> bool:
         try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-        except Exception:
-            if hasattr(process, "kill"):
-                process.kill()
-        process.wait(timeout=self._cancel_grace_seconds)
+            return (
+                process.is_running()
+                and process.status() != psutil.STATUS_ZOMBIE
+            )
+        except psutil.NoSuchProcess:
+            return False
 
     def _write_launch_spec(
         self,
