@@ -7,6 +7,8 @@ import {
   isExternalTokenEnabled,
 } from "../externalToken";
 import type {
+  ExpertBindingView,
+  ExpertBindingUpdate,
   ChatPage,
   ChatSpec,
   ChatHistory,
@@ -270,6 +272,20 @@ export const chatApi = {
   getChat: (chatId: string) =>
     request<ChatHistory>(`/chats/${encodeURIComponent(chatId)}`),
 
+  getExpertBinding: (chatId: string) =>
+    request<ExpertBindingView>(
+      `/chats/${encodeURIComponent(chatId)}/expert-binding`,
+    ),
+
+  updateExpertBinding: (chatId: string, update: ExpertBindingUpdate) =>
+    request<ExpertBindingView>(
+      `/chats/${encodeURIComponent(chatId)}/expert-binding`,
+      {
+        method: "PUT",
+        body: JSON.stringify(update),
+      },
+    ),
+
   createChatShare: (chatId: string, turnIds: string[]) =>
     request<ChatShareCreateResponse>(
       `/chats/${encodeURIComponent(chatId)}/share`,
@@ -400,9 +416,10 @@ export const chatApi = {
     });
   },
 
-  getSubAgentRuns: (chatId: string) =>
+  getSubAgentRuns: (chatId: string, signal?: AbortSignal) =>
     request<SubAgentRunSnapshot>(
       `/subagents/runs?chat_id=${encodeURIComponent(chatId)}`,
+      signal ? { signal } : undefined,
     ),
 
   cancelSubAgentRun: (chatId: string, runId: string) =>
@@ -419,10 +436,18 @@ export const chatApi = {
       `/goals/recent?chat_id=${encodeURIComponent(chatId)}`,
     ),
 
-  createGoal: (chatId: string, contract: GoalSnapshot["contract"]) =>
+  createGoal: (
+    chatId: string,
+    contract: GoalSnapshot["contract"],
+    enableSubagents = false,
+  ) =>
     request<GoalSnapshot>("/goals", {
       method: "POST",
-      body: JSON.stringify({ chat_id: chatId, contract }),
+      body: JSON.stringify({
+        chat_id: chatId,
+        contract,
+        enable_subagents: enableSubagents,
+      }),
     }),
 
   pauseGoal: (goalId: string, chatId: string) =>
@@ -470,14 +495,19 @@ export const chatApi = {
       },
     ),
 
-  enqueueGoalSteering: (goalId: string, chatId: string, content: string) =>
+  enqueueGoalSteering: (
+    goalId: string,
+    chatId: string,
+    content: string,
+    enableSubagents = false,
+  ) =>
     request<GoalSnapshot>(
       `/goals/${encodeURIComponent(
         goalId,
       )}/steering?chat_id=${encodeURIComponent(chatId)}`,
       {
         method: "POST",
-        body: JSON.stringify({ content }),
+        body: JSON.stringify({ content, enable_subagents: enableSubagents }),
       },
     ),
 };

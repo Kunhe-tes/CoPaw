@@ -45,6 +45,59 @@ class _Memory:
         self.content.append((msg, marks or []))
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "tool_input"),
+    [
+        ("remote_mutate", {}),
+        ("write_file", {}),
+        ("execute_shell_command", {"command": "pytest"}),
+    ],
+)
+async def test_plan_subagent_applies_plan_guard_to_mcp_and_builtin_tools(
+    tmp_path: Path,
+    tool_name: str,
+    tool_input: dict,
+) -> None:
+    policy = PermissionPolicy.bounded(
+        allow_tools=["write_file", "execute_shell_command"],
+    )
+    agent = _FakeGuardAgent(tmp_path, policy)
+    agent._request_context["plan_mode_enabled"] = True
+    agent._request_context["subagent_allowed_mcp_servers"] = ["remote"]
+    agent.mcp_servers = {"remote_mutate": "remote"}
+    denied = await agent._acting_policy_denial(
+        {"id": "call-1"},
+        tool_name,
+        tool_input,
+        include_budget=False,
+    )
+    assert denied is True
+    assert "Plan Mode" in str(agent.memory.content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("plan_enabled", "tool_name"),
+    [(True, "read_file"), (False, "remote_mutate")],
+)
+async def test_plan_subagent_allows_reads_and_normal_worker_keeps_mcp(
+    tmp_path: Path,
+    plan_enabled: bool,
+    tool_name: str,
+) -> None:
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent._request_context["plan_mode_enabled"] = plan_enabled
+    agent._request_context["subagent_allowed_mcp_servers"] = ["remote"]
+    agent.mcp_servers = {"remote_mutate": "remote"}
+    assert not await agent._acting_policy_denial(
+        {"id": "call-1"},
+        tool_name,
+        {},
+        include_budget=False,
+    )
+
+
 class _SelectedExpertSupervisor:
     def __init__(self) -> None:
         self.cancelled: list[tuple[object, str]] = []
@@ -836,10 +889,10 @@ def test_background_subagent_tools_require_explicit_intent(
     assert "delegate_to_subagent" not in visible_tools
 
 
-def test_background_subagent_tools_require_selected_expert(
+def test_background_subagent_tools_accept_keywords_or_selected_expert(
     tmp_path: Path,
 ) -> None:
-    """Only an explicit expert selection should unlock background subagents."""
+    """Current user intent and explicit expert selection unlock delegation."""
     hidden = _bare_agent(
         tmp_path,
         request_context={
@@ -856,16 +909,61 @@ def test_background_subagent_tools_require_selected_expert(
     )
 
     hidden_tools = SWEAgent._create_toolkit(hidden).tools
-    assert "start_subagent" not in hidden_tools
-    assert "wait_subagent" not in hidden_tools
-    assert "get_subagent" not in hidden_tools
-    assert "cancel_subagent" not in hidden_tools
+    assert "start_subagent" in hidden_tools
+    assert "wait_subagent" in hidden_tools
+    assert "get_subagent" in hidden_tools
+    assert "cancel_subagent" in hidden_tools
 
     visible_tools = SWEAgent._create_toolkit(visible).tools
     assert "start_subagent" in visible_tools
     assert "wait_subagent" in visible_tools
     assert "get_subagent" in visible_tools
     assert "cancel_subagent" in visible_tools
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_main_agent_passes_source_expert_discovery_to_catalog(
+    tmp_path: Path,
+    enabled: bool,
+) -> None:
+    from swe.app.subagents import AgentOwnedDefinitionRepository
+
+    repository = AgentOwnedDefinitionRepository(
+        tmp_path / "agents",
+        owner_scope="tenant-1/default",
+    )
+    package = repository.create(
+        {
+            "name": "reviewer",
+            "description": "Review code",
+            "instruction": "Review carefully",
+        },
+    )
+    repository.enable(
+        package.definition_id,
+        expected_revision=package.revision,
+    )
+    agent = _bare_agent(
+        tmp_path,
+        request_context={
+            "tenant_id": "tenant-1",
+            "current_user_text": "使用子代理",
+        },
+    )
+    source = EffectiveSourceSystemConfig(
+        source_id="portal",
+        config=SourceSystemConfig.model_validate(
+            {
+                "feature_switches": {
+                    "subagent_expert_discovery_enabled": enabled,
+                },
+            },
+        ),
+    )
+    with bind_source_system_config(source):
+        toolkit = SWEAgent._create_toolkit(agent)
+    description = toolkit.tools["start_subagent"].original_func.__doc__
+    assert ("reviewer: Review code" in description) is enabled
 
 
 def test_start_subagent_description_lists_selected_expert_definition(
@@ -1001,7 +1099,7 @@ def test_only_current_user_text_can_open_subagent_tools(
 def test_background_subagent_observe_tools_visible_with_active_runs(
     tmp_path: Path,
 ) -> None:
-    """Active runs do not bypass the explicit SubAgent intent gate."""
+    """Structured user intent exposes tools independently of active runs."""
 
     class _Supervisor:
         def has_active_runs(self, scope):
@@ -1018,10 +1116,10 @@ def test_background_subagent_observe_tools_visible_with_active_runs(
 
     tools = SWEAgent._create_toolkit(agent).tools
 
-    assert "start_subagent" not in tools
-    assert "wait_subagent" not in tools
-    assert "get_subagent" not in tools
-    assert "cancel_subagent" not in tools
+    assert "start_subagent" in tools
+    assert "wait_subagent" in tools
+    assert "get_subagent" in tools
+    assert "cancel_subagent" in tools
 
 
 def test_background_subagent_management_tools_require_fresh_intent(

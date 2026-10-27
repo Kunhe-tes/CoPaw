@@ -17,6 +17,10 @@ import {
 } from "@/pages/Chat/taskProgressEvents";
 import { emitSubAgentRunsRefreshIfPresent } from "@/pages/Chat/subAgentRunEvents";
 import {
+  readStopAppendMetadata,
+  stopAppendBubbleId,
+} from "@/pages/Chat/stopAppend";
+import {
   extractPlanInteractionCard,
   type ChatRuntimeResponseCardData,
 } from "@/pages/Chat/messageMeta";
@@ -25,7 +29,9 @@ import {
   type ChatRequestOwner,
 } from "./requestOwnership";
 import { createChatStreamAbortReason, isAbortLikeError } from "./abortReasons";
+import { readExpertBindingConflict } from "@/pages/Chat/useExpertBinding";
 import { emit } from "../../Context/useChatAnywhereEventEmitter";
+import { readChatStream, StreamRecoveryError } from "./streamRecovery";
 
 export const CONVERSATION_COMPACTION_EVENT = "conversation_compacted";
 
@@ -35,11 +41,13 @@ interface UseChatRequestOptions {
   hasMessage?: (id: string) => boolean;
   getCurrentSessionId: () => string;
   onFinish: (owner: ChatRequestOwner) => void;
+  onAdmissionRejected?: (owner: ChatRequestOwner) => void;
   applyRecoverySnapshot?: (
     history: unknown,
     owner: ChatRequestOwner,
   ) => void | Promise<void>;
   recoverAfterNotFound?: (owner: ChatRequestOwner) => void | Promise<void>;
+  onConnectionLost?: (owner: ChatRequestOwner, error: Error) => void;
 }
 
 function isTaskCancellationMessage(message: unknown) {
@@ -156,8 +164,10 @@ export default function useChatRequest(options: UseChatRequestOptions) {
     hasMessage = () => true,
     getCurrentSessionId,
     onFinish,
+    onAdmissionRejected,
     applyRecoverySnapshot,
     recoverAfterNotFound,
+    onConnectionLost,
   } = options;
   const apiOptions = useChatAnywhereOptions((v) => v.api);
 
@@ -274,6 +284,10 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           currentQARef.current.activeRequestOwner,
           owner,
         );
+      const isOwnerReplaced = () => {
+        const activeOwner = currentQARef.current.activeRequestOwner;
+        return Boolean(activeOwner && !isOwnerActive());
+      };
       let didFinish = false;
       const finishOnce = () => {
         if (didFinish) return;
@@ -354,6 +368,14 @@ export default function useChatRequest(options: UseChatRequestOptions) {
         }
         const data = await response.json().catch(() => ({}));
         if (!isOwnerActive()) {
+          return;
+        }
+        if (
+          response.status === 409 &&
+          readExpertBindingConflict(data) &&
+          onAdmissionRejected
+        ) {
+          onAdmissionRejected(owner);
           return;
         }
         const res = agentScopeRuntimeResponseBuilder.handle({
@@ -439,8 +461,23 @@ export default function useChatRequest(options: UseChatRequestOptions) {
       };
 
       try {
-        for await (const chunk of Stream({
-          readableStream: response.body,
+        for await (const chunk of readChatStream({
+          response,
+          owner,
+          decode: (nextResponse) =>
+            Stream({ readableStream: nextResponse.body! }),
+          isActive: isOwnerActive,
+          isReplaced: isOwnerReplaced,
+          reconnect: apiOptionsRef.current.reconnect
+            ? (after) =>
+                apiOptionsRef.current.reconnect!({
+                  session_id: owner.sessionId,
+                  signal: currentQARef.current.abortController?.signal,
+                  logical_session_id: owner.logicalSessionId,
+                  chat_id: owner.chatId,
+                  after_event_id: after,
+                })
+            : undefined,
         })) {
           if (chunk.event === "chat.snapshot" && chunk.data) {
             const responseParser =
@@ -448,12 +485,14 @@ export default function useChatRequest(options: UseChatRequestOptions) {
             const snapshot = getChatSnapshot(responseParser(chunk.data));
             if (
               snapshot &&
+              typeof snapshot.chat_id === "string" &&
               isOwnerActive() &&
               (!owner.chatId || snapshot.chat_id === owner.chatId)
             ) {
               if (typeof snapshot.msgid === "string") {
                 owner.msgid = snapshot.msgid;
               }
+              owner.chatId = snapshot.chat_id;
               await applyRecoverySnapshot?.(snapshot.history, owner);
               return;
             }
@@ -536,7 +575,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           if (streamedTaskProgress !== undefined) {
             emitTaskProgressUpdate(streamedTaskProgress, owner);
           }
-          emitSubAgentRunsRefreshIfPresent(chunkData);
+          emitSubAgentRunsRefreshIfPresent(chunkData, owner.chatId);
           const res = agentScopeRuntimeResponseBuilder.handle(chunkData);
           const isTerminalResponse =
             res.status === AgentScopeRuntimeRunStatus.Completed ||
@@ -552,6 +591,13 @@ export default function useChatRequest(options: UseChatRequestOptions) {
             continue;
           }
 
+          const appendedMessages = (res.output ?? []).flatMap((message) => {
+            const marker = readStopAppendMetadata(message);
+            return marker && message.content?.length
+              ? [{ message, marker }]
+              : [];
+          });
+
           const canUpdateLiveResponse = Boolean(
             currentQARef.current.response &&
               isOwnerActive() &&
@@ -563,6 +609,9 @@ export default function useChatRequest(options: UseChatRequestOptions) {
               extractPlanInteractionCard(res);
             const responseData = {
               ...withResponseHeaderMeta(res, responseHeaderTimestamp),
+              output: (res.output ?? []).filter(
+                (message) => !readStopAppendMetadata(message),
+              ),
               planReviewCard:
                 planInteractionCard?.card_type === "plan_review"
                   ? planInteractionCard
@@ -601,16 +650,46 @@ export default function useChatRequest(options: UseChatRequestOptions) {
 
             currentQARef.current.response.cards = cards;
 
-            if (
-              res.status === AgentScopeRuntimeRunStatus.Completed ||
-              res.status === AgentScopeRuntimeRunStatus.Failed ||
-              res.status === AgentScopeRuntimeRunStatus.Canceled
-            ) {
-              emitTaskProgressUpdate(null, owner);
-              finishOnce();
-            } else {
+            if (!isTerminalResponse || appendedMessages.length > 0) {
               updateMessage(currentQARef.current.response);
             }
+          }
+
+          // Publish the main body first. Only the UI bubble uses the persisted
+          // ID; runtime/content IDs stay intact for SSE builder aggregation.
+          for (const { message, marker } of appendedMessages) {
+            updateMessage({
+              id: stopAppendBubbleId(marker),
+              role: "assistant",
+              msgStatus:
+                message.status === AgentScopeRuntimeRunStatus.Completed
+                  ? "finished"
+                  : "generating",
+              cards: [
+                {
+                  code: "AgentScopeRuntimeResponseCard",
+                  data: {
+                    ...withResponseHeaderMeta(res, responseHeaderTimestamp),
+                    id: `response_${marker.message_id}`,
+                    output: [message],
+                    status: message.status,
+                  },
+                },
+              ],
+            });
+          }
+
+          if (
+            isTerminalResponse &&
+            (canUpdateLiveResponse || appendedMessages.length > 0)
+          ) {
+            if (!canUpdateLiveResponse && appendedMessages.length > 0) {
+              // Recovery history owns the body now; finish must not reinsert
+              // the obsolete live response through the controller callback.
+              currentQARef.current.response = undefined;
+            }
+            emitTaskProgressUpdate(null, owner);
+            finishOnce();
           }
         }
         if (
@@ -621,10 +700,14 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           finishOnce();
         }
       } catch (error) {
-        console.error(error);
         if (!isOwnerActive()) {
           return;
         }
+        if (error instanceof StreamRecoveryError && onConnectionLost) {
+          onConnectionLost(owner, error);
+          return;
+        }
+        console.error(error);
         if (
           currentQARef.current.response?.msgStatus === "interrupted" ||
           isAbortLikeError(error)
@@ -643,7 +726,9 @@ export default function useChatRequest(options: UseChatRequestOptions) {
       getResponseHeaderTimestamp,
       hasMessage,
       onFinish,
+      onAdmissionRejected,
       recoverAfterNotFound,
+      onConnectionLost,
       updateMessage,
     ],
   );
@@ -729,6 +814,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
             signal: abortSignal,
             logical_session_id: requestOwner.logicalSessionId,
             chat_id: requestOwner.chatId,
+            after_event_id: requestOwner.streamCursor,
           });
         } catch (error) {
           if (

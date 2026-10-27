@@ -46,6 +46,11 @@ import {
   type ChatInputReplaceTextPayload,
 } from "../chatInputDraft";
 
+import {
+  RUNTIME_INPUT_SET_CONTENT_EVENT,
+  type RuntimeInputRestorePayload,
+} from "../AgentScopeRuntimeWebUI/core/Chat/hooks/followUpSubmit";
+
 const RUNTIME_INPUT_UPLOAD_FILE_EVENT = "pasteFile";
 const WELCOME_INPUT_CARD_STYLE = {
   boxSizing: "border-box",
@@ -59,6 +64,7 @@ const PLACEHOLDER_OPTIONS = [
 ];
 
 interface WelcomeCenterLayoutProps {
+  disabled?: boolean;
   greeting?: string;
   placeholder?: string;
   beforeSubmit?: IAgentScopeRuntimeWebUISenderOptions["beforeSubmit"];
@@ -67,6 +73,7 @@ interface WelcomeCenterLayoutProps {
   onSubmit: (data: IAgentScopeRuntimeWebUIInputData) => void | Promise<void>;
   onScenarioPresetSubmit?: (scenarioPresetId: string) => void;
   skillMentions?: SkillMentionsData;
+  restoreDraft?: RuntimeInputRestorePayload;
 }
 
 function isSubmitCancelled(result: unknown): result is {
@@ -90,12 +97,13 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
     quickMenuItems,
     prefixItems,
     onScenarioPresetSubmit,
+    restoreDraft,
   } = props;
   const { t } = useTranslation();
   const inputState = useChatAnywhereInput((value) => ({
     disabled: Boolean(value.disabled),
   }));
-  const inputDisabled = Boolean(inputState.disabled);
+  const inputDisabled = Boolean(inputState.disabled) || Boolean(props.disabled);
   const [inputValue, setInputValue] = useState("");
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -116,7 +124,11 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
   const inputValueRef = useRef(inputValue);
   const fileListRef = useRef(fileList);
   const isSubmittingRef = useRef(false);
+  const restoredBizParamsRef =
+    useRef<IAgentScopeRuntimeWebUIInputData["biz_params"]>();
+  const restoreRevisionRef = useRef(0);
   const setCurrentInputValue = useCallback((value: string) => {
+    restoredBizParamsRef.current = undefined;
     inputValueRef.current = value;
     setInputValue(value);
   }, []);
@@ -133,6 +145,27 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
     },
     [],
   );
+  const restoreInput = useCallback(
+    (data: RuntimeInputRestorePayload) => {
+      if (typeof data?.content !== "string") return;
+      restoreRevisionRef.current += 1;
+      setCurrentInputValue(data.content);
+      if (data.fileList) setCurrentFileList(data.fileList);
+      restoredBizParamsRef.current = data.biz_params;
+    },
+    [setCurrentFileList, setCurrentInputValue],
+  );
+  useEffect(() => {
+    if (restoreDraft) restoreInput(restoreDraft);
+  }, [restoreDraft, restoreInput]);
+  useEffect(() => {
+    const restore = (event: Event) =>
+      restoreInput((event as CustomEvent<RuntimeInputRestorePayload>).detail);
+    document.addEventListener(RUNTIME_INPUT_SET_CONTENT_EVENT, restore);
+    return () =>
+      document.removeEventListener(RUNTIME_INPUT_SET_CONTENT_EVENT, restore);
+  }, [restoreInput]);
+
   const effectiveSkillMentions = useMemo<SkillMentionsData>(
     () =>
       skillMentions || {
@@ -186,9 +219,10 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
   }, [setCurrentInputValue]);
 
   const handleSend = useCallback(async () => {
-    if (isSubmittingRef.current) return;
+    if (inputDisabled || isSubmittingRef.current) return;
 
     const submittedInputValue = inputValueRef.current;
+    const submittedRestoreRevision = restoreRevisionRef.current;
     const promptDraft = submittedInputValue.trim();
     const capabilityMarker = selectedScenario
       ? `@${selectedScenario.capability.name}`
@@ -201,6 +235,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
     const inputData: IAgentScopeRuntimeWebUIInputData = {
       query,
       fileList: uploadedFiles,
+      biz_params: restoredBizParamsRef.current,
     };
 
     isSubmittingRef.current = true;
@@ -223,6 +258,8 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
       await Promise.resolve(
         onSubmit(typeof next === "object" ? next : inputData),
       );
+      if (restoreRevisionRef.current !== submittedRestoreRevision) return;
+      restoredBizParamsRef.current = undefined;
       if (inputValueRef.current === submittedInputValue) {
         setCurrentInputValue("");
       }
@@ -237,6 +274,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
     }
   }, [
     beforeSubmit,
+    inputDisabled,
     onScenarioPresetSubmit,
     onSubmit,
     selectedScenario,

@@ -91,6 +91,23 @@ class ChatManager:
             f"ChatManager created with repo path: {repo_path}",
         )
 
+    async def compare_and_set_expert_binding(
+        self,
+        chat_id: str,
+        expected_revision: int,
+        expert_id: str | None,
+    ):
+        """Delegate identity CAS to storage's cross-instance transaction."""
+        return await self._repo.compare_and_set_expert_binding(
+            chat_id,
+            expected_revision,
+            expert_id,
+        )
+
+    async def release_current_expert_binding(self, chat_id: str):
+        """Release the storage-current identity without a stale revision."""
+        return await self._repo.release_current_expert_binding(chat_id)
+
     # ----- Read Operations -----
 
     async def list_chats(
@@ -345,8 +362,17 @@ class ChatManager:
             ):
                 _keep_generated_title(existing, spec)
             spec.updated_at = datetime.now(timezone.utc)
-            await self._repo.upsert_chat(spec)
-            return spec
+            update = getattr(self._repo, "update_chat_if_exists", None)
+            if update is None:
+                if existing is None:
+                    raise KeyError(spec.id)
+                await self._repo.upsert_chat(spec)
+                updated = await self._repo.get_chat(spec.id)
+            else:
+                updated = await update(spec)
+            if updated is None:
+                raise KeyError(spec.id)
+            return updated
 
     async def update_chat_name(
         self,

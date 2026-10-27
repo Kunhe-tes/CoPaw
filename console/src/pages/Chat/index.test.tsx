@@ -44,6 +44,8 @@ const mocks = vi.hoisted(() => {
       id: "chat-real-created",
       meta: { plan_mode_enabled: true },
     })),
+    getExpertBinding: vi.fn(),
+    updateExpertBinding: vi.fn(),
     expertSelectorProps: null as Record<string, unknown> | null,
     listCronJobs: vi.fn(async () => []),
     listExperts: vi.fn(async () => []),
@@ -332,6 +334,8 @@ vi.mock("../../stores/iframeStore", () => {
 vi.mock("../../api/modules/chat", () => ({
   chatApi: {
     createChat: mocks.createChat,
+    getExpertBinding: mocks.getExpertBinding,
+    updateExpertBinding: mocks.updateExpertBinding,
     getSubAgentRuns: vi.fn(async () => ({
       chat_id: "chat-1",
       session_id: "chat-1",
@@ -693,12 +697,25 @@ describe("ChatPage plan mode wiring", () => {
     mocks.listExperts.mockResolvedValue([]);
     mocks.loadActiveModelData.mockClear();
     mocks.expertSelectorProps = null;
+    mocks.getExpertBinding.mockReset();
+    mocks.getExpertBinding.mockResolvedValue({
+      revision: 0,
+      expert_id: null,
+      enabled: false,
+      available: true,
+      expert_name: null,
+      reason: null,
+    });
+    mocks.updateExpertBinding.mockReset();
     mocks.setLoading.mockReset();
     mocks.getLoading.mockReset();
     mocks.getLoading.mockReturnValue(false);
     mocks.setSessionLoading.mockReset();
     mocks.setSessions.mockReset();
-    mocks.updateChat.mockClear();
+    mocks.updateChat.mockReset();
+    mocks.updateChat.mockImplementation(async (_chatId, payload) => ({
+      meta: payload.meta,
+    }));
     mocks.updateSession.mockClear();
     mocks.clearNavigationParams.mockReset();
     if (mocks.sessionApi) {
@@ -714,6 +731,401 @@ describe("ChatPage plan mode wiring", () => {
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+  });
+
+  it("restores persistent binding and submits its revision without clearing selection", async () => {
+    mocks.getExpertBinding.mockResolvedValue({
+      revision: 3,
+      expert_id: "expert-1",
+      enabled: true,
+      available: true,
+      expert_name: "绑定专家",
+      reason: null,
+    });
+    mocks.listExperts.mockResolvedValue([
+      {
+        definition_id: "expert-1",
+        enabled: true,
+        valid: true,
+        definition: { name: "绑定专家" },
+      },
+    ]);
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("", { status: 200 }));
+    render(<ChatPage />);
+    await waitFor(() =>
+      expect(mocks.expertSelectorProps?.selectedExpertId).toBe("expert-1"),
+    );
+    expect(mocks.expertSelectorProps?.persistent).toBe(true);
+    await act(async () => {
+      await mocks.capturedOptions?.api.fetch({
+        input: [{ role: "user", content: [{ type: "text", text: "你好" }] }],
+        session_id: "chat-1",
+      });
+    });
+    const body = JSON.parse(
+      fetchMock.mock.calls[fetchMock.mock.calls.length - 1]?.[1]
+        ?.body as string,
+    );
+    expect(body.expert_binding_revision).toBe(3);
+    expect(body.selected_expert_id).toBeUndefined();
+    expect(mocks.expertSelectorProps?.selectedExpertId).toBe("expert-1");
+  });
+
+  it.each(["/new", "/clear", "/reset"])(
+    "keeps expert authority until the server accepts %s",
+    async (command) => {
+      mocks.inputDisabled = false;
+      const bound = {
+        revision: 3,
+        expert_id: "expert-1",
+        enabled: true,
+        available: true,
+        expert_name: "专家",
+        reason: null,
+      };
+      mocks.getExpertBinding.mockResolvedValue(bound);
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response("", { status: 200 }));
+      render(<ChatPage />);
+      await waitFor(() =>
+        expect(mocks.expertSelectorProps?.selectedExpertId).toBe("expert-1"),
+      );
+      let submission: unknown;
+      await act(async () => {
+        submission = await mocks.capturedOptions?.sender?.beforeSubmit({
+          query: command,
+          fileList: [],
+        });
+      });
+      expect(submission).toMatchObject({
+        query: command,
+        biz_params: { expert_binding_revision: 3 },
+      });
+      expect(mocks.updateExpertBinding).not.toHaveBeenCalled();
+      expect(mocks.expertSelectorProps?.selectedExpertId).toBe("expert-1");
+      mocks.getExpertBinding.mockResolvedValue({
+        ...bound,
+        revision: 4,
+        expert_id: null,
+        expert_name: null,
+      });
+      await act(async () => {
+        await mocks.capturedOptions?.api.fetch({
+          input: [{ role: "user", content: [{ type: "text", text: command }] }],
+          session_id: "chat-1",
+        });
+      });
+      expect(fetchMock).toHaveBeenCalled();
+      await waitFor(() =>
+        expect(mocks.expertSelectorProps?.selectedExpertId).toBe(null),
+      );
+    },
+  );
+
+  it("restores text and attachment references on a send conflict and synchronizes the binding", async () => {
+    mocks.getExpertBinding.mockResolvedValue({
+      revision: 1,
+      expert_id: "expert-1",
+      enabled: true,
+      available: true,
+      expert_name: "专家一号",
+      reason: null,
+    });
+    const conflict = {
+      detail: {
+        code: "expert_binding_changed",
+        expert_binding: {
+          revision: 2,
+          expert_id: "other",
+          enabled: true,
+          available: true,
+          expert_name: "其他专家",
+          reason: null,
+        },
+      },
+    };
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async () =>
+        new Response(JSON.stringify(conflict), {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+    const restored = vi.fn();
+    document.addEventListener("agentscope-runtime:set-input-content", restored);
+    render(<ChatPage />);
+    await waitFor(() =>
+      expect(mocks.expertSelectorProps?.selectedExpertId).toBe("expert-1"),
+    );
+    const draft = {
+      query: "保留草稿",
+      fileList: [
+        { uid: "file-1", name: "附件.txt", response: { url: "file-ref" } },
+      ],
+    };
+    await act(async () => {
+      await mocks.capturedOptions?.sender.beforeSubmit(draft);
+    });
+    await act(async () => {
+      await mocks.capturedOptions?.api.fetch({
+        input: [
+          { role: "user", content: [{ type: "text", text: "保留草稿" }] },
+        ],
+        session_id: "chat-1",
+      });
+    });
+    await waitFor(() => expect(restored).toHaveBeenCalledTimes(1));
+    expect(restored.mock.calls[0][0].detail).toMatchObject({
+      content: draft.query,
+      fileList: draft.fileList,
+    });
+    expect(mocks.expertSelectorProps?.selectedExpertId).toBe("other");
+    const welcome = screen.getByTestId("chat-welcome");
+    await waitFor(() =>
+      expect(welcome.querySelector('[role="textbox"]')).toHaveTextContent(
+        draft.query,
+      ),
+    );
+    expect(welcome).toHaveTextContent("附件.txt");
+    document.removeEventListener(
+      "agentscope-runtime:set-input-content",
+      restored,
+    );
+  });
+
+  it.each(["计划模式", "目标模式"])(
+    "releases the persistent binding atomically with entering %s",
+    async (mode) => {
+      mocks.inputDisabled = false;
+      mocks.sessions[0].meta.plan_mode_enabled = false;
+      mocks.getExpertBinding.mockResolvedValueOnce({
+        revision: 1,
+        expert_id: "expert-1",
+        enabled: true,
+        available: true,
+        expert_name: "专家",
+        reason: null,
+      });
+      mocks.getExpertBinding.mockResolvedValue({
+        revision: 2,
+        expert_id: null,
+        enabled: true,
+        available: true,
+        expert_name: null,
+        reason: null,
+      });
+      render(<ChatPage />);
+      await waitFor(() =>
+        expect(mocks.expertSelectorProps?.selectedExpertId).toBe("expert-1"),
+      );
+      if (mode === "计划模式") {
+        await act(async () => {
+          await mocks.capturedOptions?.sender?.beforeSubmit({
+            query: "/plan",
+            fileList: [],
+          });
+        });
+      } else {
+        fireEvent.click(screen.getByRole("switch", { name: mode }));
+      }
+      await waitFor(() =>
+        expect(mocks.updateChat).toHaveBeenCalledWith("chat-1", {
+          meta: expect.objectContaining(
+            mode === "计划模式"
+              ? { plan_mode_enabled: true }
+              : { goal_mode_enabled: true, plan_mode_enabled: false },
+          ),
+        }),
+      );
+      expect(mocks.updateExpertBinding).not.toHaveBeenCalled();
+      await waitFor(() =>
+        expect(mocks.expertSelectorProps?.selectedExpertId).toBe(null),
+      );
+    },
+  );
+  it.each(["计划模式", "目标模式"])(
+    "keeps the binding when entering %s fails",
+    async (mode) => {
+      mocks.inputDisabled = false;
+      mocks.sessions[0].meta.plan_mode_enabled = false;
+      mocks.getExpertBinding.mockResolvedValue({
+        revision: 1,
+        expert_id: "expert-1",
+        enabled: true,
+        available: true,
+        expert_name: "专家",
+        reason: null,
+      });
+      mocks.updateExpertBinding.mockResolvedValue({
+        revision: 2,
+        expert_id: null,
+        enabled: true,
+        available: true,
+        expert_name: null,
+        reason: null,
+      });
+      mocks.updateChat.mockRejectedValueOnce(new Error("offline"));
+      render(<ChatPage />);
+      await waitFor(() =>
+        expect(mocks.expertSelectorProps?.selectedExpertId).toBe("expert-1"),
+      );
+      if (mode === "计划模式") {
+        await act(async () => {
+          await expect(
+            mocks.capturedOptions?.sender?.beforeSubmit({
+              query: "/plan",
+              fileList: [],
+            }),
+          ).rejects.toThrow("offline");
+        });
+      } else {
+        fireEvent.click(screen.getByRole("switch", { name: mode }));
+        await waitFor(() => expect(mocks.updateChat).toHaveBeenCalled());
+      }
+      expect(mocks.updateExpertBinding).not.toHaveBeenCalled();
+      expect(mocks.expertSelectorProps?.selectedExpertId).toBe("expert-1");
+      expect(screen.getByRole("switch", { name: mode })).toHaveAttribute(
+        "aria-checked",
+        "false",
+      );
+    },
+  );
+  it("creates and immediately binds an empty chat before sending any message", async () => {
+    mocks.pathname = "/chat";
+    mocks.currentSessionId = "";
+    mocks.sessions = [];
+    mocks.getChatIdForSession.mockReturnValue(null);
+    mocks.getExpertBinding.mockResolvedValue({
+      revision: 0,
+      expert_id: null,
+      enabled: true,
+      available: true,
+      expert_name: null,
+      reason: null,
+    });
+    mocks.updateExpertBinding.mockResolvedValue({
+      revision: 1,
+      expert_id: "expert-1",
+      enabled: true,
+      available: true,
+      expert_name: "专家",
+      reason: null,
+    });
+    mocks.listExperts.mockResolvedValue([
+      {
+        definition_id: "expert-1",
+        enabled: true,
+        valid: true,
+        definition: { name: "专家" },
+      },
+    ]);
+    render(<ChatPage />);
+    await waitFor(() => expect(mocks.expertSelectorProps).toBeTruthy());
+    await act(async () => {
+      await (mocks.expertSelectorProps?.onChange as (id: string) => void)(
+        "expert-1",
+      );
+    });
+    await waitFor(() =>
+      expect(mocks.updateExpertBinding).toHaveBeenCalledWith(
+        "chat-real-created",
+        { expected_revision: 0, expert_id: "expert-1" },
+      ),
+    );
+    expect(mocks.createChat).toHaveBeenCalledTimes(1);
+    expect(mocks.navigate).toHaveBeenCalledWith("/chat/chat-real-created", {
+      replace: true,
+    });
+  });
+  it("cancels an asynchronously prepared draft after switching chats", async () => {
+    mocks.inputDisabled = false;
+    mocks.sessions[0].meta.plan_mode_enabled = false;
+    let resolveUpdate!: (value: { meta: Record<string, unknown> }) => void;
+    mocks.updateChat.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveUpdate = resolve;
+        }),
+    );
+    const { rerender } = render(<ChatPage />);
+    await waitFor(() => expect(mocks.getExpertBinding).toHaveBeenCalled());
+    let prepared!: Promise<unknown>;
+    act(() => {
+      prepared = mocks.capturedOptions?.sender?.beforeSubmit({
+        query: "/plan retain this draft",
+        fileList: [],
+      });
+    });
+    await waitFor(() => expect(mocks.updateChat).toHaveBeenCalled());
+    mocks.pathname = "/chat/chat-2";
+    mocks.currentSessionId = "chat-2";
+    mocks.sessions = [
+      {
+        id: "chat-2",
+        realId: "chat-2",
+        sessionId: "chat-2",
+        name: "会话 2",
+        messages: [],
+        meta: { plan_mode_enabled: false },
+      },
+    ];
+    rerender(<ChatPage />);
+    await act(async () => {
+      resolveUpdate({ meta: { plan_mode_enabled: true } });
+      expect(await prepared).toBe(false);
+    });
+  });
+  it("blocks sending while a binding save is pending", async () => {
+    mocks.getExpertBinding.mockResolvedValue({
+      revision: 0,
+      expert_id: null,
+      enabled: true,
+      available: true,
+      expert_name: null,
+      reason: null,
+    });
+    mocks.listExperts.mockResolvedValue([
+      {
+        definition_id: "expert-1",
+        enabled: true,
+        valid: true,
+        definition: { name: "专家" },
+      },
+    ]);
+    let resolve!: (value: unknown) => void;
+    mocks.updateExpertBinding.mockReturnValue(
+      new Promise((r) => {
+        resolve = r;
+      }),
+    );
+    render(<ChatPage />);
+    await waitFor(() =>
+      expect(mocks.expertSelectorProps?.persistent).toBe(true),
+    );
+    act(() => {
+      (mocks.expertSelectorProps?.onChange as (id: string) => void)("expert-1");
+    });
+    let result: unknown;
+    await act(async () => {
+      result = await mocks.capturedOptions?.sender.beforeSubmit({
+        query: "不要发送",
+        fileList: [],
+      });
+    });
+    expect(result).toBe(false);
+    await act(async () =>
+      resolve({
+        revision: 1,
+        expert_id: "expert-1",
+        enabled: true,
+        available: true,
+        expert_name: "专家",
+        reason: null,
+      }),
+    );
   });
 
   it("新任务执行受理后不自动弹出操作进度，仍刷新任务列表", async () => {
@@ -969,6 +1381,53 @@ describe("ChatPage plan mode wiring", () => {
     expect(goalModeItem?.props.icon).toBeUndefined();
   });
 
+  it("clears server Goal draft intent when Goal Mode is disabled", async () => {
+    mocks.inputDisabled = false;
+    render(<ChatPage />);
+    const modeItem = () => {
+      const quickItems = React.Children.toArray(
+        mocks.capturedOptions?.sender?.quickMenuItems,
+      ) as React.ReactElement[];
+      return (
+        React.Children.toArray(
+          quickItems[0].props.children,
+        ) as React.ReactElement[]
+      ).find((item) => item.props.label === "目标");
+    };
+    act(() => modeItem()?.props.extra.props.onChange(true));
+    mocks.updateChat.mockClear();
+    await act(async () => modeItem()?.props.extra.props.onChange(false));
+    expect(mocks.updateChat).toHaveBeenCalledWith("chat-1", {
+      meta: { goal_mode_enabled: false },
+    });
+  });
+
+  it("clears Goal draft authority when entering Plan Mode with slash command", async () => {
+    mocks.inputDisabled = false;
+    mocks.sessions[0].meta.plan_mode_enabled = false;
+    render(<ChatPage />);
+    const quickItems = React.Children.toArray(
+      mocks.capturedOptions?.sender?.quickMenuItems,
+    ) as React.ReactElement[];
+    const goalModeItem = (
+      React.Children.toArray(
+        quickItems[0].props.children,
+      ) as React.ReactElement[]
+    ).find((item) => item.props.label === "目标");
+    await act(async () => goalModeItem?.props.extra.props.onChange(true));
+    mocks.updateChat.mockClear();
+    await act(async () => {
+      await mocks.capturedOptions?.sender?.beforeSubmit({
+        query: "/plan",
+        fileList: [],
+      });
+    });
+    expect(mocks.updateChat).toHaveBeenCalledWith("chat-1", {
+      meta: { goal_mode_enabled: false, plan_mode_enabled: true },
+    });
+    expect(mocks.updateChat).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps Goal Mode selected after submitting a goal request", async () => {
     mocks.inputDisabled = false;
     const fetchMock = vi.fn(
@@ -1070,7 +1529,9 @@ describe("ChatPage plan mode wiring", () => {
     fireEvent.click(screen.getByRole("button", { name: "选择专家" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "专家一号" })).toBeEnabled();
+      screen
+        .getAllByRole("button", { name: "专家一号" })
+        .forEach((button) => expect(button).toBeEnabled());
       const quickMenuItems = React.Children.toArray(
         mocks.capturedOptions?.sender?.quickMenuItems,
       ) as Array<React.ReactElement<{ icon?: React.ReactNode; label: string }>>;

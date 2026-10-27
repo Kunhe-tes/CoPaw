@@ -141,3 +141,39 @@ describe("ExpertSelector inline menu", () => {
     expect(mocks.listExperts).not.toHaveBeenCalled();
   });
 });
+
+it("offers default Agent in persistent mode and keeps the selected expert on repeat click", () => {
+  const onChange = vi.fn();
+  render(
+    <ExpertSelector
+      experts={[{ id: "e", name: "专家", description: "" }]}
+      persistent
+      selectedExpertId="e"
+      planModeEnabled={false}
+      onChange={onChange}
+      onDisablePlanMode={vi.fn()}
+      inline
+    />,
+  );
+  fireEvent.click(screen.getByRole("menuitem", { name: "专家" }));
+  expect(onChange).toHaveBeenLastCalledWith("e");
+  fireEvent.click(screen.getByRole("menuitem", { name: /默认 Agent/ }));
+  expect(onChange).toHaveBeenLastCalledWith(null);
+});
+it("shows an unavailable bound identity even when filtered from the selectable list", () => {
+  render(
+    <ExpertSelector
+      experts={[]}
+      persistent
+      selectedExpertId="old-id"
+      boundExpertName="已撤回专家"
+      unavailable
+      planModeEnabled={false}
+      onChange={vi.fn()}
+      onDisablePlanMode={vi.fn()}
+      inline
+    />,
+  );
+  expect(screen.getByText(/已撤回专家.*不可用/)).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: /已撤回专家/ })).toBeDisabled();
+});

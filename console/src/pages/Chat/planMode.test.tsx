@@ -13,6 +13,7 @@ import {
   PlanModeMenuItem,
   getPlanModeEnabled,
   getScopedPlanModeEnabled,
+  buildPlanModeMeta,
   persistPlanModeState,
   preparePlanModeSubmit,
   resolveActivePlanModeSession,
@@ -20,6 +21,28 @@ import {
 import quickMenuStyles from "@/components/agentscope-chat/ComposerQuickMenu/index.module.less";
 
 describe("Plan Mode frontend helpers", () => {
+  it("omits server-owned Goal draft authority from chat patches", () => {
+    expect(
+      buildPlanModeMeta(
+        {
+          goal_draft_subagent_delegation_enabled: true,
+          title: "preserved",
+        },
+        true,
+      ),
+    ).toEqual({ title: "preserved", plan_mode_enabled: true });
+  });
+  it("omits server-owned expert identity from mode patches", () => {
+    expect(
+      buildPlanModeMeta(
+        {
+          expert_main_binding: { revision: 2, expert_id: "expert" },
+          title: "preserved",
+        },
+        true,
+      ),
+    ).toEqual({ title: "preserved", plan_mode_enabled: true });
+  });
   afterEach(() => {
     cleanup();
     vi.useRealTimers();

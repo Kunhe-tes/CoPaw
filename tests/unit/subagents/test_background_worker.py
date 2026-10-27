@@ -151,6 +151,33 @@ def test_launch_spec_filters_secret_like_context(tmp_path):
     assert "secret" not in payload
 
 
+@pytest.mark.parametrize("enabled", [True, False, "false"])
+def test_launch_spec_preserves_boolean_plan_restriction(tmp_path, enabled):
+    from swe.app.subagents.models import SubAgentDefinition
+
+    spec = WorkerLaunchSpec(
+        run_id="subagent-test",
+        run_store_dir=str(tmp_path / "runs"),
+        workspace_dir=str(tmp_path),
+        parent_agent_config={},
+        definition=SubAgentDefinition(
+            name="researcher",
+            source="run_scoped",
+            owner_scope="run:test",
+            instruction="Research",
+            description="Research task",
+        ),
+        delegation_spec=_spec(),
+        effective_policy=PermissionPolicy.readonly(),
+        request_context={
+            "plan_mode_enabled": enabled,
+            "enable_subagents": True,
+        },
+    )
+    assert spec.request_context["plan_mode_enabled"] is (enabled is True)
+    assert "enable_subagents" not in spec.request_context
+
+
 def test_launch_spec_removes_full_parent_mcp_configuration(tmp_path) -> None:
     """Only the private one-shot snapshot may carry MCP credentials."""
     spec = WorkerLaunchSpec(

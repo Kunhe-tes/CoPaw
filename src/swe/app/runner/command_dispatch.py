@@ -21,6 +21,7 @@ from .daemon_commands import (
     parse_daemon_query,
 )
 from ...agents.command_handler import CommandHandler
+from ...agents.memory.expert_main_memory import ExpertMainMemoryManager
 from ...config.config import load_agent_config
 
 logger = logging.getLogger(__name__)
@@ -246,11 +247,29 @@ async def _run_conversation_command(
     memory_state = session_state.get("agent", {}).get("memory", {})
     memory.load_state_dict(memory_state, strict=False)
 
+    expert = bool(
+        getattr(runner, "_get_expert_main_execution", lambda _: None)(request)
+        or (getattr(request, "channel_meta", None) or {}).get(
+            "_expert_main_reset",
+        ),
+    )
+    command = query.strip().split(maxsplit=1)[0]
+    if expert and command in {
+        "/long_term_memory",
+        "/await_summary",
+    }:
+        yield _command_error("专家主执行不使用 Profile 长期记忆。"), True
+        return
+    manager = runner.memory_manager
+    if expert:
+        if hasattr(memory, "_long_term_memory"):
+            memory._long_term_memory = ""
+        manager = ExpertMainMemoryManager(manager)
     conv_handler = CommandHandler(
         agent_name="Friday",
         memory=memory,
-        memory_manager=runner.memory_manager,
-        enable_memory_manager=runner.memory_manager is not None,
+        memory_manager=manager,
+        enable_memory_manager=manager is not None,
         request_context={
             "session_id": context.session_id,
             "user_id": context.user_id,

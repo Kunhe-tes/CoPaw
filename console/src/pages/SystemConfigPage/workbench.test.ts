@@ -9,6 +9,29 @@ import {
 } from "./workbench";
 
 describe("source-system configuration workbench", () => {
+  it("tracks expert main drafts and saved overrides under conversation", () => {
+    const config = {
+      feature_switches: { expert_as_main_enabled: true },
+    };
+    const summaries = buildCapabilitySummaries({
+      savedConfig: {},
+      draftConfig: config,
+      effectiveConfig: {},
+    });
+    expect(
+      filterCapabilitySummaries(summaries, "unsaved").map(({ id }) => id),
+    ).toEqual(["conversation"]);
+    const saved = buildCapabilitySummaries({
+      savedConfig: config,
+      draftConfig: config,
+      effectiveConfig: config,
+    });
+    expect(saved.find(({ id }) => id === "conversation")).toMatchObject({
+      state: "custom",
+      sourceLabel: "已自定义",
+    });
+  });
+
   it("marks only the changed capability as unsaved", () => {
     const summaries = buildCapabilitySummaries({
       savedConfig: {},

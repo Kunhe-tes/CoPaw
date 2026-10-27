@@ -18,6 +18,7 @@ import useSuggestionsPolling from "./useSuggestionsPolling";
 import { useChatAnywhereOptions } from "../../Context/ChatAnywhereOptionsContext";
 import { ChatAnywhereMessagesContext } from "../../Context/ChatAnywhereMessagesContext";
 import ReactDOM from "react-dom";
+import { message } from "antd";
 import {
   FollowUpSubmitCoordinator,
   FOLLOW_UP_SUBMIT_FAILED_EVENT,
@@ -25,6 +26,7 @@ import {
   type FollowUpSubmitData,
 } from "./followUpSubmit";
 import { emitTaskProgressUpdate } from "@/pages/Chat/taskProgressEvents";
+import { emitSubAgentRunsRefresh } from "@/pages/Chat/subAgentRunEvents";
 import { shouldEnqueueFollowUpSubmission } from "./followUpSubmitState";
 import type { CurrentQARef } from "./currentQARef";
 import {
@@ -111,6 +113,7 @@ export default function useChatController() {
         return;
       }
       setSessionNotFound?.(false);
+      emitSubAgentRunsRefresh(owner.chatId, true);
       currentQARef.current.activeRequestOwner = undefined;
       currentQARef.current.abortController = undefined;
       currentQARef.current.response = undefined;
@@ -162,7 +165,10 @@ export default function useChatController() {
     ) => {
       const ownerIsActive =
         !owner ||
-        isActiveChatRequestOwner(currentQARef.current.activeRequestOwner, owner);
+        isActiveChatRequestOwner(
+          currentQARef.current.activeRequestOwner,
+          owner,
+        );
       if (!currentQARef.current.response) {
         if (ownerIsActive && !currentQARef.current.stopPending) {
           setLoading(false);
@@ -211,6 +217,35 @@ export default function useChatController() {
     hasMessage: messageHandler.hasMessage,
     getCurrentSessionId: sessionHandler.getCurrentSessionId,
     onFinish: (owner) => finishResponse("finished", owner),
+    onAdmissionRejected: (owner) => {
+      if (
+        !isActiveChatRequestOwner(
+          currentQARef.current.activeRequestOwner,
+          owner,
+        )
+      )
+        return;
+      const rejectedIds = [
+        currentQARef.current.request?.id,
+        currentQARef.current.response?.id,
+      ];
+      rejectedIds.forEach((id) => {
+        if (id) messageHandler.removeMessageById(id);
+      });
+      currentQARef.current.request = undefined;
+      currentQARef.current.response = undefined;
+      sessionHandler.syncSessionMessagesForSession(
+        owner.sessionId,
+        messageHandler.getMessages(),
+        false,
+        { refreshList: false },
+      );
+      finishResponse("finished", owner);
+    },
+    onConnectionLost: (owner, error) => {
+      message.warning(error.message);
+      finishResponse("interrupted", owner);
+    },
     applyRecoverySnapshot,
     recoverAfterNotFound,
   });

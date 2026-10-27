@@ -43,6 +43,11 @@ from .tool_failure import (
     build_failed_tool_result_block,
 )
 from ..security.tool_guard.models import TOOL_GUARD_DENIED_MARK
+from ..security.shell_installation_policy import (
+    SHELL_TOOL_NAMES,
+    UNCHECKABLE_COMMAND,
+    shell_installation_denial,
+)
 from ..tracing import has_trace_manager, get_trace_manager, get_current_trace
 
 logger = logging.getLogger(__name__)
@@ -1482,6 +1487,48 @@ class ToolGuardMixin:
         finally:
             self._active_tool_guard_acting_tasks.discard(task)
 
+    async def _acting_shell_installation_denial(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> bool:
+        """Enforce platform shell policy independently of approvals/config."""
+        if tool_name not in SHELL_TOOL_NAMES:
+            return False
+        # Missing required arguments still go through ordinary tool validation.
+        command = tool_input.get("command", "")
+        reason = (
+            shell_installation_denial(command)
+            if isinstance(command, str)
+            else UNCHECKABLE_COMMAND
+        )
+        if reason is None:
+            return False
+        message = Msg(
+            "system",
+            [
+                ToolResultBlock(
+                    **build_failed_tool_result_block(
+                        tool_call_id=tool_call["id"],
+                        tool_name=tool_name,
+                        error_type="shell_policy_denied",
+                        detail=reason,
+                        governance_status="blocked",
+                    ),
+                ),
+            ],
+            "system",
+        )
+        attach_tool_governance_message_metadata(
+            message,
+            tool_call_id=tool_call["id"],
+            governance_status="blocked",
+        )
+        await self.print(message, True)
+        await self.memory.add(message)
+        return True
+
     async def _acting_policy_denial(
         self,
         tool_call: dict[str, Any],
@@ -1493,10 +1540,20 @@ class ToolGuardMixin:
         """Enforce Plan Mode and SubAgent policy before executing a tool."""
         request_context = getattr(self, "_request_context", {}) or {}
         agent_role = request_context.get("agent_role", "main")
-        reason: str | None = None
-        if agent_role != "subagent":
-            reason = self._plan_mode_policy_denial(tool_name, tool_input)
-        elif agent_role == "subagent":
+        reason = self._plan_mode_policy_denial(tool_name, tool_input)
+        if reason is None and request_context.get("expert_main_execution"):
+            from ..app.runner.expert_main_runtime import (
+                expert_main_policy_reason,
+            )
+
+            reason = expert_main_policy_reason(
+                self,
+                tool_name,
+                tool_input,
+                include_budget=include_budget,
+                tool_call_id=str(tool_call.get("id") or ""),
+            )
+        if reason is None and agent_role == "subagent":
             policy_payload = request_context.get("subagent_policy")
             if not isinstance(policy_payload, dict):
                 reason = "missing SubAgent effective policy"
@@ -1609,6 +1666,12 @@ class ToolGuardMixin:
                 tool_name,
                 pre_hook_result.reason or "Hook requested stop",
             )
+        if await self._acting_shell_installation_denial(
+            tool_call,
+            tool_name,
+            tool_input,
+        ):
+            return tool_call, tool_input, True, None
         if pre_hook_result.decision in {
             HookDecision.BLOCK,
             HookDecision.DENY,
@@ -1696,6 +1759,13 @@ class ToolGuardMixin:
         # Resolve mcp_server from toolkit registration since tool_call dict
         # (agentscope ToolUseBlock) does not carry mcp_server.
         mcp_server = self._resolve_mcp_server(tool_name)
+
+        if await self._acting_shell_installation_denial(
+            tool_call,
+            tool_name,
+            tool_input,
+        ):
+            return None
 
         if await self._acting_policy_denial(
             tool_call,
@@ -1858,7 +1928,23 @@ class ToolGuardMixin:
         engine = self._tool_guard_engine
         tool_name = str(tool_call.get("name", ""))
         tool_input = tool_call.get("input", {})
-        if not tool_name or not engine.enabled:
+        if not tool_name:
+            return None
+
+        context = getattr(self, "_request_context", {}) or {}
+        if context.get("expert_main_execution"):
+            from ..app.runner.expert_main_runtime import (
+                expert_main_approval_action,
+            )
+
+            expert_action = await expert_main_approval_action(
+                self,
+                tool_name,
+                tool_input,
+            )
+            if expert_action is not None:
+                return expert_action
+        if not engine.enabled:
             return None
 
         if engine.is_denied(tool_name):
@@ -1954,7 +2040,8 @@ class ToolGuardMixin:
         executable_tool_call.pop(OPERATION_GROUP_INTERNAL_FIELD, None)
         if action is not None:
             return await self._execute_guard_action(
-                action, executable_tool_call
+                action,
+                executable_tool_call,
             )
         return await self._run_tool_call_with_hard_timeout(
             executable_tool_call,
@@ -2124,6 +2211,9 @@ class ToolGuardMixin:
         if chat_id and msgid:
             extra["chat_id"] = chat_id
             extra["msgid"] = msgid
+        execution_identity = self._request_context.get("execution_identity")
+        if isinstance(execution_identity, dict):
+            extra["execution_identity"] = dict(execution_identity)
         if hook_ask_handler_ids:
             extra["hook_ask_handler_ids"] = list(hook_ask_handler_ids)
         if original_msg is not None:
@@ -2327,6 +2417,9 @@ class ToolGuardMixin:
             ):
                 return await self._emit_waiting_for_approval()
 
+        from ..app.runner.expert_main_runtime import consume_expert_reasoning
+
+        consume_expert_reasoning(self._request_context)
         return await super()._reasoning(  # type: ignore[misc]
             tool_choice=tool_choice,
         )

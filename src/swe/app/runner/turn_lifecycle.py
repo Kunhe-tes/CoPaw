@@ -18,6 +18,8 @@ from .assistant_response import (
 )
 from ...agents.tool_guard_mixin import PreToolUseTerminalStop
 from ...agents.hook_runtime.models import HookDecision, MergedHookResult
+from ..subagents.intent import has_subagent_intent
+from ...runtime_workers import run_runtime_state_work
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +104,8 @@ class TurnLifecycleOwner(Protocol):
     def _build_stop_follow_up_msg(self, reason: str) -> Msg: ...
 
     def _build_stop_incomplete_msg(self, reason: str) -> Msg: ...
+
+    def _stream_stop_appended_messages(self, **kwargs: Any) -> Any: ...
 
 
 async def stream_agent_turns(
@@ -256,7 +260,15 @@ async def _resolve_implicit_goal_steering(
         )
     steering_message = plan.original_user_message.strip()
     if steering_message:
-        await service.enqueue_steering(active_goal.goal_id, steering_message)
+        context = getattr(runtime.agent, "_request_context", {})
+        await service.enqueue_steering(
+            active_goal.goal_id,
+            steering_message,
+            enable_subagents=has_subagent_intent(
+                steering_message,
+                context.get("enable_subagents", False),
+            ),
+        )
     return Msg(
         name="Friday",
         role="assistant",
@@ -287,10 +299,16 @@ async def _begin_goal_turn(
                 role="assistant",
                 content="The requested Goal is not available in this chat.",
             )
-        msgid = str(
-            getattr(runtime.agent, "_request_context", {}).get("msgid") or "",
-        ).strip()
-        return service, await service.begin_turn(goal_id, msgid=msgid or None)
+        context = getattr(runtime.agent, "_request_context", {})
+        msgid = str(context.get("msgid") or "").strip()
+        return service, await service.begin_turn(
+            goal_id,
+            msgid=msgid or None,
+            enable_subagents=has_subagent_intent(
+                context.get("current_user_text"),
+                context.get("enable_subagents", False),
+            ),
+        )
     except ValueError:
         state = getattr(getattr(current_goal, "state", None), "value", None)
         return Msg(
@@ -303,13 +321,16 @@ async def _begin_goal_turn(
         )
 
 
-def _prepare_goal_turn_context(
+async def _prepare_goal_turn_context(
     owner: TurnLifecycleOwner,
     *,
     runtime: Any,
     goal: Any,
 ) -> None:
     request_context = getattr(runtime.agent, "_request_context", {})
+    request_context["enable_subagents"] = bool(
+        getattr(goal, "subagent_delegation_enabled", False),
+    )
     request_context["goal_contract_context"] = (
         owner._build_goal_contract_context(
             goal,
@@ -318,6 +339,30 @@ def _prepare_goal_turn_context(
     request_context.pop("goal_turn_resolution", None)
     request_context.pop("_goal_turn_environment_changed", None)
     request_context["_goal_turn_tool_observations"] = []
+    refresh = getattr(runtime.agent, "refresh_background_subagent_tools", None)
+    if refresh is not None:
+        await _refresh_goal_subagent_tools(owner, goal, refresh)
+
+
+async def _refresh_goal_subagent_tools(
+    owner: TurnLifecycleOwner,
+    goal: Any,
+    refresh: Any,
+) -> None:
+    """Refresh only delegation tools with this turn's Source configuration."""
+    from ..source_system_config.runtime import bind_source_system_config
+
+    workspace = getattr(owner, "_workspace", None)
+    resolver = getattr(workspace, "_source_system_config_service", None)
+    if resolver is None:
+        await run_runtime_state_work(refresh)
+        return
+    config = await resolver.resolve_config(
+        goal.scope.source_id,
+        force_refresh=True,
+    )
+    with bind_source_system_config(config):
+        await run_runtime_state_work(refresh)
 
 
 async def _settle_goal_turn(
@@ -556,6 +601,14 @@ async def _stream_goal_finalization(
                 outcome.assistant_response,
             )
             yield finalization_msg, True
+            async for item in _stream_approved_appends(
+                owner,
+                request=request,
+                runtime=runtime,
+                plan=plan,
+                outcome=outcome,
+            ):
+                yield item
         return
 
 
@@ -580,7 +633,14 @@ async def _stream_goal_completion_lifecycle(
             yield started, True
             return
         service, goal = started
-        _prepare_goal_turn_context(owner, runtime=runtime, goal=goal)
+        try:
+            await _prepare_goal_turn_context(owner, runtime=runtime, goal=goal)
+        except (Exception, asyncio.CancelledError):
+            await service.abandon_turn(
+                goal_id,
+                "Goal turn context preparation failed",
+            )
+            raise
         outcome.stop_hook_active = False
         async for msg, last in _stream_one_goal_turn(
             owner,
@@ -649,6 +709,7 @@ async def _resolve_goal_finalization_stop_gate(
     outcome: Any,
 ) -> tuple[bool, Msg | None, str | None]:
     """Apply Stop to formal Goal delivery without reopening Goal execution."""
+    outcome.stop_append_approved = False
     stop_result = await owner._emit_stop_hook_if_needed(
         request=request,
         runtime=runtime,
@@ -656,6 +717,7 @@ async def _resolve_goal_finalization_stop_gate(
         outcome=outcome,
     )
     if stop_result is None or stop_result.decision != HookDecision.BLOCK:
+        outcome.stop_append_approved = bool(outcome.stop_hook_active)
         outcome.stop_hook_active = False
         return False, None, None
     reason = (
@@ -688,6 +750,7 @@ async def _resolve_stop_gate(
     plan: Any,
     outcome: Any,
 ) -> tuple[bool, Msg | None]:
+    outcome.stop_append_approved = False
     stop_result = await owner._emit_stop_hook_if_needed(
         request=request,
         runtime=runtime,
@@ -695,6 +758,7 @@ async def _resolve_stop_gate(
         outcome=outcome,
     )
     if stop_result is None or stop_result.decision != HookDecision.BLOCK:
+        outcome.stop_append_approved = bool(outcome.stop_hook_active)
         outcome.stop_hook_active = False
         return False, None
     reason = (
@@ -781,7 +845,35 @@ async def _stream_standard_completion_lifecycle(
                     outcome.assistant_response,
                 )
                 yield final_message, True
+        if incomplete_msg is None:
+            async for item in _stream_approved_appends(
+                owner,
+                request=request,
+                runtime=runtime,
+                plan=plan,
+                outcome=outcome,
+            ):
+                yield item
         return
+
+
+async def _stream_approved_appends(
+    owner: TurnLifecycleOwner,
+    *,
+    request: AgentRequest,
+    runtime: Any,
+    plan: Any,
+    outcome: Any,
+) -> AsyncGenerator[tuple[Msg, bool], None]:
+    append = getattr(owner, "_stream_stop_appended_messages", None)
+    if getattr(outcome, "stop_append_approved", False) and callable(append):
+        async for item in append(
+            request=request,
+            runtime=runtime,
+            plan=plan,
+            outcome=outcome,
+        ):
+            yield item
 
 
 def _is_bufferable_assistant_text(msg: Msg) -> bool:

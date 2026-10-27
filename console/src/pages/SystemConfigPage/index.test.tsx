@@ -156,6 +156,57 @@ describe("SystemConfigPage", () => {
     expect(screen.queryByText(/Source/)).toBeNull();
   });
 
+  it("saves expert discovery and reloads it only for its source", async () => {
+    const enabledRecord = {
+      source_id: "portal",
+      config: {
+        feature_switches: { subagent_expert_discovery_enabled: true },
+      },
+      version: 1,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: null,
+    };
+    mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue(enabledRecord);
+    const first = render(<SystemConfigPage />);
+    await waitFor(() => {
+      expect(getSwitchByTitle("允许自主选择我的专家")).toBeEnabled();
+    });
+    expect(getSwitchByTitle("允许自主选择我的专家")).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
+    fireEvent.click(getSwitchByTitle("允许自主选择我的专家"));
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+    await waitFor(() => {
+      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
+        config: enabledRecord.config,
+      });
+    });
+    first.unmount();
+    mocks.sourceSystemConfigApi.getCurrent.mockResolvedValue(enabledRecord);
+    render(<SystemConfigPage />);
+    await waitFor(() => {
+      expect(getSwitchByTitle("允许自主选择我的专家")).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+    });
+    mocks.sourceSystemConfigApi.getCurrent.mockResolvedValue({
+      ...enabledRecord, source_id: "workspace", config: {}, version: 0,
+    });
+    act(() => {
+      useIframeStore.getState().setContext({ source: "workspace" });
+    });
+    await waitFor(() => {
+      expect(getSwitchByTitle("允许自主选择我的专家")).toBeEnabled();
+      expect(getSwitchByTitle("允许自主选择我的专家")).toHaveAttribute(
+        "aria-checked",
+        "false",
+      );
+    });
+  });
+
   it("loads current-source config and saves switch changes", async () => {
     mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
       source_id: "portal",

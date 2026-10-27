@@ -15,6 +15,14 @@ from pathlib import Path
 from swe.runtime_workers import run_runtime_state_work
 
 from .base import BaseChatRepository
+from ..expert_binding import (
+    EXPERT_BINDING_META_KEY,
+    ChatExpertBinding,
+    ExpertBindingConflict,
+    ExpertBindingModeConflict,
+    is_ordinary_chat,
+    read_expert_binding,
+)
 from ...channels.schema import DEFAULT_CHANNEL
 from ..models import ChatSpec, ChatsFile
 
@@ -394,19 +402,142 @@ class JsonChatRepository(BaseChatRepository):
             )
             return snapshot_state, spec.model_copy(deep=True), True
 
-    def _upsert_chat_sync(self, spec: ChatSpec) -> _SnapshotState | None:
+    def _upsert_chat_sync(
+        self,
+        spec: ChatSpec,
+        *,
+        require_existing: bool = False,
+    ) -> _SnapshotState | None:
         with self._write_lock_sync():
             _, chats_file = self._load_sync()
             for index, existing in enumerate(chats_file.chats):
                 if existing.id == spec.id:
-                    chats_file.chats[index] = spec.model_copy(deep=True)
+                    updated = spec.model_copy(deep=True)
+                    binding = read_expert_binding(existing)
+                    if binding.expert_id and not is_ordinary_chat(updated):
+                        binding = ChatExpertBinding(
+                            revision=binding.revision + 1,
+                        )
+                    if (
+                        EXPERT_BINDING_META_KEY in existing.meta
+                        or binding.revision
+                    ):
+                        updated.meta[EXPERT_BINDING_META_KEY] = (
+                            binding.model_dump()
+                        )
+                    else:
+                        updated.meta.pop(EXPERT_BINDING_META_KEY, None)
+                    chats_file.chats[index] = updated
                     break
             else:
+                if require_existing:
+                    return None
                 chats_file.chats.append(spec.model_copy(deep=True))
             return self._save_and_prepare_snapshot_sync(
                 chats_file,
                 already_locked=True,
             )
+
+    def _compare_and_set_expert_binding_sync(
+        self,
+        chat_id: str,
+        expected_revision: int,
+        expert_id: str | None,
+    ):
+        from datetime import datetime, timezone
+
+        with self._write_lock_sync():
+            _, chats_file = self._load_sync()
+            chat = next(
+                (item for item in chats_file.chats if item.id == chat_id),
+                None,
+            )
+            if chat is None:
+                raise KeyError(chat_id)
+            current = read_expert_binding(chat)
+            if current.revision != expected_revision:
+                raise ExpertBindingConflict(current)
+            if expert_id is not None and not is_ordinary_chat(chat):
+                raise ExpertBindingModeConflict(
+                    "Expert main execution requires ordinary Chat",
+                )
+            binding = ChatExpertBinding(
+                revision=current.revision + 1,
+                expert_id=expert_id,
+            )
+            chat.meta[EXPERT_BINDING_META_KEY] = binding.model_dump()
+            chat.updated_at = datetime.now(timezone.utc)
+            snapshot = self._save_and_prepare_snapshot_sync(
+                chats_file,
+                already_locked=True,
+            )
+            return snapshot, binding
+
+    def _release_current_expert_binding_sync(self, chat_id: str):
+        from datetime import datetime, timezone
+
+        with self._write_lock_sync():
+            _, chats_file = self._load_sync()
+            chat = next(
+                (item for item in chats_file.chats if item.id == chat_id),
+                None,
+            )
+            if chat is None:
+                raise KeyError(chat_id)
+            current = read_expert_binding(chat)
+            if current.expert_id is None:
+                return None, current
+            released = ChatExpertBinding(revision=current.revision + 1)
+            chat.meta[EXPERT_BINDING_META_KEY] = released.model_dump()
+            chat.updated_at = datetime.now(timezone.utc)
+            return (
+                self._save_and_prepare_snapshot_sync(
+                    chats_file,
+                    already_locked=True,
+                ),
+                released,
+            )
+
+    async def release_current_expert_binding(
+        self,
+        chat_id: str,
+    ) -> ChatExpertBinding:
+        snapshot, binding = await run_runtime_state_work(
+            self._release_current_expert_binding_sync,
+            chat_id,
+        )
+        if snapshot is not None:
+            self._set_snapshot(snapshot)
+        return binding
+
+    def _update_chat_if_exists_sync(self, spec: ChatSpec):
+        return self._upsert_chat_sync(spec, require_existing=True)
+
+    async def update_chat_if_exists(
+        self,
+        spec: ChatSpec,
+    ) -> ChatSpec | None:
+        snapshot = await run_runtime_state_work(
+            self._update_chat_if_exists_sync,
+            spec,
+        )
+        self._set_snapshot(snapshot)
+        return await self.get_chat(spec.id)
+
+    async def compare_and_set_expert_binding(
+        self,
+        chat_id: str,
+        expected_revision: int,
+        expert_id: str | None,
+    ) -> ChatExpertBinding:
+        snapshot, binding = await run_runtime_state_work(
+            self._compare_and_set_expert_binding_sync,
+            chat_id,
+            expected_revision,
+            expert_id,
+        )
+        self._set_snapshot(snapshot)
+        return binding
 
     def _delete_chats_sync(
         self,

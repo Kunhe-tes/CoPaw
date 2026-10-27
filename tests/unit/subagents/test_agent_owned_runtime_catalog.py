@@ -53,6 +53,7 @@ async def test_start_subagent_resolves_enabled_agent_owned_package(
         workspace_dir=tmp_path,
         request_context={"tenant_id": "tenant-1", "agent_id": "agent-1"},
         effective_skill_names=[],
+        expert_discovery_enabled=True,
     )
 
     response = await tools["start_subagent"](
@@ -67,4 +68,7 @@ async def test_start_subagent_resolves_enabled_agent_owned_package(
     assert definition.name == "code-reviewer"
     assert definition.instruction == "Review only the requested scope."
     assert captured["definition_match"].reason == "exact_name"
-    assert "code-reviewer: Review a code change." in tools["start_subagent"].__doc__
+    assert (
+        "code-reviewer: Review a code change."
+        in tools["start_subagent"].__doc__
+    )

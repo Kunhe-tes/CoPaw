@@ -470,9 +470,9 @@ describe("WelcomeCenterLayout", () => {
     const selectorStyle = getComputedStyle(selector as Element);
 
     expect(domain).toHaveClass("is-active");
-    expect(
-      domain.closest(".scenario-preset-domain-selector"),
-    ).toHaveClass("is-single");
+    expect(domain.closest(".scenario-preset-domain-selector")).toHaveClass(
+      "is-single",
+    );
     expect(capability).toHaveClass("is-active");
     expect(scene).not.toHaveClass("is-active");
     expect(selectorStyle.getPropertyValue("--segment-track-bg").trim()).toBe(
@@ -866,4 +866,113 @@ describe("WelcomeCenterLayout", () => {
       expect(screen.getByText("later.txt")).toBeInTheDocument();
     });
   });
+});
+it("disables sending while the expert binding is saving", () => {
+  cleanup();
+  getEffectiveCatalog.mockResolvedValue({ domains: [] });
+  render(<WelcomeCenterLayout onSubmit={vi.fn()} disabled />);
+  expect(screen.getByRole("textbox")).toBeDisabled();
+});
+
+it("restores rejected expert draft text and attachment references in the welcome composer", async () => {
+  cleanup();
+  getEffectiveCatalog.mockResolvedValue({ domains: [] });
+  render(<WelcomeCenterLayout onSubmit={vi.fn()} />);
+  fireEvent(
+    document,
+    new CustomEvent("agentscope-runtime:set-input-content", {
+      detail: {
+        content: "恢复草稿",
+        fileList: [
+          { uid: "a", name: "保留附件.txt", response: { url: "ref" } },
+        ],
+      },
+    }),
+  );
+  expect(
+    screen
+      .getAllByRole("textbox")
+      .find((element) => element.tagName === "TEXTAREA"),
+  ).toHaveValue("恢复草稿");
+  expect(screen.getByText("保留附件.txt")).toBeInTheDocument();
+  cleanup();
+});
+
+it("clears restored interaction metadata when editing a rejected draft", async () => {
+  cleanup();
+  getEffectiveCatalog.mockResolvedValue({ domains: [] });
+  const onSubmit = vi.fn();
+  render(<WelcomeCenterLayout onSubmit={onSubmit} />);
+  fireEvent(
+    document,
+    new CustomEvent("agentscope-runtime:set-input-content", {
+      detail: {
+        content: "恢复草稿",
+        biz_params: { plan_interaction_response: { decision: "approve" } },
+      },
+    }),
+  );
+  fireEvent.change(screen.getByRole("textbox"), {
+    target: { value: "新的普通消息" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() =>
+    expect(onSubmit).toHaveBeenCalledWith({
+      query: "新的普通消息",
+      fileList: [],
+    }),
+  );
+  cleanup();
+});
+
+it("restores a rejected draft when welcome mounts after the restore event", () => {
+  cleanup();
+  getEffectiveCatalog.mockResolvedValue({ domains: [] });
+  render(
+    <WelcomeCenterLayout
+      onSubmit={vi.fn()}
+      restoreDraft={{
+        content: "visible rejected draft",
+        fileList: [
+          { uid: "a", name: "visible-file.txt", response: { url: "ref" } },
+        ],
+      }}
+    />,
+  );
+  expect(screen.getByRole("textbox")).toHaveValue("visible rejected draft");
+  expect(screen.getByText("visible-file.txt")).toBeInTheDocument();
+  cleanup();
+});
+
+it("keeps a restored draft when the rejected submission finishes", async () => {
+  cleanup();
+  getEffectiveCatalog.mockResolvedValue({ domains: [] });
+  let finishSubmit!: () => void;
+  const onSubmit = vi.fn(
+    () => new Promise<void>((resolve) => (finishSubmit = resolve)),
+  );
+  const { rerender } = render(<WelcomeCenterLayout onSubmit={onSubmit} />);
+  fireEvent.change(screen.getByRole("textbox"), {
+    target: { value: "rejected during submit" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+  rerender(
+    <WelcomeCenterLayout
+      onSubmit={onSubmit}
+      restoreDraft={{
+        content: "rejected during submit",
+        fileList: [
+          { uid: "a", name: "retained.txt", response: { url: "ref" } },
+        ],
+      }}
+    />,
+  );
+  finishSubmit();
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "发送" })).not.toBeDisabled(),
+  );
+  expect(screen.getByRole("textbox")).toHaveValue("rejected during submit");
+  expect(screen.getByText("retained.txt")).toBeInTheDocument();
+  cleanup();
 });

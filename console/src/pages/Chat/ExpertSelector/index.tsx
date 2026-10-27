@@ -16,9 +16,12 @@ export interface ExpertSelectorProps {
   goalModeEnabled?: boolean;
   selectedExpertId: string | null;
   onChange: (expertId: string | null) => void;
-  onDisablePlanMode: () => void;
+  onDisablePlanMode: () => void | Promise<void>;
   disabled?: boolean;
   inline?: boolean;
+  persistent?: boolean;
+  boundExpertName?: string | null;
+  unavailable?: boolean;
 }
 
 export default function ExpertSelector({
@@ -31,6 +34,9 @@ export default function ExpertSelector({
   onDisablePlanMode,
   disabled = false,
   inline = false,
+  persistent = false,
+  boundExpertName,
+  unavailable = false,
 }: ExpertSelectorProps) {
   const [open, setOpen] = useState(false);
   const selectedExpert =
@@ -38,12 +44,20 @@ export default function ExpertSelector({
 
   const selectionDisabled = disabled || goalModeEnabled;
 
-  const handleSelect = (expert: SelectableExpert) => {
+  const handleSelect = async (expert: SelectableExpert) => {
     if (selectionDisabled) return;
     if (planModeEnabled) {
-      onDisablePlanMode();
+      try {
+        await onDisablePlanMode();
+      } catch {
+        return;
+      }
     }
-    onChange(toggleExpertSelection(selectedExpertId, expert.id, false));
+    onChange(
+      persistent
+        ? expert.id
+        : toggleExpertSelection(selectedExpertId, expert.id, false),
+    );
     setOpen(false);
   };
 
@@ -55,6 +69,31 @@ export default function ExpertSelector({
       role="menu"
       aria-label="专家选择"
     >
+      {persistent && (
+        <button
+          type="button"
+          className={styles.item}
+          role="menuitem"
+          disabled={selectionDisabled || loading}
+          onClick={() => {
+            onChange(null);
+            setOpen(false);
+          }}
+        >
+          <span className={styles.itemName}>默认 Agent</span>
+          {!selectedExpertId && (
+            <CheckOutlined className={styles.check} aria-hidden />
+          )}
+        </button>
+      )}
+      {persistent && selectedExpertId && (!selectedExpert || unavailable) && (
+        <button type="button" className={styles.item} role="menuitem" disabled>
+          <span className={styles.itemName}>
+            {boundExpertName || selectedExpert?.name || selectedExpertId}
+            （不可用）
+          </span>
+        </button>
+      )}
       {loading ? (
         <div className={styles.state}>
           <Spin size="small" />
@@ -69,7 +108,10 @@ export default function ExpertSelector({
             className={`${styles.item} ${
               expert.id === selectedExpertId ? styles.itemActive : ""
             }`}
-            disabled={selectionDisabled}
+            disabled={
+              selectionDisabled ||
+              (unavailable && expert.id === selectedExpertId)
+            }
             onClick={() => handleSelect(expert)}
             role="menuitem"
           >
@@ -82,7 +124,7 @@ export default function ExpertSelector({
               ) : null}
             </span>
             {expert.id === selectedExpertId ? (
-              <CheckOutlined className={styles.check} />
+              <CheckOutlined className={styles.check} aria-hidden />
             ) : null}
           </button>
         ))

@@ -375,6 +375,38 @@ def test_distribution_and_recall_require_manager(
     assert recalled.status_code == 200
 
 
+@pytest.mark.parametrize(
+    ("target_type", "target_values"),
+    [("all", []), ("bbk_id", ["100"]), ("user_id", ["alice"])],
+)
+def test_distribution_forwards_target_selection(
+    manager_client: TestClient,
+    test_app: FastAPI,
+    target_type: str,
+    target_values: list[str],
+) -> None:
+    test_app.state.marketplace.distribute_expert.return_value = {
+        "item_id": "expert-1",
+        "distributed_count": 0,
+        "conflict_count": 0,
+        "results": [],
+    }
+
+    response = manager_client.post(
+        "/market/experts/expert-1/distribute",
+        headers={"X-Source-Id": "SRC", "X-User-Id": "manager"},
+        json={"target_type": target_type, "target_values": target_values},
+    )
+
+    assert response.status_code == 200
+    call = test_app.state.marketplace.distribute_expert.await_args
+    assert call.args[:3] == ("SRC", "expert-1", "manager")
+    assert call.args[3].model_dump() == {
+        "target_type": target_type,
+        "target_values": target_values,
+    }
+
+
 def test_expert_distributions_require_manager_and_return_holders(
     client: TestClient,
     manager_client: TestClient,

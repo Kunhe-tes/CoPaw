@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,8 +12,12 @@ import tempfile
 from typing import Any
 from uuid import UUID
 
-from ...agents.skills_manager import get_skill_freshness_token
+from ...agents.skills_manager import (
+    _build_signature,
+    get_skill_freshness_token,
+)
 from ...config.config import AgentProfileConfig
+from .agent_definitions import AgentOwnedDefinitionRepository
 from .launch_snapshot import (
     _copy_skill_tree_no_symlinks,
     _diagnostics,
@@ -79,12 +84,22 @@ def initialize_community_expert_dependency_view(
     try:
         _copy_regular_tree(source, temporary)
         _write_binding(temporary / _BINDING_FILE_NAME, binding)
-        if target.exists() or target.is_symlink():
-            _remove_snapshot_tree(target)
-        os.replace(temporary, target)
-    except BaseException:
+        try:
+            os.replace(temporary, target)
+        except OSError:
+            if not _view_matches_definition(
+                target,
+                definition_id,
+                community.item_id,
+            ):
+                raise
+            _validate_frozen_dependency_root(
+                target,
+                definition,
+                dependency_names=_view_dependency_names(target, definition),
+            )
+    finally:
         _remove_snapshot_tree(temporary)
-        raise
     return target
 
 
@@ -372,3 +387,166 @@ def _copy_regular_tree(source: Path, target: Path) -> None:
             raise ExpertDependencyViewError(
                 f"frozen expert dependency has unsupported entry: {entry.name}",
             )
+
+
+def initialize_community_expert_main_dependency_view(
+    *,
+    workspace_dir: Path,
+    chat_id: str,
+    definition: SubAgentDefinition,
+) -> Path | None:
+    """Publish a versioned view without changing legacy Chat freezing.
+
+    The marketplace stages a temporary definition before swapping dependencies,
+    then publishes the definition last. Reject that window and source changes
+    during copying rather than mixing instructions and resources.
+    """
+    metadata = definition.agent_owned
+    if metadata is None or metadata.community is None:
+        return None
+    definition_id = _canonical_uuid(metadata.definition_id, "definition id")
+    canonical_chat_id = _canonical_uuid(chat_id, "chat id")
+    workspace = Path(workspace_dir).resolve()
+    source = workspace / "agents" / f"{definition_id}.dependencies"
+    binding = _binding_payload(definition)
+    before = _main_dependency_source_state(workspace, definition)
+    binding["dependency_signature"] = before[2]
+    identity = hashlib.sha256(
+        json.dumps(binding, sort_keys=True).encode("utf-8"),
+    ).hexdigest()
+    parent = (
+        workspace
+        / _EXPERT_SESSION_ROOT_NAME
+        / canonical_chat_id
+        / ".main"
+        / definition_id
+    )
+    _validate_main_view_parent(workspace, parent)
+    target = parent / identity
+    if _main_view_matches(target, binding):
+        _validate_frozen_dependency_root(target, definition)
+        _validate_main_skill_entrypoints(target, definition)
+        if _main_dependency_content_signature(target) != before[2]:
+            raise ExpertDependencyViewError("expert dependency view changed")
+        _require_main_dependency_source_state(workspace, definition, before)
+        return target
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = Path(
+        tempfile.mkdtemp(prefix=".main-", suffix=".tmp", dir=parent),
+    )
+    try:
+        temporary.rmdir()
+        _copy_skill_tree_no_symlinks(source, temporary)
+        _validate_frozen_dependency_root(temporary, definition)
+        if _main_dependency_content_signature(temporary) != before[2]:
+            raise ExpertDependencyViewError(
+                "expert dependencies changed during capture",
+            )
+        _write_binding(temporary / _BINDING_FILE_NAME, binding)
+        _require_main_dependency_source_state(workspace, definition, before)
+        try:
+            os.replace(temporary, target)
+        except OSError:
+            if not _main_view_matches(target, binding):
+                raise
+            _validate_frozen_dependency_root(target, definition)
+        _require_main_dependency_source_state(workspace, definition, before)
+        return target
+    finally:
+        _remove_snapshot_tree(temporary)
+
+
+def _validate_main_view_parent(workspace: Path, parent: Path) -> None:
+    candidate = parent
+    while candidate != workspace:
+        if candidate.is_symlink():
+            raise ExpertDependencyViewError(
+                "expert dependency view path is invalid",
+            )
+        candidate = candidate.parent
+
+
+def _main_view_matches(root: Path, binding: dict[str, Any]) -> bool:
+    if not root.is_dir() or root.is_symlink():
+        return False
+    path = root / _BINDING_FILE_NAME
+    if path.is_symlink():
+        return False
+    try:
+        return json.loads(path.read_text(encoding="utf-8")) == binding
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+
+
+def _main_dependency_source_state(
+    workspace: Path,
+    definition: SubAgentDefinition,
+) -> tuple[str, tuple[int, int], str]:
+    metadata = definition.agent_owned
+    assert metadata is not None
+    root = workspace / "agents"
+    if root.is_symlink():
+        raise ExpertDependencyViewError("expert definition root is invalid")
+    definition_id = _canonical_uuid(metadata.definition_id, "definition id")
+    if any(root.glob(f".{definition_id}.toml.*.tmp")) or any(
+        root.glob(f".{definition_id}.dependencies.backup-*"),
+    ):
+        raise ExpertDependencyViewError("expert update is in progress")
+    definition_path = root / f"{definition_id}.toml"
+    if definition_path.is_symlink():
+        raise ExpertDependencyViewError("expert definition path is invalid")
+    repository = AgentOwnedDefinitionRepository(
+        root,
+        owner_scope=definition.owner_scope,
+    )
+    package = repository.get(definition_id)
+    if (
+        package is None
+        or package.definition is None
+        or not package.definition.enabled
+    ):
+        raise ExpertDependencyViewError("expert definition is unavailable")
+    excluded = {"created_at", "updated_at"}
+    if package.definition.model_dump(
+        exclude=excluded,
+    ) != definition.model_dump(exclude=excluded):
+        raise ExpertDependencyViewError(
+            "expert definition changed during capture",
+        )
+    source = root / f"{definition_id}.dependencies"
+    _validate_frozen_dependency_root(source, definition)
+    _validate_main_skill_entrypoints(source, definition)
+    stat = source.stat()
+    return (
+        package.revision,
+        (stat.st_dev, stat.st_ino),
+        _main_dependency_content_signature(source),
+    )
+
+
+def _validate_main_skill_entrypoints(
+    root: Path,
+    definition: SubAgentDefinition,
+) -> None:
+    for name in definition.agent_owned.declared_skills:
+        entrypoint = root / "skills" / name / "SKILL.md"
+        if not entrypoint.is_file() or entrypoint.is_symlink():
+            raise ExpertDependencyViewError(
+                f"frozen expert dependency is missing: skill {name}",
+            )
+
+
+def _main_dependency_content_signature(root: Path) -> str:
+    payload = [_build_signature(root / name) for name in ("skills", "mcp")]
+    return hashlib.sha256(json.dumps(payload).encode("utf-8")).hexdigest()
+
+
+def _require_main_dependency_source_state(
+    workspace: Path,
+    definition: SubAgentDefinition,
+    expected: tuple[str, tuple[int, int], str],
+) -> None:
+    if _main_dependency_source_state(workspace, definition) != expected:
+        raise ExpertDependencyViewError(
+            "expert dependencies changed during capture",
+        )

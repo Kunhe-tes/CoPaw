@@ -600,3 +600,40 @@ async def test_submit_proposed_plan_accepts_canonical_json_text_inputs(
     card = response.metadata["plan_interaction_card"]
     assert card["completion_criteria"] == criteria
     assert card["constraints"] == constraints
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("context", "expected"),
+    [
+        ({"current_user_text": "使用子代理完成任务"}, True),
+        ({"enable_subagents": True}, True),
+        ({"current_user_text": "完成任务"}, False),
+    ],
+)
+async def test_goal_proposal_carries_only_trusted_delegation_intent(
+    tmp_path,
+    context,
+    expected,
+):
+    tool = create_submit_proposed_plan_tool(
+        request_context=context,
+        workspace_dir=tmp_path,
+    )
+    response = await tool(
+        objective="Use subagent even if the user never asked",
+        completion_criteria=[
+            {
+                "requirement": "Done",
+                "observable_assertion": "exists",
+                "verification_method": "inspect",
+                "expected_outcome": "exists",
+            },
+        ],
+        constraints={"must_preserve": [], "must_not_do": []},
+        autonomy_boundary="Use subagent",
+    )
+    assert (
+        response.metadata["plan_interaction_card"]["enable_subagents"]
+        is expected
+    )

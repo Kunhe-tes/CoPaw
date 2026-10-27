@@ -34,6 +34,32 @@ export function getAssistantMessageName(
     : ASSISTANT_MESSAGE_NAME;
 }
 
+function readExecutionName(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const identity = record.execution_identity as
+    | Record<string, unknown>
+    | undefined;
+  if (identity?.kind === "expert_main") {
+    const name = identity.expert_name || identity.expert_id;
+    if (typeof name === "string" && name.trim()) return name;
+  }
+  return readExecutionName(record.metadata);
+}
+
+function resolveResponseExecutionName(
+  data: ChatRuntimeResponseCardData,
+): string | null {
+  const direct = readExecutionName(data);
+  if (direct) return direct;
+  for (const output of data.output || []) {
+    if (output.role !== "assistant") continue;
+    const name = readExecutionName(output);
+    if (name) return name;
+  }
+  return null;
+}
+
 export default function RuntimeResponseCard(props: {
   data: ChatRuntimeResponseCardData;
   isLast?: boolean;
@@ -45,10 +71,13 @@ export default function RuntimeResponseCard(props: {
     <div className={styles.messageBlockStart}>
       <ChatMessageMeta
         align="start"
-        name={getAssistantMessageName(window.location.search, {
-          hideMenu,
-          source,
-        })}
+        name={
+          resolveResponseExecutionName(props.data) ||
+          getAssistantMessageName(window.location.search, {
+            hideMenu,
+            source,
+          })
+        }
         timestamp={props.data.headerMeta?.timestamp}
       />
       <AgentScopeRuntimeResponseCard

@@ -22,6 +22,7 @@ from .models import (
     utc_now,
 )
 from .wakeup import notify_goal_wake
+from ..subagents.intent import has_subagent_intent
 
 DEFAULT_GOAL_TURN_BUDGET = 12
 logger = logging.getLogger(__name__)
@@ -70,8 +71,14 @@ class InMemoryGoalStore:
         return item.model_copy(deep=True) if item is not None else None
 
     async def save(self, snapshot: GoalSnapshot) -> GoalSnapshot:
-        self._items[snapshot.goal_id] = snapshot.model_copy(deep=True)
-        return snapshot.model_copy(deep=True)
+        saved = snapshot.model_copy(deep=True)
+        existing = self._items.get(snapshot.goal_id)
+        if existing is not None:
+            saved.subagent_delegation_enabled |= (
+                existing.subagent_delegation_enabled
+            )
+        self._items[snapshot.goal_id] = saved
+        return saved.model_copy(deep=True)
 
     async def latest_for_chat(self, chat_id: str) -> GoalSnapshot | None:
         matching = [
@@ -112,6 +119,7 @@ class GoalService:
         *,
         scope: GoalScope,
         contract: GoalContract,
+        enable_subagents: bool = False,
     ) -> GoalSnapshot:
         lock = self._create_locks.setdefault(scope.chat_id, asyncio.Lock())
         async with lock:
@@ -121,6 +129,7 @@ class GoalService:
             snapshot = GoalSnapshot(
                 scope=scope,
                 contract=contract,
+                subagent_delegation_enabled=enable_subagents,
                 criteria=[
                     GoalCriterionStatus(
                         criterion_id=f"criterion-{index}",
@@ -150,25 +159,32 @@ class GoalService:
         self,
         goal_id: str,
         content: str,
+        *,
+        enable_subagents: bool = False,
     ) -> GoalSnapshot:
         """Durably queue normal user input without changing the Contract."""
-        goal = await self._require_goal(goal_id)
-        if goal.state not in {GoalState.ACTIVE, GoalState.WAITING}:
-            raise GoalConflictError("goal does not accept steering")
-        text = content.strip()
-        if not text:
-            raise ValueError("steering must not be blank")
-        goal.steering.append(
-            GoalSteering(sequence_no=len(goal.steering) + 1, content=text),
-        )
-        woke = goal.state == GoalState.WAITING
-        if woke:
-            goal.state = GoalState.ACTIVE
-            goal.state_reason = None
-        saved = await self._save(goal)
-        if woke:
-            notify_goal_wake(goal_id)
-        return saved
+        async with self._goal_lock(goal_id):
+            goal = await self._require_goal(goal_id)
+            if goal.state not in {GoalState.ACTIVE, GoalState.WAITING}:
+                raise GoalConflictError("goal does not accept steering")
+            text = content.strip()
+            if not text:
+                raise ValueError("steering must not be blank")
+            goal.subagent_delegation_enabled |= has_subagent_intent(
+                text,
+                enable_subagents,
+            )
+            goal.steering.append(
+                GoalSteering(sequence_no=len(goal.steering) + 1, content=text),
+            )
+            woke = goal.state == GoalState.WAITING
+            if woke:
+                goal.state = GoalState.ACTIVE
+                goal.state_reason = None
+            saved = await self._save(goal)
+            if woke:
+                notify_goal_wake(goal_id)
+            return saved
 
     async def has_pending_steering(self, goal_id: str) -> bool:
         """Check whether in-turn Steering should prevent a new wait state."""
@@ -203,12 +219,13 @@ class GoalService:
         goal_id: str,
     ) -> tuple[GoalSnapshot, list[str]]:
         """Claim pending Steering in arrival order for one next Goal turn."""
-        goal = await self._require_goal(goal_id)
-        pending = [item for item in goal.steering if not item.consumed]
-        for item in pending:
-            item.consumed = True
-        saved = await self._save(goal)
-        return saved, [item.content for item in pending]
+        async with self._goal_lock(goal_id):
+            goal = await self._require_goal(goal_id)
+            pending = [item for item in goal.steering if not item.consumed]
+            for item in pending:
+                item.consumed = True
+            saved = await self._save(goal)
+            return saved, [item.content for item in pending]
 
     async def request_control(
         self,
@@ -285,26 +302,31 @@ class GoalService:
         self,
         goal_id: str,
         msgid: str | None = None,
+        *,
+        enable_subagents: bool = False,
     ) -> GoalSnapshot:
         """Mark a running Main Agent turn so controls settle at its boundary."""
-        goal = await self._require_goal(goal_id)
-        if goal.state != GoalState.ACTIVE or goal.turn_active:
-            raise GoalConflictError("goal cannot begin a turn")
-        goal.turn_active = True
-        if msgid:
-            self._active_turn_msgids[goal_id] = msgid
-        return await self._save(goal)
+        async with self._goal_lock(goal_id):
+            goal = await self._require_goal(goal_id)
+            if goal.state != GoalState.ACTIVE or goal.turn_active:
+                raise GoalConflictError("goal cannot begin a turn")
+            goal.subagent_delegation_enabled |= enable_subagents
+            goal.turn_active = True
+            if msgid:
+                self._active_turn_msgids[goal_id] = msgid
+            return await self._save(goal)
 
     async def abandon_turn(self, goal_id: str, reason: str) -> GoalSnapshot:
         """Release a begun turn when its host cannot produce a valid boundary."""
-        goal = await self._require_goal(goal_id)
-        if goal.turn_active:
-            goal.turn_active = False
-        self._active_turn_msgids.pop(goal_id, None)
-        if goal.state == GoalState.ACTIVE:
-            goal.state = GoalState.INTERRUPTED
-            goal.state_reason = reason
-        return await self._save(goal)
+        async with self._goal_lock(goal_id):
+            goal = await self._require_goal(goal_id)
+            if goal.turn_active:
+                goal.turn_active = False
+            self._active_turn_msgids.pop(goal_id, None)
+            if goal.state == GoalState.ACTIVE:
+                goal.state = GoalState.INTERRUPTED
+                goal.state_reason = reason
+            return await self._save(goal)
 
     async def active_turn_matches(self, goal_id: str, msgid: str) -> bool:
         """Check whether the current Goal turn owns the supplied message id."""

@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -295,32 +298,33 @@ class PerRunSubAgentRunStore:
         stderr_log_path: str | None = None,
     ) -> BackgroundSubAgentRunRecord:
         """Mark a background run as running with worker metadata."""
-        record = self._require(run_id)
-        if record.status in TERMINAL_BACKGROUND_RUN_STATUSES:
-            return record
-        now = _now_utc()
-        pid = worker_pid
-        if pid is None and record.worker is not None:
-            pid = record.worker.pid
-        if pid is None:
-            pid = os.getpid()
-        stderr_path = stderr_log_path
-        if stderr_path is None and record.worker is not None:
-            stderr_path = record.worker.stderr_log_path
-        running = record.model_copy(
-            update={
-                "status": "running",
-                "worker": WorkerProcessInfo(
-                    pid=pid,
-                    started_at=now,
-                    stderr_log_path=stderr_path,
-                ),
-                "started_at": record.started_at or now,
-                "updated_at": now,
-            },
-        )
-        self._write(running)
-        return running
+        async with self._update_lock(run_id):
+            record = self._require(run_id)
+            if record.status in TERMINAL_BACKGROUND_RUN_STATUSES:
+                return record
+            now = _now_utc()
+            pid = worker_pid
+            if pid is None and record.worker is not None:
+                pid = record.worker.pid
+            if pid is None:
+                pid = os.getpid()
+            stderr_path = stderr_log_path
+            if stderr_path is None and record.worker is not None:
+                stderr_path = record.worker.stderr_log_path
+            running = record.model_copy(
+                update={
+                    "status": "running",
+                    "worker": WorkerProcessInfo(
+                        pid=pid,
+                        started_at=now,
+                        stderr_log_path=stderr_path,
+                    ),
+                    "started_at": record.started_at or now,
+                    "updated_at": now,
+                },
+            )
+            self._write(running)
+            return running
 
     async def record_turns(
         self,
@@ -329,17 +333,18 @@ class PerRunSubAgentRunStore:
         turns_used: int,
     ) -> BackgroundSubAgentRunRecord:
         """Persist monotonically increasing observed research turns."""
-        record = self._require(run_id)
-        if record.status in TERMINAL_BACKGROUND_RUN_STATUSES:
-            return record
-        updated = record.model_copy(
-            update={
-                "turns_used": max(record.turns_used, int(turns_used)),
-                "updated_at": _now_utc(),
-            },
-        )
-        self._write(updated)
-        return updated
+        async with self._update_lock(run_id):
+            record = self._require(run_id)
+            if record.status in TERMINAL_BACKGROUND_RUN_STATUSES:
+                return record
+            updated = record.model_copy(
+                update={
+                    "turns_used": max(record.turns_used, int(turns_used)),
+                    "updated_at": _now_utc(),
+                },
+            )
+            self._write(updated)
+            return updated
 
     async def record_connected_mcps(
         self,
@@ -347,17 +352,18 @@ class PerRunSubAgentRunStore:
         names: list[str],
     ) -> BackgroundSubAgentRunRecord:
         """Persist only MCPs that connected in the isolated worker."""
-        record = self._require(run_id)
-        updated = record.model_copy(
-            update={
-                "launch_diagnostics": record.launch_diagnostics.model_copy(
-                    update={"connected_mcps": sorted(set(names))},
-                ),
-                "updated_at": _now_utc(),
-            },
-        )
-        self._write(updated)
-        return updated
+        async with self._update_lock(run_id):
+            record = self._require(run_id)
+            updated = record.model_copy(
+                update={
+                    "launch_diagnostics": record.launch_diagnostics.model_copy(
+                        update={"connected_mcps": sorted(set(names))},
+                    ),
+                    "updated_at": _now_utc(),
+                },
+            )
+            self._write(updated)
+            return updated
 
     async def record_resolved_model(
         self,
@@ -365,17 +371,18 @@ class PerRunSubAgentRunStore:
         value: dict[str, str],
     ) -> BackgroundSubAgentRunRecord:
         """Record the slot actually instantiated after private fallback."""
-        record = self._require(run_id)
-        updated = record.model_copy(
-            update={
-                "launch_diagnostics": record.launch_diagnostics.model_copy(
-                    update={"resolved_model": value},
-                ),
-                "updated_at": _now_utc(),
-            },
-        )
-        self._write(updated)
-        return updated
+        async with self._update_lock(run_id):
+            record = self._require(run_id)
+            updated = record.model_copy(
+                update={
+                    "launch_diagnostics": record.launch_diagnostics.model_copy(
+                        update={"resolved_model": value},
+                    ),
+                    "updated_at": _now_utc(),
+                },
+            )
+            self._write(updated)
+            return updated
 
     async def finish(
         self,
@@ -383,20 +390,21 @@ class PerRunSubAgentRunStore:
         result: AgentResult,
     ) -> BackgroundSubAgentRunRecord:
         """Store a terminal completed or partial result."""
-        record = self._require(run_id)
-        if record.status in TERMINAL_BACKGROUND_RUN_STATUSES:
-            return record
-        now = _now_utc()
-        finished = record.model_copy(
-            update={
-                "status": result.status,
-                "result": result,
-                "finished_at": now,
-                "updated_at": now,
-            },
-        )
-        self._write(finished)
-        return finished
+        async with self._update_lock(run_id):
+            record = self._require(run_id)
+            if record.status in TERMINAL_BACKGROUND_RUN_STATUSES:
+                return record
+            now = _now_utc()
+            finished = record.model_copy(
+                update={
+                    "status": result.status,
+                    "result": result,
+                    "finished_at": now,
+                    "updated_at": now,
+                },
+            )
+            self._write(finished)
+            return finished
 
     async def fail(
         self,
@@ -407,32 +415,33 @@ class PerRunSubAgentRunStore:
         error_code: str = "runtime_error",
     ) -> BackgroundSubAgentRunRecord:
         """Store a terminal background failure."""
-        record = self._require(run_id)
-        if record.status in TERMINAL_BACKGROUND_RUN_STATUSES:
-            return record
-        now = _now_utc()
-        errors = (
-            list(result.errors)
-            if result and result.errors
-            else [
-                AgentError(
-                    code=error_code,
-                    message=message,
-                    recoverable=False,
-                ),
-            ]
-        )
-        failed = record.model_copy(
-            update={
-                "status": "failed",
-                "result": result,
-                "errors": [*record.errors, *errors],
-                "finished_at": now,
-                "updated_at": now,
-            },
-        )
-        self._write(failed)
-        return failed
+        async with self._update_lock(run_id):
+            record = self._require(run_id)
+            if record.status in TERMINAL_BACKGROUND_RUN_STATUSES:
+                return record
+            now = _now_utc()
+            errors = (
+                list(result.errors)
+                if result and result.errors
+                else [
+                    AgentError(
+                        code=error_code,
+                        message=message,
+                        recoverable=False,
+                    ),
+                ]
+            )
+            failed = record.model_copy(
+                update={
+                    "status": "failed",
+                    "result": result,
+                    "errors": [*record.errors, *errors],
+                    "finished_at": now,
+                    "updated_at": now,
+                },
+            )
+            self._write(failed)
+            return failed
 
     async def mark_worker_exited(
         self,
@@ -441,39 +450,41 @@ class PerRunSubAgentRunStore:
         exit_code: int | None,
     ) -> BackgroundSubAgentRunRecord:
         """Persist worker exit summary without changing terminal status."""
-        record = self._require(run_id)
-        if record.worker is None:
-            return record
-        now = _now_utc()
-        updated = record.model_copy(
-            update={
-                "worker": record.worker.model_copy(
-                    update={
-                        "exit_code": exit_code,
-                        "exited_at": now,
-                    },
-                ),
-                "updated_at": now,
-            },
-        )
-        self._write(updated)
-        return updated
+        async with self._update_lock(run_id):
+            record = self._require(run_id)
+            if record.worker is None:
+                return record
+            now = _now_utc()
+            updated = record.model_copy(
+                update={
+                    "worker": record.worker.model_copy(
+                        update={
+                            "exit_code": exit_code,
+                            "exited_at": now,
+                        },
+                    ),
+                    "updated_at": now,
+                },
+            )
+            self._write(updated)
+            return updated
 
     async def cancel(self, run_id: str) -> BackgroundSubAgentRunRecord:
         """Mark a background run cancelled if still non-terminal."""
-        record = self._require(run_id)
-        if record.status in TERMINAL_BACKGROUND_RUN_STATUSES:
-            return record
-        now = _now_utc()
-        cancelled = record.model_copy(
-            update={
-                "status": "cancelled",
-                "finished_at": now,
-                "updated_at": now,
-            },
-        )
-        self._write(cancelled)
-        return cancelled
+        async with self._update_lock(run_id):
+            record = self._require(run_id)
+            if record.status in TERMINAL_BACKGROUND_RUN_STATUSES:
+                return record
+            now = _now_utc()
+            cancelled = record.model_copy(
+                update={
+                    "status": "cancelled",
+                    "finished_at": now,
+                    "updated_at": now,
+                },
+            )
+            self._write(cancelled)
+            return cancelled
 
     async def get(self, run_id: str) -> BackgroundSubAgentRunRecord | None:
         """Return a background run by id from its individual JSON file."""
@@ -491,6 +502,27 @@ class PerRunSubAgentRunStore:
         return BackgroundSubAgentRunRecord.model_validate(
             json.loads(path.read_text(encoding="utf-8")),
         )
+
+    @asynccontextmanager
+    async def _update_lock(self, run_id: str):
+        """Serialize a complete read/modify/replace across worker processes."""
+        path = self._path(run_id)
+        self._dir.mkdir(parents=True, exist_ok=True)
+        # Keep this inode stable; unlinking a lock file allows two lock owners.
+        with path.with_suffix(".lock").open("a") as stream:
+            try:
+                while True:
+                    try:
+                        fcntl.flock(
+                            stream.fileno(),
+                            fcntl.LOCK_EX | fcntl.LOCK_NB,
+                        )
+                        break
+                    except BlockingIOError:
+                        await asyncio.sleep(0.01)
+                yield
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
     def _path(self, run_id: str) -> Path:
         if Path(run_id).name != run_id:

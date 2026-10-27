@@ -9,8 +9,11 @@ import os
 import tomllib
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
+from fastapi import FastAPI
 
+from market.app.routers.experts_market import router as experts_router
 from market.marketplace.fs import get_user_expert_dir, load_index
 from market.marketplace.schemas import ExpertDistributionRequest
 from market.marketplace.service import (
@@ -48,7 +51,9 @@ def service(
 ) -> MarketplaceService:
     """Create a MarketplaceService instance."""
     marketplace_root, swe_root = mock_paths
-    return MarketplaceService(mock_db, marketplace_root, swe_root)
+    instance = MarketplaceService(mock_db, marketplace_root, swe_root)
+    instance._trigger_agent_reload = AsyncMock(return_value=True)
+    return instance
 
 
 def _write_source_package(
@@ -122,6 +127,34 @@ def _publish(
     )
 
 
+@pytest.fixture
+async def published_dependencies(service: MarketplaceService, tmp_path: Path):
+    """Publish a complete dependency package shared by delivery scenarios."""
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    mcp_config = {
+        "name": "mcp_a",
+        "command": "published-tool",
+        "env": {"TOKEN": "published-value"},
+        "headers": {"X-Expert": "published-header"},
+    }
+    _write_source_package(
+        source_dir,
+        skill_content="# Published Skill\n",
+        mcp_config=json.dumps(mcp_config),
+    )
+    definition_path = source_dir / "definition.toml"
+    definition_path.write_text(
+        'instruction = "Use the private dependencies."\n'
+        + definition_path.read_text(),
+    )
+    skill_script = source_dir / "skills" / "skill_a" / "scripts" / "run.py"
+    skill_script.parent.mkdir()
+    skill_script.write_text("published script\n")
+    item, _ = await _publish(service, "source-a", source_dir)
+    return source_dir, item, mcp_config
+
+
 def test_copy_expert_package_keeps_previous_root_when_staging_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -143,6 +176,262 @@ def test_copy_expert_package_keeps_previous_root_when_staging_fails(
         _copy_expert_package(source, target)
 
     assert (target / "definition.toml").read_text(encoding="utf-8") == "old"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_normal_dependencies", [False, True])
+async def test_distribution_delivers_published_private_dependencies(
+    service: MarketplaceService,
+    tmp_path: Path,
+    has_normal_dependencies: bool,
+    published_dependencies,
+) -> None:
+    from swe.app.subagents import AgentOwnedDefinitionRepository
+    from swe.app.subagents.launch_snapshot import (
+        read_and_remove_private_mcp_snapshot,
+    )
+    from swe.app.subagents.session_dependencies import (
+        capture_community_expert_session_dependencies,
+        initialize_community_expert_dependency_view,
+    )
+    from swe.config.config import AgentProfileConfig
+
+    source_dir, item, mcp_config = published_dependencies
+    skill_script = source_dir / "skills" / "skill_a" / "scripts" / "run.py"
+
+    # Unpublished edits must not leak into the distributed version.
+    skill_script.write_text("unpublished script\n")
+    (source_dir / "mcp" / "mcp_a" / "mcp.json").write_text(
+        json.dumps({**mcp_config, "command": "unpublished-tool"}),
+    )
+    expert_dir = get_user_expert_dir(
+        service.swe_root,
+        "alice",
+        "default",
+        "source-a",
+    )
+    workspace = expert_dir.parent
+    workspace.mkdir(parents=True, exist_ok=True)
+    normal_skill = workspace / "skills" / "skill_a" / "SKILL.md"
+    normal_config = (
+        {
+            "mcp": {"clients": {"mcp_a": {"command": "normal-tool"}}},
+        }
+        if has_normal_dependencies
+        else {}
+    )
+    if has_normal_dependencies:
+        normal_skill.parent.mkdir(parents=True)
+        normal_skill.write_text("normal skill\n")
+    config_path = workspace / "agent.json"
+    config_text = json.dumps(normal_config)
+    config_path.write_text(config_text)
+
+    app = FastAPI()
+    app.state.marketplace = service
+    app.include_router(experts_router)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            f"/market/experts/{item.item_id}/distribute",
+            headers={
+                "X-Source-Id": "source-a",
+                "X-Manager": "true",
+                "X-User-Id": "manager",
+            },
+            json={"target_type": "user_id", "target_values": ["alice"]},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["distributed_count"] == 1
+    definition_id = response.json()["results"][0]["definition_id"]
+    package = AgentOwnedDefinitionRepository(
+        expert_dir,
+        owner_scope="alice/default",
+    ).get(definition_id)
+    assert package is not None and package.valid
+    assert package.definition.enabled is True
+    assert package.definition.agent_owned.community.version == item.version
+    private_root = expert_dir / f"{definition_id}.dependencies"
+    assert (
+        private_root / "skills" / "skill_a" / "scripts" / "run.py"
+    ).read_text() == "published script\n"
+    assert config_path.read_text() == config_text
+    if has_normal_dependencies:
+        assert normal_skill.read_text() == "normal skill\n"
+    else:
+        assert not normal_skill.exists()
+
+    view = initialize_community_expert_dependency_view(
+        workspace_dir=workspace,
+        chat_id="00000000-0000-4000-8000-000000000001",
+        definition=package.definition,
+    )
+    assert view is not None
+    run_store = tmp_path / "run-store"
+    paths, mcp_path, diagnostics = (
+        capture_community_expert_session_dependencies(
+            run_store_dir=run_store,
+            run_id="subagent-delivery-test",
+            dependency_view_root=view,
+            definition=package.definition,
+            parent_agent_config=AgentProfileConfig(
+                id="default",
+                name="Default",
+            ),
+        )
+    )
+    assert diagnostics.loaded_skills == ["skill_a"]
+    assert (Path(paths[0]) / "SKILL.md").read_text() == "# Published Skill\n"
+    assert (
+        Path(paths[0]) / "scripts" / "run.py"
+    ).read_text() == "published script\n"
+    snapshot = read_and_remove_private_mcp_snapshot(
+        mcp_path,
+        run_store_dir=run_store,
+        run_id="subagent-delivery-test",
+    )
+    assert set(snapshot) == {"mcp_a"}
+    for key, value in mcp_config.items():
+        assert snapshot["mcp_a"][key] == value
+    assert snapshot["mcp_a"]["transport"] == "stdio"
+
+
+@pytest.mark.asyncio
+async def test_distribution_updates_both_private_dependencies_and_keeps_disabled(
+    service: MarketplaceService,
+    published_dependencies,
+) -> None:
+    source_dir, item, _ = published_dependencies
+    installed = await service.install_expert("source-a", item.item_id, "alice")
+    expert_dir = get_user_expert_dir(
+        service.swe_root,
+        "alice",
+        "default",
+        "source-a",
+    )
+    definition_path = expert_dir / f"{installed.definition_id}.toml"
+    definition_path.write_text(
+        definition_path.read_text().replace(
+            "enabled = true",
+            "enabled = false",
+        ),
+    )
+    _write_source_package(
+        source_dir,
+        skill_content="new skill\n",
+        mcp_config='{"name":"mcp_a","command":"new-tool"}',
+    )
+    updated, _ = await _publish(service, "source-a", source_dir)
+
+    result = await service.distribute_expert(
+        "source-a",
+        item.item_id,
+        "manager",
+        ExpertDistributionRequest(
+            target_type="user_id",
+            target_values=["alice"],
+        ),
+    )
+
+    assert result.distributed_count == 1
+    assert result.results[0].definition_id == installed.definition_id
+    payload = tomllib.loads(definition_path.read_text())
+    assert payload["enabled"] is False
+    assert payload["community"]["version"] == updated.version != item.version
+    private_root = expert_dir / f"{installed.definition_id}.dependencies"
+    assert (
+        private_root / "skills" / "skill_a" / "SKILL.md"
+    ).read_text() == "new skill\n"
+    assert (
+        json.loads((private_root / "mcp" / "config.json").read_text())[
+            "mcp_a"
+        ]["command"]
+        == "new-tool"
+    )
+
+
+@pytest.mark.asyncio
+async def test_distribution_keeps_old_receipt_on_copy_failure_and_continues(
+    service: MarketplaceService,
+    monkeypatch: pytest.MonkeyPatch,
+    published_dependencies,
+) -> None:
+    import shutil
+
+    source_dir, item, _ = published_dependencies
+    installed = await service.install_expert("source-a", item.item_id, "alice")
+    alice_dir = get_user_expert_dir(
+        service.swe_root,
+        "alice",
+        "default",
+        "source-a",
+    )
+    definition_path = alice_dir / f"{installed.definition_id}.toml"
+    original_definition = definition_path.read_bytes()
+    _write_source_package(
+        source_dir,
+        skill_content="new skill\n",
+        mcp_config='{"name":"mcp_a","command":"new-tool"}',
+    )
+    await _publish(service, "source-a", source_dir)
+    original_copy = shutil.copytree
+
+    def fail_alice_copy(source, target, *args, **kwargs):
+        if Path(target).is_relative_to(alice_dir):
+            raise OSError("dependency copy failed")
+        return original_copy(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "market.marketplace.service.shutil.copytree",
+        fail_alice_copy,
+    )
+    result = await service.distribute_expert(
+        "source-a",
+        item.item_id,
+        "manager",
+        ExpertDistributionRequest(
+            target_type="user_id",
+            target_values=["alice", "bob"],
+        ),
+    )
+
+    assert result.distributed_count == 1
+    assert result.conflict_count == 1
+    assert [(entry.user_id, entry.success) for entry in result.results] == [
+        ("alice", False),
+        ("bob", True),
+    ]
+    assert result.results[0].reason == "dependency copy failed"
+    assert definition_path.read_bytes() == original_definition
+    private_root = alice_dir / f"{installed.definition_id}.dependencies"
+    assert (
+        private_root / "skills" / "skill_a" / "SKILL.md"
+    ).read_text() == "# Published Skill\n"
+    assert (
+        json.loads((private_root / "mcp" / "config.json").read_text())[
+            "mcp_a"
+        ]["command"]
+        == "published-tool"
+    )
+    bob_dir = get_user_expert_dir(
+        service.swe_root,
+        "bob",
+        "default",
+        "source-a",
+    )
+    bob_root = bob_dir / f"{result.results[1].definition_id}.dependencies"
+    assert (
+        bob_root / "skills" / "skill_a" / "SKILL.md"
+    ).read_text() == "new skill\n"
+    assert (
+        json.loads((bob_root / "mcp" / "config.json").read_text())["mcp_a"][
+            "command"
+        ]
+        == "new-tool"
+    )
 
 
 class TestPublishExpert:

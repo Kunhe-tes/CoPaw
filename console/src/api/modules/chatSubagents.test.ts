@@ -35,6 +35,17 @@ describe("chat subagent api", () => {
     expect(result.runs).toEqual([]);
     expect(mocks.request).toHaveBeenCalledWith(
       "/subagents/runs?chat_id=chat-1",
+      undefined,
+    );
+  });
+
+  it("forwards the optional snapshot abort signal", async () => {
+    const { chatApi } = await import("./chat");
+    const controller = new AbortController();
+    await chatApi.getSubAgentRuns("chat-1", controller.signal);
+    expect(mocks.request).toHaveBeenCalledWith(
+      "/subagents/runs?chat_id=chat-1",
+      { signal: controller.signal },
     );
   });
 
