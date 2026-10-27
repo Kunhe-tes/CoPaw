@@ -896,7 +896,18 @@ export default function Create() {
                 拖动调整顺序，或使用上下箭头
               </span>
             </h3>
-            <div className={styles.selectedList}>
+            <div
+              className={cx(
+                styles.selectedList,
+                draft.items.some(
+                  (item) =>
+                    item.schedule.type === "weekly" ||
+                    item.schedule.type === "custom",
+                ) && styles.expandedSchedules,
+                draft.items.some((item) => item.cycle === "自定义") &&
+                  styles.expandedCycles,
+              )}
+            >
               {draft.items.length > 0 && (
                 <div className={styles.selectedListHeader}>
                   <span>经营场景</span>

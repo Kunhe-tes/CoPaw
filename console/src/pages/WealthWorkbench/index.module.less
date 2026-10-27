@@ -2891,17 +2891,26 @@
     min-width: 0;
   }
   .selectedList {
-    // 共用弹性列宽；周期和排程在单元格内换行，不按最长排程撑宽整张表。
-    --selected-columns: 16px 27px minmax(100px, 1.2fr) minmax(100px, 1fr)
-      minmax(240px, 1.5fr) minmax(240px, 1.6fr) 110px 82px;
+    // 前两列只随窗口变化；展开周期和频率时扩宽表格，不重新挤压文字列。
+    --selected-scene-width: clamp(160px, 13.5vw, 260px);
+    --selected-direction-width: clamp(140px, 11vw, 210px);
+    --selected-columns: 16px 27px var(--selected-scene-width)
+      var(--selected-direction-width)
+      minmax(var(--selected-cycle-min, 400px), 1.2fr)
+      minmax(var(--selected-schedule-min, 320px), 1fr) 110px 82px;
     display: block;
     overflow-x: auto;
   }
   .selectedListHeader,
   .selectedRow {
     grid-template-columns: var(--selected-columns);
-    column-gap: 8px;
-    min-width: 0;
+    column-gap: 12px;
+    // 拖动、序号、客户数、操作列及边框留白共计 249px，另计七处列间距。
+    min-width: calc(
+      249px + 7 * 12px + var(--selected-scene-width) +
+        var(--selected-direction-width) + var(--selected-cycle-min, 400px) +
+        var(--selected-schedule-min, 320px)
+    );
   }
   .selectedListHeader {
     display: grid;
@@ -2958,12 +2967,17 @@
     width: 100%;
     margin-top: 0;
   }
-  .selectedRow .taskCycleBlock,
   .selectedRow .scheduleBlock,
   .selectedRow .customScheduleFields,
-  .selectedRow .customScheduleRow,
-  .selectedRow .taskCustomDates {
+  .selectedRow .customScheduleRow {
     flex-wrap: wrap;
+  }
+  .selectedRow .taskCycleBlock,
+  .selectedRow .taskCustomDates {
+    flex-wrap: nowrap;
+    > * {
+      flex-shrink: 0;
+    }
   }
   .selectedRow .taskCycleBlock,
   .selectedRow .scheduleField,
@@ -2997,7 +3011,7 @@
   .selectedRow .taskRangeLabel {
     padding-left: 0;
   }
-  .selectedRow .taskDatePicker:global(.ant-picker) {
+  .selectedRow .taskDatePicker {
     width: 108px;
   }
   .selectedRow .expandedSchedule {
@@ -3012,6 +3026,25 @@
   .selectedRow .scheduleField {
     width: auto;
     flex: 0 1 auto;
+  }
+  .selectedList.expandedSchedules {
+    --selected-schedule-min: 760px;
+    .expandedSchedule,
+    .customScheduleFields,
+    .customScheduleRow {
+      flex-wrap: nowrap;
+      flex-shrink: 0;
+    }
+    .expandedSchedule > .customScheduleFields {
+      width: auto;
+    }
+    .expandedSchedule .scheduleField {
+      flex-shrink: 0;
+      max-width: none;
+    }
+  }
+  .selectedList.expandedCycles {
+    --selected-cycle-min: 500px;
   }
   .selectedRow .cycleGroup button {
     padding: 5px 6px;
@@ -3131,7 +3164,7 @@
     color: var(--muted);
     font-size: 12px;
   }
-  .taskDatePicker:global(.ant-picker) {
+  .taskDatePicker {
     width: 142px;
     height: 29px;
     min-width: 0;
@@ -3142,7 +3175,7 @@
     color: var(--ink);
     cursor: pointer;
   }
-  .taskDatePicker:global(.ant-picker) :global(.ant-picker-input > input) {
+  .taskDatePicker input {
     color: var(--ink);
     font-size: 12px;
     cursor: pointer;
@@ -3156,16 +3189,17 @@
     width: 270px;
     height: 34px;
   }
-  .taskDatePicker:global(.ant-picker) :global(.ant-picker-suffix) {
+  .taskDatePicker :global(.ant-picker-suffix),
+  .taskDatePicker :global(.swe-picker-suffix) {
     color: var(--muted);
     font-size: 13px;
   }
-  .taskDatePicker:global(.ant-picker):hover,
-  .taskDatePicker:global(.ant-picker-focused) {
+  .taskDatePicker:hover,
+  .taskDatePicker:focus-within {
     border-color: #bcd5ff;
     outline: none;
   }
-  .taskDatePicker:global(.ant-picker-focused) {
+  .taskDatePicker:focus-within {
     box-shadow: 0 0 0 2px rgba(55, 105, 252, 0.16);
   }
   .scheduleBlock {
