@@ -11,7 +11,7 @@
 - [x] Intent/catalog/config: keyword helper, structured enablement, exclusive selection, Source default-off switch, frontend registry, tests. Reviewed and committed as `d4ca8466f`.
 - [x] Chat management/dependencies: owning Chat/session checks, management-only registration, private expert views and concurrent initialization. Reviewed and committed as `343ee43c7`.
 - [x] Goal intent: durable field, trusted draft/create/Steering intent, recovery and Source refresh; monotonic store protection and worker preparation. Reviewed and committed as `740db02db`.
-- [ ] Final integration: review against every requirement, run related suites and frontend checks, fix findings, changed-file pre-commit, GitNexus detect_changes, deliver reports.
+- [x] Final integration: all independent reviews converged; related suites, typecheck, changed-file hooks and GitNexus scope checks completed. Fast-forwarded into `perf/event-loop-optimization`; integrated verification: 289 backend and 116 frontend tests passed, TypeScript passed. Original unrelated uncommitted files preserved. Reports are in `docs/superpowers/reports/2026-10-27-subagent-intent-*`.
 
 ## Verification
 

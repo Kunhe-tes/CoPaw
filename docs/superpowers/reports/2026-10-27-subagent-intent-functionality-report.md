@@ -33,4 +33,4 @@ Goal 初始意图跨澄清、提案、确认保存；后续真实 Steering 可�
 - `343ee43c7`：Chat 运行隔离、专家依赖视图与并发修复。
 - `740db02db`：Goal 持久授权、前端传递、原子保存及异步预读。
 
-测试证据和限制见同目录测试报告。未推送远端或创建 PR。
+已快进合并到 `perf/event-loop-optimization`。重叠的 CONTEXT 与 Playbook 索引做了逐项合并，其他原有未提交文件按 SHA-256 验证保留；旧的未跟踪设计草稿在 `/private/tmp/subagent-intent-integration-backup/original-draft-design.md` 备份，当前路径为最终已确认稿。合并后 289 项后端专项与 116 项前端专项通过，TypeScript 通过。测试证据和限制见同目录测试报告。未推送远端或创建 PR。

@@ -15,6 +15,8 @@
 | TypeScript `pnpm --dir console run typecheck` | exit 0 |
 | 变更文件 pre-commit 与实际提交 hooks | AST、编码、密钥、空白、trailing comma、mypy、Black79、flake8、pylint、涉及前端时 tsc 全部通过 |
 | Git diff / GitNexus detect_changes | diff --check 通过；每次提交前检查范围；Task2 LOW，Task3共享接口 HIGH 并已审查 |
+| 合并至当前分支后的后端专项 | 289 passed，覆盖 Goal、Runner、事务、意图门禁、Chat 隔离、专家依赖及 Marketplace |
+| 合并至当前分支后的前端专项与类型检查 | 五文件 116 passed，TypeScript exit 0 |
 
 各专项存在重叠，不能相加当作独立总数。未运行仓库全部测试；此报告也不声明 ESLint 全仓无告警。Chat index.test 存在原有 any/require/unused 问题，未进行无关重构。
 
@@ -60,3 +62,5 @@ pnpm --dir console run typecheck
 测试为本地单元/集成契约验证，数据库事务使用测试连接或替身；未连接生产 MySQL、未进行 Kubernetes 多实例与共享 NAS 的真实发布验收，未进行真实模型端到端调用。部署前可在预发补上述环境验证。
 
 本次会话原始日志保留于 `/private/tmp/subagent-intent-*`，重要结果已归档在本报告；临时目录不属于长期发布制品。
+
+当前分支原有未提交内容未纳入功能提交。重叠文档合并后，其他原有文件按 SHA-256 校验一致；恢复原有未跟踪测试探针后再次运行 TypeScript 亦通过。
