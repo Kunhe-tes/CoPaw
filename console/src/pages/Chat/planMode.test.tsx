@@ -32,6 +32,17 @@ describe("Plan Mode frontend helpers", () => {
       ),
     ).toEqual({ title: "preserved", plan_mode_enabled: true });
   });
+  it("omits server-owned expert identity from mode patches", () => {
+    expect(
+      buildPlanModeMeta(
+        {
+          expert_main_binding: { revision: 2, expert_id: "expert" },
+          title: "preserved",
+        },
+        true,
+      ),
+    ).toEqual({ title: "preserved", plan_mode_enabled: true });
+  });
   afterEach(() => {
     cleanup();
     vi.useRealTimers();

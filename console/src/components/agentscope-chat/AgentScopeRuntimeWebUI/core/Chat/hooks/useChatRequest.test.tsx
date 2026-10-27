@@ -126,6 +126,7 @@ function Harness(props: {
   applyRecoverySnapshot?: (history: unknown, owner: ChatRequestOwner) => void;
   recoverAfterNotFound?: (owner: ChatRequestOwner) => void;
   onConnectionLost?: (owner: ChatRequestOwner, error: Error) => void;
+  onAdmissionRejected?: (owner: ChatRequestOwner) => void;
 }) {
   hookApi = useChatRequest({
     currentQARef: props.currentQARef,
@@ -136,6 +137,7 @@ function Harness(props: {
     applyRecoverySnapshot: props.applyRecoverySnapshot,
     recoverAfterNotFound: props.recoverAfterNotFound,
     onConnectionLost: props.onConnectionLost,
+    onAdmissionRejected: props.onAdmissionRejected,
   });
 
   return null;
@@ -206,6 +208,46 @@ describe("useChatRequest", () => {
       resolveGate = resolve;
     });
     mocks.streamGate.resolve = resolveGate;
+  });
+
+  it("rejects a binding conflict without rendering a failed answer or retrying", async () => {
+    const owner = createOwner();
+    const currentQARef = {
+      current: {
+        activeRequestOwner: owner,
+        request: { id: "optimistic-user", role: "user", cards: [] },
+        response: { id: "optimistic-response", role: "assistant", cards: [] },
+      },
+    } as unknown as CurrentQARef;
+    mocks.fetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: "expert_binding_changed",
+            expert_binding: { revision: 2, expert_id: "other", enabled: true },
+          },
+        }),
+        { status: 409 },
+      ),
+    );
+    const updateMessage = vi.fn(),
+      onFinish = vi.fn(),
+      onAdmissionRejected = vi.fn();
+    render(
+      <Harness
+        currentQARef={currentQARef}
+        updateMessage={updateMessage}
+        onFinish={onFinish}
+        onAdmissionRejected={onAdmissionRejected}
+      />,
+    );
+    await act(async () => {
+      await hookApi.request([], undefined, owner);
+    });
+    expect(onAdmissionRejected).toHaveBeenCalledWith(owner);
+    expect(updateMessage).not.toHaveBeenCalled();
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+    expect(onFinish).not.toHaveBeenCalled();
   });
 
   it("upserts separate append bubbles while keeping the streamed body in its original response", async () => {

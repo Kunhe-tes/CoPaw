@@ -78,7 +78,9 @@ export function buildPlanModeMeta(
 ): Record<string, unknown> {
   const writableMeta = Object.fromEntries(
     Object.entries(meta || {}).filter(
-      ([key]) => key !== "goal_draft_subagent_delegation_enabled",
+      ([key]) =>
+        key !== "goal_draft_subagent_delegation_enabled" &&
+        key !== "expert_main_binding",
     ),
   );
   return {

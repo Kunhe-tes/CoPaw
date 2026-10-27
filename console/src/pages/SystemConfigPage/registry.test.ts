@@ -168,9 +168,7 @@ describe("SystemConfigPage registry compatibility", () => {
   });
 
   it("reads default cron notification settings", () => {
-    expect(readCronNotificationConfig({})).toEqual(
-      CRON_NOTIFICATION_DEFAULTS,
-    );
+    expect(readCronNotificationConfig({})).toEqual(CRON_NOTIFICATION_DEFAULTS);
   });
 
   it("writes cron notification settings without mutating source", () => {

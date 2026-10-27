@@ -217,6 +217,31 @@ export default function useChatController() {
     hasMessage: messageHandler.hasMessage,
     getCurrentSessionId: sessionHandler.getCurrentSessionId,
     onFinish: (owner) => finishResponse("finished", owner),
+    onAdmissionRejected: (owner) => {
+      if (
+        !isActiveChatRequestOwner(
+          currentQARef.current.activeRequestOwner,
+          owner,
+        )
+      )
+        return;
+      const rejectedIds = [
+        currentQARef.current.request?.id,
+        currentQARef.current.response?.id,
+      ];
+      rejectedIds.forEach((id) => {
+        if (id) messageHandler.removeMessageById(id);
+      });
+      currentQARef.current.request = undefined;
+      currentQARef.current.response = undefined;
+      sessionHandler.syncSessionMessagesForSession(
+        owner.sessionId,
+        messageHandler.getMessages(),
+        false,
+        { refreshList: false },
+      );
+      finishResponse("finished", owner);
+    },
     onConnectionLost: (owner, error) => {
       message.warning(error.message);
       finishResponse("interrupted", owner);

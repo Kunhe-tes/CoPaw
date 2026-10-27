@@ -29,6 +29,7 @@ import {
   type ChatRequestOwner,
 } from "./requestOwnership";
 import { createChatStreamAbortReason, isAbortLikeError } from "./abortReasons";
+import { readExpertBindingConflict } from "@/pages/Chat/useExpertBinding";
 import { emit } from "../../Context/useChatAnywhereEventEmitter";
 import { readChatStream, StreamRecoveryError } from "./streamRecovery";
 
@@ -40,6 +41,7 @@ interface UseChatRequestOptions {
   hasMessage?: (id: string) => boolean;
   getCurrentSessionId: () => string;
   onFinish: (owner: ChatRequestOwner) => void;
+  onAdmissionRejected?: (owner: ChatRequestOwner) => void;
   applyRecoverySnapshot?: (
     history: unknown,
     owner: ChatRequestOwner,
@@ -162,6 +164,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
     hasMessage = () => true,
     getCurrentSessionId,
     onFinish,
+    onAdmissionRejected,
     applyRecoverySnapshot,
     recoverAfterNotFound,
     onConnectionLost,
@@ -365,6 +368,14 @@ export default function useChatRequest(options: UseChatRequestOptions) {
         }
         const data = await response.json().catch(() => ({}));
         if (!isOwnerActive()) {
+          return;
+        }
+        if (
+          response.status === 409 &&
+          readExpertBindingConflict(data) &&
+          onAdmissionRejected
+        ) {
+          onAdmissionRejected(owner);
           return;
         }
         const res = agentScopeRuntimeResponseBuilder.handle({
@@ -715,6 +726,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
       getResponseHeaderTimestamp,
       hasMessage,
       onFinish,
+      onAdmissionRejected,
       recoverAfterNotFound,
       onConnectionLost,
       updateMessage,

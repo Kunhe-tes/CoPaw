@@ -1,5 +1,27 @@
 export type ChatStatus = "idle" | "running" | "stopping";
 
+export interface ExpertBindingView {
+  revision: number;
+  expert_id: string | null;
+  enabled: boolean;
+  available: boolean;
+  expert_name: string | null;
+  reason: string | null;
+}
+
+export interface ExpertBindingUpdate {
+  expected_revision: number;
+  expert_id: string | null;
+}
+
+export interface ExpertBindingConflict {
+  code:
+    | "expert_binding_changed"
+    | "expert_main_disabled"
+    | "expert_unavailable";
+  expert_binding: ExpertBindingView;
+}
+
 export interface ChatSpec {
   id: string; // Chat UUID identifier
   session_id: string; // Session identifier (channel:user_id format)

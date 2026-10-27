@@ -135,3 +135,51 @@ describe("runtime message header cards", () => {
     ).toBe("AI伙伴");
   });
 });
+
+it("shows persisted expert execution identity instead of the current agent label", () => {
+  render(
+    <RuntimeResponseCard
+      data={
+        {
+          output: [
+            {
+              role: "assistant",
+              metadata: {
+                metadata: {
+                  execution_identity: {
+                    kind: "expert_main",
+                    expert_id: "e",
+                    expert_name: "历史专家",
+                    binding_revision: 3,
+                  },
+                },
+              },
+            },
+          ],
+        } as never
+      }
+    />,
+  );
+  expect(screen.getByText("历史专家")).toBeInTheDocument();
+  expect(screen.queryByText("小助 Claw")).not.toBeInTheDocument();
+});
+it("shows direct response execution identity", () => {
+  render(
+    <RuntimeResponseCard
+      data={
+        {
+          output: [],
+          metadata: {
+            execution_identity: {
+              kind: "expert_main",
+              expert_id: "e",
+              expert_name: "实时专家",
+              binding_revision: 1,
+            },
+          },
+        } as never
+      }
+    />,
+  );
+  expect(screen.getByText("实时专家")).toBeInTheDocument();
+});

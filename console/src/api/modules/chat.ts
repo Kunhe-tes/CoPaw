@@ -7,6 +7,8 @@ import {
   isExternalTokenEnabled,
 } from "../externalToken";
 import type {
+  ExpertBindingView,
+  ExpertBindingUpdate,
   ChatPage,
   ChatSpec,
   ChatHistory,
@@ -269,6 +271,20 @@ export const chatApi = {
 
   getChat: (chatId: string) =>
     request<ChatHistory>(`/chats/${encodeURIComponent(chatId)}`),
+
+  getExpertBinding: (chatId: string) =>
+    request<ExpertBindingView>(
+      `/chats/${encodeURIComponent(chatId)}/expert-binding`,
+    ),
+
+  updateExpertBinding: (chatId: string, update: ExpertBindingUpdate) =>
+    request<ExpertBindingView>(
+      `/chats/${encodeURIComponent(chatId)}/expert-binding`,
+      {
+        method: "PUT",
+        body: JSON.stringify(update),
+      },
+    ),
 
   createChatShare: (chatId: string, turnIds: string[]) =>
     request<ChatShareCreateResponse>(
