@@ -378,8 +378,20 @@ The one-time initialization of a Chat's Session-scoped Expert Dependency View wh
 _Avoid_: per-turn dependency loading, Agent Profile installation, cross-chat dependency reuse
 
 **Explicit Expert Selection**:
-The per-message user action in the Chat composer's Expert control, displayed alongside the Model control, that selects one enabled Agent-owned or Received Community Expert. The selection clears after submission and provides an entry independent of keyword-triggered delegation and the Expert Autonomous Discovery Switch.
-_Avoid_: mode control, intent-keyword delegation, implicit expert discovery, Main-Agent-selected expert, session-persistent expert selection
+The structured user action in the Chat composer's Expert control that selects one enabled Agent-owned or Received Community Expert. It produces a per-message Selected Expert Execution by default, or a Chat Expert Binding when the Expert Main Execution Switch is enabled, independently of keyword delegation and autonomous discovery.
+_Avoid_: text mention, implicit expert discovery, Main-Agent-selected expert
+
+**Expert Main Execution Switch**:
+A default-off Source administrator choice allowing an explicitly selected Expert to handle ordinary Chat messages directly as the Main Agent. It does not enable autonomous expert discovery or extend the Expert's declared capabilities.
+_Avoid_: global expert permission, Profile replacement, autonomous discovery switch
+
+**Chat Expert Binding**:
+The persisted choice of one exact Expert identity responsible for subsequent ordinary messages in a Chat until the user changes or releases it. An unavailable identity remains visible and cannot execute until that same Expert becomes valid again; entering Plan or Goal, resetting the Chat, or disabling Expert Main Execution releases the binding.
+_Avoid_: per-message selection, name-based fallback, new Agent Profile, automatic restored binding
+
+**Expert Main Execution**:
+One Chat message handled and streamed directly by its bound Expert using current-Chat context and the Expert's role and capabilities, without Profile long-term memory or further delegation. Its identity, resources and stricter per-message limits remain fixed through execution and interactive approval.
+_Avoid_: SubAgent Run, Main Agent summary, Profile memory inheritance, recursive delegation
 
 **Composer Expert Catalog**:
 The searchable list of valid enabled local and Received Community Experts in the currently selected Agent Profile, shown by the Chat composer's Expert control. Community listings are not directly callable; an expert must first be received by that Agent Profile.

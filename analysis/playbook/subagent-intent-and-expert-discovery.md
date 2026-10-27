@@ -2,7 +2,17 @@
 
 ## 工具没有出现
 
-先区分启动权限与管理权限。当前真实用户文本命中“子代理”“子智能体”“subagent”“sub-agent”，或结构化 `enable_subagents=true`，才开放新启动。英文忽略大小写，历史、工具结果及模型生成的 Contract 不产生授权。显式 `selected_expert_id` 是独立且排他的入口。
+先区分启动权限与管理权限。当前真实用户文本命中“子代理”“子智能体”“subagent”“sub-agent”，或结构化 `enable_subagents=true`，才开放新启动。英文忽略大小写，历史、工具结果及模型生成的 Contract 不产生授权。关闭专家主执行开关时，显式 `selected_expert_id` 是独立且排他的单轮 SubAgent 入口；开启后的普通 Chat 使用服务端持久专家绑定。
+
+## 专家主执行与绑定冲突
+
+- Source 管理员开关：`feature_switches.expert_as_main_enabled`，默认关闭，与自主发现开关独立。只有现有结构化选择器建立绑定，正文提及专家不建立绑定。
+- 绑定接口：`GET/PUT /chats/{id}/expert-binding`；PUT 显式提交 `expected_revision` 与 `expert_id`（null 解除）。JSON 仓储在跨进程 flock 内比较修订；通用 Chat 更新不能覆盖绑定。
+- 发送前：`runner/expert_main_admission.py` 在发布 user turn 前校验修订、开关和专家。409 `expert_binding_changed` 同步最新身份；`expert_main_disabled` 解除绑定；`expert_unavailable` 保留绑定并阻止执行。前端保留草稿与附件供手动重发，不自动重试。
+- 执行：`runner/expert_main.py` 捕获每条消息的最新有效本地定义和私有依赖；`expert_main_runtime.py` 管理内部执行身份、预算和审批快照。专家直接流式回复，不创建 SubAgent Run，不读取 Profile 长期记忆，不能继续委派。
+- 审批：原进程的 pending lease 续接原身份与预算。进程重启或请求落到没有该 lease 的实例时安全拒绝，reason=`expert_execution_unavailable`，需重新发起任务；不能用最新配置重放旧工具。
+- 开关关闭、Plan/Goal、`/new`/`/clear` 解除绑定；`/compact` 保留。失效专家按精确 ID 恢复，同名重建不接替。
+- 回归入口：`test_expert_main_binding.py`、`test_console_chat_expert_main.py`、`test_expert_main_preparation.py`、`test_expert_main_runtime.py` 与 `test_expert_main_dependency_versions.py`。本地两个进程的 CAS 测试不代表 Kubernetes/NAS 已验收。
 
 - 判定：`src/swe/app/subagents/intent.py`。
 - 注册：`SWEAgent._register_background_subagent_tools`。
