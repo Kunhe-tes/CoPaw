@@ -3389,14 +3389,7 @@ class AgentRunner(Runner):
 
         elapsed = time.time() - pending.created_at
         if elapsed > self._APPROVAL_TIMEOUT_SECONDS:
-            if (getattr(pending, "extra", {}) or {}).get(
-                "execution_identity",
-                {},
-            ).get("kind") == "expert_main":
-                await self._discard_expert_main_approval(
-                    pending.request_id,
-                    request,
-                )
+            await self._discard_pending_expert_main_approval(pending, request)
             await svc.resolve_request(
                 pending.request_id,
                 ApprovalDecision.TIMEOUT,
@@ -3420,24 +3413,10 @@ class AgentRunner(Runner):
                 external_submission,
             )
         ):
-            source_channel = external_submission.get("source_channel")
-            if not isinstance(source_channel, str) or not source_channel:
-                source_channel = "external"
             return (
-                Msg(
-                    name="Friday",
-                    role="assistant",
-                    content=[
-                        TextBlock(
-                            type="text",
-                            text=(
-                                f"Approval request `{pending.request_id}` "
-                                f"has already been submitted from "
-                                f"`{source_channel}`. Refresh the session "
-                                "to see the latest approval state."
-                            ),
-                        ),
-                    ],
+                self._external_approval_conflict_message(
+                    pending,
+                    external_submission,
                 ),
                 True,
                 None,
@@ -3467,14 +3446,7 @@ class AgentRunner(Runner):
             pending.request_id,
             denial_decision,
         )
-        if (getattr(pending, "extra", {}) or {}).get(
-            "execution_identity",
-            {},
-        ).get("kind") == "expert_main":
-            await self._discard_expert_main_approval(
-                pending.request_id,
-                request,
-            )
+        await self._discard_pending_expert_main_approval(pending, request)
         await self._notify_console_approval_result(
             resolved or pending,
             denial_decision,
@@ -3489,6 +3461,44 @@ class AgentRunner(Runner):
             True,
             None,
         )
+
+    @staticmethod
+    def _external_approval_conflict_message(
+        pending: Any,
+        external_submission: dict[str, Any],
+    ) -> Msg:
+        source_channel = external_submission.get("source_channel")
+        if not isinstance(source_channel, str) or not source_channel:
+            source_channel = "external"
+        return Msg(
+            name="Friday",
+            role="assistant",
+            content=[
+                TextBlock(
+                    type="text",
+                    text=(
+                        f"Approval request `{pending.request_id}` "
+                        f"has already been submitted from "
+                        f"`{source_channel}`. Refresh the session "
+                        "to see the latest approval state."
+                    ),
+                ),
+            ],
+        )
+
+    async def _discard_pending_expert_main_approval(
+        self,
+        pending: Any,
+        request: Any | None,
+    ) -> None:
+        if (getattr(pending, "extra", {}) or {}).get(
+            "execution_identity",
+            {},
+        ).get("kind") == "expert_main":
+            await self._discard_expert_main_approval(
+                pending.request_id,
+                request,
+            )
 
     async def _discard_expert_main_approval(
         self,
@@ -4328,33 +4338,13 @@ class AgentRunner(Runner):
         channel_meta = getattr(request, "channel_meta", None) or {}
         lease = self._get_expert_main_execution(request)
         if lease is not None:
-            request_context.update(lease.context())
-            if self.memory_manager is not None:
-                from ...agents.memory.expert_main_memory import (
-                    ExpertMainMemoryManager,
-                )
-
-                chat_memory_manager = ExpertMainMemoryManager(
-                    self.memory_manager,
-                )
-                request_context["_expert_chat_memory_manager"] = (
-                    chat_memory_manager
-                )
-                request_context["_expert_chat_memory"] = (
-                    chat_memory_manager.create_request_memory(chat.id)
-                    if chat is not None
-                    else None
-                )
-            if auth_token:
-                request_context["auth_token"] = auth_token
-            if approved_tool_call:
-                request_context["forced_tool_call_json"] = json.dumps(
-                    approved_tool_call,
-                    ensure_ascii=False,
-                )
-                request_context["_expert_main_approved_tool_call"] = (
-                    approved_tool_call
-                )
+            self._apply_expert_main_query_context(
+                request_context,
+                lease,
+                chat,
+                auth_token,
+                approved_tool_call,
+            )
             return request_context
         selected_expert_id = self._apply_query_mode_context(
             request_context=request_context,
@@ -4413,6 +4403,42 @@ class AgentRunner(Runner):
                 ensure_ascii=False,
             )
         return request_context
+
+    def _apply_expert_main_query_context(
+        self,
+        request_context: dict[str, Any],
+        lease: Any,
+        chat: Any,
+        auth_token: str | None,
+        approved_tool_call: dict[str, Any] | None,
+    ) -> None:
+        request_context.update(lease.context())
+        if self.memory_manager is not None:
+            from ...agents.memory.expert_main_memory import (
+                ExpertMainMemoryManager,
+            )
+
+            chat_memory_manager = ExpertMainMemoryManager(
+                self.memory_manager,
+            )
+            request_context["_expert_chat_memory_manager"] = (
+                chat_memory_manager
+            )
+            request_context["_expert_chat_memory"] = (
+                chat_memory_manager.create_request_memory(chat.id)
+                if chat is not None
+                else None
+            )
+        if auth_token:
+            request_context["auth_token"] = auth_token
+        if approved_tool_call:
+            request_context["forced_tool_call_json"] = json.dumps(
+                approved_tool_call,
+                ensure_ascii=False,
+            )
+            request_context["_expert_main_approved_tool_call"] = (
+                approved_tool_call
+            )
 
     def _build_query_request_context(
         self,

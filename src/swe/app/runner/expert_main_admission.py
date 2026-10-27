@@ -114,15 +114,7 @@ async def admit_expert_main(workspace, chat, payload, msgid):
         return token
     if await _release_for_mode_or_reset(workspace, chat, meta, text, current):
         return None
-    if type(expected) is not int or expected != current.revision:
-        # Legacy clients can start a default, never-bound Chat unchanged.
-        if (
-            current.revision
-            or current.expert_id
-            or meta.get("selected_expert_id")
-            or expected is not None
-        ):
-            await _reject(workspace, chat, enabled, "expert_binding_changed")
+    await _validate_binding_revision(workspace, chat, current, meta, expected)
     if current.expert_id is None:
         return None
     definition = await run_runtime_state_work(
@@ -138,19 +130,7 @@ async def admit_expert_main(workspace, chat, payload, msgid):
         await _reject(workspace, chat, enabled, "expert_unavailable")
     registered = False
     try:
-        if not await _source_enabled(workspace, source_id):
-            await _discard_pending(workspace, chat, source_id)
-            chat = await _reconcile_disabled_binding(workspace, chat)
-            await _reject(workspace, chat, False, "expert_main_disabled")
-        latest = await workspace.chat_manager.get_chat(chat.id)
-        if (
-            latest is None
-            or read_expert_binding(latest) != current
-            or not is_ordinary_chat(latest)
-        ):
-            if latest is None:
-                raise HTTPException(status_code=404, detail="Chat not found")
-            await _reject(workspace, latest, enabled, "expert_binding_changed")
+        await _validate_prepared_binding(workspace, chat, current, source_id)
         token = workspace.runner.register_expert_main_execution(
             prepared,
             chat_id=chat.id,
@@ -164,6 +144,34 @@ async def admit_expert_main(workspace, chat, payload, msgid):
     finally:
         if not registered:
             await _cleanup_prepared(prepared)
+
+
+async def _validate_binding_revision(workspace, chat, current, meta, expected):
+    if type(expected) is not int or expected != current.revision:
+        # Legacy clients can start a default, never-bound Chat unchanged.
+        if (
+            current.revision
+            or current.expert_id
+            or meta.get("selected_expert_id")
+            or expected is not None
+        ):
+            await _reject(workspace, chat, True, "expert_binding_changed")
+
+
+async def _validate_prepared_binding(workspace, chat, current, source_id):
+    if not await _source_enabled(workspace, source_id):
+        await _discard_pending(workspace, chat, source_id)
+        chat = await _reconcile_disabled_binding(workspace, chat)
+        await _reject(workspace, chat, False, "expert_main_disabled")
+    latest = await workspace.chat_manager.get_chat(chat.id)
+    if (
+        latest is None
+        or read_expert_binding(latest) != current
+        or not is_ordinary_chat(latest)
+    ):
+        if latest is None:
+            raise HTTPException(status_code=404, detail="Chat not found")
+        await _reject(workspace, latest, True, "expert_binding_changed")
 
 
 async def _release_for_mode_or_reset(workspace, chat, meta, text, current):

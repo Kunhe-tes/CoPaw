@@ -7,6 +7,11 @@ import ast
 import inspect
 import textwrap
 
+from swe.agents.hook_runtime.output import (
+    _stop_append_text,
+    normalize_stop_append_output,
+)
+from swe.agents.hook_runtime.runtime import HookRuntime
 from swe.agents.skills_manager import (
     SkillPoolService,
     _require_workspace_layout_v2,
@@ -16,7 +21,16 @@ from swe.app.channels.base import BaseChannel
 from swe.app.channels.zhaohu.channel import ZhaohuChannel
 from swe.app.crons.executor import CronExecutor
 from swe.app.crons.manager import CronManager
+from swe.app.runner.expert_main_admission import (
+    _validate_binding_revision,
+    _validate_prepared_binding,
+    admit_expert_main,
+)
 from swe.app.runner.runner import AgentRunner, _extract_assistant_response
+from swe.app.routers.console import (
+    _apply_expert_payload_metadata,
+    _extract_session_and_payload,
+)
 
 
 def _cyclomatic_complexity(func) -> int:
@@ -52,6 +66,29 @@ def test_targeted_agent_paths_stay_within_complexity_budget() -> None:
         CronManager.run_job,
         CronManager._record_task_execution_success,
         CronManager._execute_once,
+        ToolGuardMixin._acting_policy_denial,
+        ToolGuardMixin._build_approval_extra,
+        _extract_session_and_payload,
+        AgentRunner._resolve_pending_approval,
+        AgentRunner._prepare_query_agent_context,
+        admit_expert_main,
+        normalize_stop_append_output,
+        HookRuntime.emit_stop_append,
+        ToolGuardMixin._subagent_policy_denial,
+        ToolGuardMixin._consume_subagent_tool_budget,
+        ToolGuardMixin._approval_thinking_blocks,
+        _apply_expert_payload_metadata,
+        AgentRunner._external_approval_conflict_message,
+        AgentRunner._discard_pending_expert_main_approval,
+        AgentRunner._apply_expert_main_query_context,
+        _validate_binding_revision,
+        _validate_prepared_binding,
+        _stop_append_text,
+        HookRuntime._filter_completed_append_tasks,
     )
 
-    assert all(_cyclomatic_complexity(target) <= 15 for target in targets)
+    complexities = {
+        target.__qualname__: _cyclomatic_complexity(target)
+        for target in targets
+    }
+    assert max(complexities.values()) <= 15, complexities
