@@ -951,9 +951,27 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
     context_references = _extract_context_references(request_data)
     if context_references is not None:
         native_payload["meta"]["context_references"] = context_references
+    _apply_expert_payload_metadata(native_payload["meta"], request_data)
+    scenario_preset_id = _extract_scenario_preset_id(request_data)
+    if scenario_preset_id is not None:
+        native_payload["meta"]["scenario_preset_id"] = scenario_preset_id
+    memory_user_scope = _extract_wplus_user_scope(request_data)
+    if memory_user_scope is not None:
+        native_payload["meta"]["wplus_user_scope"] = memory_user_scope
+    if user_name:
+        native_payload["meta"]["user_name"] = user_name
+    if bbk_id:
+        native_payload["meta"]["bbk_id"] = bbk_id
+    return native_payload
+
+
+def _apply_expert_payload_metadata(
+    meta: dict[str, Any],
+    request_data: Any,
+) -> None:
     selected_expert_id = _extract_selected_expert_id(request_data)
     if selected_expert_id is not None:
-        native_payload["meta"]["selected_expert_id"] = selected_expert_id
+        meta["selected_expert_id"] = selected_expert_id
     mapping = (
         request_data
         if isinstance(request_data, dict)
@@ -969,18 +987,7 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
             "expert_binding_revision",
         )
     if revision is not None:
-        native_payload["meta"]["expert_binding_revision"] = revision
-    scenario_preset_id = _extract_scenario_preset_id(request_data)
-    if scenario_preset_id is not None:
-        native_payload["meta"]["scenario_preset_id"] = scenario_preset_id
-    memory_user_scope = _extract_wplus_user_scope(request_data)
-    if memory_user_scope is not None:
-        native_payload["meta"]["wplus_user_scope"] = memory_user_scope
-    if user_name:
-        native_payload["meta"]["user_name"] = user_name
-    if bbk_id:
-        native_payload["meta"]["bbk_id"] = bbk_id
-    return native_payload
+        meta["expert_binding_revision"] = revision
 
 
 def _extract_scenario_preset_id(

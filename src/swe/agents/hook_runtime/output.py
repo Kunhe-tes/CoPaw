@@ -302,7 +302,18 @@ def normalize_stop_append_output(
         raise ValueError("Append output decision must be allow")
     if not isinstance(reason, str) or not reason.strip() or len(reason) > 2000:
         raise ValueError("Append output reason is invalid")
-    specific = raw_output.get("hookSpecificOutput", {})
+    text = _stop_append_text(raw_output.get("hookSpecificOutput", {}))
+    return HookHandlerResult(
+        handler_id=handler_id,
+        order=order,
+        output=HookOutput.model_validate(raw_output),
+        decision=HookDecision.ALLOW,
+        reason=reason,
+        append_text=text,
+    )
+
+
+def _stop_append_text(specific: Any) -> str | None:
     if not isinstance(specific, dict) or set(specific) - {"appendText"}:
         raise ValueError("Append hookSpecificOutput is invalid")
     text = specific.get("appendText")
@@ -312,11 +323,4 @@ def normalize_stop_append_output(
         or len(text.encode("utf-8")) > 16384
     ):
         raise ValueError("Append text is invalid")
-    return HookHandlerResult(
-        handler_id=handler_id,
-        order=order,
-        output=HookOutput.model_validate(raw_output),
-        decision=HookDecision.ALLOW,
-        reason=reason,
-        append_text=text,
-    )
+    return text
