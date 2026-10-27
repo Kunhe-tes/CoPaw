@@ -114,6 +114,14 @@ export const CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES: CurrentSourceConfigSwitchDef
         "表达子代理意图后，允许主 Agent 自主选择当前 Agent 已启用的专家；关闭不影响临时子代理、Skill 自带定义或显式选择专家。",
     },
     {
+      key: "feature_switches.expert_as_main_enabled",
+      path: ["feature_switches", "expert_as_main_enabled"],
+      defaultValue: false,
+      title: "所选专家作为主 Agent",
+      description:
+        "开启后，普通聊天中选择的专家会持续接管当前会话并直接回复；关闭后仍按单条消息作为子代理执行。",
+    },
+    {
       key: "feature_switches.database_access_guard_enabled",
       path: ["feature_switches", "database_access_guard_enabled"],
       defaultValue: true,

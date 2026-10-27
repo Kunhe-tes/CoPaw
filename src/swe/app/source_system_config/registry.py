@@ -62,6 +62,12 @@ SUBAGENT_EXPERT_DISCOVERY_ENABLED_SWITCH = SourceSystemConfigSwitch(
     default_value=False,
     value_type="bool",
 )
+EXPERT_AS_MAIN_ENABLED_SWITCH = SourceSystemConfigSwitch(
+    key="feature_switches.expert_as_main_enabled",
+    path=("feature_switches", "expert_as_main_enabled"),
+    default_value=False,
+    value_type="bool",
+)
 
 TOOL_RESULT_COMPACT_ENABLED_SETTING = SourceSystemConfigSetting(
     key="tool_result_compact.enabled",
@@ -301,6 +307,7 @@ CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES: tuple[SourceSystemConfigSwitch, ...] = (
     CHAT_TASK_PROGRESS_ENABLED_SWITCH,
     NORMAL_MODE_PLAN_INTERACTION_TOOLS_ENABLED_SWITCH,
     SUBAGENT_EXPERT_DISCOVERY_ENABLED_SWITCH,
+    EXPERT_AS_MAIN_ENABLED_SWITCH,
     DATABASE_ACCESS_GUARD_ENABLED_SWITCH,
 )
 CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS: tuple[
@@ -310,6 +317,7 @@ CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS: tuple[
     CHAT_TASK_PROGRESS_ENABLED_SWITCH,
     NORMAL_MODE_PLAN_INTERACTION_TOOLS_ENABLED_SWITCH,
     SUBAGENT_EXPERT_DISCOVERY_ENABLED_SWITCH,
+    EXPERT_AS_MAIN_ENABLED_SWITCH,
     DATABASE_ACCESS_GUARD_ENABLED_SWITCH,
     TOOL_RESULT_COMPACT_ENABLED_SETTING,
     TOOL_RESULT_COMPACT_RECENT_N_SETTING,
@@ -466,6 +474,20 @@ def is_normal_mode_plan_interaction_tools_enabled(
 def is_subagent_expert_discovery_enabled(config: Any | None) -> bool:
     """Read autonomous expert visibility, defaulting to disabled."""
     setting = SUBAGENT_EXPERT_DISCOVERY_ENABLED_SWITCH
+    value = _get_nested_value(_normalize_config_payload(config), setting.path)
+    if value is _MISSING:
+        return False
+    return _coerce_registered_boolean_value(
+        setting.key,
+        value,
+        default=False,
+        strict=False,
+    )
+
+
+def is_expert_as_main_enabled(config: Any | None) -> bool:
+    """Read explicit expert main execution, defaulting to disabled."""
+    setting = EXPERT_AS_MAIN_ENABLED_SWITCH
     value = _get_nested_value(_normalize_config_payload(config), setting.path)
     if value is _MISSING:
         return False
@@ -918,6 +940,7 @@ __all__ = [
     "CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS",
     "CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES",
     "DATABASE_ACCESS_GUARD_ENABLED_SWITCH",
+    "EXPERT_AS_MAIN_ENABLED_SWITCH",
     "LLM_ACQUIRE_TIMEOUT_SETTING",
     "LLM_CHAT_ACQUIRE_TIMEOUT_SETTING",
     "LLM_CHAT_MAX_CONCURRENT_SETTING",
@@ -946,6 +969,7 @@ __all__ = [
     "get_system_prompt_injections",
     "is_chat_task_progress_enabled",
     "is_database_access_guard_enabled",
+    "is_expert_as_main_enabled",
     "is_subagent_expert_discovery_enabled",
     "is_normal_mode_plan_interaction_tools_enabled",
     "merge_source_system_config_with_defaults",

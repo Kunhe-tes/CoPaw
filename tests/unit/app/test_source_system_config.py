@@ -58,6 +58,7 @@ DEFAULT_EXPECTED_SOURCE_CONFIG = {
         "database_access_guard_enabled": True,
         "normal_mode_plan_interaction_tools_enabled": False,
         "subagent_expert_discovery_enabled": False,
+        "expert_as_main_enabled": False,
     },
     "system_prompt_injections": [],
     "tool_result_compact": {
@@ -176,6 +177,7 @@ class TestSourceSystemConfigModels:
                 "database_access_guard_enabled": True,
                 "normal_mode_plan_interaction_tools_enabled": False,
                 "subagent_expert_discovery_enabled": False,
+                "expert_as_main_enabled": False,
             },
             "provider_policy": {"default_model": "qwen-max"},
         }
@@ -463,6 +465,51 @@ class TestSourceSystemConfigModels:
         assert config.as_dict() == {
             "provider_policy": {"default_model": "qwen-max"},
         }
+
+
+def test_expert_main_defaults_off():
+    from swe.app.source_system_config.registry import (
+        build_default_source_system_config_payload,
+        is_expert_as_main_enabled,
+    )
+
+    defaults = build_default_source_system_config_payload()
+    assert defaults["feature_switches"]["expert_as_main_enabled"] is False
+    assert is_expert_as_main_enabled(None) is False
+    assert is_expert_as_main_enabled({}) is False
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [(True, True), (False, False), ("true", True), ("off", False)],
+)
+def test_expert_main_normalizes_boolean_values(raw_value, expected):
+    from swe.app.source_system_config.registry import (
+        is_expert_as_main_enabled,
+        is_subagent_expert_discovery_enabled,
+    )
+
+    config = SourceSystemConfig.model_validate(
+        {
+            "feature_switches": {
+                "expert_as_main_enabled": raw_value,
+                "subagent_expert_discovery_enabled": not expected,
+            },
+        },
+    )
+    assert is_expert_as_main_enabled(config) is expected
+    assert is_subagent_expert_discovery_enabled(config) is not expected
+    assert (
+        config.as_dict()["feature_switches"]["expert_as_main_enabled"]
+        is expected
+    )
+
+
+def test_expert_main_rejects_invalid_boolean_values():
+    with pytest.raises(ValueError, match="expert_as_main_enabled"):
+        SourceSystemConfig.model_validate(
+            {"feature_switches": {"expert_as_main_enabled": "disabled"}},
+        )
 
 
 class TestSourceSystemConfigStore:
@@ -1249,6 +1296,60 @@ class TestSourceSystemConfigService:
         assert result.is_default is True
         assert result.stale is True
         assert "storage unavailable" in (result.last_error or "")
+
+
+@pytest.mark.asyncio
+async def test_expert_main_source_isolation_and_restore_default():
+    from swe.app.source_system_config.registry import (
+        is_expert_as_main_enabled,
+        is_subagent_expert_discovery_enabled,
+    )
+
+    store = _FakeManagementStore()
+    service = SourceSystemConfigService(store)
+    await service.upsert_current_source_config(
+        "source-a",
+        SourceSystemConfig.model_validate(
+            {"feature_switches": {"expert_as_main_enabled": True}},
+        ),
+        updated_by="alice",
+    )
+    await service.upsert_current_source_config(
+        "source-b",
+        SourceSystemConfig.model_validate(
+            {"feature_switches": {"subagent_expert_discovery_enabled": True}},
+        ),
+        updated_by="alice",
+    )
+
+    source_a = await service.resolve_config("source-a")
+    source_b = await service.resolve_config("source-b")
+    assert is_expert_as_main_enabled(source_a.config) is True
+    assert is_expert_as_main_enabled(source_b.config) is False
+    assert is_subagent_expert_discovery_enabled(source_a.config) is False
+    assert is_subagent_expert_discovery_enabled(source_b.config) is True
+
+    restored = await service.upsert_current_source_config(
+        "source-a",
+        SourceSystemConfig.model_validate(
+            {"feature_switches": {"expert_as_main_enabled": False}},
+        ),
+        updated_by="alice",
+    )
+    assert restored.config.as_dict() == {}
+    assert "source-a" not in store.records
+    assert (
+        is_expert_as_main_enabled(
+            (await service.resolve_config("source-a")).config,
+        )
+        is False
+    )
+    assert (
+        is_subagent_expert_discovery_enabled(
+            (await service.resolve_config("source-b")).config,
+        )
+        is True
+    )
 
 
 class TestSourceSystemConfigRuntime:
