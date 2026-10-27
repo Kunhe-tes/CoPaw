@@ -8,9 +8,9 @@
 
 ## Tasks
 
-- [ ] Intent/catalog/config: keyword helper, structured enablement, exclusive selection, Source default-off switch, frontend registry, tests. Verify TDD red/green and review before committing.
-- [ ] Chat management/dependencies: separate management registration, owning Chat/session checks in get/wait/cancel, retained-run detection, per-expert Chat views and tests. Verify cross-Chat denial and frozen dependency reuse.
-- [ ] Goal intent: durable backward-compatible field, creation request, real user request/Steering promotion, restore and per-turn toolkit/catalog refresh; test automatic turns and process recovery.
+- [x] Intent/catalog/config: keyword helper, structured enablement, exclusive selection, Source default-off switch, frontend registry, tests. Reviewed and committed as `d4ca8466f`.
+- [x] Chat management/dependencies: owning Chat/session checks, management-only registration, private expert views and concurrent initialization. Reviewed and committed as `343ee43c7`.
+- [x] Goal intent: durable field, trusted draft/create/Steering intent, recovery and Source refresh; monotonic store protection and worker preparation. Reviewed and committed as `740db02db`.
 - [ ] Final integration: review against every requirement, run related suites and frontend checks, fix findings, changed-file pre-commit, GitNexus detect_changes, deliver reports.
 
 ## Verification
