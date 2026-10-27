@@ -990,10 +990,18 @@ export async function publishPlan(
 
 /** 移除规划，返回最新规划列表；任何失败均上抛 */
 export async function removePlan(id: string): Promise<{ plans: Plan[] }> {
-  const deleted = await requestPlan<boolean>(
-    `${PLAN_PATH}/${encodeURIComponent(id)}`,
-    { method: "DELETE", body: JSON.stringify({ sapId: getUserId() }) },
-  );
+  let deleted: boolean;
+  try {
+    deleted = await requestPlan<boolean>(
+      `${PLAN_PATH}/${encodeURIComponent(id)}`,
+      { method: "DELETE", body: JSON.stringify({ sapId: getUserId() }) },
+    );
+  } catch (error) {
+    if (error instanceof Error && error.message === "plan not found") {
+      error.message = "该规划已被删除，请刷新页面后重试";
+    }
+    throw error;
+  }
   if (!deleted) throw new Error("规划删除未完成");
   return { plans: await fetchPlans() };
 }

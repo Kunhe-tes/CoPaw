@@ -64,6 +64,50 @@ describe("WealthWorkbench api 错误传播", () => {
     });
   });
 
+  it.each([
+    { status: 404, errorStatus: 404, payload: { detail: "plan not found" } },
+    { status: 500, errorStatus: 500, payload: { detail: "plan not found" } },
+    {
+      status: 200,
+      errorStatus: 404,
+      payload: { code: 404, message: "plan not found" },
+    },
+    {
+      status: 200,
+      errorStatus: 500,
+      payload: { code: 500, message: "plan not found" },
+    },
+  ])(
+    "removePlan：规划不存在时提示刷新页面：%j",
+    async ({ status, errorStatus, payload }) => {
+      vi.mocked(fetch).mockResolvedValueOnce(
+        new Response(JSON.stringify(payload), { status }),
+      );
+
+      await expect(api.removePlan("plan-1")).rejects.toMatchObject({
+        message: "该规划已被删除，请刷新页面后重试",
+        status: errorStatus,
+        data: payload,
+      });
+      expect(fetch).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    { status: 404, detail: "route not found" },
+    { status: 403, detail: "无权限移除该规划" },
+    { status: 409, detail: "规划发布中，请稍后再移除" },
+  ])("removePlan：其他错误保留原文：%j", async ({ status, detail }) => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail }), { status }),
+    );
+
+    await expect(api.removePlan("plan-1")).rejects.toMatchObject({
+      message: detail,
+      status,
+    });
+  });
+
   it("publishPlan：认证失效（无 status 的认证文案）时上抛", async () => {
     mockRequest.mockRejectedValue(
       new Error("认证已失效，请刷新页面或重新进入系统后再试"),

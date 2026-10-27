@@ -2,6 +2,12 @@
 
 本文档只收录仓库中已经出现过、且有明确入口可追的高频报错。
 
+## 移除财富规划时提示 plan not found
+
+- 规划已被删除但看板仍保留旧数据时，删除请求可能返回 HTTP 404 与 `detail: "plan not found"`，或业务响应 `code: 404, message: "plan not found"`。
+- 前端 `console/src/pages/WealthWorkbench/api.ts` 的 `removePlan()` 仅按错误文案精确匹配 `plan not found`，不限制 HTTP 状态码或业务码，并翻译为「该规划已被删除，请刷新页面后重试」，看板显示「移除失败：该规划已被删除，请刷新页面后重试」。其他错误保留原文，不自动刷新或移除本地规划。
+- 回归入口：`console/src/pages/WealthWorkbench/api.http-errors.test.ts`；后端接口无需调整。
+
 ## SSE 客户端断连后订阅未释放
 
 - 症状：协商式 SSE 响应返回后，`TaskTracker._runs[chat_id].queues`
