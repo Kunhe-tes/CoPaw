@@ -12,6 +12,83 @@ from swe.config.context import current_tenant_id
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("has_records", [False, True])
+async def test_retained_subagent_presence_is_prepared_outside_event_loop(
+    tmp_path,
+    monkeypatch,
+    has_records,
+):
+    from swe.agents import react_agent as agent_module
+    from swe.app.runner.runner import AgentRunner
+    from swe.app.subagents import run_access
+
+    observed = []
+    runner = object.__new__(AgentRunner)
+    runner.workspace_dir = tmp_path
+    runner.agent_id = "agent"
+    runner.session = SimpleNamespace()
+    config = SimpleNamespace(id="agent", system_prompt_files=[])
+
+    def read(*_args):
+        observed.append(threading.get_ident())
+        return [object()] if has_records else []
+
+    def install(**kwargs):
+        agent = object.__new__(agent_module.SWEAgent)
+        agent._workspace_dir = tmp_path
+        agent._agent_config = config
+        agent._normalize_registered_tool_functions = lambda *_: None
+        toolkit = SimpleNamespace(tools={})
+        toolkit.register_tool_function = (
+            lambda function, **_: toolkit.tools.update(
+                {function.__name__: function},
+            )
+        )
+        agent._register_background_subagent_tools(
+            toolkit,
+            "override",
+            kwargs["prepared_request_context"],
+        )
+        return toolkit.tools
+
+    monkeypatch.setattr(run_access, "read_chat_run_records", read)
+    monkeypatch.setattr(agent_module, "read_chat_run_records", read)
+    monkeypatch.setattr(
+        runner,
+        "_build_query_request_context",
+        lambda **_: {
+            "tenant_id": "tenant",
+            "agent_id": "agent",
+            "session_id": "session",
+            "chat_id": "chat",
+            "_subagent_run_store_dir": str(tmp_path / "runs"),
+        },
+    )
+    monkeypatch.setattr(runner, "_apply_query_mode_context", lambda **_: None)
+    monkeypatch.setattr(
+        runner,
+        "_apply_selected_expert_context",
+        lambda **_: None,
+    )
+    monkeypatch.setattr(runner, "_source_tool_versions", lambda _: ())
+    monkeypatch.setattr(runner, "_create_agent_for_query", install)
+    tools = await runner._create_agent_for_query_async(
+        agent_config=config,
+        request=SimpleNamespace(),
+        session_id="session",
+        current_user_text="hello",
+    )
+    assert observed and all(
+        thread != threading.get_ident() for thread in observed
+    )
+    assert set(tools) == (
+        {"get_subagent", "wait_subagent", "cancel_subagent"}
+        if has_records
+        else set()
+    )
+
+
+@pytest.mark.asyncio
 async def test_preflight_configuration_worker_preserves_tenant_context():
     from swe.app.runner.query_preflight import prepare_query_preflight
 

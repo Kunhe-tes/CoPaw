@@ -901,6 +901,52 @@ describe("ChatPage plan mode wiring", () => {
     expect(goalModeItem?.props.icon).toBeUndefined();
   });
 
+  it("clears server Goal draft intent when Goal Mode is disabled", async () => {
+    mocks.inputDisabled = false;
+    render(<ChatPage />);
+    const modeItem = () => {
+      const quickItems = React.Children.toArray(
+        mocks.capturedOptions?.sender?.quickMenuItems,
+      ) as React.ReactElement[];
+      return (
+        React.Children.toArray(
+          quickItems[0].props.children,
+        ) as React.ReactElement[]
+      ).find((item) => item.props.label === "目标");
+    };
+    act(() => modeItem()?.props.extra.props.onChange(true));
+    mocks.updateChat.mockClear();
+    await act(async () => modeItem()?.props.extra.props.onChange(false));
+    expect(mocks.updateChat).toHaveBeenCalledWith("chat-1", {
+      meta: { goal_mode_enabled: false },
+    });
+  });
+
+  it("clears Goal draft authority when entering Plan Mode with slash command", async () => {
+    mocks.inputDisabled = false;
+    mocks.sessions[0].meta.plan_mode_enabled = false;
+    render(<ChatPage />);
+    const quickItems = React.Children.toArray(
+      mocks.capturedOptions?.sender?.quickMenuItems,
+    ) as React.ReactElement[];
+    const goalModeItem = (
+      React.Children.toArray(
+        quickItems[0].props.children,
+      ) as React.ReactElement[]
+    ).find((item) => item.props.label === "目标");
+    act(() => goalModeItem?.props.extra.props.onChange(true));
+    mocks.updateChat.mockClear();
+    await act(async () => {
+      await mocks.capturedOptions?.sender?.beforeSubmit({
+        query: "/plan",
+        fileList: [],
+      });
+    });
+    expect(mocks.updateChat).toHaveBeenCalledWith("chat-1", {
+      meta: { goal_mode_enabled: false },
+    });
+  });
+
   it("keeps Goal Mode selected after submitting a goal request", async () => {
     mocks.inputDisabled = false;
     const fetchMock = vi.fn(

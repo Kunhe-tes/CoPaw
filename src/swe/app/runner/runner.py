@@ -82,6 +82,11 @@ from .session import SafeJSONSession, SESSION_SKILL_SNAPSHOT_STATE_KEY
 from .stream_boundary import normalize_reasoning_boundary_stream
 from .task_progress import attach_task_progress
 from .utils import build_env_context
+from ..goals.delegation import (
+    GOAL_DRAFT_DELEGATION_META_KEY,
+    is_goal_draft_request,
+)
+from ..subagents.intent import has_subagent_intent
 from ..identity_resolver import resolve_user_identity
 from ..channels.schema import DEFAULT_CHANNEL
 from ...__version__ import __version__
@@ -4043,6 +4048,7 @@ class AgentRunner(Runner):
         )
         from ...runtime_workers import run_runtime_state_work
 
+        await self._update_goal_draft_delegation(kwargs)
         config = kwargs["agent_config"]
         files = getattr(config, "system_prompt_files", None)
         prepared = await prepare_system_prompt_async(
@@ -4063,6 +4069,30 @@ class AgentRunner(Runner):
         )
         with bind_prepared_system_prompt(prepared):
             return self._create_agent_for_query(**kwargs)
+
+    async def _update_goal_draft_delegation(
+        self,
+        values: dict[str, Any],
+    ) -> None:
+        """Persist only actual user authority during Goal draft clarification."""
+        chat = values.get("chat")
+        if chat is None:
+            return
+        request = values.get("request")
+        metadata = dict(getattr(chat, "meta", None) or {})
+        if is_goal_draft_request(request):
+            enabled = bool(metadata.get(GOAL_DRAFT_DELEGATION_META_KEY))
+            enabled |= has_subagent_intent(
+                values.get("current_user_text"),
+                self._request_allows_subagents(request),
+            )
+            if enabled:
+                metadata[GOAL_DRAFT_DELEGATION_META_KEY] = True
+        else:
+            metadata.pop(GOAL_DRAFT_DELEGATION_META_KEY, None)
+        if metadata != (getattr(chat, "meta", None) or {}):
+            chat.meta = metadata
+            await self._chat_manager.update_chat(chat)
 
     def _create_agent_for_query(
         self,
@@ -4161,6 +4191,12 @@ class AgentRunner(Runner):
             request=request,
             channel_meta=channel_meta,
         )
+        if is_goal_draft_request(request):
+            request_context["enable_subagents"] |= bool(
+                (getattr(chat, "meta", None) or {}).get(
+                    GOAL_DRAFT_DELEGATION_META_KEY,
+                ),
+            )
         self._apply_selected_expert_context(
             request_context=request_context,
             selected_expert_id=selected_expert_id,
@@ -4168,6 +4204,34 @@ class AgentRunner(Runner):
             objective=current_user_text,
             approved_tool_call=approved_tool_call,
         )
+        if (
+            values.get("agent_config") is not None
+            and not selected_expert_id
+            and not has_subagent_intent(
+                current_user_text,
+                request_context.get("enable_subagents", False),
+            )
+        ):
+            from ...agents.tools.subagent_background import (
+                build_background_subagent_scope,
+            )
+            from ..subagents.run_access import read_chat_run_records
+
+            retained_runs_present = False
+            if request_context.get("session_id"):
+                scope = build_background_subagent_scope(
+                    parent_agent_config=values["agent_config"],
+                    request_context=request_context,
+                )
+                retained_runs_present = bool(
+                    read_chat_run_records(
+                        scope.run_store_dir,
+                        request_context,
+                    ),
+                )
+            request_context["_subagent_retained_runs_present"] = (
+                retained_runs_present
+            )
         if auth_token:
             request_context["auth_token"] = auth_token
         if (

@@ -1272,6 +1272,7 @@ function GoalProposalCard({
     try {
       const created = await onConfirmGoalProposal({
         card_type: "goal_proposal",
+        enable_subagents: data.enable_subagents === true,
         objective: objective.trim(),
         completion_criteria: criteria,
         constraints: {

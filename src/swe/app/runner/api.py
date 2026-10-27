@@ -39,6 +39,7 @@ from .model_call_error_detail import MODEL_CALL_FAILED_MESSAGES_STATE_KEY
 from .hidden_context_injection import HIDDEN_CONTEXT_METADATA_KEY
 from .utils import agentscope_msg_to_message
 from ..approvals import get_approval_service
+from ..goals.delegation import GOAL_DRAFT_DELEGATION_META_KEY
 
 router = APIRouter(prefix="/chats", tags=["chats"])
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ TASK_RUN_SECTION_STEP = "step"
 TASK_RUN_SECTION_FINAL = "final"
 _SERVER_OWNED_CHAT_META_KEYS = frozenset(
     {
+        GOAL_DRAFT_DELEGATION_META_KEY,
         "scenario_preset_snapshot",
         "scenario_preset_snapshot_source",
     },
@@ -107,6 +109,11 @@ def _merge_chat_update(
             **(existing.meta or {}),
             **incoming_meta,
         }
+        if incoming_meta.get("goal_mode_enabled") is False:
+            merged["meta"].pop(
+                GOAL_DRAFT_DELEGATION_META_KEY,
+                None,
+            )
 
     return ChatSpec.model_validate(merged)
 

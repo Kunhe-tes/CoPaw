@@ -44,8 +44,20 @@ class MySqlGoalStore:
         return _snapshot_from_row(row)
 
     async def save(self, snapshot: GoalSnapshot) -> GoalSnapshot:
-        await self._write(snapshot)
-        return snapshot.model_copy(deep=True)
+        saved = snapshot.model_copy(deep=True)
+        async with self._db.transaction() as db:
+            row = await db.fetch_one(
+                f"SELECT snapshot_json FROM {_GOALS} "
+                "WHERE goal_id = %s FOR UPDATE",
+                (saved.goal_id,),
+            )
+            existing = _snapshot_from_row(row)
+            if existing is not None:
+                saved.subagent_delegation_enabled |= (
+                    existing.subagent_delegation_enabled
+                )
+            await self._write_with(db, saved, _dump(saved))
+        return saved
 
     async def latest_for_chat(self, chat_id: str) -> GoalSnapshot | None:
         terminal = tuple(state.value for state in TERMINAL_GOAL_STATES)

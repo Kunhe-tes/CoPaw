@@ -76,8 +76,13 @@ export function buildPlanModeMeta(
   meta: Record<string, unknown> | null | undefined,
   enabled: boolean,
 ): Record<string, unknown> {
+  const writableMeta = Object.fromEntries(
+    Object.entries(meta || {}).filter(
+      ([key]) => key !== "goal_draft_subagent_delegation_enabled",
+    ),
+  );
   return {
-    ...(meta || {}),
+    ...writableMeta,
     plan_mode_enabled: enabled,
   };
 }

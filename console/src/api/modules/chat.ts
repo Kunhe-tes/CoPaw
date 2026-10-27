@@ -419,10 +419,18 @@ export const chatApi = {
       `/goals/recent?chat_id=${encodeURIComponent(chatId)}`,
     ),
 
-  createGoal: (chatId: string, contract: GoalSnapshot["contract"]) =>
+  createGoal: (
+    chatId: string,
+    contract: GoalSnapshot["contract"],
+    enableSubagents = false,
+  ) =>
     request<GoalSnapshot>("/goals", {
       method: "POST",
-      body: JSON.stringify({ chat_id: chatId, contract }),
+      body: JSON.stringify({
+        chat_id: chatId,
+        contract,
+        enable_subagents: enableSubagents,
+      }),
     }),
 
   pauseGoal: (goalId: string, chatId: string) =>
@@ -470,14 +478,19 @@ export const chatApi = {
       },
     ),
 
-  enqueueGoalSteering: (goalId: string, chatId: string, content: string) =>
+  enqueueGoalSteering: (
+    goalId: string,
+    chatId: string,
+    content: string,
+    enableSubagents = false,
+  ) =>
     request<GoalSnapshot>(
       `/goals/${encodeURIComponent(
         goalId,
       )}/steering?chat_id=${encodeURIComponent(chatId)}`,
       {
         method: "POST",
-        body: JSON.stringify({ content }),
+        body: JSON.stringify({ content, enable_subagents: enableSubagents }),
       },
     ),
 };

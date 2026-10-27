@@ -18,6 +18,8 @@ from .assistant_response import (
 )
 from ...agents.tool_guard_mixin import PreToolUseTerminalStop
 from ...agents.hook_runtime.models import HookDecision, MergedHookResult
+from ..subagents.intent import has_subagent_intent
+from ...runtime_workers import run_runtime_state_work
 
 logger = logging.getLogger(__name__)
 
@@ -258,7 +260,15 @@ async def _resolve_implicit_goal_steering(
         )
     steering_message = plan.original_user_message.strip()
     if steering_message:
-        await service.enqueue_steering(active_goal.goal_id, steering_message)
+        context = getattr(runtime.agent, "_request_context", {})
+        await service.enqueue_steering(
+            active_goal.goal_id,
+            steering_message,
+            enable_subagents=has_subagent_intent(
+                steering_message,
+                context.get("enable_subagents", False),
+            ),
+        )
     return Msg(
         name="Friday",
         role="assistant",
@@ -289,10 +299,16 @@ async def _begin_goal_turn(
                 role="assistant",
                 content="The requested Goal is not available in this chat.",
             )
-        msgid = str(
-            getattr(runtime.agent, "_request_context", {}).get("msgid") or "",
-        ).strip()
-        return service, await service.begin_turn(goal_id, msgid=msgid or None)
+        context = getattr(runtime.agent, "_request_context", {})
+        msgid = str(context.get("msgid") or "").strip()
+        return service, await service.begin_turn(
+            goal_id,
+            msgid=msgid or None,
+            enable_subagents=has_subagent_intent(
+                context.get("current_user_text"),
+                context.get("enable_subagents", False),
+            ),
+        )
     except ValueError:
         state = getattr(getattr(current_goal, "state", None), "value", None)
         return Msg(
@@ -305,13 +321,16 @@ async def _begin_goal_turn(
         )
 
 
-def _prepare_goal_turn_context(
+async def _prepare_goal_turn_context(
     owner: TurnLifecycleOwner,
     *,
     runtime: Any,
     goal: Any,
 ) -> None:
     request_context = getattr(runtime.agent, "_request_context", {})
+    request_context["enable_subagents"] = bool(
+        getattr(goal, "subagent_delegation_enabled", False),
+    )
     request_context["goal_contract_context"] = (
         owner._build_goal_contract_context(
             goal,
@@ -320,6 +339,30 @@ def _prepare_goal_turn_context(
     request_context.pop("goal_turn_resolution", None)
     request_context.pop("_goal_turn_environment_changed", None)
     request_context["_goal_turn_tool_observations"] = []
+    refresh = getattr(runtime.agent, "refresh_background_subagent_tools", None)
+    if refresh is not None:
+        await _refresh_goal_subagent_tools(owner, goal, refresh)
+
+
+async def _refresh_goal_subagent_tools(
+    owner: TurnLifecycleOwner,
+    goal: Any,
+    refresh: Any,
+) -> None:
+    """Refresh only delegation tools with this turn's Source configuration."""
+    from ..source_system_config.runtime import bind_source_system_config
+
+    workspace = getattr(owner, "_workspace", None)
+    resolver = getattr(workspace, "_source_system_config_service", None)
+    if resolver is None:
+        await run_runtime_state_work(refresh)
+        return
+    config = await resolver.resolve_config(
+        goal.scope.source_id,
+        force_refresh=True,
+    )
+    with bind_source_system_config(config):
+        await run_runtime_state_work(refresh)
 
 
 async def _settle_goal_turn(
@@ -590,7 +633,14 @@ async def _stream_goal_completion_lifecycle(
             yield started, True
             return
         service, goal = started
-        _prepare_goal_turn_context(owner, runtime=runtime, goal=goal)
+        try:
+            await _prepare_goal_turn_context(owner, runtime=runtime, goal=goal)
+        except (Exception, asyncio.CancelledError):
+            await service.abandon_turn(
+                goal_id,
+                "Goal turn context preparation failed",
+            )
+            raise
         outcome.stop_hook_active = False
         async for msg, last in _stream_one_goal_turn(
             owner,

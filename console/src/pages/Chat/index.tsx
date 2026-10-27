@@ -1430,8 +1430,26 @@ function ChatPageContent() {
     [activeSessionId, chatId],
   );
 
+  const handleGoalModeChange = useCallback(
+    async (enabled: boolean) => {
+      if (!enabled && feedbackChatId) {
+        try {
+          await chatApi.updateChat(feedbackChatId, {
+            meta: { goal_mode_enabled: false },
+          });
+        } catch (error) {
+          message.error("目标模式状态保存失败，请重试");
+          throw error;
+        }
+      }
+      setGoalModeEnabled(enabled);
+    },
+    [feedbackChatId, message],
+  );
+
   const persistPlanMode = useCallback(
     async (enabled: boolean) => {
+      if (enabled && goalModeEnabled) await handleGoalModeChange(false);
       const previousSelectedExpertId = selectedExpertId;
       if (enabled) {
         setSelectedExpertId(null);
@@ -1485,6 +1503,8 @@ function ChatPageContent() {
     },
     [
       activePlanModeMetadataEnabled,
+      goalModeEnabled,
+      handleGoalModeChange,
       ensurePlanModeChatId,
       message,
       selectedExpertId,
@@ -1536,10 +1556,12 @@ function ChatPageContent() {
     () => (
       <ActiveGoalModeControl
         enabled={goalModeEnabled}
-        onDisable={() => setGoalModeEnabled(false)}
+        onDisable={() => {
+          void handleGoalModeChange(false).catch(() => {});
+        }}
       />
     ),
-    [goalModeEnabled],
+    [goalModeEnabled, handleGoalModeChange],
   );
 
   const selectedExpert = useMemo(
@@ -2309,12 +2331,16 @@ function ChatPageContent() {
           if (!feedbackChatId) {
             throw new Error("当前会话尚未创建，无法确认 Goal");
           }
-          return chatApi.createGoal(feedbackChatId, {
-            objective: proposal.objective,
-            completion_criteria: proposal.completion_criteria,
-            constraints: proposal.constraints,
-            autonomy_boundary: proposal.autonomy_boundary,
-          });
+          return chatApi.createGoal(
+            feedbackChatId,
+            {
+              objective: proposal.objective,
+              completion_criteria: proposal.completion_criteria,
+              constraints: proposal.constraints,
+              autonomy_boundary: proposal.autonomy_boundary,
+            },
+            proposal.enable_subagents === true,
+          );
         },
       }),
       [feedbackChatId, handleContinueModifyingPlan, handlePlanModeDecision],
@@ -2401,12 +2427,13 @@ function ChatPageContent() {
       let annotationPrepared = discardStaleHtmlAnnotationSubmission(data);
       if (pendingHtmlAnnotationBundle) {
         try {
+          if (goalModeEnabled) await handleGoalModeChange(false);
           annotationPrepared = await prepareHtmlAnnotationExecutionMode(
             annotationPrepared,
             {
               planModeEnabled,
               persistPlanMode,
-              goalModeEnabled,
+              goalModeEnabled: false,
               setGoalModeEnabled,
             },
           );
@@ -2497,7 +2524,6 @@ function ChatPageContent() {
           showIcon={false}
           tooltip={t("chat.planMode.tooltip", "计划模式使用只读工具先产出计划")}
           onChange={(enabled) => {
-            if (enabled) setGoalModeEnabled(false);
             void persistPlanMode(enabled);
           }}
         />
@@ -2512,7 +2538,7 @@ function ChatPageContent() {
               disabled={composerDisabled}
               aria-label="目标模式"
               onChange={(enabled) => {
-                setGoalModeEnabled(enabled);
+                void handleGoalModeChange(enabled).catch(() => {});
                 if (enabled) {
                   setSelectedExpertId(null);
                   if (planModeEnabled) void persistPlanMode(false);
@@ -2537,7 +2563,15 @@ function ChatPageContent() {
                 planModeEnabled={planModeEnabled}
                 goalModeEnabled={goalModeEnabled}
                 selectedExpertId={selectedExpertId}
-                onChange={setSelectedExpertId}
+                onChange={(expertId) => {
+                  if (expertId && goalModeEnabled) {
+                    void handleGoalModeChange(false)
+                      .then(() => setSelectedExpertId(expertId))
+                      .catch(() => {});
+                  } else {
+                    setSelectedExpertId(expertId);
+                  }
+                }}
                 onDisablePlanMode={() => {
                   void persistPlanMode(false);
                 }}
@@ -2758,6 +2792,7 @@ function ChatPageContent() {
     handleFileUpload,
     handleContinueModifyingPlan,
     handlePlanModeDecision,
+    handleGoalModeChange,
     isComposingRef,
     isContentOnly,
     isDark,

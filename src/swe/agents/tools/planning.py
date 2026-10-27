@@ -14,6 +14,7 @@ from ...app.plans import (
     GoalProposal,
 )
 from ...app.goals.models import CompletionCriterion, GoalConstraints
+from ...app.subagents.intent import has_subagent_intent
 
 _PLAN_CARD_METADATA_KEY = "plan_interaction_card"
 _DIRECT_CLARIFICATION_KINDS = frozenset(
@@ -421,7 +422,13 @@ def create_submit_proposed_plan_tool(
                 ),
             ],
             metadata={
-                _PLAN_CARD_METADATA_KEY: proposal.model_dump(mode="json"),
+                _PLAN_CARD_METADATA_KEY: {
+                    **proposal.model_dump(mode="json"),
+                    "enable_subagents": has_subagent_intent(
+                        request_context.get("current_user_text"),
+                        request_context.get("enable_subagents", False),
+                    ),
+                },
             },
         )
 

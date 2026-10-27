@@ -128,8 +128,14 @@ export interface SubAgentRunCancelResponse {
 }
 
 export type GoalState =
-  | "ACTIVE" | "WAITING" | "PAUSED" | "BLOCKED" | "LIMITED"
-  | "INTERRUPTED" | "COMPLETE" | "CANCELLED";
+  | "ACTIVE"
+  | "WAITING"
+  | "PAUSED"
+  | "BLOCKED"
+  | "LIMITED"
+  | "INTERRUPTED"
+  | "COMPLETE"
+  | "CANCELLED";
 
 export interface GoalCriterionSnapshot {
   criterion_id: string;
@@ -146,6 +152,7 @@ export interface GoalCriterionSnapshot {
 
 export interface GoalSnapshot {
   goal_id: string;
+  subagent_delegation_enabled?: boolean;
   state: GoalState;
   revision: number;
   turn_budget: number;

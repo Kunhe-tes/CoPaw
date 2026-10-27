@@ -13,6 +13,7 @@ from .models import GoalContract, GoalControlAction, GoalScope, GoalSnapshot
 from .service import GoalConflictError, GoalNotFoundError, GoalService
 from .store import MySqlGoalStore
 from .registry import get_goal_service
+from .delegation import GOAL_DRAFT_DELEGATION_META_KEY
 
 router = APIRouter(prefix="/goals", tags=["goals"])
 
@@ -24,6 +25,7 @@ class _StrictRequest(BaseModel):
 class CreateGoalRequest(_StrictRequest):
     chat_id: str = Field(min_length=1)
     contract: GoalContract
+    enable_subagents: bool = False
 
 
 class EditGoalRequest(_StrictRequest):
@@ -32,6 +34,7 @@ class EditGoalRequest(_StrictRequest):
 
 class SteeringRequest(_StrictRequest):
     content: str = Field(min_length=1, max_length=16000)
+    enable_subagents: bool = False
 
 
 async def _service(request: Request) -> GoalService:
@@ -129,17 +132,31 @@ async def create_goal(
     workspace: Any = Depends(get_workspace),
 ) -> GoalSnapshot:
     chat = await _chat(workspace, body.chat_id)
+    draft_enabled = bool(
+        (getattr(chat, "meta", None) or {}).get(
+            GOAL_DRAFT_DELEGATION_META_KEY,
+        ),
+    )
     try:
-        return await (await _service(request)).create_goal(
+        goal = await (await _service(request)).create_goal(
             scope=_scope(
                 workspace,
                 chat,
                 source_id=getattr(request.state, "source_id", None),
             ),
             contract=body.contract,
+            enable_subagents=body.enable_subagents or draft_enabled,
         )
     except (GoalConflictError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if draft_enabled:
+        chat.meta = {
+            key: value
+            for key, value in chat.meta.items()
+            if key != GOAL_DRAFT_DELEGATION_META_KEY
+        }
+        await workspace.chat_manager.update_chat(chat)
+    return goal
 
 
 @router.get("/recent", response_model=GoalSnapshot | None)
@@ -236,6 +253,10 @@ async def enqueue_goal_steering(
     service = await _service(request)
     await _owned_goal(service, workspace, goal_id, chat_id)
     try:
-        return await service.enqueue_steering(goal_id, body.content)
+        return await service.enqueue_steering(
+            goal_id,
+            body.content,
+            enable_subagents=body.enable_subagents,
+        )
     except GoalConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
