@@ -948,6 +948,7 @@ export async function saveDraft(
 export interface PublishResult {
   plans: Plan[];
   created: boolean;
+  planId: string;
 }
 
 /** 发布新规划或保存对既有规划的修改，返回最新规划列表；任何失败均上抛，由调用方提示 */
@@ -968,18 +969,23 @@ export async function publishPlan(
     scenes: draft.items.map(buildScenePayload),
     targets: targets.map((t) => ({ sapId: t.sapId, name: t.name })),
   };
+  let saved: PlanCreateResponse;
   if (editingId != null) {
-    await requestPlan<PlanCreateResponse>(
+    saved = await requestPlan<PlanCreateResponse>(
       `${PLAN_PATH}/${encodeURIComponent(editingId)}`,
       { method: "PUT", body: JSON.stringify(payload) },
     );
   } else {
-    await requestPlan<PlanCreateResponse>(PLAN_PATH, {
+    saved = await requestPlan<PlanCreateResponse>(PLAN_PATH, {
       method: "POST",
       body: JSON.stringify(payload),
     });
   }
-  return { plans: await fetchPlans(), created: editingId == null };
+  return {
+    plans: await fetchPlans(),
+    created: editingId == null,
+    planId: saved.id,
+  };
 }
 
 /** 移除规划，返回最新规划列表；任何失败均上抛 */
