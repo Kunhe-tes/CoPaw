@@ -41,7 +41,8 @@ class BaseChatRepository(ABC):
         raise NotImplementedError("Repository must implement atomic bindings")
 
     async def update_chat_if_exists(
-        self, spec: ChatSpec
+        self,
+        spec: ChatSpec,
     ) -> Optional[ChatSpec]:
         """Update an existing Chat without recreating it after a delete race."""
         if await self.get_chat(spec.id) is None:

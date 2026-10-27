@@ -22,7 +22,8 @@ def _module():
 
 def _definition(workspace, *, community=False):
     repository = AgentOwnedDefinitionRepository(
-        workspace / "agents", owner_scope="agent:tenant:profile"
+        workspace / "agents",
+        owner_scope="agent:tenant:profile",
     )
     payload = {
         "name": "reviewer",
@@ -41,7 +42,8 @@ def _definition(workspace, *, community=False):
         }
     package = repository.create(payload)
     package = repository.enable(
-        package.definition_id, expected_revision=package.revision
+        package.definition_id,
+        expected_revision=package.revision,
     )
     if community:
         (
@@ -64,16 +66,19 @@ def _prepare(workspace, definition, **overrides):
         ),
         "parent_agent_config": config,
         "parent_policy": PermissionPolicy.readonly(
-            allow_tools=["read_file", "write_file"]
+            allow_tools=["read_file", "write_file"],
         ),
         "workspace_policy": PermissionPolicy.readonly(
-            allow_tools=["read_file"]
+            allow_tools=["read_file"],
         ),
         "chat_model_slot": ModelSlotConfig(
-            provider_id="chat", model="chat-model"
+            provider_id="chat",
+            model="chat-model",
         ),
         "main_budget": BudgetConfig(
-            max_turns=10, max_tool_calls=5, timeout_ms=20000
+            max_turns=10,
+            max_tool_calls=5,
+            timeout_ms=20000,
         ),
     }
     kwargs.update(overrides)
@@ -93,10 +98,13 @@ def test_preparation_captures_identity_policy_and_strict_per_message_budget(
     assert prepared.instruction == "Expert role"
     assert prepared.permission.tools.allow == ["read_file"]
     assert prepared.budget == BudgetConfig(
-        max_turns=6, max_tool_calls=5, timeout_ms=10000
+        max_turns=6,
+        max_tool_calls=5,
+        timeout_ms=10000,
     )
     assert prepared.model_slot == ModelSlotConfig(
-        provider_id="chat", model="chat-model"
+        provider_id="chat",
+        model="chat-model",
     )
     with pytest.raises(FrozenInstanceError):
         prepared.instruction = "changed"
@@ -106,10 +114,14 @@ def test_preparation_captures_identity_policy_and_strict_per_message_budget(
 
 
 @pytest.mark.parametrize(
-    ("global_seconds", "effective_ms"), [(1.25, 1250), (20, 10000)]
+    ("global_seconds", "effective_ms"),
+    [(1.25, 1250), (20, 10000)],
 )
 def test_admission_preparation_snapshots_global_timeout_limit(
-    tmp_path, monkeypatch, global_seconds, effective_ms
+    tmp_path,
+    monkeypatch,
+    global_seconds,
+    effective_ms,
 ):
     from types import SimpleNamespace
     from swe import constant
@@ -140,12 +152,15 @@ def test_admission_preparation_snapshots_global_timeout_limit(
 
 
 def test_unresolvable_expert_model_keeps_current_chat_model(
-    tmp_path, monkeypatch
+    tmp_path,
+    monkeypatch,
 ):
     _, definition = _definition(tmp_path)
     module = _module()
     monkeypatch.setattr(
-        module, "resolve_skill_owned_model_slot", lambda *_: None
+        module,
+        "resolve_skill_owned_model_slot",
+        lambda *_: None,
     )
     prepared = _prepare(tmp_path, definition)
     assert prepared.model_slot.provider_id == "chat"
@@ -153,13 +168,16 @@ def test_unresolvable_expert_model_keeps_current_chat_model(
 
 
 def test_usable_expert_model_wins_without_provider_credentials(
-    tmp_path, monkeypatch
+    tmp_path,
+    monkeypatch,
 ):
     _, definition = _definition(tmp_path)
     module = _module()
     slot = ModelSlotConfig(provider_id="expert", model="expert-model")
     monkeypatch.setattr(
-        module, "resolve_skill_owned_model_slot", lambda *_: slot
+        module,
+        "resolve_skill_owned_model_slot",
+        lambda *_: slot,
     )
     prepared = _prepare(tmp_path, definition)
     assert prepared.model_slot == slot
@@ -169,7 +187,8 @@ def test_usable_expert_model_wins_without_provider_credentials(
 
 @pytest.mark.parametrize("state", ["disabled", "deleted", "broken"])
 def test_invalid_current_definition_blocks_then_same_identity_can_recover(
-    tmp_path, state
+    tmp_path,
+    state,
 ):
     repository, definition = _definition(tmp_path)
     path = tmp_path / "agents" / f"{definition.agent_owned.definition_id}.toml"
@@ -177,7 +196,8 @@ def test_invalid_current_definition_blocks_then_same_identity_can_recover(
     if state == "disabled":
         package = repository.get(definition.agent_owned.definition_id)
         repository.disable(
-            package.definition_id, expected_revision=package.revision
+            package.definition_id,
+            expected_revision=package.revision,
         )
     elif state == "deleted":
         path.unlink()
@@ -198,7 +218,7 @@ def test_private_mcps_are_independent_and_cleanup_keeps_other_message(
     metadata = definition.agent_owned
     path = tmp_path / "agents" / f"{metadata.definition_id}.toml"
     path.write_text(
-        path.read_text().replace("mcps = []", 'mcps = ["private"]')
+        path.read_text().replace("mcps = []", 'mcps = ["private"]'),
     )
     definition.agent_owned.declared_mcps = ["private"]
     root = tmp_path / "agents" / f"{metadata.definition_id}.dependencies/mcp"
@@ -210,9 +230,9 @@ def test_private_mcps_are_independent_and_cleanup_keeps_other_message(
                     "name": "private",
                     "command": "offline-server",
                     "env": {"KEY": "value"},
-                }
-            }
-        )
+                },
+            },
+        ),
     )
     first = _prepare(tmp_path, definition)
     second = _prepare(tmp_path, definition)
@@ -239,7 +259,10 @@ def test_preparation_inherited_policy_still_denies_delegation(tmp_path):
     broad = PermissionPolicy.readonly(allow_tools=["read_file", "write_file"])
     broad.tools.allow.append("start_subagent")
     prepared = _prepare(
-        tmp_path, definition, parent_policy=broad, workspace_policy=broad
+        tmp_path,
+        definition,
+        parent_policy=broad,
+        workspace_policy=broad,
     )
     assert prepared.permission.tools.allow == ["read_file", "write_file"]
     assert "start_subagent" not in prepared.permission.tools.allow
@@ -264,7 +287,7 @@ def test_main_preparation_freezes_v1_and_next_message_uses_complete_v2(
                     "version": version,
                     "content_fingerprint": version,
                 },
-            }
+            },
         )
         root = tmp_path / "agents" / f"{definition_id}.dependencies"
         import shutil
@@ -280,9 +303,9 @@ def test_main_preparation_freezes_v1_and_next_message_uses_complete_v2(
                     f"mcp-{version}": {
                         "name": f"mcp-{version}",
                         "command": f"server-{version}",
-                    }
-                }
-            )
+                    },
+                },
+            ),
         )
         package = repository._package_from_payload(definition_id, payload)
         repository._write(package)
@@ -315,20 +338,21 @@ def test_main_preparation_freezes_v1_and_next_message_uses_complete_v2(
 
 
 def test_unreadable_mcp_capture_fails_closed_and_cleans_message_files(
-    tmp_path, monkeypatch
+    tmp_path,
+    monkeypatch,
 ):
     _, definition = _definition(tmp_path, community=True)
     module = _module()
     metadata = definition.agent_owned
     path = tmp_path / "agents" / f"{metadata.definition_id}.toml"
     path.write_text(
-        path.read_text().replace("mcps = []", 'mcps = ["private"]')
+        path.read_text().replace("mcps = []", 'mcps = ["private"]'),
     )
     definition.agent_owned.declared_mcps = ["private"]
     root = tmp_path / "agents" / f"{metadata.definition_id}.dependencies/mcp"
     root.mkdir()
     (root / "config.json").write_text(
-        json.dumps({"private": {"name": "private", "command": "server"}})
+        json.dumps({"private": {"name": "private", "command": "server"}}),
     )
     monkeypatch.setattr(
         module,
@@ -345,7 +369,8 @@ def test_workspace_agents_symlink_cannot_read_another_profile(tmp_path):
     workspace = tmp_path / "current"
     workspace.mkdir()
     (workspace / "agents").symlink_to(
-        tmp_path / "other/agents", target_is_directory=True
+        tmp_path / "other/agents",
+        target_is_directory=True,
     )
     with pytest.raises(_module().ExpertMainPreparationError):
         _prepare(workspace, definition)
@@ -364,13 +389,15 @@ def test_undeclared_parent_mcp_is_not_inherited_by_expert_main(tmp_path):
             "name": "Profile",
             "mcp": {
                 "clients": {
-                    "parent": {"name": "parent", "command": "parent-only"}
-                }
+                    "parent": {"name": "parent", "command": "parent-only"},
+                },
             },
-        }
+        },
     )
     prepared = _prepare(
-        tmp_path, package.definition, parent_agent_config=config
+        tmp_path,
+        package.definition,
+        parent_agent_config=config,
     )
     assert not prepared.mcp_configs
     prepared.cleanup()
@@ -385,7 +412,10 @@ def test_parent_approval_and_network_constraints_are_retained(tmp_path):
     workspace.network_enabled = False
     workspace.tools.ask = ["write_file"]
     prepared = _prepare(
-        tmp_path, definition, parent_policy=parent, workspace_policy=workspace
+        tmp_path,
+        definition,
+        parent_policy=parent,
+        workspace_policy=workspace,
     )
     assert prepared.permission.tools.ask == ["read_file", "write_file"]
     assert not prepared.permission.network_enabled
@@ -422,8 +452,8 @@ def test_disabled_profile_skill_is_not_loaded_from_declared_name(tmp_path):
             {
                 "layout_version": 2,
                 "skills": {"private": {"enabled": False, "channels": ["all"]}},
-            }
-        )
+            },
+        ),
     )
     prepared = _prepare(tmp_path, package.definition)
     assert not prepared.skill_snapshot_dirs
@@ -463,10 +493,10 @@ def test_private_skill_runtime_snapshot_is_built_from_copied_private_root(
                     "private": {
                         "enabled": True,
                         "config": {"SECRET": "profile-only"},
-                    }
-                }
-            }
-        )
+                    },
+                },
+            },
+        ),
     )
     prepared = _prepare(tmp_path, package.definition)
     snapshot = prepared.workspace_skill_snapshot.skills["private"]

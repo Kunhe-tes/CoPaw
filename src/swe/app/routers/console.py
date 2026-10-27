@@ -954,6 +954,22 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
     selected_expert_id = _extract_selected_expert_id(request_data)
     if selected_expert_id is not None:
         native_payload["meta"]["selected_expert_id"] = selected_expert_id
+    mapping = (
+        request_data
+        if isinstance(request_data, dict)
+        else (
+            request_data.model_dump()
+            if hasattr(request_data, "model_dump")
+            else vars(request_data)
+        )
+    )
+    revision = mapping.get("expert_binding_revision")
+    if revision is None:
+        revision = (mapping.get("channel_meta") or {}).get(
+            "expert_binding_revision",
+        )
+    if revision is not None:
+        native_payload["meta"]["expert_binding_revision"] = revision
     scenario_preset_id = _extract_scenario_preset_id(request_data)
     if scenario_preset_id is not None:
         native_payload["meta"]["scenario_preset_id"] = scenario_preset_id
@@ -1364,10 +1380,18 @@ async def _start_new_chat(
         native_payload,
     )
     native_payload["meta"]["chat_id"] = chat.id
+    from ..runner.expert_main_admission import admit_expert_main
+
+    expert_token = await admit_expert_main(
+        workspace,
+        chat,
+        native_payload,
+        msgid,
+    )
     coordinator = workspace.answer_turn_coordinator
-    if coordinator is None:
-        raise RuntimeError("answer-turn coordinator is not configured")
     try:
+        if coordinator is None:
+            raise RuntimeError("answer-turn coordinator is not configured")
         lease = await _start_or_attach_console_turn(
             coordinator,
             chat,
@@ -1377,11 +1401,15 @@ async def _start_new_chat(
             before_start,
         )
     except BaseException:
+        if expert_token:
+            await workspace.runner.discard_expert_main_execution(expert_token)
         if scenario_preset_id and created:
             await workspace.chat_manager.delete_chats([chat.id])
         raise
     queue = lease.queue
     is_new_run = lease.is_new_run
+    if expert_token and not is_new_run:
+        await workspace.runner.discard_expert_main_execution(expert_token)
     msgid = lease.identity.msgid
     native_payload["meta"]["msgid"] = msgid
     native_payload["meta"]["answer_turn_identity"] = lease.identity

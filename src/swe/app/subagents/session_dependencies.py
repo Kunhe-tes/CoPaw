@@ -432,7 +432,7 @@ def initialize_community_expert_main_dependency_view(
         return target
     parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = Path(
-        tempfile.mkdtemp(prefix=".main-", suffix=".tmp", dir=parent)
+        tempfile.mkdtemp(prefix=".main-", suffix=".tmp", dir=parent),
     )
     try:
         temporary.rmdir()
@@ -440,7 +440,7 @@ def initialize_community_expert_main_dependency_view(
         _validate_frozen_dependency_root(temporary, definition)
         if _main_dependency_content_signature(temporary) != before[2]:
             raise ExpertDependencyViewError(
-                "expert dependencies changed during capture"
+                "expert dependencies changed during capture",
             )
         _write_binding(temporary / _BINDING_FILE_NAME, binding)
         _require_main_dependency_source_state(workspace, definition, before)
@@ -461,7 +461,7 @@ def _validate_main_view_parent(workspace: Path, parent: Path) -> None:
     while candidate != workspace:
         if candidate.is_symlink():
             raise ExpertDependencyViewError(
-                "expert dependency view path is invalid"
+                "expert dependency view path is invalid",
             )
         candidate = candidate.parent
 
@@ -496,7 +496,8 @@ def _main_dependency_source_state(
     if definition_path.is_symlink():
         raise ExpertDependencyViewError("expert definition path is invalid")
     repository = AgentOwnedDefinitionRepository(
-        root, owner_scope=definition.owner_scope
+        root,
+        owner_scope=definition.owner_scope,
     )
     package = repository.get(definition_id)
     if (
@@ -507,10 +508,10 @@ def _main_dependency_source_state(
         raise ExpertDependencyViewError("expert definition is unavailable")
     excluded = {"created_at", "updated_at"}
     if package.definition.model_dump(
-        exclude=excluded
+        exclude=excluded,
     ) != definition.model_dump(exclude=excluded):
         raise ExpertDependencyViewError(
-            "expert definition changed during capture"
+            "expert definition changed during capture",
         )
     source = root / f"{definition_id}.dependencies"
     _validate_frozen_dependency_root(source, definition)
@@ -547,5 +548,5 @@ def _require_main_dependency_source_state(
 ) -> None:
     if _main_dependency_source_state(workspace, definition) != expected:
         raise ExpertDependencyViewError(
-            "expert dependencies changed during capture"
+            "expert dependencies changed during capture",
         )

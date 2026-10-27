@@ -1009,6 +1009,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             request_context.get("agent_role", "main")
             in {"subagent", "completion_judge"}
             or bool(request_context.get("goal_finalization"))
+            or bool(request_context.get("expert_main_execution"))
             or not (
                 request_context.get("agent_id")
                 or getattr(self._agent_config, "id", None)
@@ -1602,12 +1603,21 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         )
 
         # Check if heartbeat is enabled in agent config
-        sys_prompt = build_system_prompt_from_working_dir(
-            working_dir=self._workspace_dir,
-            enabled_files=list(self._system_prompt_enabled_files()),
-            agent_id=agent_id,
-            heartbeat_enabled=self._heartbeat_enabled_for_prompt(),
-        )
+        if self._request_context.get("expert_main_execution"):
+            from .prompt import SYSTEM_PROMPT_PROTECTION
+
+            sys_prompt = (
+                SYSTEM_PROMPT_PROTECTION
+                + "\n\n"
+                + self._request_context["expert_main_instruction"]
+            )
+        else:
+            sys_prompt = build_system_prompt_from_working_dir(
+                working_dir=self._workspace_dir,
+                enabled_files=list(self._system_prompt_enabled_files()),
+                agent_id=agent_id,
+                heartbeat_enabled=self._heartbeat_enabled_for_prompt(),
+            )
         logger.debug("System prompt:\n%s...", sys_prompt[:100])
 
         # Inject multimodal capability awareness
@@ -1693,6 +1703,11 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
 
         self._enable_memory_manager: bool = enable_memory_manager
         self.memory_manager = memory_manager
+        if self._request_context.get("expert_main_execution"):
+            chat_memory = self._request_context.get("_expert_chat_memory")
+            if chat_memory is not None:
+                self.memory = chat_memory
+            return
 
         # Register memory_search tool if enabled and available
         if self._enable_memory_manager and self.memory_manager is not None:
@@ -1755,6 +1770,21 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
     def _register_hooks(self) -> None:
         """Register pre-reasoning and pre-acting hooks."""
         if self._request_context.get("agent_role") == "completion_judge":
+            return
+        if self._request_context.get("expert_main_execution"):
+            manager = self._request_context.get("_expert_chat_memory_manager")
+            if (
+                manager is not None
+                and self._request_context.get(
+                    "_expert_chat_memory",
+                )
+                is not None
+            ):
+                self.register_instance_hook(
+                    hook_type="pre_reasoning",
+                    hook_name="memory_compact_hook",
+                    hook=MemoryCompactionHook(manager).__call__,
+                )
             return
         # Bootstrap hook - checks BOOTSTRAP.md on first interaction
         # Use workspace_dir if available, else fallback to WORKING_DIR
@@ -2172,6 +2202,20 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         ``print`` can strip tool_use blocks from streaming chunks.
         """
         with self.agent_phase(AgentPhase.SUMMARIZING, reason="summarizing"):
+            if getattr(self, "_request_context", {}).get(
+                "expert_main_execution",
+            ):
+                self._request_context["expert_main_terminal_reason"] = (
+                    "turn_budget_exceeded"
+                )
+                message = Msg(
+                    self.name,
+                    "专家本轮执行达到推理上限，已终止。",
+                    "assistant",
+                )
+                await self.print(message, True)
+                await self.memory.add(message)
+                return message
             # --- Proactive filtering layer ---
             if not get_active_model_supports_multimodal():
                 n = self._proactive_strip_media_blocks()
@@ -2239,6 +2283,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         the active phase metadata.
         """
         self._record_agent_activity(reason="output")
+        from ..app.runner.expert_main_runtime import tag_expert_message
+
+        tag_expert_message(msg, self._request_context)
 
         if not getattr(self, "_in_summarizing", False):
             return await super().print(msg, last, speech=speech)

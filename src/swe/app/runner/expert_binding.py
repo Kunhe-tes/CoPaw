@@ -106,7 +106,9 @@ async def binding_view(workspace, chat, *, enabled: bool) -> ExpertBindingView:
     definition = (
         (
             await run_runtime_state_work(
-                resolve_bound_expert, workspace, binding.expert_id
+                resolve_bound_expert,
+                workspace,
+                binding.expert_id,
             )
         )
         if binding.expert_id

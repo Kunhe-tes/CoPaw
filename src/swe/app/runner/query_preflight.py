@@ -46,6 +46,15 @@ async def prepare_query_preflight(
         session_execution=session_execution,
     )
     hook_additional_context = ""
+    expert_lease = getattr(
+        owner,
+        "_get_expert_main_execution",
+        lambda _: None,
+    )(request)
+    if expert_lease is not None:
+        from .expert_main_runtime import restrict_expert_hook_overlay
+
+        hook_overlay = restrict_expert_hook_overlay(hook_overlay)
     if query and owner._query_preflight_hooks_enabled(
         tenant_hooks,
         agent_config,

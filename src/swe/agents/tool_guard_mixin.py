@@ -1541,6 +1541,18 @@ class ToolGuardMixin:
         request_context = getattr(self, "_request_context", {}) or {}
         agent_role = request_context.get("agent_role", "main")
         reason = self._plan_mode_policy_denial(tool_name, tool_input)
+        if reason is None and request_context.get("expert_main_execution"):
+            from ..app.runner.expert_main_runtime import (
+                expert_main_policy_reason,
+            )
+
+            reason = expert_main_policy_reason(
+                self,
+                tool_name,
+                tool_input,
+                include_budget=include_budget,
+                tool_call_id=str(tool_call.get("id") or ""),
+            )
         if reason is None and agent_role == "subagent":
             policy_payload = request_context.get("subagent_policy")
             if not isinstance(policy_payload, dict):
@@ -1916,7 +1928,23 @@ class ToolGuardMixin:
         engine = self._tool_guard_engine
         tool_name = str(tool_call.get("name", ""))
         tool_input = tool_call.get("input", {})
-        if not tool_name or not engine.enabled:
+        if not tool_name:
+            return None
+
+        context = getattr(self, "_request_context", {}) or {}
+        if context.get("expert_main_execution"):
+            from ..app.runner.expert_main_runtime import (
+                expert_main_approval_action,
+            )
+
+            expert_action = await expert_main_approval_action(
+                self,
+                tool_name,
+                tool_input,
+            )
+            if expert_action is not None:
+                return expert_action
+        if not engine.enabled:
             return None
 
         if engine.is_denied(tool_name):
@@ -2183,6 +2211,9 @@ class ToolGuardMixin:
         if chat_id and msgid:
             extra["chat_id"] = chat_id
             extra["msgid"] = msgid
+        execution_identity = self._request_context.get("execution_identity")
+        if isinstance(execution_identity, dict):
+            extra["execution_identity"] = dict(execution_identity)
         if hook_ask_handler_ids:
             extra["hook_ask_handler_ids"] = list(hook_ask_handler_ids)
         if original_msg is not None:
@@ -2386,6 +2417,9 @@ class ToolGuardMixin:
             ):
                 return await self._emit_waiting_for_approval()
 
+        from ..app.runner.expert_main_runtime import consume_expert_reasoning
+
+        consume_expert_reasoning(self._request_context)
         return await super()._reasoning(  # type: ignore[misc]
             tool_choice=tool_choice,
         )

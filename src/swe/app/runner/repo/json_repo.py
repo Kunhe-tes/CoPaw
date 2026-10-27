@@ -416,7 +416,7 @@ class JsonChatRepository(BaseChatRepository):
                     binding = read_expert_binding(existing)
                     if binding.expert_id and not is_ordinary_chat(updated):
                         binding = ChatExpertBinding(
-                            revision=binding.revision + 1
+                            revision=binding.revision + 1,
                         )
                     if (
                         EXPERT_BINDING_META_KEY in existing.meta
@@ -449,7 +449,8 @@ class JsonChatRepository(BaseChatRepository):
         with self._write_lock_sync():
             _, chats_file = self._load_sync()
             chat = next(
-                (item for item in chats_file.chats if item.id == chat_id), None
+                (item for item in chats_file.chats if item.id == chat_id),
+                None,
             )
             if chat is None:
                 raise KeyError(chat_id)
@@ -458,7 +459,7 @@ class JsonChatRepository(BaseChatRepository):
                 raise ExpertBindingConflict(current)
             if expert_id is not None and not is_ordinary_chat(chat):
                 raise ExpertBindingModeConflict(
-                    "Expert main execution requires ordinary Chat"
+                    "Expert main execution requires ordinary Chat",
                 )
             binding = ChatExpertBinding(
                 revision=current.revision + 1,
@@ -478,7 +479,8 @@ class JsonChatRepository(BaseChatRepository):
         with self._write_lock_sync():
             _, chats_file = self._load_sync()
             chat = next(
-                (item for item in chats_file.chats if item.id == chat_id), None
+                (item for item in chats_file.chats if item.id == chat_id),
+                None,
             )
             if chat is None:
                 raise KeyError(chat_id)
@@ -490,7 +492,8 @@ class JsonChatRepository(BaseChatRepository):
             chat.updated_at = datetime.now(timezone.utc)
             return (
                 self._save_and_prepare_snapshot_sync(
-                    chats_file, already_locked=True
+                    chats_file,
+                    already_locked=True,
                 ),
                 released,
             )

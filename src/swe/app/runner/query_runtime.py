@@ -394,6 +394,11 @@ async def finalize_query_runtime(
     prepare_memory = getattr(memory_manager, "prepare_request_memory", None)
     if (
         resources.chat is not None
+        and not bool(
+            getattr(owner, "_get_expert_main_execution", lambda _: None)(
+                request,
+            ),
+        )
         and callable(prepare_memory)
         and os.getenv("ENABLE_MEMORY_MANAGER", "").lower() != "false"
     ):
@@ -490,10 +495,17 @@ async def prepare_query_runtime(
             return block_result
         from ...agents.model_factory import prepare_model_config_async
 
+        lease = getattr(owner, "_get_expert_main_execution", lambda _: None)(
+            request,
+        )
+        model_kwargs = {}
+        if lease is not None:
+            model_kwargs["model_slot_override"] = lease.prepared.model_slot
         inputs.prepared_model_config = await prepare_model_config_async(
             agent_id=inputs.agent_config.id,
             tenant_id=owner.tenant_id,
             manager=manager,
+            **model_kwargs,
         )
         runtime = await owner._finalize_query_runtime(
             request=request,

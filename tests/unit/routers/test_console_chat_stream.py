@@ -40,7 +40,17 @@ class _FakeChannelManager:
         return _FakeConsoleChannel()
 
 
-class _FakeChatManager:
+class _UnboundExpertBindingManager:
+    async def release_current_expert_binding(self, _chat_id):
+        from swe.app.runner.expert_binding import ChatExpertBinding
+
+        return ChatExpertBinding()
+
+    async def get_chat(self, chat_id):
+        return SimpleNamespace(id=chat_id, meta={})
+
+
+class _FakeChatManager(_UnboundExpertBindingManager):
     async def get_or_create_chat(
         self,
         session_id: str,
@@ -259,7 +269,7 @@ def test_console_chat_authenticated_agent_mismatch_is_rejected_before_starting_t
 async def test_start_new_chat_propagates_created_chat_id_to_compaction_sse():
     """A new-chat /compact stream must carry the created chat ID to SSE."""
 
-    class _ChatManager:
+    class _ChatManager(_UnboundExpertBindingManager):
         async def get_or_create_chat(self, *_args, **_kwargs):
             return SimpleNamespace(
                 id="chat-created-by-router",
@@ -338,7 +348,7 @@ async def test_start_new_chat_propagates_created_chat_id_to_compaction_sse():
 
 @pytest.mark.asyncio
 async def test_start_new_chat_rejects_submission_while_chat_is_stopping():
-    class _ChatManager:
+    class _ChatManager(_UnboundExpertBindingManager):
         async def get_or_create_chat(self, *_args, **_kwargs):
             return SimpleNamespace(
                 id="chat-stopping",
@@ -390,7 +400,7 @@ async def test_start_new_chat_persists_first_submit_scenario_snapshot(
 ):
     """The server-created snapshot, not the client ID, reaches the runner."""
 
-    class _ChatManager:
+    class _ChatManager(_UnboundExpertBindingManager):
         created = None
 
         async def get_or_create_scenario_chat(self, *_args):
@@ -483,7 +493,7 @@ async def test_start_new_chat_persists_first_submit_scenario_snapshot(
 async def test_start_new_chat_cleans_created_scenario_when_tracker_fails(
     monkeypatch,
 ):
-    class _ChatManager:
+    class _ChatManager(_UnboundExpertBindingManager):
         deleted: list[str] = []
 
         async def get_or_create_scenario_chat(self, *_args):

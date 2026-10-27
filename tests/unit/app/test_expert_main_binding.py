@@ -56,7 +56,7 @@ async def test_binding_compare_and_set_serializes_two_repository_instances(
         == 1
     )
     binding = read_expert_binding(
-        await JsonChatRepository(path).get_chat("chat")
+        await JsonChatRepository(path).get_chat("chat"),
     )
     assert binding.revision == 1
     assert binding.expert_id in {"a", "b"}
@@ -137,8 +137,8 @@ def binding_api(tmp_path, monkeypatch):
                 session_id="s",
                 user_id="alice",
                 meta={"source_id": "source-a", "agent_id": "profile-a"},
-            )
-        )
+            ),
+        ),
     )
     manager = ChatManager(repo=repo)
     workspace = SimpleNamespace(
@@ -160,10 +160,11 @@ def binding_api(tmp_path, monkeypatch):
         request.state.source_system_config = {
             "feature_switches": {
                 "expert_as_main_enabled": request.headers.get(
-                    "enabled", "true"
+                    "enabled",
+                    "true",
                 )
-                == "true"
-            }
+                == "true",
+            },
         }
         return await call_next(request)
 
@@ -175,7 +176,9 @@ def binding_api(tmp_path, monkeypatch):
         lambda *args: SimpleNamespace(name="Expert A", enabled=True),
     )
     monkeypatch.setattr(
-        api, "resolve_bound_expert", expert_binding.resolve_bound_expert
+        api,
+        "resolve_bound_expert",
+        expert_binding.resolve_bound_expert,
     )
     return TestClient(app), repo
 
@@ -195,7 +198,8 @@ def test_binding_api_preserves_revision_and_syncs_conflicts(binding_api):
     assert conflict.status_code == 409
     assert conflict.json()["detail"]["expert_binding"]["expert_id"] == "a"
     disabled = client.get(
-        "/chats/chat/expert-binding", headers={"enabled": "false"}
+        "/chats/chat/expert-binding",
+        headers={"enabled": "false"},
     )
     assert (
         disabled.json()["expert_id"] is None
@@ -221,7 +225,7 @@ def test_generic_api_cannot_inject_binding(binding_api):
     response = client.put(
         "/chats/chat",
         json={
-            "meta": {"expert_main_binding": {"revision": 2, "expert_id": "a"}}
+            "meta": {"expert_main_binding": {"revision": 2, "expert_id": "a"}},
         },
     )
     assert response.status_code == 400
@@ -325,7 +329,8 @@ def test_disabled_binding_get_only_reports_an_actual_release(binding_api):
 
 
 def test_disabled_binding_get_releases_binding_after_stale_unbound_read(
-    binding_api, monkeypatch
+    binding_api,
+    monkeypatch,
 ):
     from swe.app.runner import api
 
@@ -337,10 +342,13 @@ def test_disabled_binding_get_releases_binding_after_stale_unbound_read(
         return await original(request)
 
     monkeypatch.setattr(
-        api, "expert_main_enabled_for_request", bind_after_chat_read
+        api,
+        "expert_main_enabled_for_request",
+        bind_after_chat_read,
     )
     response = client.get(
-        "/chats/chat/expert-binding", headers={"enabled": "false"}
+        "/chats/chat/expert-binding",
+        headers={"enabled": "false"},
     )
     assert response.json()["expert_id"] is None
     assert response.json()["revision"] == 2
@@ -353,8 +361,8 @@ def test_binding_cas_serializes_two_independent_local_processes(tmp_path):
     path = tmp_path / "chats.json"
     asyncio.run(
         JsonChatRepository(path).upsert_chat(
-            ChatSpec(id="chat", session_id="s", user_id="u")
-        )
+            ChatSpec(id="chat", session_id="s", user_id="u"),
+        ),
     )
     script = """
 import asyncio, json, pathlib, sys, time
@@ -387,7 +395,9 @@ print(json.dumps(asyncio.run(run())))
     try:
         for identity in ("a", "b"):
             processes.append(
-                subprocess.Popen(
+                # Both contenders must be alive before opening the CAS gate;
+                # the finally block terminates and waits for every process.
+                subprocess.Popen(  # pylint: disable=consider-using-with
                     [
                         sys.executable,
                         "-c",
@@ -401,7 +411,7 @@ print(json.dumps(asyncio.run(run())))
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
-                )
+                ),
             )
         deadline = time.monotonic() + 15
         while not all(
@@ -428,7 +438,7 @@ print(json.dumps(asyncio.run(run())))
         "saved",
     ]
     binding = read_expert_binding(
-        asyncio.run(JsonChatRepository(path).get_chat("chat"))
+        asyncio.run(JsonChatRepository(path).get_chat("chat")),
     )
     assert binding.revision == 1
     assert binding.expert_id in {"a", "b"}
@@ -436,7 +446,8 @@ print(json.dumps(asyncio.run(run())))
 
 
 def test_binding_api_retries_release_if_another_tab_wins(
-    binding_api, monkeypatch
+    binding_api,
+    monkeypatch,
 ):
     from swe.app.runner.manager import ChatManager
 
@@ -456,17 +467,21 @@ def test_binding_api_retries_release_if_another_tab_wins(
         return await original(self, chat_id)
 
     monkeypatch.setattr(
-        ChatManager, "release_current_expert_binding", competing_binding
+        ChatManager,
+        "release_current_expert_binding",
+        competing_binding,
     )
     response = client.get(
-        "/chats/chat/expert-binding", headers={"enabled": "false"}
+        "/chats/chat/expert-binding",
+        headers={"enabled": "false"},
     )
     assert response.json()["expert_id"] is None
     assert response.json()["reason"] == "expert_main_disabled"
 
 
 def test_binding_put_clears_delayed_save_after_source_disables(
-    binding_api, monkeypatch
+    binding_api,
+    monkeypatch,
 ):
     from swe.app.runner import api
     from swe.app.runner.expert_binding import read_expert_binding
@@ -494,7 +509,9 @@ def test_binding_put_clears_delayed_save_after_source_disables(
 
 @pytest.mark.parametrize("method", ["binding_put", "binding_get", "chat_put"])
 def test_delete_race_returns_404_without_recreating_chat(
-    binding_api, monkeypatch, method
+    binding_api,
+    monkeypatch,
+    method,
 ):
     from swe.app.runner.manager import ChatManager
 
@@ -507,7 +524,9 @@ def test_delete_race_returns_404_without_recreating_chat(
             return await original(spec)
 
         monkeypatch.setattr(
-            repo, "update_chat_if_exists", delete_during_update
+            repo,
+            "update_chat_if_exists",
+            delete_during_update,
         )
         response = client.put("/chats/chat", json={"name": "new"})
     elif method == "binding_put":
@@ -518,7 +537,9 @@ def test_delete_race_returns_404_without_recreating_chat(
             return await original(self, chat_id, revision, expert_id)
 
         monkeypatch.setattr(
-            ChatManager, "compare_and_set_expert_binding", delete_before_cas
+            ChatManager,
+            "compare_and_set_expert_binding",
+            delete_before_cas,
         )
         response = client.put(
             "/chats/chat/expert-binding",
@@ -538,7 +559,8 @@ def test_delete_race_returns_404_without_recreating_chat(
             delete_before_release,
         )
         response = client.get(
-            "/chats/chat/expert-binding", headers={"enabled": "false"}
+            "/chats/chat/expert-binding",
+            headers={"enabled": "false"},
         )
     assert response.status_code == 404
     assert asyncio.run(repo.get_chat("chat")) is None

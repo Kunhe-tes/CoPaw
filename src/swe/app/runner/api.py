@@ -1533,7 +1533,8 @@ async def put_chat_expert_binding(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(
-                status_code=404, detail="Chat not found"
+                status_code=404,
+                detail="Chat not found",
             ) from exc
         enabled = await expert_main_enabled_for_request(request)
         if not enabled:
@@ -1541,7 +1542,8 @@ async def put_chat_expert_binding(
                 await mgr.release_current_expert_binding(chat_id)
             except KeyError as exc:
                 raise HTTPException(
-                    status_code=404, detail="Chat not found"
+                    status_code=404,
+                    detail="Chat not found",
                 ) from exc
             code = "expert_main_disabled"
         chat = await mgr.get_chat(chat_id)

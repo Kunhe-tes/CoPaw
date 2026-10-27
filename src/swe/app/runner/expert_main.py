@@ -166,7 +166,7 @@ def prepare_expert_main_execution(
         )
         if set(payload) != set(diagnostics.snapshotted_mcps):
             raise ExpertMainPreparationError(
-                "expert MCP capture is incomplete"
+                "expert MCP capture is incomplete",
             )
         mcps = {
             name: MCPClientConfig.model_validate(raw)
@@ -175,7 +175,7 @@ def prepare_expert_main_execution(
         _, latest_revision = _current_definition(workspace, captured)
         if latest_revision != revision:
             raise ExpertMainPreparationError(
-                "expert changed during preparation"
+                "expert changed during preparation",
             )
         community = captured.agent_owned.community
         return PreparedExpertMainExecution(
@@ -206,7 +206,7 @@ def prepare_expert_main_execution(
     except (OSError, ValueError) as exc:
         _remove_snapshot_tree(snapshot_root)
         raise ExpertMainPreparationError(
-            "expert resources are unavailable"
+            "expert resources are unavailable",
         ) from exc
     except BaseException:
         _remove_snapshot_tree(snapshot_root)
@@ -220,7 +220,7 @@ def _current_definition(
     metadata = definition.agent_owned
     if metadata is None:
         raise ExpertMainPreparationError(
-            "expert must belong to the current Profile"
+            "expert must belong to the current Profile",
         )
     try:
         expert_id = str(UUID(metadata.definition_id))
@@ -234,7 +234,8 @@ def _current_definition(
     if path.is_symlink():
         raise ExpertMainPreparationError("expert definition path is invalid")
     repository = AgentOwnedDefinitionRepository(
-        path.parent, owner_scope=definition.owner_scope
+        path.parent,
+        owner_scope=definition.owner_scope,
     )
     package = repository.get(expert_id)
     if (
@@ -245,7 +246,7 @@ def _current_definition(
         raise ExpertMainPreparationError("expert is unavailable")
     excluded = {"created_at", "updated_at"}
     if package.definition.model_dump(
-        exclude=excluded
+        exclude=excluded,
     ) != definition.model_dump(exclude=excluded):
         raise ExpertMainPreparationError("expert changed before preparation")
     return package.definition.model_copy(deep=True), package.revision
@@ -305,9 +306,11 @@ def _message_skill_snapshot(
             runtime_profile=build_skill_runtime_profile(path, path.name),
             config=_freeze(dict(original.config) if original else {}),
             requirements=_freeze(
-                dict(original.requirements)
-                if original
-                else metadata["requirements"]
+                (
+                    dict(original.requirements)
+                    if original
+                    else metadata["requirements"]
+                ),
             ),
             channels=original.channels if original else ("all",),
         )
