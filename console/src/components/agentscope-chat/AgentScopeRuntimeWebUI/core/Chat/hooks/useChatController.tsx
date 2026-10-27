@@ -26,6 +26,7 @@ import {
   type FollowUpSubmitData,
 } from "./followUpSubmit";
 import { emitTaskProgressUpdate } from "@/pages/Chat/taskProgressEvents";
+import { emitSubAgentRunsRefresh } from "@/pages/Chat/subAgentRunEvents";
 import { shouldEnqueueFollowUpSubmission } from "./followUpSubmitState";
 import type { CurrentQARef } from "./currentQARef";
 import {
@@ -112,6 +113,7 @@ export default function useChatController() {
         return;
       }
       setSessionNotFound?.(false);
+      emitSubAgentRunsRefresh(owner.chatId, true);
       currentQARef.current.activeRequestOwner = undefined;
       currentQARef.current.abortController = undefined;
       currentQARef.current.response = undefined;

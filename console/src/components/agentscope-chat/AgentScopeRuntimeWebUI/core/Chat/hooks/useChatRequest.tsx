@@ -15,10 +15,7 @@ import {
   emitTaskProgressUpdate,
   extractTaskProgress,
 } from "@/pages/Chat/taskProgressEvents";
-import {
-  emitSubAgentRunsRefresh,
-  emitSubAgentRunsRefreshIfPresent,
-} from "@/pages/Chat/subAgentRunEvents";
+import { emitSubAgentRunsRefreshIfPresent } from "@/pages/Chat/subAgentRunEvents";
 import {
   readStopAppendMetadata,
   stopAppendBubbleId,
@@ -484,10 +481,8 @@ export default function useChatRequest(options: UseChatRequestOptions) {
               if (typeof snapshot.msgid === "string") {
                 owner.msgid = snapshot.msgid;
               }
+              owner.chatId = snapshot.chat_id;
               await applyRecoverySnapshot?.(snapshot.history, owner);
-              if (isOwnerActive()) {
-                emitSubAgentRunsRefresh(snapshot.chat_id, true);
-              }
               return;
             }
             if (isOwnerActive()) {

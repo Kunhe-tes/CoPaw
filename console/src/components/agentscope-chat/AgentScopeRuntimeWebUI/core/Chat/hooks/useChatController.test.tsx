@@ -9,6 +9,10 @@ import type { ChatRequestOwner } from "./requestOwnership";
 const mocks = vi.hoisted(() => ({
   inputContext: {},
   sessionsContext: {},
+  messagesContext: {},
+  setMessages: vi.fn(),
+  applyChatSnapshot: vi.fn(),
+  refreshSession: vi.fn(async () => true),
   setLoading: vi.fn(),
   getLoading: vi.fn(() => false),
   getSession: vi.fn(async () => ({ generating: false })),
@@ -36,6 +40,10 @@ let latestCurrentQARef: CurrentQARef | undefined;
 let latestRequestOptions:
   | {
       onFinish: (owner: ChatRequestOwner) => void;
+      applyRecoverySnapshot: (
+        history: unknown,
+        owner: ChatRequestOwner,
+      ) => Promise<void>;
     }
   | undefined;
 let latestController:
@@ -72,6 +80,9 @@ vi.mock("use-context-selector", () => ({
         currentSessionId: "chat-b",
       });
     }
+    if (context === mocks.messagesContext) {
+      return selector({ setMessages: mocks.setMessages });
+    }
 
     return selector({});
   },
@@ -85,12 +96,17 @@ vi.mock("../../Context/ChatAnywhereSessionsContext", () => ({
   ChatAnywhereSessionsContext: mocks.sessionsContext,
 }));
 
+vi.mock("../../Context/ChatAnywhereMessagesContext", () => ({
+  ChatAnywhereMessagesContext: mocks.messagesContext,
+}));
+
 vi.mock("../../Context/ChatAnywhereOptionsContext", () => ({
   useChatAnywhereOptions: (selector: (value: unknown) => unknown) =>
     selector({
       session: {
         api: {
           getSession: mocks.getSession,
+          applyChatSnapshot: mocks.applyChatSnapshot,
           getLogicalSessionId: (sessionId: string) => `logical:${sessionId}`,
           getChatIdForSession: (sessionId: string) => `chat:${sessionId}`,
         },
@@ -135,7 +151,7 @@ vi.mock("./useChatMessageHandler", () => ({
 
 vi.mock("./useChatRequest", () => ({
   __esModule: true,
-  default: (options: { onFinish: (owner: ChatRequestOwner) => void }) => {
+  default: (options: NonNullable<typeof latestRequestOptions>) => {
     latestRequestOptions = options;
     return {
       request: mocks.request,
@@ -149,6 +165,7 @@ vi.mock("./useChatSessionHandler", () => ({
   __esModule: true,
   default: () => ({
     ensureSession: mocks.ensureSession,
+    refreshSession: mocks.refreshSession,
     updateSessionName: mocks.updateSessionName,
     getCurrentSessionId: mocks.getCurrentSessionId,
     syncSessionMessages: mocks.syncSessionMessages,
@@ -188,10 +205,104 @@ describe("useChatController", () => {
     });
     mocks.getLoading.mockReturnValue(false);
     mocks.getSession.mockResolvedValue({ generating: false });
+    mocks.applyChatSnapshot.mockReset();
+    mocks.setMessages.mockReset();
+    mocks.refreshSession.mockReset();
+    mocks.refreshSession.mockResolvedValue(true);
     mocks.getMessages.mockReturnValue([{ id: "message-1" }]);
     latestCurrentQARef = undefined;
     latestRequestOptions = undefined;
     latestController = undefined;
+  });
+
+  it.each([true, false])(
+    "refreshes recovered subagent runs before releasing ownership (snapshot: %s)",
+    async (hasSnapshot) => {
+      const history = { messages: [{ id: "message-1" }] };
+      if (hasSnapshot) {
+        mocks.applyChatSnapshot.mockReturnValue(history.messages);
+      }
+      render(<Harness />);
+      const owner: ChatRequestOwner = {
+        requestId: "request-a",
+        kind: "reconnect",
+        sessionId: "chat-b",
+        logicalSessionId: "logical:chat-b",
+        chatId: "chat:chat-b",
+      };
+      latestCurrentQARef!.current.activeRequestOwner = owner;
+      const refreshListener = vi.fn((event: Event) => ({
+        event,
+        owner: latestCurrentQARef!.current.activeRequestOwner,
+      }));
+      document.addEventListener("subagent-runs-refresh", refreshListener);
+
+      try {
+        await act(async () => {
+          await latestRequestOptions!.applyRecoverySnapshot(history, owner);
+        });
+        expect(refreshListener).toHaveBeenCalledTimes(1);
+        expect(refreshListener.mock.results[0].value.owner).toBe(owner);
+        expect(
+          (refreshListener.mock.calls[0][0] as CustomEvent).detail,
+        ).toEqual({
+          chatId: "chat:chat-b",
+          discover: true,
+        });
+        expect(latestCurrentQARef!.current.activeRequestOwner).toBeUndefined();
+        expect(mocks.setLoading).toHaveBeenCalledWith(false);
+        if (hasSnapshot) {
+          expect(mocks.setMessages).toHaveBeenCalledWith(history.messages);
+          expect(mocks.refreshSession).not.toHaveBeenCalled();
+        } else {
+          expect(mocks.refreshSession).toHaveBeenCalledWith("chat-b", false);
+        }
+      } finally {
+        document.removeEventListener("subagent-runs-refresh", refreshListener);
+      }
+    },
+  );
+
+  it("does not refresh recovered runs after a session switch during refresh", async () => {
+    let finishRefresh!: (refreshed: boolean) => void;
+    mocks.refreshSession.mockImplementationOnce(
+      () => new Promise<boolean>((resolve) => (finishRefresh = resolve)),
+    );
+    render(<Harness />);
+    const owner: ChatRequestOwner = {
+      requestId: "request-a",
+      kind: "reconnect",
+      sessionId: "chat-b",
+      logicalSessionId: "logical:chat-b",
+      chatId: "chat:chat-b",
+    };
+    latestCurrentQARef!.current.activeRequestOwner = owner;
+    const refreshListener = vi.fn();
+    document.addEventListener("subagent-runs-refresh", refreshListener);
+
+    try {
+      const recoveryPromise = latestRequestOptions!.applyRecoverySnapshot(
+        { messages: [] },
+        owner,
+      );
+      await waitFor(() => expect(mocks.refreshSession).toHaveBeenCalled());
+      const nextOwner = {
+        ...owner,
+        requestId: "request-b",
+        sessionId: "chat-c",
+      };
+      latestCurrentQARef!.current.activeRequestOwner = nextOwner;
+      mocks.setLoading.mockClear();
+      await act(async () => {
+        finishRefresh(true);
+        await recoveryPromise;
+      });
+      expect(refreshListener).not.toHaveBeenCalled();
+      expect(latestCurrentQARef!.current.activeRequestOwner).toBe(nextOwner);
+      expect(mocks.setLoading).not.toHaveBeenCalled();
+    } finally {
+      document.removeEventListener("subagent-runs-refresh", refreshListener);
+    }
   });
 
   it("syncs completion-time messages back to the request's owning session", async () => {

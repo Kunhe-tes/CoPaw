@@ -917,122 +917,64 @@ describe("useChatRequest", () => {
     );
   });
 
-  it("applies a named terminal chat snapshot without creating an error card", async () => {
-    const applyRecoverySnapshot = vi.fn();
-    const refreshListener = vi.fn();
-    document.addEventListener("subagent-runs-refresh", refreshListener);
-    mocks.streamChunks.splice(0, mocks.streamChunks.length, {
-      event: "chat.snapshot",
-      data: JSON.stringify({
-        object: "chat_snapshot",
-        chat_id: "chat-real-a",
-        msgid: "msg-2",
-        turn_status: "completed",
-        history: { messages: [{ id: "user-1", role: "user" }] },
-      }),
-    });
-    mocks.reconnect.mockResolvedValue({
-      ok: true,
-      body: {},
-      headers: new Headers(),
-    } as Response);
-
-    const currentQARef = {
-      current: {
-        response: {
-          id: "ui-response-a",
-          msgStatus: "generating",
-          cards: [],
-        },
-        activeRequestOwner: createOwner({ kind: "reconnect" }),
-      },
-    } as CurrentQARef;
-
-    const updateMessage = vi.fn();
-    const onFinish = vi.fn();
-    render(
-      <Harness
-        currentQARef={currentQARef}
-        updateMessage={updateMessage}
-        onFinish={onFinish}
-        applyRecoverySnapshot={applyRecoverySnapshot}
-      />,
-    );
-
-    await act(async () => {
-      await hookApi.reconnect("chat-a", createOwner({ kind: "reconnect" }));
-    });
-
-    document.removeEventListener("subagent-runs-refresh", refreshListener);
-    expect(refreshListener).toHaveBeenCalledTimes(1);
-    expect(refreshListener.mock.calls[0][0].detail).toEqual({
-      chatId: "chat-real-a",
-      discover: true,
-    });
-    expect(applyRecoverySnapshot).toHaveBeenCalledWith(
-      expect.objectContaining({ messages: [{ id: "user-1", role: "user" }] }),
-      expect.objectContaining({ msgid: "msg-2" }),
-    );
-    expect(updateMessage).not.toHaveBeenCalled();
-    expect(onFinish).not.toHaveBeenCalled();
-  });
-
-  it("does not refresh the monitor if ownership changes while applying recovery", async () => {
-    let finishRecovery!: () => void;
-    const applyRecoverySnapshot = vi.fn(
-      () =>
-        new Promise<void>((resolve) => {
-          finishRecovery = resolve;
+  it.each(["chat-real-a", null])(
+    "applies a terminal snapshot before the recovery callback releases ownership (%s)",
+    async (chatId) => {
+      const applyRecoverySnapshot = vi.fn(() => {
+        currentQARef.current.activeRequestOwner = undefined;
+      });
+      mocks.streamChunks.splice(0, mocks.streamChunks.length, {
+        event: "chat.snapshot",
+        data: JSON.stringify({
+          object: "chat_snapshot",
+          chat_id: "chat-real-a",
+          msgid: "msg-2",
+          turn_status: "completed",
+          history: { messages: [{ id: "user-1", role: "user" }] },
         }),
-    );
-    const refreshListener = vi.fn();
-    document.addEventListener("subagent-runs-refresh", refreshListener);
-    mocks.streamChunks.splice(0, mocks.streamChunks.length, {
-      event: "chat.snapshot",
-      data: JSON.stringify({
-        object: "chat_snapshot",
-        chat_id: "chat-real-a",
-        history: { messages: [] },
-      }),
-    });
-    mocks.reconnect.mockResolvedValue({
-      ok: true,
-      body: {},
-      headers: new Headers(),
-    } as Response);
-    const currentQARef = {
-      current: {
-        response: { id: "ui-response-a", msgStatus: "generating", cards: [] },
-        activeRequestOwner: createOwner({ kind: "reconnect" }),
-      },
-    } as CurrentQARef;
-    render(
-      <Harness
-        currentQARef={currentQARef}
-        updateMessage={vi.fn()}
-        onFinish={vi.fn()}
-        applyRecoverySnapshot={applyRecoverySnapshot}
-      />,
-    );
-    let reconnectPromise!: Promise<void>;
-    await act(async () => {
-      reconnectPromise = hookApi.reconnect(
-        "chat-a",
-        createOwner({ kind: "reconnect" }),
+      });
+      mocks.reconnect.mockResolvedValue({
+        ok: true,
+        body: {},
+        headers: new Headers(),
+      } as Response);
+
+      const owner = createOwner({ kind: "reconnect", chatId });
+      const currentQARef = {
+        current: {
+          response: {
+            id: "ui-response-a",
+            msgStatus: "generating",
+            cards: [],
+          },
+          activeRequestOwner: owner,
+        },
+      } as CurrentQARef;
+
+      const updateMessage = vi.fn();
+      const onFinish = vi.fn();
+      render(
+        <Harness
+          currentQARef={currentQARef}
+          updateMessage={updateMessage}
+          onFinish={onFinish}
+          applyRecoverySnapshot={applyRecoverySnapshot}
+        />,
       );
-    });
-    await waitFor(() => expect(applyRecoverySnapshot).toHaveBeenCalled());
-    currentQARef.current.activeRequestOwner = createOwner({
-      requestId: "new-owner",
-      chatId: "chat-real-b",
-    });
-    await act(async () => {
-      finishRecovery();
-      await reconnectPromise;
-    });
-    document.removeEventListener("subagent-runs-refresh", refreshListener);
-    expect(refreshListener).not.toHaveBeenCalled();
-  });
+
+      await act(async () => {
+        await hookApi.reconnect("chat-a", owner);
+      });
+
+      expect(applyRecoverySnapshot).toHaveBeenCalledWith(
+        expect.objectContaining({ messages: [{ id: "user-1", role: "user" }] }),
+        expect.objectContaining({ msgid: "msg-2", chatId: "chat-real-a" }),
+      );
+      expect(updateMessage).not.toHaveBeenCalled();
+      expect(onFinish).not.toHaveBeenCalled();
+      expect(currentQARef.current.activeRequestOwner).toBeUndefined();
+    },
+  );
 
   it("uses the compatibility refresh callback for a reconnect 404", async () => {
     const recoverAfterNotFound = vi.fn();

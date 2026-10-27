@@ -68,7 +68,11 @@ venv/bin/python -m pytest tests/unit/subagents/test_monitor_api.py -q
 
 ## 修复落地
 
-当前实现以 chatId 和组件生命周期 token 校验 GET/cancel 写回，同会话 reset 不失效 GET。GET 使用 10 秒超时、请求结束后 10 秒调度；错误保留最后快照并独立重试。start 事件有 400ms 确认与最长 30 秒发现窗口，wait/get/cancel 不开启新发现窗口。事件携带 chatId；chat.snapshot 恢复在 await 后重新检查 owner 再通知 Monitor。
+当前实现以 chatId 和组件生命周期 token 校验 GET/cancel 写回，同会话 reset 不失效 GET。GET 使用 10 秒超时、请求结束后 10 秒调度；错误保留最后快照并独立重试。start 事件有 400ms 确认与最长 30 秒发现窗口，wait/get/cancel 不开启新发现窗口。事件携带 chatId；chat.snapshot 恢复由控制器在成功应用历史、重新检查 owner 后，释放 owner 之前通知 Monitor。
+
+恢复回调正常完成也会清空 activeRequestOwner，因此不能在 await applyRecoverySnapshot 返回后用 owner 是否仍活跃判断是否刷新。请求层先将已校验的 snapshot.chat_id 写入 owner，控制器在成功分支发出一次 discover=true；异步刷新期间切换会话则不发事件。回归测试须调用真实恢复回调，覆盖直接应用快照、兼容 refreshSession、事件先于 owner 释放，以及异步刷新期间 owner 被替换。
+
+该生命周期修正先以真实控制器回调复现两项零事件失败，再验证通过。2026-10-27 聚焦前端六个测试文件共 82 项、Python monitor API 11 项、TypeScript、受影响文件 Prettier 和生产构建通过。两个生产 Hook 的 ESLint 诊断与 HEAD 相同（忽略行号移动），仍有既有 6 个错误和 5 个警告；构建仍有分包与体积警告。
 
 下一轮仅累计隐藏当时已知终态 ID，pending/running/paused 保留展示与轮询。取消请求跨 reset 保持停止中并防重入，成功后使旧 GET 失效，再以取消结果更新 state/ref 和查询确认。
 
