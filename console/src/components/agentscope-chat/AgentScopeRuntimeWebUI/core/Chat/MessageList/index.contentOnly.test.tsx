@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   sessionNotFound: false,
   currentSessionId: "chat-1",
   anchorTop: 100,
+  scrollHeight: 1000,
   animationFrame: undefined as FrameRequestCallback | undefined,
   frames: new Map<number, FrameRequestCallback>(),
   nextFrameId: 0,
@@ -113,7 +114,10 @@ vi.mock("@/components/agentscope-chat", () => ({
               element.dataset.scrollGeometryReady = "true";
               Object.defineProperties(element, {
                 clientHeight: { configurable: true, value: 400 },
-                scrollHeight: { configurable: true, value: 1000 },
+                scrollHeight: {
+                  configurable: true,
+                  value: mocks.scrollHeight,
+                },
                 scrollTop: {
                   configurable: true,
                   value: 0,
@@ -316,6 +320,7 @@ describe("MessageList content-only composition", () => {
     mocks.sessionNotFound = false;
     mocks.currentSessionId = "chat-1";
     mocks.anchorTop = 100;
+    mocks.scrollHeight = 1000;
     mocks.animationFrame = undefined;
     mocks.frames.clear();
     mocks.nextFrameId = 0;
@@ -333,6 +338,71 @@ describe("MessageList content-only composition", () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     cleanup();
+  });
+
+  it.each([false, true])(
+    "automatically confirms the start of a short conversation (content-only: %s)",
+    async (contentOnly) => {
+      mocks.messages = [{ id: "online-message", history: true }];
+      mocks.scrollHeight = 300;
+      apiMocks.getChatHistory.mockResolvedValue({
+        messages: [],
+        boundaries: [],
+        has_more: false,
+        next_cursor: null,
+      });
+      render(
+        <ChatContentOnlyProvider enabled={contentOnly}>
+          <MessageList onSubmit={vi.fn()} />
+        </ChatContentOnlyProvider>,
+      );
+      await waitFor(() =>
+        expect(screen.getByRole("status")).toHaveTextContent(
+          "已到达会话开始处",
+        ),
+      );
+      expect(apiMocks.getChatHistory).toHaveBeenCalledExactlyOnceWith(
+        "chat-real-1",
+        null,
+        20,
+      );
+      expect(
+        screen.queryByRole("button", { name: "加载更早消息" }),
+      ).not.toBeInTheDocument();
+      await flushHistoryLayout();
+      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("bounds initial short-list paging even when empty pages keep advancing", async () => {
+    mocks.messages = [{ id: "online-message", history: true }];
+    mocks.scrollHeight = 300;
+    let page = 0;
+    apiMocks.getChatHistory.mockImplementation(async () => ({
+      messages: [],
+      boundaries: [],
+      has_more: true,
+      next_cursor: `cursor-${++page}`,
+    }));
+    render(<MessageList onSubmit={vi.fn()} />);
+    await waitFor(() =>
+      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(1),
+    );
+    for (let step = 0; step < 5; step += 1) await flushHistoryLayout();
+    expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(3);
+    expect(screen.getByRole("button", { name: "加载更早消息" })).toBeEnabled();
+  });
+
+  it("shows retry feedback without automatically retrying a failed initial check", async () => {
+    mocks.messages = [{ id: "online-message", history: true }];
+    mocks.scrollHeight = 300;
+    apiMocks.getChatHistory.mockRejectedValue(new Error("offline"));
+    render(<MessageList onSubmit={vi.fn()} />);
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent("历史消息加载失败"),
+    );
+    await flushHistoryLayout();
+    expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(1);
   });
 
   it("preserves the normal Welcome surface outside content-only mode", () => {
