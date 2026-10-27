@@ -62,7 +62,7 @@ describe("ScheduleEditor", () => {
     ["weekly", "0 9 * * mon"],
     ["monthly", "0 9 15 * *"],
     ["yearly", "0 9 15 6 *"],
-  ])("自定义 %s 并排展示规则与时刻，不重复展示摘要", (mode, rawCron) => {
+  ])("自定义 %s 展示规则与时刻，不重复展示摘要", (mode, rawCron) => {
     const item: PlanItem = {
       id: "scene-compact",
       sceneName: "紧凑排程场景",
@@ -258,16 +258,40 @@ describe("Create", () => {
         <Create />
       </MemoryRouter>,
     );
-    expect(screen.getByText("经营场景")).toBeInTheDocument();
-    expect(
-      screen.getByText("经营方向", {
-        exact: false,
-        selector: "." + styles.selectedListHeader + " > span",
-      }),
-    ).toBeInTheDocument();
-    expect(screen.getByText("经营场景").parentElement).toHaveTextContent(
-      "执行频率",
+    const header = screen.getByText("经营场景 / 经营方向").parentElement!;
+    expect(Array.from(header.children).map((node) => node.textContent)).toEqual(
+      [
+        "经营场景 / 经营方向",
+        "执行周期",
+        "督办策略",
+        "推送客户数（选填）",
+        "操作",
+      ],
     );
+    expect(
+      screen.queryByText("经营方向", { exact: true }),
+    ).not.toBeInTheDocument();
+    const row = header.nextElementSibling!;
+    expect(row.children).toHaveLength(5);
+    expect(
+      Array.from(row.children[1].children).map((node) =>
+        node.getAttribute("data-label"),
+      ),
+    ).toEqual(["任务周期", "执行频率"]);
+    expect(
+      Array.from(row.children[2].children).map((node) =>
+        node.getAttribute("data-label"),
+      ),
+    ).toEqual(["监控周期", "监控时间", "预期完成率"]);
+    expect(
+      screen.queryByRole("button", { name: /^上移|^下移/ }),
+    ).not.toBeInTheDocument();
+    expect(document.querySelector('[draggable="true"]')).toBeNull();
+    expect(
+      screen
+        .getByLabelText("数量设置场景的经营方向")
+        .closest(`.${styles.selectedMain}`),
+    ).toHaveTextContent("数量设置场景");
     expect(screen.getByText("推送客户数（选填）")).toBeInTheDocument();
     expect(screen.queryByText("每日 09:00")).not.toBeInTheDocument();
     const input = screen.getByRole("spinbutton", {

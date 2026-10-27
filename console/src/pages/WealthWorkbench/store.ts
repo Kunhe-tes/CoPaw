@@ -13,6 +13,14 @@ import { useIframeStore } from "../../stores/iframeStore";
 import * as api from "./api";
 import { throwIfRequestAborted } from "./abortSignal";
 import {
+  defaultMonitoring,
+  MONITORING_SAVE_ERROR,
+  monitoringScope,
+  monitoringStorageKey,
+  readMonitoring,
+  writeMonitoring,
+} from "./monitoring";
+import {
   canAccessPage,
   FALLBACK_ROLE,
   needsDistributeTargets,
@@ -697,6 +705,10 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
 
   publishPlan: async () => {
     const state = get();
+    const scope = monitoringScope(useIframeStore.getState());
+    const monitoring = readMonitoring(
+      monitoringStorageKey(scope, state.editingId),
+    );
     const error = validateDraft(state.draft);
     if (error) {
       get().toast(error);
@@ -713,24 +725,42 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
     set({ acting: true });
     const draft = normalizeItems(state.draft);
     try {
-      const { plans, created } = await api.publishPlan(
+      const { plans, created, planId } = await api.publishPlan(
         account,
         draft,
         state.editingId,
         targets,
+      );
+      const monitoringSaved = writeMonitoring(
+        monitoringStorageKey(scope, planId),
+        Object.fromEntries(
+          draft.items.map((item) => [
+            item.id,
+            monitoring[item.id] ?? defaultMonitoring(),
+          ]),
+        ),
       );
       // 请求仍会完成并更新列表；已切换表单时不回写旧草稿，也不触发旧页面跳转。
       const isCurrentForm = get().planFormVersion === state.planFormVersion;
       set({
         plans,
         ...(isCurrentForm
-          ? { draft, editingId: null, dialog: null, savedAt: "", targetSapIds: [] }
+          ? {
+              draft,
+              editingId: null,
+              dialog: null,
+              savedAt: "",
+              targetSapIds: [],
+            }
           : {}),
       });
+      const successMessage = created
+        ? "规划已发布，正在后台创建定时任务并分发"
+        : "规划已修改，正在重新发布";
       get().toast(
-        created
-          ? "规划已发布，正在后台创建定时任务并分发"
-          : "规划已修改，正在重新发布",
+        monitoringSaved
+          ? successMessage
+          : `${successMessage}；${MONITORING_SAVE_ERROR}`,
       );
       return isCurrentForm;
     } catch (error) {
