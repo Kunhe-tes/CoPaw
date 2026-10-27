@@ -70,8 +70,12 @@ vi.mock("../store", () => ({
     selector(state),
 }));
 
+const initialPlans = structuredClone(state.plans);
+
 afterEach(cleanup);
 beforeEach(() => {
+  vi.clearAllMocks();
+  state.plans = structuredClone(initialPlans);
   state.pendingCustomers = [];
   state.doneCustomers = [];
   state.customers = ["48", "48", "50"].map((age, index) => ({
@@ -95,6 +99,167 @@ beforeEach(() => {
 });
 
 describe("经营分类独立表格", () => {
+  it.each(["business", "customer", "pending", "done"] as const)(
+    "%s 名单展示最近接触时间，缺失时保留占位",
+    (view) => {
+      state.customers[0].time = "2026-10-23 09:30:00";
+      state.customers.forEach((customer) => {
+        customer.groupFields = [];
+      });
+      state.pendingCustomers = state.doneCustomers = state.customers;
+      render(
+        <MemoryRouter>
+          <Tasks
+            page={view === "business" || view === "customer" ? "today" : view}
+          />
+        </MemoryRouter>,
+      );
+      if (view === "customer") {
+        fireEvent.click(screen.getByRole("button", { name: "客户视角" }));
+      }
+      const table = screen.getByRole("table");
+      const headers = within(table).getAllByRole("columnheader");
+      const columnIndex = headers.findIndex(
+        (header) => header.textContent === "最近接触时间",
+      );
+      expect(columnIndex).toBeGreaterThan(-1);
+      const rows = within(table).getAllByRole("row");
+      const timeCell = within(rows[1]).getAllByRole("cell")[columnIndex];
+      expect(timeCell).toHaveTextContent("2026-10-23 09:30:00");
+      expect(timeCell).toHaveAttribute("title", "2026-10-23 09:30:00");
+      expect(
+        within(rows[2]).getAllByRole("cell")[columnIndex],
+      ).toHaveTextContent("—");
+    },
+  );
+
+  it.each(["today", "pending", "done"] as const)(
+    "%s 经营场景筛选匹配任一场景，可叠加标签并清除，汇总保持不变",
+    (page) => {
+      const customer = state.customers[0];
+      state.customers = [
+        {
+          ...customer,
+          id: "a",
+          name: "多场景客户",
+          skillNames: ["场景甲", "场景乙"],
+          label: "行长指派",
+        },
+        {
+          ...customer,
+          id: "b",
+          name: "单场景客户",
+          skillNames: ["场景甲"],
+          label: "我的关注",
+        },
+        { ...customer, id: "c", name: "其他场景客户", skillNames: ["场景丙"] },
+        { ...customer, id: "d", name: "缺少场景客户", skillNames: undefined },
+      ].map((item) => ({ ...item, groupFields: [], done: page === "done" }));
+      state.pendingCustomers = state.doneCustomers = state.customers;
+      render(
+        <MemoryRouter>
+          <Tasks page={page} />
+        </MemoryRouter>,
+      );
+      if (page === "today") {
+        expect(
+          screen.queryByRole("button", { name: "筛选经营场景" }),
+        ).not.toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "客户视角" }));
+      }
+      fireEvent.click(screen.getByRole("button", { name: "筛选经营场景" }));
+      const menu = screen.getByRole("menu", { name: "筛选经营场景" });
+      expect(within(menu).getAllByText("场景甲")).toHaveLength(1);
+      fireEvent.click(within(menu).getByText("场景乙"));
+      expect(screen.getByText("多场景客户")).toBeInTheDocument();
+      expect(screen.queryByText("单场景客户")).not.toBeInTheDocument();
+      expect(screen.queryByText("其他场景客户")).not.toBeInTheDocument();
+      expect(screen.queryByText("缺少场景客户")).not.toBeInTheDocument();
+      expect(screen.getByText(/目标客户/)).toHaveTextContent("目标客户 42 人");
+      fireEvent.click(screen.getByRole("button", { name: "筛选重点标签" }));
+      fireEvent.click(
+        within(screen.getByRole("dialog", { name: "筛选重点标签" })).getByRole(
+          "button",
+          { name: /^我的关注/ },
+        ),
+      );
+      expect(screen.getByText("暂无符合条件的客户")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "清除重点标签筛选" }));
+      expect(screen.getByText("多场景客户")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "清除经营场景筛选" }));
+      expect(screen.getByText("单场景客户")).toBeInTheDocument();
+      expect(screen.getByText("缺少场景客户")).toBeInTheDocument();
+    },
+  );
+
+  it("同分类同名场景按 ID 独立选中、查询和筛选，改名保留选择，移除后回退", () => {
+    const first = state.plans[0].items[0];
+    state.plans[0].items.push({ ...first, id: "skill-2" });
+    const customer = state.customers[0];
+    state.customers = [
+      { ...customer, id: "first", name: "首个场景客户" },
+      { ...customer, id: "second", skillId: "skill-2", name: "第二场景客户" },
+    ];
+    const renderTasks = () => (
+      <MemoryRouter>
+        <Tasks page="today" />
+      </MemoryRouter>
+    );
+    const { rerender } = render(renderTasks());
+    const buttons = screen.getAllByRole("button", {
+      name: "我的关注资产到期经营",
+    });
+    expect(buttons[0]).toHaveClass(styles.active);
+    expect(buttons[1]).not.toHaveClass(styles.active);
+    expect(screen.getByText("首个场景客户")).toBeInTheDocument();
+    expect(screen.queryByText("第二场景客户")).not.toBeInTheDocument();
+    fireEvent.click(buttons[1]);
+    expect(buttons[0]).not.toHaveClass(styles.active);
+    expect(buttons[1]).toHaveClass(styles.active);
+    expect(state.loadTodayCustomers).toHaveBeenLastCalledWith(
+      "business",
+      "skill-2",
+    );
+    expect(screen.getByText("第二场景客户")).toBeInTheDocument();
+    expect(screen.queryByText("首个场景客户")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "刷新工作任务" }));
+    expect(state.refreshTodayCustomers).toHaveBeenLastCalledWith(
+      "business",
+      "skill-2",
+    );
+    state.plans = [
+      {
+        ...state.plans[0],
+        items: [
+          first,
+          {
+            ...first,
+            id: "skill-2",
+            sceneName: "重命名场景",
+            categoryLabel: "基金",
+          },
+        ],
+      },
+    ];
+    rerender(renderTasks());
+    expect(
+      screen.getByRole("button", { name: "我的关注重命名场景" }),
+    ).toHaveClass(styles.active);
+    expect(screen.getByText("当前任务：重命名场景")).toBeInTheDocument();
+    expect(screen.getByText("第二场景客户")).toBeInTheDocument();
+    state.plans = [{ ...state.plans[0], items: [first] }];
+    rerender(renderTasks());
+    expect(
+      screen.getByRole("button", { name: "我的关注资产到期经营" }),
+    ).toHaveClass(styles.active);
+    expect(state.loadTodayCustomers).toHaveBeenLastCalledWith(
+      "business",
+      "skill",
+    );
+    expect(screen.getByText("首个场景客户")).toBeInTheDocument();
+    expect(screen.queryByText("第二场景客户")).not.toBeInTheDocument();
+  });
+
   it("今日任务各分类内待处理优先，同状态保持原顺序，不改变分类和缓存顺序", () => {
     const template = state.customers[0];
     state.customers = [
@@ -371,6 +536,7 @@ describe("经营分类独立表格", () => {
       "客户指标",
       "经营方案",
       "接触状态",
+      "最近接触时间",
       "执行",
     ]);
     const rows = within(table).getAllByRole("row");
@@ -386,7 +552,7 @@ describe("经营分类独立表格", () => {
     );
     expect(
       screen.getByText("暂无符合条件的客户").closest("td"),
-    ).toHaveAttribute("colspan", "8");
+    ).toHaveAttribute("colspan", "9");
   });
 
   it.each(["business", "customer"] as const)(
@@ -477,7 +643,7 @@ describe("经营分类独立表格", () => {
         "经营场景",
         page === "done" ? "客户指标" : "经营机会",
       ]);
-      expect(headers).toHaveLength(7);
+      expect(headers).toHaveLength(8);
       if (page === "done") {
         expect(headers.map((th) => th.textContent)).toEqual([
           "客户姓名",
@@ -485,6 +651,7 @@ describe("经营分类独立表格", () => {
           "经营场景",
           "客户指标",
           "触达方式",
+          "最近接触时间",
           "完成时间",
           "经营结果",
         ]);
@@ -504,7 +671,7 @@ describe("经营分类独立表格", () => {
           <Tasks page={page} />
         </MemoryRouter>,
       );
-      expect(screen.getByRole("cell")).toHaveAttribute("colspan", "7");
+      expect(screen.getByRole("cell")).toHaveAttribute("colspan", "8");
     },
   );
 
