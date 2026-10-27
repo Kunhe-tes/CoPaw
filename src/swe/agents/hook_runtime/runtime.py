@@ -144,15 +144,22 @@ class HookRuntime:
             for item in plan.handlers
         ]
         completed = await wait_append_tasks(tasks, deadline, stop_requested)
-        completed = {
+        completed = self._filter_completed_append_tasks(completed, deadline)
+        if stop_requested is not None and await stop_requested():
+            return []
+        return collect_append_contributions(plan, tasks, completed)
+
+    @staticmethod
+    def _filter_completed_append_tasks(
+        completed: set[asyncio.Task],
+        deadline: float,
+    ) -> set[asyncio.Task]:
+        return {
             task
             for task in completed
             if not task.cancelled()
             and (task.exception() is not None or task.result()[1] <= deadline)
         }
-        if stop_requested is not None and await stop_requested():
-            return []
-        return collect_append_contributions(plan, tasks, completed)
 
     async def emit(
         self,

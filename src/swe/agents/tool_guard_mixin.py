@@ -1554,56 +1554,13 @@ class ToolGuardMixin:
                 tool_call_id=str(tool_call.get("id") or ""),
             )
         if reason is None and agent_role == "subagent":
-            policy_payload = request_context.get("subagent_policy")
-            if not isinstance(policy_payload, dict):
-                reason = "missing SubAgent effective policy"
-            else:
-                try:
-                    from swe.app.subagents import (
-                        PermissionPolicy,
-                        validate_tool_call,
-                    )
-
-                    decision = validate_tool_call(
-                        PermissionPolicy.model_validate(policy_payload),
-                        tool_name,
-                        tool_input,
-                        mcp_server=_subagent_mcp_server_key(
-                            self._resolve_mcp_server(tool_name),
-                            request_context,
-                        ),
-                        allowed_mcp_servers=set(
-                            request_context.get(
-                                "subagent_allowed_mcp_servers",
-                            )
-                            or [],
-                        ),
-                    )
-                    if not decision.allowed:
-                        reason = decision.reason
-                except Exception as exc:
-                    reason = f"invalid SubAgent effective policy: {exc}"
+            reason = self._subagent_policy_denial(
+                tool_name,
+                tool_input,
+                request_context,
+            )
             if reason is None and include_budget:
-                budget = request_context.get("subagent_budget")
-                if isinstance(budget, dict):
-                    try:
-                        maximum = int(budget.get("max_tool_calls") or 0)
-                        used = int(
-                            request_context.get("_subagent_tool_calls_used")
-                            or 0,
-                        )
-                    except (TypeError, ValueError):
-                        reason = "invalid SubAgent tool-call budget"
-                    else:
-                        if used >= maximum > 0:
-                            reason = (
-                                "SubAgent tool-call budget exceeded "
-                                f"({used}/{maximum})."
-                            )
-                        elif maximum > 0:
-                            request_context["_subagent_tool_calls_used"] = (
-                                used + 1
-                            )
+                reason = self._consume_subagent_tool_budget(request_context)
         if reason is None:
             return False
         denied_text = (
@@ -1626,6 +1583,52 @@ class ToolGuardMixin:
         await self.print(tool_res_msg, True)
         await self.memory.add(tool_res_msg)
         return True
+
+    def _subagent_policy_denial(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        request_context: dict[str, Any],
+    ) -> str | None:
+        policy_payload = request_context.get("subagent_policy")
+        if not isinstance(policy_payload, dict):
+            return "missing SubAgent effective policy"
+        try:
+            from swe.app.subagents import PermissionPolicy, validate_tool_call
+
+            decision = validate_tool_call(
+                PermissionPolicy.model_validate(policy_payload),
+                tool_name,
+                tool_input,
+                mcp_server=_subagent_mcp_server_key(
+                    self._resolve_mcp_server(tool_name),
+                    request_context,
+                ),
+                allowed_mcp_servers=set(
+                    request_context.get("subagent_allowed_mcp_servers") or [],
+                ),
+            )
+            return None if decision.allowed else decision.reason
+        except Exception as exc:
+            return f"invalid SubAgent effective policy: {exc}"
+
+    @staticmethod
+    def _consume_subagent_tool_budget(
+        request_context: dict[str, Any],
+    ) -> str | None:
+        budget = request_context.get("subagent_budget")
+        if not isinstance(budget, dict):
+            return None
+        try:
+            maximum = int(budget.get("max_tool_calls") or 0)
+            used = int(request_context.get("_subagent_tool_calls_used") or 0)
+        except (TypeError, ValueError):
+            return "invalid SubAgent tool-call budget"
+        if used >= maximum > 0:
+            return f"SubAgent tool-call budget exceeded ({used}/{maximum})."
+        if maximum > 0:
+            request_context["_subagent_tool_calls_used"] = used + 1
+        return None
 
     def _plan_mode_policy_denial(
         self,
@@ -2217,11 +2220,7 @@ class ToolGuardMixin:
         if hook_ask_handler_ids:
             extra["hook_ask_handler_ids"] = list(hook_ask_handler_ids)
         if original_msg is not None:
-            thinking_blocks = [
-                block
-                for block in original_msg.get_content_blocks()
-                if isinstance(block, dict) and block.get("type") == "thinking"
-            ]
+            thinking_blocks = self._approval_thinking_blocks(original_msg)
             if thinking_blocks:
                 extra["thinking_blocks"] = thinking_blocks
         replay_queue = getattr(self, "_tool_guard_replay_queue", None)
@@ -2233,6 +2232,14 @@ class ToolGuardMixin:
             if siblings:
                 extra["sibling_tool_calls"] = siblings
         return extra
+
+    @staticmethod
+    def _approval_thinking_blocks(original_msg: Any) -> list[dict[str, Any]]:
+        return [
+            block
+            for block in original_msg.get_content_blocks()
+            if isinstance(block, dict) and block.get("type") == "thinking"
+        ]
 
     async def _cancel_stale_approval_requests(
         self,
