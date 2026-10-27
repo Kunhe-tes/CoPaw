@@ -79,12 +79,22 @@ def initialize_community_expert_dependency_view(
     try:
         _copy_regular_tree(source, temporary)
         _write_binding(temporary / _BINDING_FILE_NAME, binding)
-        if target.exists() or target.is_symlink():
-            _remove_snapshot_tree(target)
-        os.replace(temporary, target)
-    except BaseException:
+        try:
+            os.replace(temporary, target)
+        except OSError:
+            if not _view_matches_definition(
+                target,
+                definition_id,
+                community.item_id,
+            ):
+                raise
+            _validate_frozen_dependency_root(
+                target,
+                definition,
+                dependency_names=_view_dependency_names(target, definition),
+            )
+    finally:
         _remove_snapshot_tree(temporary)
-        raise
     return target
 
 

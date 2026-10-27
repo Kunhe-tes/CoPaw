@@ -37,6 +37,7 @@ from .prompt import (
 )
 from ..runtime_workers import run_runtime_state_work
 from ..app.subagents.intent import has_subagent_intent
+from ..app.subagents.run_access import read_chat_run_records
 from .skills_manager import (
     apply_skill_config_env_overrides,
     ensure_skills_initialized,
@@ -883,7 +884,26 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         namesake_strategy: NamesakeStrategy,
         request_context: dict[str, Any],
     ) -> None:
-        if self._background_subagent_registration_blocked(request_context):
+        if self._background_subagent_role_blocked(request_context):
+            return
+        start_enabled = not self._background_subagent_registration_blocked(
+            request_context,
+        )
+        scope = build_background_subagent_scope(
+            parent_agent_config=self._agent_config,
+            request_context=request_context,
+        )
+        if start_enabled:
+            management_enabled = True
+        elif "_subagent_retained_runs_present" in request_context:
+            management_enabled = bool(
+                request_context["_subagent_retained_runs_present"],
+            )
+        else:
+            management_enabled = bool(
+                read_chat_run_records(scope.run_store_dir, request_context),
+            )
+        if not management_enabled:
             return
         supervisor = (
             request_context.get(
@@ -894,6 +914,20 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         workspace_dir = self._workspace_dir or Path(
             self._agent_config.workspace_dir or ".",
         )
+        if not start_enabled:
+            tools = create_background_subagent_tools(
+                supervisor=supervisor,
+                parent_agent_config=self._agent_config,
+                workspace_dir=workspace_dir,
+                request_context=request_context,
+                start_enabled=False,
+            )
+            self._install_background_subagent_tools(
+                toolkit,
+                namesake_strategy,
+                tools,
+            )
+            return
         workspace_snapshot = getattr(self, "_workspace_skill_snapshot", None)
         if workspace_snapshot is not None:
             channel = request_context.get("channel", "console")
@@ -937,13 +971,49 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             or None,
             expert_discovery_enabled=_subagent_expert_discovery_enabled(),
         )
-        names = self._background_subagent_tool_names(True)
-        for name in names:
+        self._install_background_subagent_tools(
+            toolkit,
+            namesake_strategy,
+            tools,
+        )
+
+    def _install_background_subagent_tools(
+        self,
+        toolkit: Toolkit,
+        namesake_strategy: NamesakeStrategy,
+        tools: dict[str, Any],
+    ) -> None:
+        for name in tools:
             toolkit.register_tool_function(
                 tools[name],
                 namesake_strategy=namesake_strategy,
             )
-        self._normalize_registered_tool_functions(toolkit, names)
+        self._normalize_registered_tool_functions(toolkit, list(tools))
+
+    def refresh_background_subagent_tools(self) -> None:
+        """Refresh only delegation tools under the current request/Source."""
+        self._request_context.pop("_subagent_retained_runs_present", None)
+        for name in self._background_subagent_tool_names(True):
+            self.toolkit.remove_tool_function(name)
+        self._register_background_subagent_tools(
+            self.toolkit,
+            getattr(self, "_namesake_strategy", "skip"),
+            self._request_context,
+        )
+
+    def _background_subagent_role_blocked(
+        self,
+        request_context: dict[str, Any],
+    ) -> bool:
+        return (
+            request_context.get("agent_role", "main")
+            in {"subagent", "completion_judge"}
+            or bool(request_context.get("goal_finalization"))
+            or not (
+                request_context.get("agent_id")
+                or getattr(self._agent_config, "id", None)
+            )
+        )
 
     def _background_subagent_registration_blocked(
         self,
@@ -952,19 +1022,11 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         selected_expert_id = str(
             request_context.get("selected_expert_id") or "",
         ).strip()
-        return (
-            request_context.get("agent_role", "main")
-            in {"subagent", "completion_judge"}
-            or not (
-                request_context.get("agent_id")
-                or getattr(self._agent_config, "id", None)
-            )
-            or not (
-                selected_expert_id
-                or has_subagent_intent(
-                    request_context.get("current_user_text"),
-                    request_context.get("enable_subagents", False),
-                )
+        return self._background_subagent_role_blocked(request_context) or not (
+            selected_expert_id
+            or has_subagent_intent(
+                request_context.get("current_user_text"),
+                request_context.get("enable_subagents", False),
             )
         )
 

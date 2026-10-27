@@ -99,7 +99,7 @@ async def test_start_subagent_returns_blocked_without_run_file(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_wait_subagent_returns_compact_snapshot(tmp_path):
+async def test_wait_subagent_returns_compact_snapshot(tmp_path, monkeypatch):
     supervisor = SimpleNamespace()
     supervisor.wait = _AsyncReturn(
         SimpleNamespace(
@@ -120,6 +120,7 @@ async def test_wait_subagent_returns_compact_snapshot(tmp_path):
             timed_out=True,
         ),
     )
+    _mock_owned_wait_records(monkeypatch, supervisor.wait.value)
     tools = create_background_subagent_tools(
         supervisor=supervisor,
         parent_agent_config=_agent_config(tmp_path),
@@ -127,6 +128,7 @@ async def test_wait_subagent_returns_compact_snapshot(tmp_path):
         request_context={
             "tenant_id": "tenant-1",
             "agent_id": "agent-1",
+            "session_id": "session-1",
             "_subagent_definition_store_dir": str(tmp_path / "definitions"),
         },
     )
@@ -139,7 +141,10 @@ async def test_wait_subagent_returns_compact_snapshot(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_wait_subagent_returns_parent_facing_partial_result(tmp_path):
+async def test_wait_subagent_returns_parent_facing_partial_result(
+    tmp_path,
+    monkeypatch,
+):
     supervisor = SimpleNamespace()
     supervisor.wait = _AsyncReturn(
         SimpleNamespace(
@@ -180,6 +185,7 @@ async def test_wait_subagent_returns_parent_facing_partial_result(tmp_path):
             timed_out=False,
         ),
     )
+    _mock_owned_wait_records(monkeypatch, supervisor.wait.value)
     tools = create_background_subagent_tools(
         supervisor=supervisor,
         parent_agent_config=_agent_config(tmp_path),
@@ -187,6 +193,7 @@ async def test_wait_subagent_returns_parent_facing_partial_result(tmp_path):
         request_context={
             "tenant_id": "tenant-1",
             "agent_id": "agent-1",
+            "session_id": "session-1",
             "_subagent_definition_store_dir": str(tmp_path / "definitions"),
         },
     )
@@ -230,6 +237,7 @@ def test_compact_result_omits_non_finalization_error_code() -> None:
 @pytest.mark.asyncio
 async def test_wait_subagent_returns_error_summary_for_failed_no_result_run(
     tmp_path,
+    monkeypatch,
 ):
     supervisor = SimpleNamespace()
     supervisor.wait = _AsyncReturn(
@@ -256,6 +264,7 @@ async def test_wait_subagent_returns_error_summary_for_failed_no_result_run(
             timed_out=False,
         ),
     )
+    _mock_owned_wait_records(monkeypatch, supervisor.wait.value)
     tools = create_background_subagent_tools(
         supervisor=supervisor,
         parent_agent_config=_agent_config(tmp_path),
@@ -263,6 +272,7 @@ async def test_wait_subagent_returns_error_summary_for_failed_no_result_run(
         request_context={
             "tenant_id": "tenant-1",
             "agent_id": "agent-1",
+            "session_id": "session-1",
             "_subagent_definition_store_dir": str(tmp_path / "definitions"),
         },
     )
@@ -1004,6 +1014,36 @@ async def test_get_subagent_returns_error_summary_for_failed_no_result_run(
         "summary": "runtime_error: worker failed to start",
     }
     assert "errors" not in payload
+
+
+def _mock_owned_wait_records(monkeypatch, snapshot):
+    """Keep serializer fixtures at the authorized-record boundary."""
+    from swe.app.subagents.models import BackgroundSubAgentRunRecord
+
+    records = [
+        BackgroundSubAgentRunRecord(
+            run_id=record.run_id,
+            status=record.status,
+            spec=DelegationSpec(
+                name=record.spec.name,
+                objective=record.spec.objective,
+                parent_thread_id="session-1",
+            ),
+            definition_name=record.spec.name,
+            definition_version="1",
+            definition_source="run_scoped",
+            owner_scope="run:test",
+            effective_policy=PermissionPolicy.readonly(),
+            nickname=getattr(record, "nickname", None),
+            result=record.result,
+            errors=[vars(error) for error in record.errors],
+        )
+        for record in [*snapshot.active_runs, *snapshot.terminal_runs]
+    ]
+    monkeypatch.setattr(
+        "swe.agents.tools.subagent_background.read_chat_run_records",
+        lambda *_args: records,
+    )
 
 
 class _AsyncReturn:

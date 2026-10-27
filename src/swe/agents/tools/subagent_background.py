@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 from pathlib import Path
+import time
 from typing import Any, Callable, Mapping
 
 from agentscope.message import TextBlock
@@ -31,6 +32,15 @@ from ...app.subagents import (
 )
 from ...config.config import AgentProfileConfig
 from ...config.utils import get_tenant_working_dir
+from ...runtime_workers import run_runtime_state_work
+from ...app.subagents.models import TERMINAL_BACKGROUND_RUN_STATUSES
+from ...app.subagents.run_access import (
+    read_chat_run_record,
+    read_chat_run_records,
+)
+from ...app.subagents.session_dependencies import (
+    initialize_community_expert_dependency_view,
+)
 
 _RUN_ID_CONTEXT_KEYS = (
     "subagent_run_id",
@@ -294,6 +304,18 @@ def _create_start_subagent_tool(
             )
             if failure is not None:
                 return failure
+            start_context = dict(context.request_context)
+            start_context.pop("_expert_dependency_view_root", None)
+            dependency_view = await run_runtime_state_work(
+                initialize_community_expert_dependency_view,
+                workspace_dir=context.workspace_dir,
+                chat_id=str(start_context.get("chat_id") or ""),
+                definition=definition,
+            )
+            if dependency_view is not None:
+                start_context["_expert_dependency_view_root"] = str(
+                    dependency_view,
+                )
             spec = DelegationSpec(
                 parent_thread_id=str(
                     context.request_context.get("session_id") or "",
@@ -325,7 +347,7 @@ def _create_start_subagent_tool(
                     if context.request_context.get("plan_mode_enabled") is True
                     else None
                 ),
-                request_context=context.request_context,
+                request_context=start_context,
                 definition=definition,
                 start_request=start_request,
                 definition_match=definition_match,
@@ -368,13 +390,59 @@ def _create_wait_subagent_tool(
 
     async def wait_subagent(timeout_ms: int = 3000) -> ToolResponse:
         """Wait briefly and return current Background SubAgent statuses."""
-        snapshot = await context.supervisor.wait(
-            context.tool_scope,
-            timeout_ms=timeout_ms,
-        )
+        snapshot = await _wait_for_chat_runs(context, timeout_ms)
         return _json_response(_serialize_wait_snapshot(snapshot))
 
     return wait_subagent
+
+
+async def _wait_for_chat_runs(
+    context: _BackgroundSubagentToolContext,
+    timeout_ms: int,
+) -> BackgroundSubAgentWaitSnapshot:
+    """Reap processes but project results from retained Chat-owned records."""
+    if not str(context.request_context.get("session_id") or "").strip():
+        return BackgroundSubAgentWaitSnapshot()
+    deadline = time.monotonic() + max(timeout_ms, 0) / 1000
+    while True:
+        await context.supervisor.wait(context.tool_scope, timeout_ms=0)
+        records = await run_runtime_state_work(
+            read_chat_run_records,
+            context.tool_scope.run_store_dir,
+            context.request_context,
+        )
+        terminal = [
+            record
+            for record in records
+            if record.status in TERMINAL_BACKGROUND_RUN_STATUSES
+        ]
+        active = [
+            record
+            for record in records
+            if record.status not in TERMINAL_BACKGROUND_RUN_STATUSES
+        ]
+        if terminal or not active or time.monotonic() >= deadline:
+            return BackgroundSubAgentWaitSnapshot(
+                active_runs=active,
+                terminal_runs=terminal,
+                timed_out=bool(active and not terminal),
+            )
+        await asyncio.sleep(min(0.05, max(deadline - time.monotonic(), 0)))
+
+
+async def _has_chat_run_access(
+    context: _BackgroundSubagentToolContext,
+    run_id: str,
+) -> bool:
+    return (
+        await run_runtime_state_work(
+            read_chat_run_record,
+            context.tool_scope.run_store_dir,
+            context.request_context,
+            run_id,
+        )
+        is not None
+    )
 
 
 def _create_get_subagent_tool(
@@ -387,6 +455,8 @@ def _create_get_subagent_tool(
         include_details: bool = False,
     ) -> ToolResponse:
         """Fetch one Background SubAgent Run in the current scope."""
+        if not await _has_chat_run_access(context, run_id):
+            return _json_response({"status": "not_found", "run_id": run_id})
         try:
             record = await context.supervisor.get(
                 context.tool_scope,
@@ -419,6 +489,8 @@ def _create_cancel_subagent_tool(
 
     async def cancel_subagent(run_id: str) -> ToolResponse:
         """Cancel one active Background SubAgent Run in the current scope."""
+        if not await _has_chat_run_access(context, run_id):
+            return _json_response({"status": "not_found", "run_id": run_id})
         try:
             result = await context.supervisor.cancel(
                 context.tool_scope,
@@ -453,19 +525,24 @@ def create_background_subagent_tools(
     skill_snapshot_dirs: Mapping[str, Path] | None = None,
     selected_expert_id: str | None = None,
     expert_discovery_enabled: bool = False,
+    start_enabled: bool = True,
 ) -> dict[str, Callable[..., Any]]:
     """Create start/wait/get/cancel Background SubAgent tool callables."""
     tool_scope = build_background_subagent_scope(
         parent_agent_config=parent_agent_config,
         request_context=request_context,
     )
-    definition_catalog = _build_definition_catalog(
-        tool_scope=tool_scope,
-        workspace_dir=workspace_dir,
-        effective_skill_names=effective_skill_names,
-        skill_snapshot_dirs=skill_snapshot_dirs,
-        selected_expert_id=selected_expert_id,
-        expert_discovery_enabled=expert_discovery_enabled,
+    definition_catalog = (
+        _build_definition_catalog(
+            tool_scope=tool_scope,
+            workspace_dir=workspace_dir,
+            effective_skill_names=effective_skill_names,
+            skill_snapshot_dirs=skill_snapshot_dirs,
+            selected_expert_id=selected_expert_id,
+            expert_discovery_enabled=expert_discovery_enabled,
+        )
+        if start_enabled
+        else None
     )
     directory = _format_skill_definition_directory(definition_catalog)
     context = _BackgroundSubagentToolContext(
@@ -482,11 +559,15 @@ def create_background_subagent_tools(
     )
 
     tools: dict[str, Callable[..., Any]] = {
-        "start_subagent": _create_start_subagent_tool(context, directory),
         "wait_subagent": _create_wait_subagent_tool(context),
         "get_subagent": _create_get_subagent_tool(context),
         "cancel_subagent": _create_cancel_subagent_tool(context),
     }
+    if start_enabled:
+        tools["start_subagent"] = _create_start_subagent_tool(
+            context,
+            directory,
+        )
     return tools
 
 
