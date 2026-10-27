@@ -14,6 +14,9 @@ import {
 } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WealthWorkbench from "./index";
+import { useIframeStore } from "@/stores/iframeStore";
+
+beforeEach(() => useIframeStore.getState().clearContext());
 
 const access = vi.hoisted(() => ({ tasks: true }));
 beforeEach(() => {
@@ -79,6 +82,21 @@ function mount(entry: string) {
 afterEach(cleanup);
 
 describe("财富工作台嵌入头部", () => {
+  it("消息隐藏设置跨内部导航生效，不向 URL 补参数", async () => {
+    useIframeStore.getState().setContext({ source: "RCZT", hideLogo: true });
+    mount("/wealth/board");
+    expect(screen.queryByRole("banner")).not.toBeInTheDocument();
+    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+    expect(screen.queryByText("信息播报")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("切换页面"));
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "/wealth/create?other=kept",
+      ),
+    );
+    expect(screen.getByRole("status")).not.toHaveTextContent("hideLogo");
+    expect(screen.queryByRole("banner")).not.toBeInTheDocument();
+  });
   it.each(["", "?hideLogo=false", "?hideLogo=1", "?hideLogo=invalid"])(
     "默认显示头部：%s",
     (query) => {

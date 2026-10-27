@@ -290,6 +290,15 @@ The `/models` page is the first complete white-first embedded Management Console
 - Dialogs use consistent header, body spacing, field rhythm, notices, list rows, and footer alignment.
 - Provider and model operations keep their current handlers, validation, confirmation, and result semantics.
 
+## Browser Compatibility
+
+- New and modified Console frontend features must support **360 Browser in speed mode with Chromium 108 or later**. Use the Chromium engine version, not the 360 product version, to assess compatibility. This includes the Wealth Workbench and embedded routes.
+- Prefer standard CSS and Web APIs supported by the baseline. Do not make essential layout, focus feedback, forms, tables, dialogs, or primary actions depend solely on a newer feature. Features unavailable in Chromium 108, such as `subgrid` and the Popover API, require a verified compatible implementation if used.
+- Check CSS support and native API availability separately from JavaScript syntax transpilation. Vite `target` and `cssTarget` do not automatically supply every CSS fallback or Web API polyfill. Keep existing build targets unless a separate change explicitly revises them.
+- Verify affected layouts and core interactions on Chromium 108 or a matching 360 engine, as well as a current browser. Include the relevant desktop sizes, embedded mode, keyboard focus, and error states from Verification below. A newer browser, a changed User-Agent, or simulated missing APIs alone does not establish baseline compatibility; report when actual baseline-browser verification is unavailable.
+- Chromium 80–107 receives best-effort compatibility fixes driven by observed issues; it is not the required acceptance baseline. IE-engine compatibility mode is outside the supported scope. Flex `gap` may remain in the Wealth Workbench; its spacing differences on Chromium 80–83 are documented in that page's compatibility record.
+- This is the development and acceptance requirement, not a claim that every existing Console page has already passed a complete browser audit. Apply it when changing existing surfaces and record discovered issues explicitly.
+
 ## Verification
 
 For major desktop migrations, inspect:
@@ -297,6 +306,7 @@ For major desktop migrations, inspect:
 - Embedded host containers corresponding to `1280x720`, `1440x900`, and `1920x1080` viewport sizes.
 - `hideMenu=true` with the page filling the host content region and no shell-colored gaps.
 - Windows Chrome and Edge using the declared platform font stack; retain readable macOS fallbacks.
+- 360 Browser speed mode with Chromium 108, plus a current browser, for the changed surface and its core interactions; explicitly record any unavailable baseline-browser check.
 - No external font-network requests.
 - No unintended clipping, overlap, inaccessible actions, or horizontal page overflow.
 - Normal, hover, focus, loading, empty, error, disabled, unavailable, and in-progress states.

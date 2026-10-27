@@ -108,6 +108,7 @@ const initialState: IframeContext = {
   space: null,
   source: null,
   hideMenu: false,
+  hideLogo: false,
   isOriginY: false,
   isSuperManager: false,
   manager: false,

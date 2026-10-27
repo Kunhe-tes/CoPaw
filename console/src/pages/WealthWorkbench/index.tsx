@@ -19,20 +19,22 @@ import Board from "./Board";
 import Create from "./Create";
 import Tasks from "./Tasks";
 import { useVisibilityRefresh } from "./useVisibilityRefresh";
+import { useIframeStore } from "@/stores/iframeStore";
 
 export default function WealthWorkbench() {
   useVisibilityRefresh();
   const [searchParams, setSearchParams] = useSearchParams();
+  const messageHideLogo = useIframeStore((s) => s.hideLogo);
   const [entryHideLogo] = useState(
     () => searchParams.get("hideLogo") === "true",
   );
   const hideHeader = searchParams.has("hideLogo")
     ? searchParams.get("hideLogo") === "true"
-    : entryHideLogo;
+    : entryHideLogo || messageHideLogo;
 
   // 内部导航可能省略查询参数；补回隐藏设置，使嵌入布局保持一致。
   useEffect(() => {
-    if (hideHeader && !searchParams.has("hideLogo")) {
+    if (entryHideLogo && hideHeader && !searchParams.has("hideLogo")) {
       setSearchParams(
         (params) => {
           params.set("hideLogo", "true");
@@ -41,7 +43,7 @@ export default function WealthWorkbench() {
         { replace: true },
       );
     }
-  }, [hideHeader, searchParams, setSearchParams]);
+  }, [entryHideLogo, hideHeader, searchParams, setSearchParams]);
   const initialized = useWealthStore((s) => s.initialized);
   const accountId = useWealthStore((s) => s.accountId);
   const init = useWealthStore((s) => s.init);

@@ -73,11 +73,11 @@
   textarea {
     outline: none;
   }
-  button:focus-visible,
-  input:focus-visible,
-  select:focus-visible,
-  textarea:focus-visible,
-  a:focus-visible {
+  button:focus,
+  input:focus,
+  select:focus,
+  textarea:focus,
+  a:focus {
     outline: 3px solid #8bbaff;
     outline-offset: 2px;
   }
@@ -133,7 +133,9 @@
   .topbar {
     height: 74px;
     position: fixed;
-    inset: 0 0 auto;
+    top: 0;
+    right: 0;
+    left: 0;
     z-index: 20;
     background: linear-gradient(105deg, #f8fcff, #edf7ff 65%, #f8fcff);
     border-bottom: 1px solid var(--line);
@@ -740,7 +742,7 @@
   .createForm {
     border: 0;
     margin: 0;
-    min-inline-size: 0;
+    min-width: 0;
     padding: 0;
   }
   .createForm:disabled {
@@ -1715,7 +1717,8 @@
   }
   .toast {
     position: fixed;
-    inset: auto;
+    top: auto;
+    right: auto;
     margin: 0;
     bottom: 30px;
     left: 50%;
@@ -2888,28 +2891,33 @@
     min-width: 0;
   }
   .selectedList {
-    --selected-columns: 16px 27px minmax(225px, 3fr) minmax(135px, 2fr)
-      max-content max-content 110px 82px;
-    grid-template-columns: var(--selected-columns);
-    column-gap: 22px;
-    row-gap: 0;
+    // 前两列只随窗口变化；展开周期和频率时扩宽表格，不重新挤压文字列。
+    --selected-scene-width: clamp(160px, 13.5vw, 260px);
+    --selected-direction-width: clamp(140px, 11vw, 210px);
+    --selected-columns: 16px 27px var(--selected-scene-width)
+      var(--selected-direction-width)
+      minmax(var(--selected-cycle-min, 400px), 1.2fr)
+      minmax(var(--selected-schedule-min, 320px), 1fr) 110px 82px;
+    display: block;
     overflow-x: auto;
-    > .empty {
-      grid-column: 1 / -1;
-    }
   }
   .selectedListHeader,
   .selectedRow {
-    grid-column: 1 / -1;
-    grid-template-columns: subgrid;
-    column-gap: 22px;
-    min-width: 0;
+    grid-template-columns: var(--selected-columns);
+    column-gap: 12px;
+    // 拖动、序号、客户数、操作列及边框留白共计 249px，另计七处列间距。
+    min-width: calc(
+      249px + 7 * 12px + var(--selected-scene-width) +
+        var(--selected-direction-width) + var(--selected-cycle-min, 400px) +
+        var(--selected-schedule-min, 320px)
+    );
   }
   .selectedListHeader {
     display: grid;
-    padding: 10px;
+    padding: 10px 6px;
     border: 1px solid transparent;
-    border-block-color: #e6edf7;
+    border-top-color: #e6edf7;
+    border-bottom-color: #e6edf7;
     background: #f7faff;
     color: #596e8c;
     font-size: 12px;
@@ -2923,7 +2931,7 @@
   .selectedRow {
     min-height: 56px;
     align-items: center;
-    padding: 10px;
+    padding: 10px 6px;
     border: 1px solid transparent;
     border-top: 0;
     border-bottom-color: #e6edf7;
@@ -2956,15 +2964,27 @@
     text-overflow: ellipsis;
   }
   .selectedRow .scheduleBlock {
-    width: max-content;
+    width: 100%;
     margin-top: 0;
+  }
+  .selectedRow .scheduleBlock,
+  .selectedRow .customScheduleFields,
+  .selectedRow .customScheduleRow {
+    flex-wrap: wrap;
+  }
+  .selectedRow .taskCycleBlock,
+  .selectedRow .taskCustomDates {
+    flex-wrap: nowrap;
+    > * {
+      flex-shrink: 0;
+    }
   }
   .selectedRow .taskCycleBlock,
   .selectedRow .scheduleField,
   .selectedRow .customFrequencyControls,
   .selectedRow .scheduleDateParts {
-    flex-shrink: 0;
-    width: max-content;
+    min-width: 0;
+    max-width: 100%;
   }
   .selectedRow .direction,
   .selectedRow .scheduleField,
@@ -2991,20 +3011,40 @@
   .selectedRow .taskRangeLabel {
     padding-left: 0;
   }
-  .selectedRow .taskDatePicker:global(.ant-picker) {
+  .selectedRow .taskDatePicker {
     width: 108px;
   }
   .selectedRow .expandedSchedule {
-    display: grid;
-    grid-template-columns: max-content max-content;
-    gap: 8px;
+    display: flex;
     > .cycle {
       min-height: 32px;
     }
-    > .scheduleField:last-child,
     > .customScheduleFields {
-      grid-column: 1 / -1;
+      width: 100%;
     }
+  }
+  .selectedRow .scheduleField {
+    width: auto;
+    flex: 0 1 auto;
+  }
+  .selectedList.expandedSchedules {
+    --selected-schedule-min: 760px;
+    .expandedSchedule,
+    .customScheduleFields,
+    .customScheduleRow {
+      flex-wrap: nowrap;
+      flex-shrink: 0;
+    }
+    .expandedSchedule > .customScheduleFields {
+      width: auto;
+    }
+    .expandedSchedule .scheduleField {
+      flex-shrink: 0;
+      max-width: none;
+    }
+  }
+  .selectedList.expandedCycles {
+    --selected-cycle-min: 500px;
   }
   .selectedRow .cycleGroup button {
     padding: 5px 6px;
@@ -3068,7 +3108,7 @@
       appearance: none;
       margin: 0;
     }
-    input:focus-visible {
+    input:focus {
       outline: none;
     }
     > span {
@@ -3124,7 +3164,7 @@
     color: var(--muted);
     font-size: 12px;
   }
-  .taskDatePicker:global(.ant-picker) {
+  .taskDatePicker {
     width: 142px;
     height: 29px;
     min-width: 0;
@@ -3135,7 +3175,7 @@
     color: var(--ink);
     cursor: pointer;
   }
-  .taskDatePicker:global(.ant-picker) :global(.ant-picker-input > input) {
+  .taskDatePicker input {
     color: var(--ink);
     font-size: 12px;
     cursor: pointer;
@@ -3149,16 +3189,17 @@
     width: 270px;
     height: 34px;
   }
-  .taskDatePicker:global(.ant-picker) :global(.ant-picker-suffix) {
+  .taskDatePicker :global(.ant-picker-suffix),
+  .taskDatePicker :global(.swe-picker-suffix) {
     color: var(--muted);
     font-size: 13px;
   }
-  .taskDatePicker:global(.ant-picker):hover,
-  .taskDatePicker:global(.ant-picker-focused) {
+  .taskDatePicker:hover,
+  .taskDatePicker:focus-within {
     border-color: #bcd5ff;
     outline: none;
   }
-  .taskDatePicker:global(.ant-picker-focused) {
+  .taskDatePicker:focus-within {
     box-shadow: 0 0 0 2px rgba(55, 105, 252, 0.16);
   }
   .scheduleBlock {
@@ -3483,7 +3524,7 @@
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
   }
-  .opportunityPreview:focus-visible {
+  .opportunityPreview:focus {
     outline: 2px solid var(--blue);
     outline-offset: 2px;
   }
@@ -3551,7 +3592,7 @@
     background: white;
     border-color: #9ec6ff;
   }
-  .accountSwitcher .switcherTrigger:focus-visible {
+  .accountSwitcher .switcherTrigger:focus {
     outline: 3px solid #8bbaff;
     outline-offset: 2px;
   }
@@ -3836,7 +3877,7 @@
     li {
       min-width: 0;
     }
-    .metricItem:focus-visible {
+    .metricItem:focus {
       outline: 2px solid var(--blue);
       outline-offset: 2px;
     }
