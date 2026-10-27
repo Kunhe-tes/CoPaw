@@ -25,6 +25,17 @@ from .context_usage import (
     ContextUsageUnavailable,
 )
 from .manager import ChatManager
+from .expert_binding import (
+    ExpertBindingUpdate,
+    ExpertBindingView,
+    ExpertBindingConflict,
+    ExpertBindingModeConflict,
+    binding_view,
+    expert_main_enabled_for_request,
+    read_expert_binding,
+    reconcile_binding,
+    resolve_bound_expert,
+)
 from .models import (
     ChatArchiveMetadata,
     ChatArchivePage,
@@ -50,6 +61,7 @@ TASK_RUN_SECTION_FINAL = "final"
 _SERVER_OWNED_CHAT_META_KEYS = frozenset(
     {
         GOAL_DRAFT_DELEGATION_META_KEY,
+        "expert_main_binding",
         "scenario_preset_snapshot",
         "scenario_preset_snapshot_source",
     },
@@ -1447,6 +1459,108 @@ async def get_chat(
     )
 
 
+@router.get("/{chat_id}/expert-binding", response_model=ExpertBindingView)
+async def get_chat_expert_binding(
+    chat_id: str,
+    request: Request,
+    mgr: ChatManager = Depends(get_chat_manager),
+    workspace=Depends(get_workspace),
+):
+    chat = await mgr.get_chat(chat_id)
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    _authorize_chat(request, chat, workspace)
+    enabled = await expert_main_enabled_for_request(request)
+    previous = read_expert_binding(chat)
+    try:
+        chat = await reconcile_binding(workspace, chat, enabled=enabled)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Chat not found") from exc
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    view = await binding_view(workspace, chat, enabled=enabled)
+    if not enabled and (
+        previous.expert_id or view.revision != previous.revision
+    ):
+        view = view.model_copy(update={"reason": "expert_main_disabled"})
+    return view
+
+
+@router.put("/{chat_id}/expert-binding", response_model=ExpertBindingView)
+async def put_chat_expert_binding(
+    chat_id: str,
+    request: Request,
+    patch: ExpertBindingUpdate,
+    mgr: ChatManager = Depends(get_chat_manager),
+    workspace=Depends(get_workspace),
+):
+    from swe.runtime_workers import run_runtime_state_work
+
+    chat = await mgr.get_chat(chat_id)
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    _authorize_chat(request, chat, workspace)
+    enabled = await expert_main_enabled_for_request(request)
+    try:
+        chat = await reconcile_binding(workspace, chat, enabled=enabled)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Chat not found") from exc
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    code = None
+    if not enabled:
+        code = "expert_main_disabled"
+    elif (
+        patch.expert_id
+        and await run_runtime_state_work(
+            resolve_bound_expert,
+            workspace,
+            patch.expert_id,
+        )
+        is None
+    ):
+        code = "expert_unavailable"
+    if code is None:
+        try:
+            await mgr.compare_and_set_expert_binding(
+                chat_id,
+                patch.expected_revision,
+                patch.expert_id,
+            )
+        except ExpertBindingConflict:
+            code = "expert_binding_changed"
+        except ExpertBindingModeConflict as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404, detail="Chat not found"
+            ) from exc
+        enabled = await expert_main_enabled_for_request(request)
+        if not enabled:
+            try:
+                await mgr.release_current_expert_binding(chat_id)
+            except KeyError as exc:
+                raise HTTPException(
+                    status_code=404, detail="Chat not found"
+                ) from exc
+            code = "expert_main_disabled"
+        chat = await mgr.get_chat(chat_id)
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    view = await binding_view(workspace, chat, enabled=enabled)
+    if code == "expert_main_disabled":
+        view = view.model_copy(update={"reason": code})
+    if code:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": code,
+                "expert_binding": view.model_dump(),
+            },
+        )
+    return view
+
+
 @router.put("/{chat_id}", response_model=ChatSpec)
 async def update_chat(
     chat_id: str,
@@ -1484,7 +1598,10 @@ async def update_chat(
         _authorize_requested_user(request, patch.user_id)
 
     spec = _merge_chat_update(existing, patch)
-    updated = await mgr.update_chat(spec)
+    try:
+        updated = await mgr.update_chat(spec)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Chat not found") from exc
     return updated
 
 

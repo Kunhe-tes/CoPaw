@@ -27,6 +27,28 @@ class BaseChatRepository(ABC):
         """Persist all chat specs to storage (should be atomic if possible)."""
         raise NotImplementedError
 
+    async def compare_and_set_expert_binding(
+        self,
+        chat_id: str,
+        expected_revision: int,
+        expert_id: str | None,
+    ):
+        """Atomically update the server-owned identity or reject stale state."""
+        raise NotImplementedError("Repository must implement atomic bindings")
+
+    async def release_current_expert_binding(self, chat_id: str):
+        """Release whichever expert is current as one storage transaction."""
+        raise NotImplementedError("Repository must implement atomic bindings")
+
+    async def update_chat_if_exists(
+        self, spec: ChatSpec
+    ) -> Optional[ChatSpec]:
+        """Update an existing Chat without recreating it after a delete race."""
+        if await self.get_chat(spec.id) is None:
+            return None
+        await self.upsert_chat(spec)
+        return await self.get_chat(spec.id)
+
     # ---- Convenience operations ----
 
     async def list_chats(self) -> list[ChatSpec]:
