@@ -470,12 +470,14 @@ def test_get_in_memory_memory_uses_instance_tenant_id(
     manager.tenant_id = "tenant-a"
     manager._warn_if_version_mismatch = lambda: None
     manager._reme = SimpleNamespace(
-        get_in_memory_memory=lambda **kwargs: kwargs["as_token_counter"],
+        get_in_memory_memory=lambda **kwargs: SimpleNamespace(
+            content=[], token_counter=kwargs["as_token_counter"],
+        ),
     )
 
-    token_counter = manager.get_in_memory_memory()
+    memory = manager.get_in_memory_memory()
 
-    assert token_counter == "token-counter"
+    assert memory.token_counter == "token-counter"
     assert calls == [("default", "tenant-a")]
 
 

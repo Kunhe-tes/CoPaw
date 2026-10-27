@@ -93,7 +93,9 @@ async def test_store_qa_content_passes_scope_tenant(monkeypatch) -> None:
             )(),
         },
     )()
-    outcome = type("Outcome", (), {"task_completed": True})()
+    outcome = type(
+        "Outcome", (), {"task_completed": True, "stop_append_started": False},
+    )()
 
     await runner._store_qa_content_if_needed(
         runtime=runtime,

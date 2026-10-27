@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """租户 Provider API 端点的单元测试。"""
 
+import asyncio
+from types import SimpleNamespace
+
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -60,7 +63,7 @@ class TestGetTenantProviders:
             ),
             patch("swe.app.routers.providers.ProviderManager") as manager_cls,
         ):
-            manager_cls.get_instance.return_value = mock_manager
+            manager_cls.get_or_create_instance = AsyncMock(return_value=mock_manager)
 
             response = client.get("/providers")
 
@@ -74,10 +77,7 @@ class TestGetTenantProviders:
         assert data["active_model"]["model"] == "gpt-4"
         assert data["deprecated"] is True
         assert "/models" in data["migration_note"]
-        manager_cls.ensure_tenant_provider_storage.assert_called_once_with(
-            "test-tenant",
-        )
-        manager_cls.get_instance.assert_called_once_with("test-tenant")
+        manager_cls.get_or_create_instance.assert_awaited_once_with("test-tenant")
         mock_manager.list_provider_info.assert_awaited_once_with()
 
     def test_get_tenant_providers_missing_tenant_id(self, client):
@@ -104,7 +104,7 @@ class TestGetTenantProviders:
             ),
             patch("swe.app.routers.providers.ProviderManager") as manager_cls,
         ):
-            manager_cls.get_instance.return_value = mock_manager
+            manager_cls.get_or_create_instance = AsyncMock(return_value=mock_manager)
 
             response = client.get("/providers")
 
@@ -153,10 +153,12 @@ class TestGetTenantProviders:
                 "swe.app.routers.providers.ProviderManager",
             ) as manager_cls,
         ):
-            manager_cls.get_instance.side_effect = [
-                tenant1_manager,
-                tenant2_manager,
-            ]
+            manager_cls.get_or_create_instance = AsyncMock(
+                side_effect=[
+                    tenant1_manager,
+                    tenant2_manager,
+                ],
+            )
 
             tenant_id.return_value = "tenant1"
             try:
@@ -177,11 +179,11 @@ class TestGetTenantProviders:
 
                 assert data1 != data2
             finally:
-                manager_cls.get_instance.side_effect = None
+                manager_cls.get_or_create_instance.side_effect = None
 
-        manager_cls.ensure_tenant_provider_storage.assert_any_call("tenant1")
-        manager_cls.ensure_tenant_provider_storage.assert_any_call("tenant2")
-        assert manager_cls.get_instance.call_count == 2
+        manager_cls.get_or_create_instance.assert_any_await("tenant1")
+        manager_cls.get_or_create_instance.assert_any_await("tenant2")
+        assert manager_cls.get_or_create_instance.await_count == 2
 
 
 def test_distribute_providers_writes_target_source_scope(
@@ -212,7 +214,7 @@ def test_distribute_providers_writes_target_source_scope(
     )
     monkeypatch.setattr(
         providers_router,
-        "get_tenant_storage_providers_dir",
+        "_get_target_storage_providers_dir",
         lambda tenant_id: secret_dir / tenant_id / "providers",
     )
     monkeypatch.setattr(
@@ -221,11 +223,14 @@ def test_distribute_providers_writes_target_source_scope(
         FakeTenantInitializer,
     )
 
-    result = _distribute_providers_to_tenant(
-        source_providers_dir=source_providers_dir,
-        target_tenant_id="tenant-b",
-        source_working_dir=tmp_path / ".swe" / "source-scope",
-        source_id="source-a",
+    result = asyncio.run(
+        _distribute_providers_to_tenant(
+            source_providers_dir=source_providers_dir,
+            target_tenant_id="tenant-b",
+            source_working_dir=tmp_path / ".swe" / "source-scope",
+            source_id="source-a",
+            tenant_workspace_pool=SimpleNamespace(ensure_bootstrap=AsyncMock()),
+        ),
     )
 
     target_scope_id = encode_scope_id("tenant-b", "source-a")
@@ -265,7 +270,7 @@ def test_distribute_providers_writes_default_target_to_source_template(
     )
     monkeypatch.setattr(
         providers_router,
-        "get_tenant_storage_providers_dir",
+        "_get_target_storage_providers_dir",
         lambda tenant_id: secret_dir / tenant_id / "providers",
     )
     monkeypatch.setattr(
@@ -274,11 +279,14 @@ def test_distribute_providers_writes_default_target_to_source_template(
         FakeTenantInitializer,
     )
 
-    result = _distribute_providers_to_tenant(
-        source_providers_dir=source_providers_dir,
-        target_tenant_id="default",
-        source_working_dir=tmp_path / ".swe" / "default_source-a",
-        source_id="source-a",
+    result = asyncio.run(
+        _distribute_providers_to_tenant(
+            source_providers_dir=source_providers_dir,
+            target_tenant_id="default",
+            source_working_dir=tmp_path / ".swe" / "default_source-a",
+            source_id="source-a",
+            tenant_workspace_pool=SimpleNamespace(ensure_bootstrap=AsyncMock()),
+        ),
     )
 
     assert result.success is True

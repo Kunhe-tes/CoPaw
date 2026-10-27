@@ -62,8 +62,8 @@ def test_process_limits_config_uses_current_default_limits() -> None:
         },
     )
 
-    assert config.security.process_limits.cpu_time_limit_seconds == 30
-    assert config.security.process_limits.memory_max_mb == 150
+    assert config.security.process_limits.cpu_time_limit_seconds == 90
+    assert config.security.process_limits.memory_max_mb == 34000
 
 
 def test_process_limits_config_rejects_enabled_policy_without_scope() -> None:
@@ -88,8 +88,8 @@ def test_process_limits_config_defaults_to_disabled() -> None:
     assert config.security.process_limits.enabled is True
     assert config.security.process_limits.shell is True
     assert config.security.process_limits.mcp_stdio is False
-    assert config.security.process_limits.cpu_time_limit_seconds == 30
-    assert config.security.process_limits.memory_max_mb == 150
+    assert config.security.process_limits.cpu_time_limit_seconds == 90
+    assert config.security.process_limits.memory_max_mb == 34000
     assert config.security.process_limits.shell_max_concurrent == 5
     assert config.security.process_limits.shell_acquire_timeout_seconds == 5
 

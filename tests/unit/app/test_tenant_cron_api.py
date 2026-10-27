@@ -1013,7 +1013,7 @@ def test_broadcast_job_uses_db_store_when_state_store_missing(monkeypatch):
             for query, _params in db.executed
         )
         assert any(
-            "INSERT INTO swe_async_task_items" in query
+            "INSERT IGNORE INTO swe_async_task_items" in query
             for query, _params in db.executed_many
         )
 

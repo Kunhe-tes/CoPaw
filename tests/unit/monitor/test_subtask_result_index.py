@@ -370,4 +370,4 @@ def test_batch_update_queries_and_masks_missing_customer_name(monkeypatch):
     ]
 
     insert_calls = _result_index_batch_insert_calls(db)
-    assert insert_calls[0][1][0][5] == "C*********e"
+    assert insert_calls[0][1][0][5] == "C***********e"

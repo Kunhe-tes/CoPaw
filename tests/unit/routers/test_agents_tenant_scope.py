@@ -11,15 +11,16 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import swe.app
 from fastapi import HTTPException
 from pydantic import BaseModel
+from swe.agents import skills_manager
 from swe.config.context import encode_scope_id
 
 SRC_ROOT = Path(__file__).parent.parent.parent.parent / "src"
 _AGENT_CONTEXT_FILE = SRC_ROOT / "swe" / "app" / "agent_context.py"
 _ROUTER_FILE = SRC_ROOT / "swe" / "app" / "routers" / "agents.py"
 _MANAGER_FILE = SRC_ROOT / "swe" / "app" / "multi_agent_manager.py"
-_SKILLS_MANAGER_FILE = SRC_ROOT / "swe" / "agents" / "skills_manager.py"
 
 
 class FakeWorkspace:
@@ -29,12 +30,14 @@ class FakeWorkspace:
         workspace_dir: str,
         tenant_id: str | None = None,
         source_system_config_service=None,
+        workflow_config_store=None,
         continuous_governance_service=None,
     ):
         self.agent_id = agent_id
         self.workspace_dir = workspace_dir
         self.tenant_id = tenant_id
         self.source_system_config_service = source_system_config_service
+        self.workflow_config_store = workflow_config_store
         self.continuous_governance_service = continuous_governance_service
         self.manager = None
         self.started = False
@@ -146,11 +149,6 @@ def _restore_runtime_config_module(monkeypatch) -> None:
     )
 
 
-skills_manager = _load_module(
-    "swe.agents.skills_manager",
-    _SKILLS_MANAGER_FILE,
-    "swe.agents",
-)
 get_skill_pool_dir = skills_manager.get_skill_pool_dir
 get_workspace_skill_manifest_path = (
     skills_manager.get_workspace_skill_manifest_path
@@ -212,6 +210,8 @@ def _create_config_module_stub() -> types.ModuleType:
 
 def _install_test_stubs() -> dict[str, object | None]:
     module_names = [
+        "swe.app.agent_context",
+        "swe.app.routers.agents",
         "swe.config.utils",
         "swe.config.context",
         "swe.config.config",

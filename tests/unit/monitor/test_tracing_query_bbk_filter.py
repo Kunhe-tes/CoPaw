@@ -361,7 +361,7 @@ class TestBuildUsersQuerySubqueries:
 
         # 验证 user_name 子查询包含 bbk_id 过滤
         # bbk_id 子查询应该有 bbk_id 过滤
-        assert "AND bbk_id IN" in query, "subqueries should filter by bbk_id"
+        assert "AND tr.bbk_id IN" in query, "subqueries should filter by bbk_id"
 
     def test_cron_subquery_includes_bbk_filter(self, service):
         """_build_cron_subquery should include bbk_id filter when bbk_ids provided."""
@@ -475,7 +475,7 @@ class TestBuildUsersQuerySubqueries:
         # 格式: SELECT COUNT(*) FROM swe_tracing_spans s WHERE ...
         # 内嵌子查询：SELECT trace_id FROM swe_tracing_traces WHERE ...
         # 应该包含 bbk_id 过滤
-        assert "AND bbk_id IN" in query, (
+        assert "AND tr.bbk_id IN" in query, (
             "total_skills subquery must filter by bbk_id to prevent counting "
             "skills from other bbk branches"
         )
@@ -615,12 +615,16 @@ async def test_get_skills_paginated_excludes_internal_skills():
     count_query, count_params = db.fetch_one.await_args.args
     data_query, data_params = db.fetch_all.await_args.args
 
-    assert "skill_name NOT IN (%s, %s)" in count_query
-    assert "skill_name NOT IN (%s, %s)" in data_query
-    assert "cron" in count_params
-    assert "skill-creator" in count_params
-    assert "cron" in data_params
-    assert "skill-creator" in data_params
+    excluded = (
+        "cron", "search_customs_by_labels", "cust_insight_url_generator",
+        "immortal-skill", "batch_task_executor", "skill_creator", "docx",
+        "himalaya",
+    )
+    assert "skill_name NOT IN (" in count_query
+    assert "skill_name NOT IN (" in data_query
+    assert all(name in count_params for name in excluded)
+    assert all(name in data_params for name in excluded)
+    assert count_query.count("%s") == len(count_params)
     assert data_params[-2:] == (20, 20)
     assert data_query.count("%s") == len(data_params)
 
@@ -641,7 +645,7 @@ async def test_get_top_skills_excludes_internal_skills():
 
     query, params = db.fetch_all.await_args.args
 
-    assert "skill_name NOT IN (%s, %s)" in query
+    assert "skill_name NOT IN (" in query
     assert "cron" in params
-    assert "skill-creator" in params
+    assert "skill_creator" in params
     assert query.count("%s") == len(params)
