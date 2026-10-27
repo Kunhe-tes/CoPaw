@@ -310,6 +310,7 @@ async def test_wait_subagent_does_not_duplicate_error_code_in_summary(
     popen_factory = _FakePopenFactory()
     supervisor = BackgroundSubAgentSupervisor(
         max_running_per_scope=1,
+        registry=AgentRegistry([builtin_definition_provider()]),
         popen_factory=popen_factory,
     )
     run_store_dir = tmp_path / "subagent_runs"
@@ -320,7 +321,12 @@ async def test_wait_subagent_does_not_duplicate_error_code_in_summary(
     )
     started = await supervisor.start(
         scope=scope,
-        spec=DelegationSpec(name="plan-researcher", objective="Inspect"),
+        spec=DelegationSpec(
+            name="plan-researcher",
+            objective="Inspect",
+            parent_thread_id="session-1",
+            parent_chat_id="chat-1",
+        ),
         parent_agent_config=_agent_config(tmp_path),
         workspace_dir=tmp_path,
     )
@@ -334,6 +340,8 @@ async def test_wait_subagent_does_not_duplicate_error_code_in_summary(
         request_context={
             "tenant_id": "tenant-1",
             "agent_id": "agent-1",
+            "session_id": "session-1",
+            "chat_id": "chat-1",
             "_subagent_run_store_dir": str(run_store_dir),
         },
     )
@@ -786,6 +794,19 @@ async def test_start_subagent_uses_matched_definition(tmp_path):
         captured.update(kwargs)
         return BackgroundSubAgentStartBlocked(limit=1)
 
+    repository = AgentOwnedDefinitionRepository(
+        tmp_path / "agents",
+        owner_scope="tenant-1/agent-1",
+    )
+    package = repository.create(
+        {
+            "name": "risk-reviewer",
+            "description": "Review risks.",
+            "instruction": "Inspect the plan for risks.",
+            "enabled": True,
+        },
+    )
+    repository.enable(package.definition_id, expected_revision=package.revision)
     supervisor = SimpleNamespace(start=_start)
     tools = create_background_subagent_tools(
         supervisor=supervisor,
@@ -796,6 +817,7 @@ async def test_start_subagent_uses_matched_definition(tmp_path):
             "agent_id": "agent-1",
             "_subagent_definition_store_dir": str(tmp_path / "definitions"),
         },
+        expert_discovery_enabled=True,
     )
 
     response = await tools["start_subagent"](
@@ -807,7 +829,7 @@ async def test_start_subagent_uses_matched_definition(tmp_path):
 
     assert payload["status"] == "blocked"
     assert captured["definition"].name == "risk-reviewer"
-    assert captured["definition"].source == "builtin"
+    assert captured["definition"].source == "agent_owned"
     assert captured["definition"].instruction != (
         "This should not override the matched definition."
     )
@@ -848,7 +870,10 @@ async def test_get_subagent_includes_manageable_and_stderr_tail(tmp_path):
     )
     store = PerRunSubAgentRunStore(run_store_dir)
     record = await store.create(
-        DelegationSpec(name="plan-researcher", objective="Inspect"),
+        DelegationSpec(
+            name="plan-researcher", objective="Inspect",
+            parent_thread_id="session-1", parent_chat_id="chat-1",
+        ),
         definition,
         PermissionPolicy.readonly(),
     )
@@ -871,6 +896,8 @@ async def test_get_subagent_includes_manageable_and_stderr_tail(tmp_path):
         request_context={
             "tenant_id": "tenant-1",
             "agent_id": "agent-1",
+            "session_id": "session-1",
+            "chat_id": "chat-1",
             "_subagent_run_store_dir": str(run_store_dir),
         },
     )
@@ -896,7 +923,10 @@ async def test_get_subagent_exposes_launch_diagnostics_only_in_details(
     )
     store = PerRunSubAgentRunStore(run_store_dir)
     record = await store.create(
-        DelegationSpec(name="plan-researcher", objective="Inspect"),
+        DelegationSpec(
+            name="plan-researcher", objective="Inspect",
+            parent_thread_id="session-1", parent_chat_id="chat-1",
+        ),
         definition,
         PermissionPolicy.readonly(),
         launch_diagnostics={
@@ -914,6 +944,8 @@ async def test_get_subagent_exposes_launch_diagnostics_only_in_details(
         request_context={
             "tenant_id": "tenant-1",
             "agent_id": "agent-1",
+            "session_id": "session-1",
+            "chat_id": "chat-1",
             "_subagent_run_store_dir": str(run_store_dir),
         },
     )
@@ -940,7 +972,10 @@ async def test_get_subagent_defaults_to_parent_facing_partial_projection(
     )
     store = PerRunSubAgentRunStore(tmp_path / "runs")
     record = await store.create(
-        DelegationSpec(name="plan-researcher", objective="Inspect"),
+        DelegationSpec(
+            name="plan-researcher", objective="Inspect",
+            parent_thread_id="session-1", parent_chat_id="chat-1",
+        ),
         definition,
         PermissionPolicy.readonly(),
     )
@@ -964,6 +999,8 @@ async def test_get_subagent_defaults_to_parent_facing_partial_projection(
         request_context={
             "tenant_id": "tenant-1",
             "agent_id": "agent-1",
+            "session_id": "session-1",
+            "chat_id": "chat-1",
             "_subagent_run_store_dir": str(tmp_path / "runs"),
         },
     )
@@ -987,7 +1024,10 @@ async def test_get_subagent_returns_error_summary_for_failed_no_result_run(
     )
     store = PerRunSubAgentRunStore(tmp_path / "runs")
     record = await store.create(
-        DelegationSpec(name="plan-researcher", objective="Inspect"),
+        DelegationSpec(
+            name="plan-researcher", objective="Inspect",
+            parent_thread_id="session-1", parent_chat_id="chat-1",
+        ),
         definition,
         PermissionPolicy.readonly(),
     )
@@ -1002,6 +1042,8 @@ async def test_get_subagent_returns_error_summary_for_failed_no_result_run(
         request_context={
             "tenant_id": "tenant-1",
             "agent_id": "agent-1",
+            "session_id": "session-1",
+            "chat_id": "chat-1",
             "_subagent_run_store_dir": str(tmp_path / "runs"),
         },
     )

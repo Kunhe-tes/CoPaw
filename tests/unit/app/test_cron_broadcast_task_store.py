@@ -267,14 +267,17 @@ def test_db_store_mirrors_actor_fields_to_async_task():
     )
 
     async_task_calls = [
-        params
+        (query, params)
         for query, params in db.executed
         if "INSERT INTO swe_async_tasks" in query
     ]
     assert async_task_calls
-    assert async_task_calls[-1][5] == "向 2 个用户分发定时任务"
-    assert async_task_calls[-1][7] == "operator-1"
-    assert async_task_calls[-1][8] == "张三"
+    query, params = async_task_calls[-1]
+    columns = query.split("(", 1)[1].split(")", 1)[0].split(",")
+    values = dict(zip((column.strip() for column in columns), params))
+    assert values["summary"] == "向 2 个用户分发定时任务"
+    assert values["actor_user_id"] == "operator-1"
+    assert values["actor_user_name"] == "张三"
 
 
 def test_db_store_mirrors_job_name_to_async_task_summary():
@@ -294,11 +297,14 @@ def test_db_store_mirrors_job_name_to_async_task_summary():
     )
 
     async_task_calls = [
-        params
+        (query, params)
         for query, params in db.executed
         if "INSERT INTO swe_async_tasks" in query
     ]
-    assert async_task_calls[-1][5] == "分发定时任务「ark」，目标 2 个用户"
+    query, params = async_task_calls[-1]
+    columns = query.split("(", 1)[1].split(")", 1)[0].split(",")
+    values = dict(zip((column.strip() for column in columns), params))
+    assert values["summary"] == "分发定时任务「ark」，目标 2 个用户"
 
 
 def test_db_store_target_item_status_is_upserted_lazily():

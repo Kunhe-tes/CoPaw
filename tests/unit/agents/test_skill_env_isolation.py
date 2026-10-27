@@ -33,7 +33,7 @@ def test_apply_skill_config_env_overrides_scopes_values_without_mutating_process
     monkeypatch.setattr(
         skills_manager,
         "resolve_effective_skills",
-        lambda workspace_dir, channel_name: ["demo"],
+        lambda workspace_dir, channel_name, *, _snapshot=None: ["demo"],
     )
     monkeypatch.delenv("API_KEY", raising=False)
     monkeypatch.delenv("COPAW_SKILL_CONFIG_DEMO", raising=False)

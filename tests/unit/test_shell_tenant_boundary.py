@@ -1184,10 +1184,10 @@ class TestExecuteShellCommand:
                 cwd=str(tenant_dir),
             )
 
-        assert prepared.command == (
-            'opencli apps list --authorization "Bearer resolved-authorization" '
-            '--cookie "resolved-cookie"'
-        )
+        assert shlex.split(prepared.command) == [
+            "opencli", "apps", "list", "--authorization",
+            "Bearer resolved-authorization", "--cookie", "resolved-cookie",
+        ]
         resolve_token.assert_called_once_with(
             tenant_id="test_tenant",
             workspace_dir=tenant_dir,
