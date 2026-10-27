@@ -15,7 +15,10 @@ import {
   emitTaskProgressUpdate,
   extractTaskProgress,
 } from "@/pages/Chat/taskProgressEvents";
-import { emitSubAgentRunsRefreshIfPresent } from "@/pages/Chat/subAgentRunEvents";
+import {
+  emitSubAgentRunsRefresh,
+  emitSubAgentRunsRefreshIfPresent,
+} from "@/pages/Chat/subAgentRunEvents";
 import {
   readStopAppendMetadata,
   stopAppendBubbleId,
@@ -474,6 +477,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
             const snapshot = getChatSnapshot(responseParser(chunk.data));
             if (
               snapshot &&
+              typeof snapshot.chat_id === "string" &&
               isOwnerActive() &&
               (!owner.chatId || snapshot.chat_id === owner.chatId)
             ) {
@@ -481,6 +485,9 @@ export default function useChatRequest(options: UseChatRequestOptions) {
                 owner.msgid = snapshot.msgid;
               }
               await applyRecoverySnapshot?.(snapshot.history, owner);
+              if (isOwnerActive()) {
+                emitSubAgentRunsRefresh(snapshot.chat_id, true);
+              }
               return;
             }
             if (isOwnerActive()) {
@@ -562,7 +569,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           if (streamedTaskProgress !== undefined) {
             emitTaskProgressUpdate(streamedTaskProgress, owner);
           }
-          emitSubAgentRunsRefreshIfPresent(chunkData);
+          emitSubAgentRunsRefreshIfPresent(chunkData, owner.chatId);
           const res = agentScopeRuntimeResponseBuilder.handle(chunkData);
           const isTerminalResponse =
             res.status === AgentScopeRuntimeRunStatus.Completed ||

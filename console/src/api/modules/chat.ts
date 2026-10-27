@@ -400,9 +400,10 @@ export const chatApi = {
     });
   },
 
-  getSubAgentRuns: (chatId: string) =>
+  getSubAgentRuns: (chatId: string, signal?: AbortSignal) =>
     request<SubAgentRunSnapshot>(
       `/subagents/runs?chat_id=${encodeURIComponent(chatId)}`,
+      signal ? { signal } : undefined,
     ),
 
   cancelSubAgentRun: (chatId: string, runId: string) =>
