@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import json
+import logging
 from pathlib import Path
 import time
 from typing import Any, Callable, Mapping
@@ -48,6 +49,11 @@ _RUN_ID_CONTEXT_KEYS = (
 )
 _FAILURE_SUMMARY_MAX_CHARS = 1024
 _DEFAULT_SUPERVISOR = BackgroundSubAgentSupervisor()
+_SELECTED_EXPERT_POLL_SECONDS = 0.25
+_SELECTED_EXPERT_RETRY_LIMIT = 3
+_SELECTED_EXPERT_CLEANUP_GRACE_SECONDS = 30
+_SELECTED_EXPERT_OPERATION_TIMEOUT_SECONDS = 5
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -362,6 +368,10 @@ def _create_start_subagent_tool(
                 skill_snapshot_signatures=context.skill_snapshot_signatures,
                 skill_snapshot_dirs=context.skill_snapshot_dirs,
             )
+            if context.request_context.get("selected_expert_execution"):
+                run_id = getattr(result, "run_id", None)
+                if run_id:
+                    context.request_context["selected_expert_run_id"] = run_id
             await _link_goal_subagent_run(
                 goal_id=goal_id,
                 result=result,
@@ -394,6 +404,219 @@ def _create_wait_subagent_tool(
         return _json_response(_serialize_wait_snapshot(snapshot))
 
     return wait_subagent
+
+
+def _create_selected_expert_wait_tool(
+    context: _BackgroundSubagentToolContext,
+) -> Callable[..., Any]:
+    async def wait_selected_expert() -> ToolResponse:
+        """Wait for the selected expert run belonging to this request."""
+        if not context.request_context.pop(
+            "_selected_expert_wait_authorized",
+            False,
+        ):
+            return _json_response({"status": "unavailable"})
+        run_id = str(
+            context.request_context.get("selected_expert_run_id") or "",
+        ).strip()
+        if not run_id or not context.request_context.get(
+            "selected_expert_execution",
+        ):
+            return _json_response({"status": "unavailable"})
+        authorized = False
+        failures = 0
+        request_deadline = context.request_context.get(
+            "_selected_expert_request_deadline",
+        )
+        if isinstance(request_deadline, (int, float)):
+            request_deadline = float(request_deadline)
+        else:
+            request_deadline = None
+        deadline = request_deadline
+        budget_deadline_set = False
+        try:
+            while True:
+                (
+                    record,
+                    deadline,
+                    budget_deadline_set,
+                    category,
+                ) = await _poll_selected_expert_record(
+                    context,
+                    run_id,
+                    deadline=deadline,
+                    request_deadline=request_deadline,
+                    budget_deadline_set=budget_deadline_set,
+                )
+                authorized = authorized or record is not None
+                if record is not None and record.status in (
+                    TERMINAL_BACKGROUND_RUN_STATUSES
+                ):
+                    return _json_response(
+                        _parent_facing_record(record, include_result=True),
+                    )
+                if category == "deadline" or (
+                    deadline is not None and time.monotonic() >= deadline
+                ):
+                    if authorized:
+                        return await _selected_expert_deadline_response(
+                            context,
+                            run_id,
+                        )
+                    _log_selected_expert_unconfirmed(context, run_id, category)
+                    return _json_response({"status": "unavailable"})
+                if record is not None:
+                    assert deadline is not None
+                    category = await _reap_selected_expert_run(
+                        context,
+                        run_id,
+                        deadline,
+                    )
+                if category is not None:
+                    failures += 1
+                    if failures >= _SELECTED_EXPERT_RETRY_LIMIT:
+                        _log_selected_expert_unconfirmed(
+                            context,
+                            run_id,
+                            category,
+                        )
+                        return _json_response({"status": "unavailable"})
+                else:
+                    failures = 0
+                delay = _SELECTED_EXPERT_POLL_SECONDS
+                if deadline is not None:
+                    delay = min(delay, max(deadline - time.monotonic(), 0))
+                await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            if authorized:
+                await _cancel_selected_expert(context, run_id)
+            raise
+
+    return wait_selected_expert
+
+
+async def _poll_selected_expert_record(
+    context: _BackgroundSubagentToolContext,
+    run_id: str,
+    *,
+    deadline: float | None,
+    request_deadline: float | None,
+    budget_deadline_set: bool,
+) -> tuple[Any, float | None, bool, str | None]:
+    """Read one owned run and derive its fixed wait deadline."""
+    record = None
+    try:
+        record = await _read_selected_expert_record(
+            context,
+            run_id,
+            deadline=deadline,
+        )
+        if record is None:
+            return None, deadline, budget_deadline_set, "record_unavailable"
+        if record.status in TERMINAL_BACKGROUND_RUN_STATUSES:
+            return record, deadline, budget_deadline_set, None
+        if not budget_deadline_set:
+            remaining = (
+                record.effective_budget.timeout_ms / 1000
+                + _SELECTED_EXPERT_CLEANUP_GRACE_SECONDS
+                - (
+                    datetime.now(timezone.utc) - record.created_at
+                ).total_seconds()
+            )
+            budget_deadline = time.monotonic() + max(remaining, 0)
+            if request_deadline is not None:
+                budget_deadline = min(budget_deadline, request_deadline)
+            deadline = budget_deadline
+            budget_deadline_set = True
+        assert deadline is not None
+        if time.monotonic() >= deadline:
+            return record, deadline, budget_deadline_set, "deadline"
+        return record, deadline, budget_deadline_set, None
+    except Exception as exc:
+        return record, deadline, budget_deadline_set, type(exc).__name__
+
+
+async def _reap_selected_expert_run(context, run_id, deadline):
+    """Reap after the caller has recorded the run's authorization."""
+    try:
+        timeout = min(
+            _SELECTED_EXPERT_OPERATION_TIMEOUT_SECONDS,
+            max(deadline - time.monotonic(), 0),
+        )
+        await asyncio.wait_for(
+            context.supervisor.reap_run(context.tool_scope, run_id),
+            timeout=timeout,
+        )
+        return None
+    except Exception as exc:
+        return type(exc).__name__
+
+
+async def _selected_expert_deadline_response(context, run_id):
+    terminal = await _cancel_selected_expert(context, run_id)
+    return _json_response(
+        (
+            _parent_facing_record(terminal, include_result=True)
+            if terminal is not None
+            else {"status": "unavailable"}
+        ),
+    )
+
+
+async def _read_selected_expert_record(context, run_id, *, deadline=None):
+    timeout = _SELECTED_EXPERT_OPERATION_TIMEOUT_SECONDS
+    if deadline is not None:
+        timeout = min(timeout, max(deadline - time.monotonic(), 0.001))
+    return await asyncio.wait_for(
+        run_runtime_state_work(
+            read_chat_run_record,
+            context.tool_scope.run_store_dir,
+            context.request_context,
+            run_id,
+            strict=True,
+        ),
+        timeout=timeout,
+    )
+
+
+def _log_selected_expert_unconfirmed(context, run_id, category):
+    logger.warning(
+        "selected_expert_wait_unconfirmed tenant_id=%s agent_id=%s "
+        "run_id=%s category=%s",
+        context.tool_scope.tenant_id,
+        context.tool_scope.agent_id,
+        run_id,
+        category,
+    )
+
+
+async def _cancel_selected_expert(context, run_id):
+    try:
+        cancel = getattr(context.supervisor, "cancel_run", None)
+        if cancel is None:
+            cancel = context.supervisor.cancel
+        result = await asyncio.wait_for(
+            cancel(context.tool_scope, run_id),
+            timeout=_SELECTED_EXPERT_OPERATION_TIMEOUT_SECONDS,
+        )
+        if (
+            getattr(result, "run_id", None) == run_id
+            and getattr(result, "status", None)
+            in TERMINAL_BACKGROUND_RUN_STATUSES
+        ):
+            return result
+        # Natural completion may win a race with remote/unmanageable cancel.
+        record = await _read_selected_expert_record(context, run_id)
+        if (
+            record is not None
+            and record.status in TERMINAL_BACKGROUND_RUN_STATUSES
+        ):
+            return record
+        category = getattr(result, "status", "cancel_unconfirmed")
+    except Exception as exc:
+        category = type(exc).__name__
+    _log_selected_expert_unconfirmed(context, run_id, category)
+    return None
 
 
 async def _wait_for_chat_runs(
@@ -567,6 +790,10 @@ def create_background_subagent_tools(
         tools["start_subagent"] = _create_start_subagent_tool(
             context,
             directory,
+        )
+    if selected_expert_id:
+        tools["wait_selected_expert"] = _create_selected_expert_wait_tool(
+            context,
         )
     return tools
 

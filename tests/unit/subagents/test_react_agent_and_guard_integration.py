@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from agentscope.agent import ReActAgent
 from agentscope.message import Msg
 from agentscope.tool import ToolResponse
 
@@ -204,6 +207,194 @@ class _FakeGuardAgent(ToolGuardMixin, _BaseAgent):
 
 
 @pytest.mark.asyncio
+async def test_selected_expert_start_reports_capacity_without_private_details(
+    tmp_path: Path,
+) -> None:
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent._request_context["selected_expert_execution"] = True
+    agent._tool_guard_replay_done = {
+        "tool_name": "start_subagent",
+        "tool_call_id": "start-1",
+        "remaining_queue": [],
+    }
+    agent._extract_current_tool_response = (
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "accepted": False,
+                "reason": "background_subagent_concurrency_limit",
+                "message": "private path",
+            },
+        )
+    )
+    reply = await agent._reason_about_replay_done()
+    assert "capacity" in reply.get_text_content()
+    assert "private path" not in reply.get_text_content()
+
+
+@pytest.mark.asyncio
+async def test_selected_expert_waits_before_summary_at_one_iteration(
+    tmp_path: Path,
+) -> None:
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent._request_context.update(
+        {
+            "selected_expert_execution": True,
+            "forced_tool_call_json": json.dumps(
+                {
+                    "id": "start-1",
+                    "name": "start_subagent",
+                    "input": {},
+                },
+            ),
+        },
+    )
+    agent.max_iters = 1
+    agent.parallel_tool_calls = False
+    agent._static_control = False
+    agent.finish_function_name = "finish"
+    agent.toolkit = SimpleNamespace(remove_tool_function=lambda _: None)
+    agent._retrieve_from_long_term_memory = AsyncMock()
+    agent._retrieve_from_knowledge = AsyncMock()
+    agent._compress_memory_if_needed = AsyncMock()
+    calls = []
+
+    async def acting(call):
+        calls.append(call["name"])
+        agent._complete_forced_tool_replay(call, call["name"], call["input"])
+
+    agent._acting = acting
+    agent._extract_current_tool_response = (
+        lambda call_id, **_kwargs: json.dumps(
+            (
+                {"accepted": True, "run_id": "subagent-1"}
+                if call_id == "start-1"
+                else {"run_id": "subagent-1", "status": "completed"}
+            ),
+        )
+    )
+
+    async def summarize():
+        reply = await agent._selected_expert_before_summary()
+        assert reply is None
+        assert agent._request_context["selected_expert_execution"] is False
+        return Msg("Friday", "expert completed", "assistant")
+
+    agent._summarizing = summarize
+    reply = await inspect.unwrap(ReActAgent.reply)(
+        agent,
+        Msg("user", "inspect", "user"),
+    )
+    assert reply.get_text_content() == "expert completed"
+    assert calls == ["start_subagent", "wait_selected_expert"]
+
+
+@pytest.mark.asyncio
+async def test_selected_expert_missing_result_does_not_return_to_main(
+    tmp_path: Path,
+) -> None:
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent._request_context.update(
+        {
+            "selected_expert_execution": True,
+            "selected_expert_run_id": "subagent-1",
+        },
+    )
+    agent._tool_guard_replay_done = {
+        "tool_name": "wait_selected_expert",
+        "tool_call_id": "wait-1",
+        "remaining_queue": [],
+    }
+    agent._extract_current_tool_response = (
+        lambda *_args, **_kwargs: json.dumps(
+            {"status": "unavailable"},
+        )
+    )
+    reply = await agent._reason_about_replay_done()
+    assert "could not be confirmed" in reply.get_text_content()
+    assert agent._request_context["selected_expert_execution"] is False
+
+
+@pytest.mark.asyncio
+async def test_selected_expert_finishes_forced_wait_before_iteration_summary(
+    tmp_path: Path,
+) -> None:
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent._request_context["selected_expert_execution"] = True
+    agent._tool_guard_replay_done = {
+        "tool_name": "start_subagent",
+        "tool_call_id": "start-1",
+        "remaining_queue": [],
+    }
+    agent._extract_current_tool_response = lambda call_id, **_kwargs: (
+        json.dumps({"accepted": True, "run_id": "subagent-1"})
+        if call_id == "start-1"
+        else json.dumps({"run_id": "subagent-1", "status": "completed"})
+    )
+    calls = []
+
+    async def acting(call):
+        calls.append(call["name"])
+        agent._complete_forced_tool_replay(call, call["name"], call["input"])
+
+    agent._acting = acting
+    assert await agent._selected_expert_before_summary() is None
+    assert calls == ["wait_selected_expert"]
+    assert agent._request_context["selected_expert_execution"] is False
+
+
+@pytest.mark.asyncio
+async def test_selected_expert_uncertain_status_is_returned_without_summary(
+    tmp_path: Path,
+) -> None:
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent._request_context.update(
+        {
+            "selected_expert_execution": True,
+            "selected_expert_run_id": "subagent-1",
+        },
+    )
+    agent._tool_guard_replay_done = {
+        "tool_name": "wait_selected_expert",
+        "tool_call_id": "wait-1",
+        "remaining_queue": [],
+    }
+    agent._extract_current_tool_response = (
+        lambda *_args, **_kwargs: json.dumps(
+            {"status": "unavailable"},
+        )
+    )
+
+    reply = await agent._selected_expert_before_summary()
+
+    assert "could not be confirmed" in reply.get_text_content()
+    assert agent._request_context["selected_expert_execution"] is False
+
+
+@pytest.mark.asyncio
+async def test_selected_expert_uses_one_targeted_wait(tmp_path: Path) -> None:
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent._request_context["selected_expert_execution"] = True
+    start = agent._selected_expert_start_follow_up(
+        agent._request_context,
+        {"accepted": True, "run_id": "subagent-1"},
+    )
+    assert start["name"] == "wait_selected_expert"
+    assert start["input"] == {}
+    agent._tool_guard_replay_done = {
+        "tool_name": "wait_selected_expert",
+        "tool_call_id": "wait-1",
+        "remaining_queue": [],
+    }
+    agent._extract_current_tool_response = (
+        lambda *_args, **_kwargs: json.dumps(
+            {"run_id": "subagent-1", "status": "completed"},
+        )
+    )
+    assert await agent._reason_about_replay_done() is None
+    assert agent._request_context["selected_expert_execution"] is False
+
+
+@pytest.mark.asyncio
 async def test_selected_expert_reads_actual_tool_result_blocks(
     tmp_path: Path,
 ) -> None:
@@ -239,11 +430,14 @@ async def test_selected_expert_reads_actual_tool_result_blocks(
 
     reply = await agent._reason_about_replay_done()
 
-    assert reply.get_content_blocks("tool_use")[0]["name"] == "wait_subagent"
+    assert (
+        reply.get_content_blocks("tool_use")[0]["name"]
+        == "wait_selected_expert"
+    )
     assert agent._request_context["selected_expert_run_id"] == "subagent-1"
 
     agent._tool_guard_replay_done = {
-        "tool_name": "wait_subagent",
+        "tool_name": "wait_selected_expert",
         "tool_call_id": "wait-1",
         "remaining_queue": [],
     }
@@ -254,12 +448,15 @@ async def test_selected_expert_reads_actual_tool_result_blocks(
                 {
                     "type": "tool_result",
                     "id": "wait-1",
-                    "name": "wait_subagent",
+                    "name": "wait_selected_expert",
                     "output": [
                         {
                             "type": "text",
                             "text": json.dumps(
-                                {"active_runs": [{"run_id": "subagent-1"}]},
+                                {
+                                    "run_id": "subagent-1",
+                                    "status": "completed",
+                                },
                             ),
                         },
                     ],
@@ -269,7 +466,8 @@ async def test_selected_expert_reads_actual_tool_result_blocks(
         ),
     )
     reply = await agent._reason_about_replay_done()
-    assert reply.get_content_blocks("tool_use")[0]["name"] == "wait_subagent"
+    assert reply is None
+    assert agent._request_context["selected_expert_execution"] is False
 
 
 @pytest.mark.asyncio
@@ -295,8 +493,8 @@ async def test_selected_expert_forced_start_waits_for_its_terminal_result(
 
     assert reply is not None
     tool_call = reply.get_content_blocks("tool_use")[0]
-    assert tool_call["name"] == "wait_subagent"
-    assert tool_call["input"] == {"timeout_ms": 3000}
+    assert tool_call["name"] == "wait_selected_expert"
+    assert tool_call["input"] == {}
     assert agent._request_context["selected_expert_run_id"] == "subagent-1"
 
 
@@ -352,7 +550,10 @@ async def test_selected_expert_wait_replays_until_the_run_is_terminal(
     reply = await agent._reason_about_replay_done()
 
     assert reply is not None
-    assert reply.get_content_blocks("tool_use")[0]["name"] == "wait_subagent"
+    assert (
+        reply.get_content_blocks("tool_use")[0]["name"]
+        == "wait_selected_expert"
+    )
 
 
 @pytest.mark.asyncio
