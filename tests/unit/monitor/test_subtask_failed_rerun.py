@@ -106,7 +106,7 @@ async def test_rerun_failed_executions_accepts_object_body():
         )
 
     assert response.status_code == 200
-    assert response.json() == {"rerun_count": 1}
+    assert response.json() == {"rerun_count": 1, "failed_count": 0}
     rerun_service.rerun_failed_executions.assert_awaited_once_with(
         ["tenant-a"],
     )

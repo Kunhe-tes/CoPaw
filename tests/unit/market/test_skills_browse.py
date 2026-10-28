@@ -1,114 +1,48 @@
 # -*- coding: utf-8 -*-
-"""Skills browse router tests."""
+"""Skills browse metadata tests."""
 
 import json
-import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
 
-from market.app.routers.skills_browse import _update_skill_json
-
-
-def test_update_skill_json_writes_created_at():
-    """上传技能时应写入 created_at 时间字段."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        skill_dir = Path(tmpdir) / "test_skill"
-        skill_dir.mkdir()
-        skill_json_path = skill_dir / "skill.json"
-
-        result = _update_skill_json(
-            skill_json_path=skill_json_path,
-            skill_name="test_skill",
-            original_name="Test Skill",
-            user_id="user1",
-            user_name="Test User",
-            bbk_id="100",
-            category_id=None,
-        )
-
-        # 验证返回结果包含 created_at
-        assert "created_at" in result
-        # 验证时间格式为 ISO 8601
-        parsed_time = datetime.fromisoformat(
-            result["created_at"].replace("Z", "+00:00"),
-        )
-        assert parsed_time.year == datetime.now(timezone.utc).year
-
-        # 验证文件已写入
-        saved_data = json.loads(skill_json_path.read_text(encoding="utf-8"))
-        assert "created_at" in saved_data
-        # 验证时间与返回值一致
-        assert saved_data["created_at"] == result["created_at"]
+from market.app.routers.skills_browse import _build_skill_metadata
 
 
-def test_update_skill_json_preserves_existing_created_at():
-    """更新现有技能时应保留已有的 created_at 时间."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        skill_dir = Path(tmpdir) / "existing_skill"
-        skill_dir.mkdir()
-        skill_json_path = skill_dir / "skill.json"
+def test_update_skill_json_writes_created_at(tmp_path):
+    """New skill metadata has a creation time without writing skill.json."""
+    result = _build_skill_metadata(tmp_path, "test_skill", "Test Skill")
 
-        # 先写入已有的 skill.json，包含 created_at
-        existing_time = "2024-01-15T10:30:00Z"
-        existing_data = {
-            "name": "Existing Skill",
-            "description": "An existing skill",
-            "created_at": existing_time,
-        }
-        skill_json_path.write_text(
-            json.dumps(existing_data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-
-        result = _update_skill_json(
-            skill_json_path=skill_json_path,
-            skill_name="existing_skill",
-            original_name="Updated Skill Name",
-            user_id="user2",
-            user_name="Another User",
-            bbk_id="200",
-            category_id=5,
-        )
-
-        # 验证 created_at 未被覆盖
-        assert result["created_at"] == existing_time
-        saved_data = json.loads(skill_json_path.read_text(encoding="utf-8"))
-        assert saved_data["created_at"] == existing_time
+    parsed_time = datetime.fromisoformat(result["created_at"])
+    assert parsed_time.year == datetime.now(timezone.utc).year
+    assert not (tmp_path / "skill.json").exists()
 
 
-def test_update_skill_json_updates_updated_at():
-    """更新技能时应写入 updated_at 时间字段."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        skill_dir = Path(tmpdir) / "skill_to_update"
-        skill_dir.mkdir()
-        skill_json_path = skill_dir / "skill.json"
+def test_update_skill_json_preserves_existing_created_at(tmp_path):
+    """Building metadata retains the creation time in an existing file."""
+    existing = {
+        "name": "Existing Skill",
+        "description": "An existing skill",
+        "created_at": "2024-01-15T10:30:00Z",
+    }
+    skill_json = tmp_path / "skill.json"
+    skill_json.write_text(json.dumps(existing), encoding="utf-8")
 
-        # 先创建一个已有的 skill.json
-        existing_data = {
-            "name": "Original Skill",
-            "created_at": "2024-01-15T10:30:00Z",
-        }
-        skill_json_path.write_text(
-            json.dumps(existing_data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+    result = _build_skill_metadata(tmp_path, "existing_skill", "Updated Skill")
 
-        result = _update_skill_json(
-            skill_json_path=skill_json_path,
-            skill_name="skill_to_update",
-            original_name="Updated Skill",
-            user_id="user3",
-            user_name="Updater",
-            bbk_id="300",
-            category_id=None,
-        )
+    assert result["created_at"] == existing["created_at"]
+    assert json.loads(skill_json.read_text(encoding="utf-8")) == existing
 
-        # 验证 updated_at 被写入
-        assert "updated_at" in result
-        parsed_time = datetime.fromisoformat(
-            result["updated_at"].replace("Z", "+00:00"),
-        )
-        assert parsed_time.year == datetime.now(timezone.utc).year
 
-        # 验证 created_at 未被覆盖
-        assert result["created_at"] == "2024-01-15T10:30:00Z"
+def test_update_skill_json_updates_updated_at(tmp_path):
+    """Existing skill metadata receives an update time in the result."""
+    existing = {"name": "Original Skill", "created_at": "2024-01-15T10:30:00Z"}
+    (tmp_path / "skill.json").write_text(json.dumps(existing), encoding="utf-8")
+
+    result = _build_skill_metadata(tmp_path, "skill_to_update", "Updated Skill")
+
+    assert (
+        datetime.fromisoformat(result["updated_at"]).year
+        == datetime.now(
+            timezone.utc,
+        ).year
+    )
+    assert result["created_at"] == existing["created_at"]

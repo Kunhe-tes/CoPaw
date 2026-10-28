@@ -32,14 +32,14 @@ _SOURCE_HEADERS = {"X-Source-Id": "source-a"}
 def _use_tmp_settings(tmp_path: Path):
     """Redirect settings file to a temp directory for every test."""
 
-    def mock_get_tenant_working_dir(tenant_id=None):
+    def mock_get_tenant_request_working_dir(tenant_id=None):
         tenant_dir = tmp_path / (tenant_id or "default")
         tenant_dir.mkdir(parents=True, exist_ok=True)
         return tenant_dir
 
     with patch(
-        "swe.app.routers.settings.get_tenant_working_dir",
-        mock_get_tenant_working_dir,
+        "swe.app.routers.settings.get_tenant_request_working_dir",
+        mock_get_tenant_request_working_dir,
     ):
         yield {
             "tenant-a": tmp_path / "tenant-a" / "settings.json",

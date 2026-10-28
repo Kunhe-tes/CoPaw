@@ -39,11 +39,13 @@ function nextHistoryFrame(signal: AbortSignal): Promise<boolean> {
   });
 }
 
-/** Progress is bounded per user action; layout changes never require a down/up gesture. */
+/** Progress is bounded per action or initial viewport fill. */
 export default function useHistoryPreload(options: UseHistoryPreloadOptions) {
   const { scrollElement, resetKey } = options;
   const latest = useRef(options);
-  const startRef = useRef<(retrying?: boolean) => void>(() => {});
+  const startRef = useRef<
+    (retrying?: boolean, fillingViewport?: boolean) => void
+  >(() => {});
   const [isAdvancing, setIsAdvancing] = useState(false);
 
   useLayoutEffect(() => {
@@ -64,7 +66,7 @@ export default function useHistoryPreload(options: UseHistoryPreloadOptions) {
       readingOlder &&
       isNearVisualStart(scrollElement);
 
-    const advance = async (retrying: boolean) => {
+    const advance = async (retrying: boolean, fillingViewport: boolean) => {
       requesting = true;
       readingOlder = true;
       setIsAdvancing(true);
@@ -82,7 +84,12 @@ export default function useHistoryPreload(options: UseHistoryPreloadOptions) {
             if (!(await nextHistoryFrame(controller.signal))) return;
           }
           previousTop = scrollElement.scrollTop;
-          if (!canContinue()) break;
+          if (
+            !canContinue() ||
+            (fillingViewport &&
+              scrollElement.scrollHeight > scrollElement.clientHeight)
+          )
+            break;
         }
       } finally {
         if (!controller.signal.aborted) {
@@ -91,14 +98,14 @@ export default function useHistoryPreload(options: UseHistoryPreloadOptions) {
         }
       }
     };
-    const start = (retrying = false) => {
+    const start = (retrying = false, fillingViewport = false) => {
       if (
         requesting ||
         (retrying ? !latest.current.onRetry : latest.current.disabled)
       )
         return;
       // The caller presents request errors; stop this automatic progression too.
-      void advance(retrying).catch(() => {});
+      void advance(retrying, fillingViewport).catch(() => {});
     };
     startRef.current = start;
 
@@ -125,6 +132,17 @@ export default function useHistoryPreload(options: UseHistoryPreloadOptions) {
       scrollElement.removeEventListener("wheel", handleWheel);
     };
   }, [resetKey, scrollElement]);
+
+  useLayoutEffect(() => {
+    if (
+      !options.disabled &&
+      scrollElement &&
+      scrollElement.clientHeight > 0 &&
+      scrollElement.scrollHeight <= scrollElement.clientHeight
+    ) {
+      startRef.current(false, true);
+    }
+  }, [options.disabled, resetKey, scrollElement]);
 
   const loadMore = useCallback(() => startRef.current(), []);
   const retry = useCallback(() => startRef.current(true), []);

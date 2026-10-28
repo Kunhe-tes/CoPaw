@@ -318,7 +318,7 @@ async def test_background_services_start_one_sweeper(monkeypatch):
         start_workspace_cleanup_loop=AsyncMock(),
         workspace_cache_metrics=lambda: {},
     )
-    app = SimpleNamespace(state=SimpleNamespace())
+    app = SimpleNamespace(state=SimpleNamespace(db_connection=None))
     await app_module._start_lifespan_background_services(app, manager)
     assert app.state.transient_memory_cleanup is cleaner
     cleaner.start.assert_awaited_once()

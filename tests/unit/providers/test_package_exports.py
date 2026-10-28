@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Regression tests for providers package exports."""
 
-import importlib
+import subprocess
 import sys
 
 import pytest
@@ -18,13 +18,19 @@ def test_provider_manager_lazy_export_resolves_class():
 
 def test_importing_provider_models_does_not_require_agentscope():
     """导入 providers.models 时不应被完整 Provider 栈阻塞。"""
-    for module_name in (
-        "swe.providers",
-        "swe.providers.models",
-        "swe.providers.provider",
-    ):
-        sys.modules.pop(module_name, None)
-
-    module = importlib.import_module("swe.providers.models")
-
-    assert module.ModelSlotConfig is not None
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; from swe.providers.models import ModelSlotConfig; "
+                "assert ModelSlotConfig is not None; "
+                "assert not any(name == 'agentscope' or "
+                "name.startswith('agentscope.') for name in sys.modules)"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout

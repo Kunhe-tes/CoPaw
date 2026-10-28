@@ -43,6 +43,9 @@ class _ChatManager:
     async def get_chat(self, chat_id: str):
         return self.chat if chat_id == self.chat.id else None
 
+    async def release_current_expert_binding(self, _chat_id: str):
+        return None
+
 
 class _BlockingConsoleChannel:
     def __init__(self) -> None:

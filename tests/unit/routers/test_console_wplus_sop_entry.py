@@ -40,6 +40,12 @@ class FakeChatManager:
     def __init__(self) -> None:
         self.chat = None
 
+    async def release_current_expert_binding(self, _chat_id: str):
+        return None
+
+    async def get_chat(self, chat_id: str):
+        return self.chat if self.chat and self.chat.id == chat_id else None
+
     async def get_chat_by_session(
         self,
         session_id: str,

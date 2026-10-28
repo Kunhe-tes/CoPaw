@@ -80,6 +80,7 @@ class TestSessionResourceQuery:
         self,
         service,
     ):
+        service._db.fetch_one.return_value = {"total": 1}
         await service.get_sessions(source_id="tenant-a", user_id="user-1")
 
         count_sql, count_params = service._db.fetch_one.call_args.args

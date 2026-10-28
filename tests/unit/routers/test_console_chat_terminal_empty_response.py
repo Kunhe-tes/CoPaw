@@ -38,13 +38,20 @@ class _FakeChatManager:
         meta=None,
     ):
         del meta
-        return SimpleNamespace(
+        self.chat = SimpleNamespace(
             id=f"chat:{session_id}",
             session_id=session_id,
             user_id=user_id,
             channel=channel_id,
             name=name,
         )
+        return self.chat
+
+    async def get_chat(self, chat_id: str):
+        return self.chat if self.chat.id == chat_id else None
+
+    async def release_current_expert_binding(self, _chat_id: str):
+        return None
 
 
 class _FakeTaskTracker:

@@ -236,32 +236,9 @@ def test_definition_match_metadata_defaults_to_unmatched() -> None:
 
 
 def test_builtin_definitions_are_valid_and_readonly() -> None:
-    """Built-ins resolve with immutable source metadata and readonly tools."""
+    """No default experts are shipped in the built-in provider."""
     registry = AgentRegistry([builtin_definition_provider()])
-
-    names = {definition.name for definition in registry.list()}
-
-    assert names == {
-        "plan-researcher",
-        "research-analyst",
-        "risk-reviewer",
-        "test-surface-analyzer",
-    }
-    definition = registry.resolve("plan-researcher")
-    assert definition.source == "builtin"
-    assert definition.owner_scope == "builtin"
-    assert definition.model.behavior == "inherit"
-    assert definition.isolation.context == "fresh"
-    assert definition.isolation.workspace == "shared"
-    assert definition.isolation.memory == "none"
-    assert definition.lifecycle.allow_nested_delegation is False
-    assert set(definition.tools.allow) <= {
-        "read_file",
-        "grep_search",
-        "glob_search",
-        "execute_shell_command",
-        "get_current_time",
-    }
+    assert registry.list() == []
 
 
 def test_definition_validation_rejects_unsupported_mvp_capabilities() -> None:
@@ -377,15 +354,17 @@ def test_definition_validation_rejects_unknown_permission_deny_ask_tools(
     assert "unknown built-in tool: bogus_tool" in str(exc_info.value)
 
 
-def test_registry_rejects_duplicate_and_builtin_shadowing() -> None:
+def test_registry_rejects_duplicate_and_builtin_shadowing(
+    sample_builtin_definition,
+) -> None:
     """A stored provider cannot silently replace a built-in definition."""
-    builtin = builtin_definition_provider().list_definitions()[0]
+    builtin = sample_builtin_definition
     stored_shadow = builtin.model_copy(update={"source": "agent_owned"})
 
     with pytest.raises(DefinitionValidationError) as exc_info:
         AgentRegistry(
             [
-                builtin_definition_provider(),
+                InMemoryDefinitionProvider([builtin]),
                 InMemoryDefinitionProvider([stored_shadow]),
             ],
         )
@@ -394,9 +373,11 @@ def test_registry_rejects_duplicate_and_builtin_shadowing() -> None:
     assert "plan-researcher" in str(exc_info.value)
 
 
-def test_registry_rejects_stored_definition_shadowing_builtin_name() -> None:
+def test_registry_rejects_stored_definition_shadowing_builtin_name(
+    sample_builtin_definition,
+) -> None:
     """A stored provider cannot supersede a built-in with another version."""
-    builtin = builtin_definition_provider().list_definitions()[0]
+    builtin = sample_builtin_definition
     stored_shadow = builtin.model_copy(
         update={"source": "agent_owned", "version": "9.0.0"},
     )
@@ -404,7 +385,7 @@ def test_registry_rejects_stored_definition_shadowing_builtin_name() -> None:
     with pytest.raises(DefinitionValidationError) as exc_info:
         AgentRegistry(
             [
-                builtin_definition_provider(),
+                InMemoryDefinitionProvider([builtin]),
                 InMemoryDefinitionProvider([stored_shadow]),
             ],
         )
@@ -431,15 +412,17 @@ def test_registry_rejects_run_scoped_definitions() -> None:
     assert "run_scoped definition cannot be loaded" in str(exc_info.value)
 
 
-def test_registry_rejects_run_scoped_before_duplicate_check() -> None:
+def test_registry_rejects_run_scoped_before_duplicate_check(
+    sample_builtin_definition,
+) -> None:
     """Run-scoped definitions are rejected even when the name matches a builtin."""
-    builtin = builtin_definition_provider().list_definitions()[0]
+    builtin = sample_builtin_definition
     run_scoped = builtin.model_copy(update={"source": "run_scoped"})
 
     with pytest.raises(DefinitionValidationError) as exc_info:
         AgentRegistry(
             [
-                builtin_definition_provider(),
+                InMemoryDefinitionProvider([builtin]),
                 InMemoryDefinitionProvider([run_scoped]),
             ],
         )
@@ -776,6 +759,7 @@ def test_readonly_shell_authorization(command: str, allowed: bool) -> None:
 @pytest.mark.asyncio
 async def test_run_stores_record_status_result_and_errors(
     tmp_path: Path,
+    sample_builtin_definition,
 ) -> None:
     """Run stores keep lifecycle state in app workspace state."""
     spec = DelegationSpec(
@@ -784,9 +768,7 @@ async def test_run_stores_record_status_result_and_errors(
         name="plan-researcher",
         objective="Inspect the repo",
     )
-    definition = AgentRegistry([builtin_definition_provider()]).resolve(
-        "plan-researcher",
-    )
+    definition = sample_builtin_definition
     policy = PermissionPolicy.readonly()
     result = AgentResult(
         task_id="task-1",

@@ -41,6 +41,7 @@ async def test_reset_scope_sensitive_runtime_state_clears_stale_caches() -> (
 
     try:
         await app_module._reset_scope_sensitive_runtime_state(app)
+        assert app_module.runner._multi_agent_manager is None
     finally:
         ProviderManager.reset_instance_cache()
         TenantModelManager.invalidate_cache()
@@ -53,7 +54,6 @@ async def test_reset_scope_sensitive_runtime_state_clears_stale_caches() -> (
     assert ProviderManager._instance is None
     assert TenantModelManager._cache == {}
     assert rate_limiter_module._limiter_registry == {}
-    assert app_module.runner._multi_agent_manager is None
 
 
 @pytest.mark.asyncio

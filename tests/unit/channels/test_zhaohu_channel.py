@@ -232,7 +232,7 @@ async def test_cron_approval_card_sends_information_without_buttons():
     open_id, content = ch.send_custom_card.await_args.args
     assert open_id == "user-1"
     assert "execute_shell_command" in content[0]["list"][0]["content"]
-    assert "发现 shell 风险" in content[0]["list"][0]["content"]
+    assert "发现 shell 风险" not in content[0]["list"][0]["content"]
     assert "echo hi" in content[0]["list"][0]["content"]
     assert "approval-1" in content[0]["list"][0]["content"]
     assert "/approve" not in content[0]["list"][0]["content"]

@@ -15,7 +15,16 @@ import sys
 
 import pytest
 
-_SCRIPTS = Path(__file__).resolve().parents[4] / "skills" / "wplus-sop-miner" / "scripts"
+_MINER_ROOT = (
+    Path(__file__).resolve().parents[4] / "skills" / "wplus-sop-miner"
+)
+if not _MINER_ROOT.exists():
+    pytest.skip(
+        "wplus-sop-miner skill bundle is not installed",
+        allow_module_level=True,
+    )
+
+_SCRIPTS = _MINER_ROOT / "scripts"
 
 
 def _load(name: str):
