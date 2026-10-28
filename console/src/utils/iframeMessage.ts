@@ -107,6 +107,70 @@ function isWealthOriginEntry(): boolean {
   return isWealthPath && getIframeContext().isOriginY;
 }
 
+/** 不带 origin=Y 的财富 iframe 等待父应用通过 USER_DATA 初始化。 */
+export function isWealthMessageEntry(): boolean {
+  return (
+    isInIframe() &&
+    /^\/(?:console\/)?wealth(?:\/|$)/.test(window.location.pathname) &&
+    !getIframeContext().isOriginY &&
+    new URLSearchParams(window.location.search).get("origin") !== "Y"
+  );
+}
+
+export function waitForWealthUserData(): Promise<void> {
+  const ready = () => {
+    const context = getIframeContext();
+    return context.initialized && Boolean(context.userId && context.source);
+  };
+  if (ready()) return Promise.resolve();
+  return new Promise((resolve) => {
+    const unsubscribe = useIframeStore.subscribe(() => {
+      if (ready()) {
+        unsubscribe();
+        resolve();
+      }
+    });
+  });
+}
+
+function handleWealthUserData(
+  message: IframeUserDataMessage,
+  origin: string,
+): void {
+  const { data } = message;
+  const userId = data.sapId || data.userId;
+  if (
+    typeof data.source !== "string" ||
+    !data.source.trim() ||
+    typeof userId !== "string" ||
+    !userId.trim()
+  ) {
+    return;
+  }
+  const store = useIframeStore.getState();
+  store.setContext({
+    userId,
+    userName: data.userName ?? null,
+    source: data.source,
+    hideLogo: toBoolean(data.hideLogo),
+    hideMenu: toBoolean(data.hideMenu),
+    sysId: data.sysId ?? null,
+    bbk: data.bbkId || data.bbkOrgId || null,
+    orgCode: data.orgCode ?? null,
+    subBranchId: data.subBranchId ?? null,
+    orgLvl: data.orgLvl ?? null,
+    positionId: data.positionId ?? null,
+    authHeaders: buildAuthHeaders(message),
+    parentOrigin: origin,
+  });
+  store.applyEntrySource(
+    data.pageSource || null,
+    data.platformSource || null,
+    "message",
+  );
+  store.markInitialized();
+}
+
 function decodeCookieValue(value: string | null): string | null {
   if (!value) return null;
   try {
@@ -227,6 +291,10 @@ async function handleUserDataMessage(
   message: IframeUserDataMessage,
   origin: string,
 ): Promise<void> {
+  if (isWealthMessageEntry()) {
+    handleWealthUserData(message, origin);
+    return;
+  }
   const store = useIframeStore.getState();
   const authHeaders = buildAuthHeaders(message);
   const nextUserId = message.data.sapId || message.data.userId || null;
@@ -295,6 +363,9 @@ function handleReadyRequest(): void {
  * @param event - MessageEvent
  */
 function handleMessage(event: MessageEvent): void {
+  if (isWealthMessageEntry() && event.source !== window.parent) {
+    return;
+  }
   // 安全检查：验证来源
   if (!isValidOrigin(event.origin)) {
     return;
@@ -398,8 +469,7 @@ export function sendReportMessageToParent(
  * 初始化流程：
  * 1. 检查是否已在 iframe 中运行（非 iframe 环境跳过）
  * 2. 注册 message 事件监听器
- * 3. 发送 READY_RESPONSE (initialized: false) 通知父窗口
- * 4. 等待父窗口发送 USER_DATA 消息
+ * 3. 等待父窗口在 iframe load 后发送 USER_DATA；不发送就绪通知
  */
 export function initIframeMessageListener(): void {
   // 防止重复注册
@@ -410,6 +480,11 @@ export function initIframeMessageListener(): void {
   // 检查是否在 iframe 中
   if (window.self === window.top) {
     return;
+  }
+
+  // 每次完整加载都重新接收身份，避免 sessionStorage 中的旧用户提前发请求。
+  if (isWealthMessageEntry()) {
+    useIframeStore.getState().clearContext();
   }
 
   // 注册消息监听器

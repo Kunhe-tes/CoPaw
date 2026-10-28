@@ -14,6 +14,7 @@ import {
   readCronUnreadAutoPauseConfig,
   readLlmRateLimiterConfigState,
   readQueryRetryConfigState,
+  readRegisteredSwitchValue,
   readSystemPromptInjections,
   validateSourceSystemConfig,
   writeArchiveMaintenanceValue,
@@ -28,6 +29,53 @@ import {
 } from "./registry";
 
 describe("SystemConfigPage registry compatibility", () => {
+  it("registers expert main independently from expert discovery", () => {
+    const definition = CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES.find(
+      (item) => item.key === "feature_switches.expert_as_main_enabled",
+    );
+    expect(definition).toEqual({
+      key: "feature_switches.expert_as_main_enabled",
+      path: ["feature_switches", "expert_as_main_enabled"],
+      defaultValue: false,
+      title: "所选专家作为主 Agent",
+      description:
+        "开启后，普通聊天中选择的专家会持续接管当前会话并直接回复；关闭后仍按单条消息作为子代理执行。",
+    });
+    expect(readRegisteredSwitchValue({}, definition!)).toBe(false);
+    const source = {
+      feature_switches: { subagent_expert_discovery_enabled: true },
+    };
+    const enabled = writeRegisteredSwitchValue(source, definition!, true);
+    expect(enabled.feature_switches).toEqual({
+      expert_as_main_enabled: true,
+      subagent_expert_discovery_enabled: true,
+    });
+    expect(writeRegisteredSwitchValue(enabled, definition!, false)).toEqual({
+      feature_switches: {
+        expert_as_main_enabled: false,
+        subagent_expert_discovery_enabled: true,
+      },
+    });
+    expect(source.feature_switches).toEqual({
+      subagent_expert_discovery_enabled: true,
+    });
+  });
+
+  it("registers default-off autonomous expert discovery", () => {
+    const definition = CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES.find(
+      (item) =>
+        item.key === "feature_switches.subagent_expert_discovery_enabled",
+    );
+    expect(definition).toMatchObject({
+      path: ["feature_switches", "subagent_expert_discovery_enabled"],
+      defaultValue: false,
+      title: "允许自主选择我的专家",
+    });
+    expect(writeRegisteredSwitchValue({}, definition!, true)).toEqual({
+      feature_switches: { subagent_expert_discovery_enabled: true },
+    });
+  });
+
   const originalStructuredClone = globalThis.structuredClone;
 
   afterEach(() => {
@@ -120,9 +168,7 @@ describe("SystemConfigPage registry compatibility", () => {
   });
 
   it("reads default cron notification settings", () => {
-    expect(readCronNotificationConfig({})).toEqual(
-      CRON_NOTIFICATION_DEFAULTS,
-    );
+    expect(readCronNotificationConfig({})).toEqual(CRON_NOTIFICATION_DEFAULTS);
   });
 
   it("writes cron notification settings without mutating source", () => {

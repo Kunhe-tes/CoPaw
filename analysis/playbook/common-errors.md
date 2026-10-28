@@ -2,6 +2,19 @@
 
 本文档只收录仓库中已经出现过、且有明确入口可追的高频报错。
 
+## SSE 客户端断连后订阅未释放
+
+- 症状：协商式 SSE 响应返回后，`TaskTracker._runs[chat_id].queues`
+  仍保留已断连客户端的订阅，且 `subscriber.detached` 为 `False`。
+- 触发条件：ASGI 2.0 客户端在 body send 阻塞时断连，同时 tracker 锁被占用。
+  Starlette 的 AnyIO 取消作用域会中断 close callback 获取锁，继而跳过迭代器关闭。
+- 处理：`ReplayStreamingResponse.stream_response()` 的 callback 和
+  `body_iterator.aclose()` 都应位于 `anyio.CancelScope(shield=True)` 内；
+  用 `try/finally` 保证 callback 抛错时仍执行迭代器关闭。
+- 回归入口：`tests/unit/routers/test_console_stream_replay.py` 的断连测试必须
+  同时覆盖阻塞 body send 和锁竞争，并断言释放订阅后 producer 继续运行；
+  `tests/unit/routers/test_sse_response.py` 覆盖 callback 抛错时关闭 source。
+
 ## 财富规划看板在旧内核浏览器点击刷新不发请求
 
 - 排查入口：`Board/index.tsx` → `useBoardRefresh.ts` → `requestTimeout.ts` 的 `withBoardRequestTimeout()` → `store.ts` 的 `refreshPlans()`。
@@ -807,3 +820,12 @@
 - **典型来源**：原生 `dialog` 关闭会将焦点还给「查看全部」按钮；`:focus-within` 会导致持续暂停。整个播报条的 `:hover` 也会覆盖「继续」操作：按钮状态已恢复，但鼠标停在按钮上时动画仍暂停。改成 `:has(:focus-visible)` 仍无法解决悬停冲突和键盘操作后继续的问题。
 - **第一落点**：`console/src/pages/WealthWorkbench/index.module.less` 的播报暂停选择器。仅在 `.tickerWindow` 文字区域悬停或手动暂停时停止动画，不因操作按钮的悬停或焦点暂停；键盘用户通过同一暂停/继续按钮控制，减少动态效果偏好仍保持静态展示。
 - **回归**：鼠标点击暂停再点击继续，鼠标留在按钮上也应滚动；键盘激活暂停/继续时保持焦点并验证动画状态；关闭按钮、Esc、遮罩关闭详情后均应恢复原播放状态；手动暂停不应被关闭弹窗重置。浏览器验证应读取实际 `animation-play-state` 和 `transform`，不能只检查按钮文案或点击外部区域后再判断。
+
+## 360 浏览器中创建规划的已选场景表格错位
+
+- **现象**：表头文字换行到不同列，推送客户数、排序和删除按钮掉到下一行，任务周期与执行频率重叠。
+- **典型来源**：`console/src/pages/WealthWorkbench/index.module.less` 的表头和数据行曾使用 `grid-template-columns: subgrid`；Chromium 从 117 才支持该值，客户常用的 108 内核也不支持。忽略该声明后会暴露之前的六列布局。
+- **处理**：移除 subgrid，表头和各行使用普通 Grid。当前布局为场景/方向、执行周期、督办策略、客户数、操作五列；组内各配置行的控件横向排列，任务周期的日期范围与按钮同排，执行频率的附加控件在按钮下一行，督办策略内控件保持横向排列；超宽时只滚动对应配置行，不撑宽整表；窄屏切换分组布局。拖动、上移和下移入口已移除；不要恢复旧的整表 nowrap 和固定最小表宽。新字段存储规则见 [监控配置维护记录](wealth-scene-monitoring.md)。
+- **周期自定义后遮挡频率列**：App 的 ConfigProvider 使用 `prefixCls="swe"`，只匹配 `.ant-picker` 的日期框尺寸规则在正式页面不会生效，日期框会越过周期列边界。通过 `.taskDatePicker` 自有类名控制宽度、高度和输入字体，避免依赖组件前缀；验证同时覆盖 `swe` 与 `ant`，并使用正式 ConfigProvider、主题和全局样式。只挂裸页面的模拟验证不能代表正式尺寸。
+- **其他检查**：顶栏和 Toast 的 inset 改用常规定位；焦点提示改用 :focus；min-inline-size 和 border-block-color 改用常规宽度及上下边框。`clamp()`、普通 Grid 已兼容 Chromium 80，保留；Flex gap 在 80–83 不支持，按用户确认暂不整改。Popover 和请求取消 API 已有能力检测或兼容处理。
+- **验证**：普通/自定义周期、多条不同排程、长场景名、客户数、排序、删除、空状态，及 1280、1440、1920 宽度与头部隐藏场景。真实内核版本和极速/兼容模式仍需在目标环境确认；仅修改 User-Agent 不能模拟 CSS 支持能力。完整边界见 [财富工作台兼容性记录](../../console/src/pages/WealthWorkbench/COMPATIBILITY.md)。

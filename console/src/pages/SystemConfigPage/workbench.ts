@@ -46,6 +46,7 @@ const CAPABILITIES: CapabilityDefinition[] = [
     paths: [
       ["feature_switches", "chat_task_progress_enabled"],
       ["feature_switches", "normal_mode_plan_interaction_tools_enabled"],
+      ["feature_switches", "expert_as_main_enabled"],
       ["system_prompt_injections"],
     ],
     summary: (config) => {

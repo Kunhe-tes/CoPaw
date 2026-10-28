@@ -24,6 +24,7 @@ from pydantic import BaseModel
 
 from . import mcp_tool_registrar
 from .agent_runtime_builder import AgentRuntimeBuilder
+from .builtin_tool_schemas import get_builtin_tool_schema
 from .command_handler import CommandHandler
 from .mcp_tool_registrar import McpToolRegistrar
 from .hooks import BootstrapHook, MemoryCompactionHook
@@ -32,7 +33,11 @@ from .prompt import (
     build_multimodal_hint,
     build_system_prompt_from_working_dir,
     get_active_model_supports_multimodal,
+    system_prompt_file_snapshot,
 )
+from ..runtime_workers import run_runtime_state_work
+from ..app.subagents.intent import has_subagent_intent
+from ..app.subagents.run_access import read_chat_run_records
 from .skills_manager import (
     apply_skill_config_env_overrides,
     ensure_skills_initialized,
@@ -217,6 +222,8 @@ execute the Goal before the user confirms it."""
 # Valid namesake strategies for tool registration
 NamesakeStrategy = Literal["override", "skip", "raise", "rename"]
 
+_REQUEST_MEMORY_NOT_PREPARED = object()
+
 
 def _plan_interaction_tools_enabled(plan_mode_enabled: bool) -> bool:
     if plan_mode_enabled:
@@ -230,6 +237,19 @@ def _plan_interaction_tools_enabled(plan_mode_enabled: bool) -> bool:
     )
 
     return is_normal_mode_plan_interaction_tools_enabled(
+        get_current_source_system_config(),
+    )
+
+
+def _subagent_expert_discovery_enabled() -> bool:
+    from ..app.source_system_config.registry import (
+        is_subagent_expert_discovery_enabled,
+    )
+    from ..app.source_system_config.runtime import (
+        get_current_source_system_config,
+    )
+
+    return is_subagent_expert_discovery_enabled(
         get_current_source_system_config(),
     )
 
@@ -509,6 +529,8 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         fallback_model_provider: Any | None = None,
         system_prompt_override: str | None = None,
         source_tool_versions: tuple[Any, ...] = (),
+        prepared_request_memory: Any = _REQUEST_MEMORY_NOT_PREPARED,
+        prepared_model_config: Any | None = None,
     ):
         """Initialize SWEAgent.
 
@@ -545,6 +567,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         self._model_provider_override = model_provider_override
         self._fallback_model_slot = fallback_model_slot
         self._fallback_model_provider = fallback_model_provider
+        self._prepared_model_config = prepared_model_config
         self._resolved_model_slot: dict[str, str] = {}
         self._resolved_model_provider = None
         self._system_prompt_override = system_prompt_override
@@ -569,20 +592,15 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             namesake_strategy=namesake_strategy,
         )
 
-        # Get model info from ProviderManager (single source of truth)
-        try:
-            from swe.config.context import get_current_effective_tenant_id
-            from swe.providers.provider_manager import ProviderManager
-
-            tenant_id = get_current_effective_tenant_id()
-            manager = ProviderManager.get_instance(tenant_id)
-            active = manager.get_active_model()
-            if active:
-                model_info = f"{active.provider_id}/{active.model}"
-            else:
-                model_info = "not-configured"
-        except Exception:
-            model_info = "unknown"
+        # Log the model actually installed, including private/fallback models,
+        # without starting another Provider lookup during construction.
+        provider_id = self._resolved_model_slot.get("provider_id")
+        model_name = self._resolved_model_slot.get("model")
+        model_info = (
+            f"{provider_id}/{model_name}"
+            if provider_id and model_name
+            else "not-configured"
+        )
         logger.info(
             f"Agent '{agent_config.id}' initialized with model: "
             f"{model_info} (class: {runtime.model.__class__.__name__})",
@@ -608,6 +626,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             and not completion_judge,
             None if goal_finalization or completion_judge else memory_manager,
             namesake_strategy,
+            prepared_request_memory=prepared_request_memory,
         )
 
         # Setup command handler
@@ -816,6 +835,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             async_exec = async_execution_tools.get(tool_name, False)
             toolkit.register_tool_function(
                 tool_func,
+                json_schema=get_builtin_tool_schema(tool_func),
                 namesake_strategy=namesake_strategy,
                 async_execution=async_exec,
             )
@@ -864,7 +884,26 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         namesake_strategy: NamesakeStrategy,
         request_context: dict[str, Any],
     ) -> None:
-        if self._background_subagent_registration_blocked(request_context):
+        if self._background_subagent_role_blocked(request_context):
+            return
+        start_enabled = not self._background_subagent_registration_blocked(
+            request_context,
+        )
+        scope = build_background_subagent_scope(
+            parent_agent_config=self._agent_config,
+            request_context=request_context,
+        )
+        if start_enabled:
+            management_enabled = True
+        elif "_subagent_retained_runs_present" in request_context:
+            management_enabled = bool(
+                request_context["_subagent_retained_runs_present"],
+            )
+        else:
+            management_enabled = bool(
+                read_chat_run_records(scope.run_store_dir, request_context),
+            )
+        if not management_enabled:
             return
         supervisor = (
             request_context.get(
@@ -875,6 +914,20 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         workspace_dir = self._workspace_dir or Path(
             self._agent_config.workspace_dir or ".",
         )
+        if not start_enabled:
+            tools = create_background_subagent_tools(
+                supervisor=supervisor,
+                parent_agent_config=self._agent_config,
+                workspace_dir=workspace_dir,
+                request_context=request_context,
+                start_enabled=False,
+            )
+            self._install_background_subagent_tools(
+                toolkit,
+                namesake_strategy,
+                tools,
+            )
+            return
         workspace_snapshot = getattr(self, "_workspace_skill_snapshot", None)
         if workspace_snapshot is not None:
             channel = request_context.get("channel", "console")
@@ -916,14 +969,52 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 request_context.get("selected_expert_id") or "",
             ).strip()
             or None,
+            expert_discovery_enabled=_subagent_expert_discovery_enabled(),
         )
-        names = self._background_subagent_tool_names(True)
-        for name in names:
+        self._install_background_subagent_tools(
+            toolkit,
+            namesake_strategy,
+            tools,
+        )
+
+    def _install_background_subagent_tools(
+        self,
+        toolkit: Toolkit,
+        namesake_strategy: NamesakeStrategy,
+        tools: dict[str, Any],
+    ) -> None:
+        for name in tools:
             toolkit.register_tool_function(
                 tools[name],
                 namesake_strategy=namesake_strategy,
             )
-        self._normalize_registered_tool_functions(toolkit, names)
+        self._normalize_registered_tool_functions(toolkit, list(tools))
+
+    def refresh_background_subagent_tools(self) -> None:
+        """Refresh only delegation tools under the current request/Source."""
+        self._request_context.pop("_subagent_retained_runs_present", None)
+        for name in self._background_subagent_tool_names(True):
+            self.toolkit.remove_tool_function(name)
+        self._register_background_subagent_tools(
+            self.toolkit,
+            getattr(self, "_namesake_strategy", "skip"),
+            self._request_context,
+        )
+
+    def _background_subagent_role_blocked(
+        self,
+        request_context: dict[str, Any],
+    ) -> bool:
+        return (
+            request_context.get("agent_role", "main")
+            in {"subagent", "completion_judge"}
+            or bool(request_context.get("goal_finalization"))
+            or bool(request_context.get("expert_main_execution"))
+            or not (
+                request_context.get("agent_id")
+                or getattr(self._agent_config, "id", None)
+            )
+        )
 
     def _background_subagent_registration_blocked(
         self,
@@ -932,14 +1023,12 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         selected_expert_id = str(
             request_context.get("selected_expert_id") or "",
         ).strip()
-        return (
-            request_context.get("agent_role", "main")
-            in {"subagent", "completion_judge"}
-            or not (
-                request_context.get("agent_id")
-                or getattr(self._agent_config, "id", None)
+        return self._background_subagent_role_blocked(request_context) or not (
+            selected_expert_id
+            or has_subagent_intent(
+                request_context.get("current_user_text"),
+                request_context.get("enable_subagents", False),
             )
-            or not selected_expert_id
         )
 
     @staticmethod
@@ -1424,25 +1513,10 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         workspace_dir = Path(
             getattr(self, "_workspace_dir", None) or WORKING_DIR,
         )
-        snapshots: list[tuple[Any, ...]] = []
-        for filename in self._system_prompt_enabled_files():
-            file_path = workspace_dir / filename
-            try:
-                stat_result = file_path.stat()
-            except FileNotFoundError:
-                snapshots.append((filename, "missing"))
-            except OSError as exc:
-                snapshots.append((filename, "error", type(exc).__name__))
-            else:
-                snapshots.append(
-                    (
-                        filename,
-                        "present",
-                        stat_result.st_mtime_ns,
-                        stat_result.st_size,
-                    ),
-                )
-        return tuple(snapshots)
+        return system_prompt_file_snapshot(
+            workspace_dir,
+            self._system_prompt_enabled_files(),
+        )
 
     @staticmethod
     def _source_system_config_prompt_token() -> tuple[Any, ...] | None:
@@ -1529,12 +1603,21 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         )
 
         # Check if heartbeat is enabled in agent config
-        sys_prompt = build_system_prompt_from_working_dir(
-            working_dir=self._workspace_dir,
-            enabled_files=list(self._system_prompt_enabled_files()),
-            agent_id=agent_id,
-            heartbeat_enabled=self._heartbeat_enabled_for_prompt(),
-        )
+        if self._request_context.get("expert_main_execution"):
+            from .prompt import SYSTEM_PROMPT_PROTECTION
+
+            sys_prompt = (
+                SYSTEM_PROMPT_PROTECTION
+                + "\n\n"
+                + self._request_context["expert_main_instruction"]
+            )
+        else:
+            sys_prompt = build_system_prompt_from_working_dir(
+                working_dir=self._workspace_dir,
+                enabled_files=list(self._system_prompt_enabled_files()),
+                agent_id=agent_id,
+                heartbeat_enabled=self._heartbeat_enabled_for_prompt(),
+            )
         logger.debug("System prompt:\n%s...", sys_prompt[:100])
 
         # Inject multimodal capability awareness
@@ -1603,6 +1686,8 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         enable_memory_manager: bool,
         memory_manager: BaseMemoryManager | None,
         namesake_strategy: NamesakeStrategy,
+        *,
+        prepared_request_memory: Any = _REQUEST_MEMORY_NOT_PREPARED,
     ) -> None:
         """Setup memory manager and register memory search tool if enabled.
 
@@ -1618,6 +1703,11 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
 
         self._enable_memory_manager: bool = enable_memory_manager
         self.memory_manager = memory_manager
+        if self._request_context.get("expert_main_execution"):
+            chat_memory = self._request_context.get("_expert_chat_memory")
+            if chat_memory is not None:
+                self.memory = chat_memory
+            return
 
         # Register memory_search tool if enabled and available
         if self._enable_memory_manager and self.memory_manager is not None:
@@ -1628,7 +1718,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 "create_request_memory",
                 None,
             )
-            if chat_id and callable(create_request_memory):
+            if prepared_request_memory is not _REQUEST_MEMORY_NOT_PREPARED:
+                self.memory = prepared_request_memory
+            elif chat_id and callable(create_request_memory):
                 self.memory = create_request_memory(chat_id)
             else:
                 self.memory = self.memory_manager.get_in_memory_memory(
@@ -1649,7 +1741,15 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             )
             if chat_id and checkpoint_store is not None:
                 try:
-                    state = checkpoint_store._read_checkpoint_state(chat_id)
+                    epoch = getattr(
+                        self.memory,
+                        "_chat_checkpoint_epoch",
+                        None,
+                    )
+                    if epoch is None:
+                        epoch = checkpoint_store._read_checkpoint_epoch(
+                            chat_id,
+                        )
                 except (TypeError, ValueError):
                     logger.warning(
                         "Skip recover_evidence: request Chat ID is invalid",
@@ -1659,7 +1759,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                         create_recover_evidence_tool(
                             self.memory_manager,
                             chat_id=chat_id,
-                            epoch=state.current_epoch,
+                            epoch=epoch,
                         ),
                         namesake_strategy=namesake_strategy,
                     )
@@ -1670,6 +1770,21 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
     def _register_hooks(self) -> None:
         """Register pre-reasoning and pre-acting hooks."""
         if self._request_context.get("agent_role") == "completion_judge":
+            return
+        if self._request_context.get("expert_main_execution"):
+            manager = self._request_context.get("_expert_chat_memory_manager")
+            if (
+                manager is not None
+                and self._request_context.get(
+                    "_expert_chat_memory",
+                )
+                is not None
+            ):
+                self.register_instance_hook(
+                    hook_type="pre_reasoning",
+                    hook_name="memory_compact_hook",
+                    hook=MemoryCompactionHook(manager).__call__,
+                )
             return
         # Bootstrap hook - checks BOOTSTRAP.md on first interaction
         # Use workspace_dir if available, else fallback to WORKING_DIR
@@ -1708,14 +1823,38 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         Updates both self._sys_prompt and the first system-role
         message stored in self.memory.content (if one exists).
         """
+        self._apply_system_prompt_refresh(
+            *self._prepare_system_prompt_refresh(),
+        )
+
+    async def rebuild_sys_prompt_async(self) -> None:
+        """Compute file-dependent state in a worker, apply only on the loop."""
+        prepared = await run_runtime_state_work(
+            self._prepare_system_prompt_refresh,
+        )
+        self._apply_system_prompt_refresh(*prepared)
+
+    def _prepare_system_prompt_refresh(
+        self,
+    ) -> tuple[str | None, tuple[Any, ...]]:
         current_token = self._current_system_prompt_freshness_token()
         if (
             getattr(self, "_sys_prompt", None) is None
             or getattr(self, "_sys_prompt_freshness_token", None)
             != current_token
         ):
-            self._sys_prompt = self._build_sys_prompt()
+            text = self._build_sys_prompt()
             current_token = self._current_system_prompt_freshness_token()
+            return text, current_token
+        return None, current_token
+
+    def _apply_system_prompt_refresh(
+        self,
+        text: str | None,
+        current_token: tuple[Any, ...],
+    ) -> None:
+        if text is not None:
+            self._sys_prompt = text
             self._sys_prompt_freshness_token = current_token
 
         if self.memory is None:
@@ -2063,6 +2202,20 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         ``print`` can strip tool_use blocks from streaming chunks.
         """
         with self.agent_phase(AgentPhase.SUMMARIZING, reason="summarizing"):
+            if getattr(self, "_request_context", {}).get(
+                "expert_main_execution",
+            ):
+                self._request_context["expert_main_terminal_reason"] = (
+                    "turn_budget_exceeded"
+                )
+                message = Msg(
+                    self.name,
+                    "专家本轮执行达到推理上限，已终止。",
+                    "assistant",
+                )
+                await self.print(message, True)
+                await self.memory.add(message)
+                return message
             # --- Proactive filtering layer ---
             if not get_active_model_supports_multimodal():
                 n = self._proactive_strip_media_blocks()
@@ -2130,6 +2283,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         the active phase metadata.
         """
         self._record_agent_activity(reason="output")
+        from ..app.runner.expert_main_runtime import tag_expert_message
+
+        tag_expert_message(msg, self._request_context)
 
         if not getattr(self, "_in_summarizing", False):
             return await super().print(msg, last, speech=speech)

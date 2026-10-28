@@ -55,6 +55,14 @@ export interface IframeUserDataMessage {
     space?: string;
     /** 来源标识 */
     source?: string;
+    /** 财富工作台嵌入布局：隐藏头部、播报与侧栏 */
+    hideLogo?: boolean | string;
+    userName?: string;
+    positionId?: string;
+    orgCode?: string;
+    subBranchId?: string;
+    orgLvl?: string;
+    sysId?: string;
     /** 是否隐藏菜单（支持 boolean 或字符串 "true"/"false"） */
     hideMenu?: boolean | string;
     /** 是否为超级管理员（支持 boolean 或字符串 "true"/"false"） */
@@ -275,6 +283,8 @@ export interface IframeContext {
   source: string | null;
   /** 是否隐藏菜单 */
   hideMenu: boolean;
+  /** 本次消息入口的财富工作台隐藏设置，不持久化 */
+  hideLogo: boolean;
   /** 当前页面是否通过 origin=Y 入口访问 */
   isOriginY: boolean;
   /** 是否为超级管理员 */

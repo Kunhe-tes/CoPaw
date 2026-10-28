@@ -16,14 +16,13 @@ from swe.app.runner.models import ChatSpec
 from swe.app.routers.subagents import router
 from swe.app.subagents import (
     AgentResult,
-    AgentRegistry,
     BackgroundSubAgentNotManageable,
     DefinitionMatchMetadata,
     DelegationSpec,
     PerRunSubAgentRunStore,
     PermissionPolicy,
+    SubAgentDefinition,
     SubAgentStartRequest,
-    builtin_definition_provider,
 )
 from swe.app.subagents.models import AgentError, BudgetConfig, Metrics
 from swe.app.subagents.monitor import SubAgentMonitorService
@@ -150,8 +149,10 @@ async def _create_run(
     nickname: str | None = None,
     definition_match: DefinitionMatchMetadata | None = None,
 ):
-    definition = AgentRegistry([builtin_definition_provider()]).resolve(
-        "plan-researcher",
+    definition = SubAgentDefinition(
+        name="plan-researcher",
+        description="Monitor test expert",
+        instruction="Inspect run monitoring",
     )
     record = await store.create(
         DelegationSpec(

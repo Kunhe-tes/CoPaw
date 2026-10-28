@@ -182,6 +182,7 @@ export interface ChatGoalCompletionCriterion {
 
 export interface ChatGoalProposalCardData {
   card_type: "goal_proposal";
+  enable_subagents?: boolean;
   objective: string;
   completion_criteria: ChatGoalCompletionCriterion[];
   constraints: { must_preserve: string[]; must_not_do: string[] };
@@ -247,7 +248,10 @@ function normalizeGoalCompletionCriteria(
 }
 
 function normalizeGoalStringList(value: unknown): string[] | null {
-  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+  if (
+    !Array.isArray(value) ||
+    !value.every((item) => typeof item === "string")
+  ) {
     return null;
   }
   return value.map((item) => item.trim()).filter(Boolean);
@@ -374,8 +378,12 @@ function normalizePlanInteractionCard(
       !criteria ||
       !constraints ||
       typeof constraints !== "object" ||
-      !normalizeGoalStringList((constraints as Record<string, unknown>).must_preserve) ||
-      !normalizeGoalStringList((constraints as Record<string, unknown>).must_not_do) ||
+      !normalizeGoalStringList(
+        (constraints as Record<string, unknown>).must_preserve,
+      ) ||
+      !normalizeGoalStringList(
+        (constraints as Record<string, unknown>).must_not_do,
+      ) ||
       typeof card.autonomy_boundary !== "string" ||
       !card.autonomy_boundary.trim()
     ) {
@@ -383,6 +391,7 @@ function normalizePlanInteractionCard(
     }
     return {
       card_type: "goal_proposal",
+      enable_subagents: card.enable_subagents === true,
       objective: card.objective.trim(),
       completion_criteria: criteria,
       constraints: {

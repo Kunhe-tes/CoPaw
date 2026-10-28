@@ -37,6 +37,16 @@ def _snapshot_model_for_supervisor_tests(monkeypatch):
     from swe.app.subagents import supervisor as supervisor_module
     from swe.providers.models import ModelSlotConfig
 
+    monkeypatch.setitem(
+        globals(),
+        "builtin_definition_provider",
+        _definition_provider,
+    )
+    monkeypatch.setattr(
+        supervisor_module,
+        "builtin_definition_provider",
+        _definition_provider,
+    )
     monkeypatch.setattr(
         supervisor_module,
         "capture_model_launch_snapshot",
@@ -47,8 +57,21 @@ def _snapshot_model_for_supervisor_tests(monkeypatch):
     )
 
 
+def _definition_provider():
+    """Lifecycle tests provide their own expert after builtins were removed."""
+    return InMemoryDefinitionProvider(
+        [
+            _builtin(
+                name="plan-researcher",
+                description="test",
+                instruction="test",
+            ),
+        ],
+    )
+
+
 class _FakeProcess:
-    def __init__(self, pid: int = 4321):
+    def __init__(self, pid: int = 99999999):
         self.pid = pid
         self.returncode: int | None = None
         self.wait_calls = 0
@@ -69,7 +92,7 @@ class _FakePopenFactory:
         self.commands: list[list[str]] = []
 
     def __call__(self, command, **kwargs):
-        process = _FakeProcess(pid=4321 + len(self.processes))
+        process = _FakeProcess(pid=99999999 + len(self.processes))
         self.processes.append(process)
         self.commands.append(list(command))
         return process

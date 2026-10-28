@@ -75,24 +75,34 @@ from . import (
     query_preflight,
     query_runtime,
     session_lifecycle,
+    stop_append,
     turn_lifecycle,
 )
 from .session import SafeJSONSession, SESSION_SKILL_SNAPSHOT_STATE_KEY
 from .stream_boundary import normalize_reasoning_boundary_stream
 from .task_progress import attach_task_progress
+from .expert_main_runtime import ExpertMainRegistry, restricted_expert_config
 from .utils import build_env_context
+from ..goals.delegation import (
+    GOAL_DRAFT_DELEGATION_META_KEY,
+    is_goal_draft_request,
+)
+from ..subagents.intent import has_subagent_intent
 from ..identity_resolver import resolve_user_identity
 from ..channels.schema import DEFAULT_CHANNEL
 from ...__version__ import __version__
-from ...agents.react_agent import SWEAgent
+from ...agents.react_agent import SWEAgent, _REQUEST_MEMORY_NOT_PREPARED
 from ...agents.skill_invocation_detector import SkillInvocationDetector
 from ...agents.tool_guard_mixin import PreToolUseTerminalStop
 from ...agents.tool_failure import (
     TOOL_GOVERNANCE_BLOCK_FIELD,
     attach_tool_governance_message_metadata,
 )
+from ...agents.skill_runtime_snapshot import (
+    SkillRuntimeSnapshot,
+    WorkspaceSkillSnapshot,
+)
 from ...agents.skills_manager import (
-    get_skill_freshness_token,
     get_workspace_skills_dir,
     resolve_effective_skill_dir,
 )
@@ -293,6 +303,8 @@ class _QueryTurnOutcome:
     buffered_assistant_messages: list[Msg] = field(default_factory=list)
     assistant_memory_start: int = 0
     goal_finalization_fallback: bool = False
+    stop_append_approved: bool = False
+    stop_append_started: bool = False
 
 
 def _match_command_with_optional_id(
@@ -2068,123 +2080,45 @@ def _supports_session_skill_freshness_refresh(
     )
 
 
-def _refresh_switched_session_skill_snapshot_entry(
-    next_snapshot: dict[str, dict[str, Any]],
-    *,
-    skill_name: str,
-    stored_dir: Path,
-    current_dir: Path | None,
-    confirmed_at: Any | None = None,
-) -> str | None:
-    if (
-        current_dir is None
-        or not current_dir.exists()
-        or current_dir == stored_dir
-    ):
-        return None
-
-    current_token = get_skill_freshness_token(current_dir)
-    _upsert_session_skill_snapshot_entry(
-        next_snapshot,
-        skill_name=skill_name,
-        resolved_skill_dir=current_dir,
-        freshness_token=current_token,
-        confirmed_at=confirmed_at,
-    )
-    return (
-        f"{skill_name}: detected skill-directory switch "
-        f"{stored_dir} -> {current_dir}. Treat current skill "
-        "content as superseding earlier assumptions. You MUST "
-        f"re-read {current_dir / 'SKILL.md'} before relying on this skill."
-    )
-
-
-def _refresh_withdrawn_session_skill_snapshot_entry(
-    next_snapshot: dict[str, dict[str, Any]],
-    *,
-    skill_name: str,
-    current_dir: Path | None,
-) -> str | None:
-    if current_dir is not None and current_dir.exists():
-        return None
-
-    _remove_session_skill_snapshot_entry(
-        next_snapshot,
-        skill_name=skill_name,
-    )
-    return (
-        f"{skill_name}: no longer effective for this turn. "
-        "Stop relying on earlier assumptions from this skill."
-    )
-
-
-def _refresh_changed_session_skill_snapshot_entry(
-    next_snapshot: dict[str, dict[str, Any]],
-    *,
-    skill_name: str,
-    entry: dict[str, Any],
-    current_dir: Path,
-) -> str | None:
-    current_token = get_skill_freshness_token(current_dir)
-    if current_token == entry.get("freshness_token"):
-        return None
-
-    _upsert_session_skill_snapshot_entry(
-        next_snapshot,
-        skill_name=skill_name,
-        resolved_skill_dir=current_dir,
-        freshness_token=current_token,
-        confirmed_at=entry.get("confirmed_at"),
-    )
-    return (
-        f"{skill_name}: detected skill-directory change at "
-        f"{current_dir}. Treat current skill content as "
-        "superseding earlier assumptions. You MUST "
-        f"re-read {current_dir / 'SKILL.md'} before relying on this skill."
-    )
-
-
 def _refresh_session_skill_snapshot_entry(
     next_snapshot: dict[str, dict[str, Any]],
     *,
     skill_name: str,
     entry: dict[str, Any],
-    effective_skill_dirs: dict[str, Path],
+    current_skill: SkillRuntimeSnapshot | None,
 ) -> str | None:
-    stored_dir = Path(str(entry.get("resolved_skill_dir", "")))
-    current_dir = effective_skill_dirs.get(skill_name)
-
-    switch_notice = _refresh_switched_session_skill_snapshot_entry(
-        next_snapshot,
-        skill_name=skill_name,
-        stored_dir=stored_dir,
-        current_dir=current_dir,
-        confirmed_at=entry.get("confirmed_at"),
-    )
-    if switch_notice is not None:
-        return switch_notice
-
-    if not stored_dir.exists():
+    if current_skill is None:
         _remove_session_skill_snapshot_entry(
             next_snapshot,
             skill_name=skill_name,
         )
+        return (
+            f"{skill_name}: no longer effective for this turn. "
+            "Stop relying on earlier assumptions from this skill."
+        )
+    stored_dir = Path(str(entry.get("resolved_skill_dir", "")))
+    current_dir = current_skill.directory
+    current_token = current_skill.freshness_token
+    if current_dir == stored_dir and current_token == entry.get(
+        "freshness_token",
+    ):
         return None
-
-    withdrawal_notice = _refresh_withdrawn_session_skill_snapshot_entry(
+    _upsert_session_skill_snapshot_entry(
         next_snapshot,
         skill_name=skill_name,
-        current_dir=current_dir,
+        resolved_skill_dir=current_dir,
+        freshness_token=current_token,
+        confirmed_at=entry.get("confirmed_at"),
     )
-    if withdrawal_notice is not None:
-        return withdrawal_notice
-
-    assert current_dir is not None
-    return _refresh_changed_session_skill_snapshot_entry(
-        next_snapshot,
-        skill_name=skill_name,
-        entry=entry,
-        current_dir=current_dir,
+    change = (
+        f"skill-directory switch {stored_dir} -> {current_dir}"
+        if current_dir != stored_dir
+        else f"skill-directory change at {current_dir}"
+    )
+    return (
+        f"{skill_name}: detected {change}. Treat current skill content as "
+        "superseding earlier assumptions. You MUST "
+        f"re-read {current_dir / 'SKILL.md'} before relying on this skill."
     )
 
 
@@ -2192,15 +2126,32 @@ def _refresh_session_skill_snapshot_entries(
     next_snapshot: dict[str, dict[str, Any]],
     *,
     stored_snapshot: dict[str, dict[str, Any]],
-    effective_skill_dirs: dict[str, Path],
+    workspace_snapshot: WorkspaceSkillSnapshot | None,
+    effective_skills: set[str],
 ) -> list[str]:
+    if workspace_snapshot is None or not workspace_snapshot.manifest_available:
+        return []
     changes: list[str] = []
     for skill_name, entry in stored_snapshot.items():
+        if skill_name in workspace_snapshot.unconfirmed_skills:
+            continue
+        # Effective skills outside the workspace snapshot (e.g. builtin
+        # skills in legacy callers) have no observation to compare here.
+        if (
+            skill_name in effective_skills
+            and skill_name not in workspace_snapshot.skills
+        ):
+            continue
+        current_skill = (
+            workspace_snapshot.skills.get(skill_name)
+            if skill_name in effective_skills
+            else None
+        )
         notice = _refresh_session_skill_snapshot_entry(
             next_snapshot,
             skill_name=skill_name,
             entry=entry,
-            effective_skill_dirs=effective_skill_dirs,
+            current_skill=current_skill,
         )
         if notice is not None:
             changes.append(notice)
@@ -3082,7 +3033,7 @@ class _QueryAttemptState:
     session_title_task_started: bool = False
 
 
-@dataclass(frozen=True)
+@dataclass
 class _QueryAttemptInput:
     """封装单次 query 尝试不随执行过程变化的输入。"""
 
@@ -3092,6 +3043,7 @@ class _QueryAttemptInput:
     preflight: _QueryPreflight
     trace_id: str | None
     session_execution: Any | None = None
+    workspace_skill_snapshot: Any | None = None
 
 
 class AgentRunner(Runner):
@@ -3331,6 +3283,9 @@ class AgentRunner(Runner):
             "is_active",
             True,
         ):
+            hydrate = getattr(session_execution, "hydrate_turn", None)
+            if hydrate is not None:
+                await hydrate(outcome.identity.msgid)
             mark_terminal_turn_state(
                 session_execution.state,
                 outcome.identity.msgid,
@@ -3356,10 +3311,14 @@ class AgentRunner(Runner):
             )
             return state
 
+        mutation_options = {}
+        if isinstance(self.session, SafeJSONSession):
+            mutation_options["hydrate_turn_ids"] = (outcome.identity.msgid,)
         await self.session.mutate_session_state(
             session_id,
             mark_outcome,
             user_id=user_id,
+            **mutation_options,
         )
 
     async def release_outcome(self, identity: TurnIdentity) -> None:
@@ -3430,6 +3389,7 @@ class AgentRunner(Runner):
 
         elapsed = time.time() - pending.created_at
         if elapsed > self._APPROVAL_TIMEOUT_SECONDS:
+            await self._discard_pending_expert_main_approval(pending, request)
             await svc.resolve_request(
                 pending.request_id,
                 ApprovalDecision.TIMEOUT,
@@ -3453,24 +3413,10 @@ class AgentRunner(Runner):
                 external_submission,
             )
         ):
-            source_channel = external_submission.get("source_channel")
-            if not isinstance(source_channel, str) or not source_channel:
-                source_channel = "external"
             return (
-                Msg(
-                    name="Friday",
-                    role="assistant",
-                    content=[
-                        TextBlock(
-                            type="text",
-                            text=(
-                                f"Approval request `{pending.request_id}` "
-                                f"has already been submitted from "
-                                f"`{source_channel}`. Refresh the session "
-                                "to see the latest approval state."
-                            ),
-                        ),
-                    ],
+                self._external_approval_conflict_message(
+                    pending,
+                    external_submission,
                 ),
                 True,
                 None,
@@ -3500,6 +3446,7 @@ class AgentRunner(Runner):
             pending.request_id,
             denial_decision,
         )
+        await self._discard_pending_expert_main_approval(pending, request)
         await self._notify_console_approval_result(
             resolved or pending,
             denial_decision,
@@ -3513,6 +3460,56 @@ class AgentRunner(Runner):
             ),
             True,
             None,
+        )
+
+    @staticmethod
+    def _external_approval_conflict_message(
+        pending: Any,
+        external_submission: dict[str, Any],
+    ) -> Msg:
+        source_channel = external_submission.get("source_channel")
+        if not isinstance(source_channel, str) or not source_channel:
+            source_channel = "external"
+        return Msg(
+            name="Friday",
+            role="assistant",
+            content=[
+                TextBlock(
+                    type="text",
+                    text=(
+                        f"Approval request `{pending.request_id}` "
+                        f"has already been submitted from "
+                        f"`{source_channel}`. Refresh the session "
+                        "to see the latest approval state."
+                    ),
+                ),
+            ],
+        )
+
+    async def _discard_pending_expert_main_approval(
+        self,
+        pending: Any,
+        request: Any | None,
+    ) -> None:
+        if (getattr(pending, "extra", {}) or {}).get(
+            "execution_identity",
+            {},
+        ).get("kind") == "expert_main":
+            await self._discard_expert_main_approval(
+                pending.request_id,
+                request,
+            )
+
+    async def _discard_expert_main_approval(
+        self,
+        approval_id: str,
+        request: Any | None,
+    ) -> None:
+        meta = getattr(request, "channel_meta", None) or {}
+        token = meta.get("_expert_main_execution_token")
+        await self._expert_main_registry().discard_approval(
+            approval_id,
+            keep_token=token if isinstance(token, str) else None,
         )
 
     async def _notify_console_approval_result(
@@ -4081,6 +4078,151 @@ class AgentRunner(Runner):
         )
         return _with_hook_context(env_context, session_start_context), None
 
+    def _expert_main_registry(self) -> ExpertMainRegistry:
+        registry = getattr(self, "_expert_main_executions", None)
+        if registry is None:
+            registry = self._expert_main_executions = ExpertMainRegistry()
+        return registry
+
+    def register_expert_main_execution(
+        self,
+        prepared: Any,
+        *,
+        chat_id: str,
+        user_id: str,
+        source_id: str,
+        turn_id: str,
+    ) -> str:
+        """Register an admitted snapshot; turn_id is the launch msgid."""
+        return self._expert_main_registry().register(
+            prepared,
+            chat_id=chat_id,
+            user_id=user_id,
+            source_id=source_id,
+            turn_id=turn_id,
+        )
+
+    def _get_expert_main_execution(self, request: Any):
+        return self._expert_main_registry().get(request)
+
+    def resume_expert_main_execution(
+        self,
+        *,
+        chat_id: str,
+        user_id: str,
+        source_id: str,
+        approval_id: str,
+        turn_id: str,
+    ) -> str | None:
+        return self._expert_main_registry().resume(
+            chat_id=chat_id,
+            user_id=user_id,
+            source_id=source_id,
+            approval_id=approval_id,
+            turn_id=turn_id,
+        )
+
+    async def discard_expert_main_execution(self, token: str) -> None:
+        await self._expert_main_registry().discard_async(token)
+
+    async def discard_expert_main_pending(
+        self,
+        *,
+        chat_id: str,
+        user_id: str,
+        source_id: str,
+    ) -> None:
+        await self._expert_main_registry().discard_pending(
+            chat_id=chat_id,
+            user_id=user_id,
+            source_id=source_id,
+        )
+
+    async def _finish_expert_main_execution(
+        self,
+        request: Any,
+        *,
+        completed: bool = True,
+    ) -> None:
+        lease = self._get_expert_main_execution(request)
+        if lease is None:
+            return
+        pending = getattr(lease.agent, "_tool_guard_pending_info", None)
+        terminal = (getattr(lease.agent, "_request_context", {}) or {}).get(
+            "expert_main_terminal_reason",
+        )
+        if (
+            completed
+            and not terminal
+            and isinstance(pending, dict)
+            and pending.get("request_id")
+        ):
+            lease.approval_id = str(pending["request_id"])
+            return
+        token = request.channel_meta["_expert_main_execution_token"]
+        await self.discard_expert_main_execution(token)
+
+    async def _create_agent_for_query_async(self, **kwargs: Any) -> SWEAgent:
+        """Prepare file-derived inputs, then install the Agent on the loop."""
+        from ...agents.prompt import (
+            PromptConfig,
+            bind_prepared_system_prompt,
+            prepare_system_prompt_async,
+        )
+        from ...runtime_workers import run_runtime_state_work
+
+        await self._update_goal_draft_delegation(kwargs)
+        lease = self._get_expert_main_execution(kwargs.get("request"))
+        if lease is not None:
+            kwargs["agent_config"] = restricted_expert_config(
+                kwargs["agent_config"],
+                lease,
+            )
+        config = kwargs["agent_config"]
+        files = getattr(config, "system_prompt_files", None)
+        prepared = await prepare_system_prompt_async(
+            Path(self.workspace_dir or WORKING_DIR),
+            list(PromptConfig.DEFAULT_FILES if files is None else files),
+            self.agent_id,
+            bool(
+                getattr(getattr(config, "heartbeat", None), "enabled", False),
+            ),
+        )
+        kwargs["prepared_request_context"] = await run_runtime_state_work(
+            self._prepare_query_agent_context,
+            kwargs,
+        )
+        kwargs["source_tool_versions"] = await run_runtime_state_work(
+            self._source_tool_versions,
+            kwargs["prepared_request_context"],
+        )
+        with bind_prepared_system_prompt(prepared):
+            return self._create_agent_for_query(**kwargs)
+
+    async def _update_goal_draft_delegation(
+        self,
+        values: dict[str, Any],
+    ) -> None:
+        """Persist only actual user authority during Goal draft clarification."""
+        chat = values.get("chat")
+        if chat is None:
+            return
+        request = values.get("request")
+        metadata = dict(getattr(chat, "meta", None) or {})
+        if is_goal_draft_request(request):
+            enabled = bool(metadata.get(GOAL_DRAFT_DELEGATION_META_KEY))
+            enabled |= has_subagent_intent(
+                values.get("current_user_text"),
+                self._request_allows_subagents(request),
+            )
+            if enabled:
+                metadata[GOAL_DRAFT_DELEGATION_META_KEY] = True
+        else:
+            metadata.pop(GOAL_DRAFT_DELEGATION_META_KEY, None)
+        if metadata != (getattr(chat, "meta", None) or {}):
+            chat.meta = metadata
+            await self._chat_manager.update_chat(chat)
+
     def _create_agent_for_query(
         self,
         *,
@@ -4098,8 +4240,83 @@ class AgentRunner(Runner):
         approved_tool_call: dict[str, Any] | None,
         current_user_text: str = "",
         workspace_skill_snapshot: Any | None = None,
+        prepared_request_memory: Any = _REQUEST_MEMORY_NOT_PREPARED,
+        prepared_model_config: Any | None = None,
+        source_tool_versions: Any | None = None,
+        prepared_request_context: dict[str, Any] | None = None,
     ) -> SWEAgent:
         """创建 SWEAgent，并注入本轮请求上下文。"""
+        if prepared_request_context is None:
+            prepared_request_context = self._prepare_query_agent_context(
+                {
+                    "request": request,
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "channel": channel,
+                    "chat": chat,
+                    "turn_id": turn_id,
+                    "hook_overlay": hook_overlay,
+                    "auth_token": auth_token,
+                    "approved_tool_call": approved_tool_call,
+                    "current_user_text": current_user_text,
+                },
+            )
+        request_context = prepared_request_context
+        lease = self._get_expert_main_execution(request)
+        expert_kwargs = {}
+        if lease is not None:
+            workspace_skill_snapshot = lease.prepared.workspace_skill_snapshot
+            expert_kwargs = {
+                "enable_memory_manager": False,
+                "enable_workspace_skills": bool(
+                    lease.prepared.skill_snapshot_dirs,
+                ),
+                "workspace_skill_dirs": {
+                    Path(path).name: Path(path)
+                    for path in lease.prepared.skill_snapshot_dirs
+                },
+                "model_slot_override": lease.prepared.model_slot,
+            }
+        if source_tool_versions is None:
+            source_tool_versions = self._source_tool_versions(request_context)
+        agent = SWEAgent(
+            agent_config=agent_config,
+            env_context=env_context,
+            mcp_clients=mcp_clients,
+            memory_manager=None if lease is not None else self.memory_manager,
+            prepared_request_memory=prepared_request_memory,
+            prepared_model_config=prepared_model_config,
+            request_context=request_context,
+            workspace_dir=self.workspace_dir,
+            workspace_skill_snapshot=workspace_skill_snapshot,
+            task_tracker=self._task_tracker,
+            source_tool_versions=(
+                () if lease is not None else source_tool_versions
+            ),
+            **expert_kwargs,
+        )
+        if lease is not None:
+            lease.agent = agent
+        return agent
+
+    def _prepare_query_agent_context(
+        self,
+        values: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Prepare request-owned context, including expert filesystem work."""
+        from ...agents.builtin_tool_schemas import prepare_builtin_tool_schemas
+
+        prepare_builtin_tool_schemas()
+        request = values.get("request")
+        session_id = values.get("session_id")
+        user_id = values.get("user_id")
+        channel = values.get("channel")
+        chat = values.get("chat")
+        turn_id = values.get("turn_id")
+        hook_overlay = values.get("hook_overlay")
+        auth_token = values.get("auth_token")
+        approved_tool_call = values.get("approved_tool_call")
+        current_user_text = values.get("current_user_text", "")
         request_details = {
             "session_id": session_id,
             "user_id": user_id,
@@ -4119,11 +4336,27 @@ class AgentRunner(Runner):
             hook_overlay=hook_overlay,
         )
         channel_meta = getattr(request, "channel_meta", None) or {}
+        lease = self._get_expert_main_execution(request)
+        if lease is not None:
+            self._apply_expert_main_query_context(
+                request_context,
+                lease,
+                chat,
+                auth_token,
+                approved_tool_call,
+            )
+            return request_context
         selected_expert_id = self._apply_query_mode_context(
             request_context=request_context,
             request=request,
             channel_meta=channel_meta,
         )
+        if is_goal_draft_request(request):
+            request_context["enable_subagents"] |= bool(
+                (getattr(chat, "meta", None) or {}).get(
+                    GOAL_DRAFT_DELEGATION_META_KEY,
+                ),
+            )
         self._apply_selected_expert_context(
             request_context=request_context,
             selected_expert_id=selected_expert_id,
@@ -4131,6 +4364,34 @@ class AgentRunner(Runner):
             objective=current_user_text,
             approved_tool_call=approved_tool_call,
         )
+        if (
+            values.get("agent_config") is not None
+            and not selected_expert_id
+            and not has_subagent_intent(
+                current_user_text,
+                request_context.get("enable_subagents", False),
+            )
+        ):
+            from ...agents.tools.subagent_background import (
+                build_background_subagent_scope,
+            )
+            from ..subagents.run_access import read_chat_run_records
+
+            retained_runs_present = False
+            if request_context.get("session_id"):
+                scope = build_background_subagent_scope(
+                    parent_agent_config=values["agent_config"],
+                    request_context=request_context,
+                )
+                retained_runs_present = bool(
+                    read_chat_run_records(
+                        scope.run_store_dir,
+                        request_context,
+                    ),
+                )
+            request_context["_subagent_retained_runs_present"] = (
+                retained_runs_present
+            )
         if auth_token:
             request_context["auth_token"] = auth_token
         if (
@@ -4141,18 +4402,43 @@ class AgentRunner(Runner):
                 approved_tool_call,
                 ensure_ascii=False,
             )
-        source_tool_versions = self._source_tool_versions(request_context)
-        return SWEAgent(
-            agent_config=agent_config,
-            env_context=env_context,
-            mcp_clients=mcp_clients,
-            memory_manager=self.memory_manager,
-            request_context=request_context,
-            workspace_dir=self.workspace_dir,
-            workspace_skill_snapshot=workspace_skill_snapshot,
-            task_tracker=self._task_tracker,
-            source_tool_versions=source_tool_versions,
-        )
+        return request_context
+
+    def _apply_expert_main_query_context(
+        self,
+        request_context: dict[str, Any],
+        lease: Any,
+        chat: Any,
+        auth_token: str | None,
+        approved_tool_call: dict[str, Any] | None,
+    ) -> None:
+        request_context.update(lease.context())
+        if self.memory_manager is not None:
+            from ...agents.memory.expert_main_memory import (
+                ExpertMainMemoryManager,
+            )
+
+            chat_memory_manager = ExpertMainMemoryManager(
+                self.memory_manager,
+            )
+            request_context["_expert_chat_memory_manager"] = (
+                chat_memory_manager
+            )
+            request_context["_expert_chat_memory"] = (
+                chat_memory_manager.create_request_memory(chat.id)
+                if chat is not None
+                else None
+            )
+        if auth_token:
+            request_context["auth_token"] = auth_token
+        if approved_tool_call:
+            request_context["forced_tool_call_json"] = json.dumps(
+                approved_tool_call,
+                ensure_ascii=False,
+            )
+            request_context["_expert_main_approved_tool_call"] = (
+                approved_tool_call
+            )
 
     def _build_query_request_context(
         self,
@@ -4361,6 +4647,7 @@ class AgentRunner(Runner):
         *,
         runtime: _QueryRuntime,
         goal: Any,
+        prepared_model_config: Any | None = None,
     ) -> SWEAgent:
         """Create an isolated, tool-free Agent for one Goal finalization."""
         source_context = getattr(runtime.agent, "_request_context", {}) or {}
@@ -4383,6 +4670,34 @@ class AgentRunner(Runner):
         }
         request_context["agent_role"] = "main"
         request_context["goal_finalization"] = True
+        if prepared_model_config is None:
+            model_slot_override, model_provider_override = (
+                self._resolve_goal_finalization_model(runtime)
+            )
+        else:
+            model_slot_override = prepared_model_config.model_slot
+            model_provider_override = prepared_model_config.provider
+        return SWEAgent(
+            agent_config=runtime.agent_config,
+            prepared_model_config=prepared_model_config,
+            env_context=None,
+            enable_memory_manager=False,
+            mcp_clients=[],
+            memory_manager=None,
+            request_context=request_context,
+            workspace_dir=self.workspace_dir,
+            task_tracker=None,
+            enable_workspace_skills=False,
+            model_slot_override=model_slot_override,
+            model_provider_override=model_provider_override,
+            system_prompt_override=_GOAL_FINALIZATION_SYSTEM_PROMPT,
+            source_tool_versions=(),
+        )
+
+    def _resolve_goal_finalization_model(
+        self,
+        runtime: _QueryRuntime,
+    ) -> tuple[Any, Any]:
         resolved_slot = (
             getattr(runtime.agent, "_resolved_model_slot", {}) or {}
         )
@@ -4413,20 +4728,59 @@ class AgentRunner(Runner):
             )
             if model_provider_override is None:
                 raise RuntimeError("Goal finalization provider is unavailable")
-        return SWEAgent(
-            agent_config=runtime.agent_config,
-            env_context=None,
-            enable_memory_manager=False,
-            mcp_clients=[],
-            memory_manager=None,
-            request_context=request_context,
-            workspace_dir=self.workspace_dir,
-            task_tracker=None,
-            enable_workspace_skills=False,
-            model_slot_override=model_slot_override,
-            model_provider_override=model_provider_override,
-            system_prompt_override=_GOAL_FINALIZATION_SYSTEM_PROMPT,
-            source_tool_versions=(),
+        return model_slot_override, model_provider_override
+
+    async def _create_goal_finalization_agent_async(
+        self,
+        *,
+        runtime: _QueryRuntime,
+        goal: Any,
+    ) -> SWEAgent:
+        from ...agents.model_factory import prepare_model_config_async
+        from ...runtime_workers import run_runtime_state_work
+
+        slot, provider = await run_runtime_state_work(
+            self._resolve_goal_finalization_model,
+            runtime,
+        )
+        prepared = await prepare_model_config_async(
+            agent_id=runtime.agent_config.id,
+            tenant_id=self.tenant_id,
+            model_slot_override=slot,
+            model_provider_override=provider,
+        )
+        return self._create_goal_finalization_agent(
+            runtime=runtime,
+            goal=goal,
+            prepared_model_config=prepared,
+        )
+
+    async def _create_goal_completion_judge_agent_async(
+        self,
+        *,
+        runtime: _QueryRuntime,
+        goal: Any,
+        approved_tool_call: dict[str, Any] | None = None,
+    ) -> SWEAgent:
+        from ...agents.model_factory import prepare_model_config_async
+        from ...runtime_workers import run_runtime_state_work
+
+        slot, provider = await run_runtime_state_work(
+            self._resolve_goal_completion_judge_model,
+            runtime,
+            goal,
+        )
+        prepared = await prepare_model_config_async(
+            agent_id=runtime.agent_config.id,
+            tenant_id=self.tenant_id,
+            model_slot_override=slot,
+            model_provider_override=provider,
+        )
+        return self._create_goal_completion_judge_agent(
+            runtime=runtime,
+            goal=goal,
+            approved_tool_call=approved_tool_call,
+            prepared_model_config=prepared,
         )
 
     def _create_goal_completion_judge_agent(
@@ -4435,17 +4789,23 @@ class AgentRunner(Runner):
         runtime: _QueryRuntime,
         goal: Any,
         approved_tool_call: dict[str, Any] | None = None,
+        prepared_model_config: Any | None = None,
     ) -> SWEAgent:
         """Create a restricted, frozen-model Agent for Goal completion review."""
         request_context = _build_goal_judge_request_context(
             runtime,
             approved_tool_call,
         )
-        model_slot_override, model_provider_override = (
-            self._resolve_goal_completion_judge_model(runtime, goal)
-        )
+        if prepared_model_config is None:
+            model_slot_override, model_provider_override = (
+                self._resolve_goal_completion_judge_model(runtime, goal)
+            )
+        else:
+            model_slot_override = prepared_model_config.model_slot
+            model_provider_override = prepared_model_config.provider
         return SWEAgent(
             agent_config=runtime.agent_config,
+            prepared_model_config=prepared_model_config,
             env_context=None,
             enable_memory_manager=False,
             mcp_clients=[],
@@ -4570,7 +4930,7 @@ class AgentRunner(Runner):
                     )
                     for criterion_id in criterion_ids
                 }
-            agent = self._create_goal_completion_judge_agent(
+            agent = await self._create_goal_completion_judge_agent_async(
                 runtime=runtime,
                 goal=review_goal,
                 approved_tool_call=approved_tool_call,
@@ -4692,7 +5052,7 @@ class AgentRunner(Runner):
         state = goal.state.value
         previous_msg: Msg | None = None
         try:
-            agent = self._create_goal_finalization_agent(
+            agent = await self._create_goal_finalization_agent_async(
                 runtime=runtime,
                 goal=goal,
             )
@@ -4783,18 +5143,15 @@ class AgentRunner(Runner):
             ):
                 return
 
-            skill_dir = resolve_effective_skill_dir(
-                Path(self.workspace_dir or WORKING_DIR),
-                skill_name,
-            )
-            if skill_dir is None or not skill_dir.exists():
+            skill = snapshot_skills.get(skill_name)
+            if skill is None:
                 return
 
             runtime.pending_confirmed_skill_snapshots[skill_name] = (
                 _build_session_skill_snapshot_entry(
                     skill_name=skill_name,
-                    resolved_skill_dir=skill_dir,
-                    freshness_token=get_skill_freshness_token(skill_dir),
+                    resolved_skill_dir=skill.directory,
+                    freshness_token=skill.freshness_token,
                     confirmed_at=time.time(),
                 )
             )
@@ -4806,6 +5163,15 @@ class AgentRunner(Runner):
             None,
         )
         snapshot_skills = getattr(workspace_skill_snapshot, "skills", {})
+        lease = self._get_expert_main_execution(request)
+        expert_dirs = (
+            {
+                Path(path).name: Path(path)
+                for path in lease.prepared.skill_snapshot_dirs
+            }
+            if lease is not None
+            else {}
+        )
         runtime.session_skill_detector = _create_session_skill_detector(
             workspace_dir=Path(self.workspace_dir or WORKING_DIR),
             tenant_id=self.tenant_id,
@@ -4827,7 +5193,8 @@ class AgentRunner(Runner):
                 name: dict(skill.metadata)
                 for name, skill in snapshot_skills.items()
             },
-            skill_dirs={
+            skill_dirs=expert_dirs
+            or {
                 name: skill.directory
                 for name, skill in snapshot_skills.items()
             },
@@ -4924,6 +5291,10 @@ class AgentRunner(Runner):
         *,
         runtime: _QueryRuntime,
     ) -> _SkillFreshnessRefreshResult:
+        if (getattr(runtime.agent, "_request_context", {}) or {}).get(
+            "expert_main_execution",
+        ):
+            return _SkillFreshnessRefreshResult()
         return await session_lifecycle.refresh_session_skill_freshness(
             self,
             runtime=runtime,
@@ -4948,6 +5319,10 @@ class AgentRunner(Runner):
         runtime: _QueryRuntime,
     ) -> None:
         """从持久化的 session snapshot 恢复一次性 skill 续接候选。"""
+        if (getattr(runtime.agent, "_request_context", {}) or {}).get(
+            "expert_main_execution",
+        ):
+            return
         await session_lifecycle.restore_confirmed_session_skill_context(
             self,
             runtime=runtime,
@@ -4974,12 +5349,14 @@ class AgentRunner(Runner):
         snapshot: dict[str, dict[str, Any]],
         *,
         stored_snapshot: dict[str, dict[str, Any]],
-        effective_skill_dirs: dict[str, Path],
+        workspace_snapshot: WorkspaceSkillSnapshot | None,
+        effective_skills: set[str],
     ) -> list[Any]:
         return _refresh_session_skill_snapshot_entries(
             snapshot,
             stored_snapshot=stored_snapshot,
-            effective_skill_dirs=effective_skill_dirs,
+            workspace_snapshot=workspace_snapshot,
+            effective_skills=effective_skills,
         )
 
     @staticmethod
@@ -5044,7 +5421,7 @@ class AgentRunner(Runner):
         session_execution: Any = None,
     ) -> _QueryRuntimeInputs:
         """Resolve request values needed before connecting runtime resources."""
-        return await query_runtime.build_query_runtime_inputs(
+        inputs = await query_runtime.build_query_runtime_inputs(
             self,
             request=request,
             msgs=msgs,
@@ -5064,6 +5441,16 @@ class AgentRunner(Runner):
             current_passthrough_headers=get_current_passthrough_headers,
             session_execution=session_execution,
         )
+        lease = self._get_expert_main_execution(request)
+        if lease is not None:
+            inputs.agent_config = restricted_expert_config(
+                inputs.agent_config,
+                lease,
+            )
+            inputs.workspace_skill_snapshot = (
+                lease.prepared.workspace_skill_snapshot
+            )
+        return inputs
 
     async def _start_query_runtime_resources(
         self,
@@ -5084,24 +5471,23 @@ class AgentRunner(Runner):
             request=request,
             turn_id=turn_id,
         )
-        with runtime_invocation_claims_context(
-            chat_id=chat.id if chat is not None else None,
-        ):
-            scenario_snapshot = (
-                await query_runtime.select_runtime_context_directives(
-                    inputs,
-                    request,
-                    workspace_dir=Path(self.workspace_dir or WORKING_DIR),
-                    chat=chat,
-                    request_scenario_snapshot=(
-                        _request_scenario_preset_snapshot
-                    ),
-                    with_scenario_mcp=_agent_config_with_scenario_mcp,
-                    request_context_references=_request_context_references,
-                    request_selected_skill_names=(
-                        _request_selected_skill_names
-                    ),
-                )
+        lease = self._get_expert_main_execution(request)
+        if lease is not None:
+            inputs.agent_config = restricted_expert_config(
+                inputs.agent_config,
+                lease,
+            )
+            inputs.workspace_skill_snapshot = (
+                lease.prepared.workspace_skill_snapshot
+            )
+            inputs.selected_context_directives = []
+            inputs.selected_skill_directives = []
+            scenario_snapshot = None
+        else:
+            scenario_snapshot = await self._select_default_runtime_directives(
+                inputs=inputs,
+                request=request,
+                chat=chat,
             )
         query_runtime.build_runtime_mcp_clients(
             mcp_clients,
@@ -5127,6 +5513,27 @@ class AgentRunner(Runner):
             emit_session_start=self._emit_session_start_hook,
             load_selected_hooks=self._load_selected_skill_hooks,
         )
+
+    async def _select_default_runtime_directives(
+        self,
+        *,
+        inputs,
+        request,
+        chat,
+    ):
+        with runtime_invocation_claims_context(
+            chat_id=chat.id if chat is not None else None,
+        ):
+            return await query_runtime.select_runtime_context_directives(
+                inputs,
+                request,
+                workspace_dir=Path(self.workspace_dir or WORKING_DIR),
+                chat=chat,
+                request_scenario_snapshot=(_request_scenario_preset_snapshot),
+                with_scenario_mcp=_agent_config_with_scenario_mcp,
+                request_context_references=_request_context_references,
+                request_selected_skill_names=(_request_selected_skill_names),
+            )
 
     async def _load_selected_skill_hooks(
         self,
@@ -5332,6 +5739,23 @@ class AgentRunner(Runner):
     def _build_stop_incomplete_msg(reason: str) -> Msg:
         return _build_stop_incomplete_msg(reason)
 
+    async def _stream_stop_appended_messages(
+        self,
+        *,
+        request: AgentRequest,
+        runtime: _QueryRuntime,
+        plan: _TurnPlan,
+        outcome: _QueryTurnOutcome,
+    ) -> AsyncGenerator[tuple[Msg, bool], None]:
+        async for item in stop_append.stream_stop_appended_messages(
+            self,
+            request=request,
+            runtime=runtime,
+            plan=plan,
+            outcome=outcome,
+        ):
+            yield item
+
     async def _emit_stop_hook_if_needed(
         self,
         *,
@@ -5514,6 +5938,7 @@ class AgentRunner(Runner):
         *,
         trace_id: str | None,
         agent: SWEAgent | None,
+        assistant_response: str | None = None,
     ) -> None:
         """有 trace 时把最终模型输出写入 Monitor。"""
         if not trace_id or agent is None:
@@ -5524,7 +5949,8 @@ class AgentRunner(Runner):
             trace_id,
             type(agent).__name__,
         )
-        assistant_response = _extract_assistant_response(agent)
+        if assistant_response is None:
+            assistant_response = _extract_assistant_response(agent)
         logger.debug(
             "Extracted assistant response: trace_id=%s, response_len=%d",
             trace_id,
@@ -5576,7 +6002,10 @@ class AgentRunner(Runner):
                     error=error,
                 )
         except Exception as trace_err:
-            logger.warning("Failed to end trace: %s", trace_err)
+            logger.warning(
+                "Failed to end trace category=%s",
+                type(trace_err).__name__,
+            )
 
     async def _handle_query_cancelled(
         self,
@@ -5864,7 +6293,11 @@ class AgentRunner(Runner):
         ):
             return
 
-        assistant_response = _extract_assistant_response(runtime.agent)
+        assistant_response = (
+            outcome.assistant_response
+            if outcome.stop_append_started
+            else _extract_assistant_response(runtime.agent)
+        )
         user_message = query
         if not assistant_response or not user_message:
             logger.debug(
@@ -6034,6 +6467,11 @@ class AgentRunner(Runner):
         await self._index_model_output_if_needed(
             trace_id=trace_id,
             agent=runtime.agent,
+            assistant_response=(
+                outcome.assistant_response
+                if outcome.stop_append_started
+                else None
+            ),
         )
         await self._end_trace_if_needed(
             trace_id,
@@ -6328,12 +6766,22 @@ class AgentRunner(Runner):
         defer_settlement = bool(
             channel_meta.get(_DEFER_ANSWER_TURN_SETTLEMENT_META_KEY),
         )
+        completed = False
+        lease = self._get_expert_main_execution(request)
         try:
             async for msg, last in self._stream_query_handler_frames(
                 msgs,
                 request,
                 context,
             ):
+                if lease is not None:
+                    from .expert_main_runtime import tag_expert_message
+
+                    agent_context = (
+                        getattr(lease.agent, "_request_context", None)
+                        or lease.context()
+                    )
+                    tag_expert_message(msg, agent_context)
                 yield msg, last
         except asyncio.CancelledError:
             if not defer_settlement:
@@ -6348,11 +6796,16 @@ class AgentRunner(Runner):
                 )
             raise
         else:
+            completed = True
             if not defer_settlement:
                 await self._settle_query_handler_outcome(identity, "completed")
         finally:
             if identity is not None:
                 self._answer_turn_tasks.pop(identity, None)
+            await self._finish_expert_main_execution(
+                request,
+                completed=completed,
+            )
 
     async def get_state_loaded(
         self,
@@ -6365,7 +6818,8 @@ class AgentRunner(Runner):
         session_execution: Any = None,
         retry_state_snapshot: dict[str, Any] | None = None,
     ) -> bool:
-        return await session_lifecycle.get_state_loaded(
+        current_prompt = getattr(agent, "_sys_prompt", None)
+        result = await session_lifecycle.get_state_loaded(
             self,
             agent,
             session_id,
@@ -6377,6 +6831,9 @@ class AgentRunner(Runner):
             session_execution=session_execution,
             retry_state_snapshot=retry_state_snapshot,
         )
+        if isinstance(current_prompt, str):
+            agent._sys_prompt = current_prompt
+        return result
 
     async def _save_cron_session_state(
         self,
@@ -6729,6 +7186,18 @@ class AgentRunner(Runner):
             ``(msg, last)`` tuples, with a final timeout notification if
             the limit is exceeded.
         """
+        if (getattr(agent, "_request_context", {}) or {}).get(
+            "expert_main_execution",
+        ):
+            from .expert_main_runtime import stream_expert_with_timeout
+
+            async for item in stream_expert_with_timeout(
+                msg_stream,
+                agent,
+                timeout_seconds,
+            ):
+                yield item
+            return
         start = time.monotonic()
         async for msg, last in msg_stream:
             elapsed = time.monotonic() - start

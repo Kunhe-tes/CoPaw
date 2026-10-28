@@ -25,6 +25,17 @@ from .context_usage import (
     ContextUsageUnavailable,
 )
 from .manager import ChatManager
+from .expert_binding import (
+    ExpertBindingUpdate,
+    ExpertBindingView,
+    ExpertBindingConflict,
+    ExpertBindingModeConflict,
+    binding_view,
+    expert_main_enabled_for_request,
+    read_expert_binding,
+    reconcile_binding,
+    resolve_bound_expert,
+)
 from .models import (
     ChatArchiveMetadata,
     ChatArchivePage,
@@ -39,6 +50,7 @@ from .model_call_error_detail import MODEL_CALL_FAILED_MESSAGES_STATE_KEY
 from .hidden_context_injection import HIDDEN_CONTEXT_METADATA_KEY
 from .utils import agentscope_msg_to_message
 from ..approvals import get_approval_service
+from ..goals.delegation import GOAL_DRAFT_DELEGATION_META_KEY
 
 router = APIRouter(prefix="/chats", tags=["chats"])
 logger = logging.getLogger(__name__)
@@ -48,6 +60,8 @@ TASK_RUN_SECTION_STEP = "step"
 TASK_RUN_SECTION_FINAL = "final"
 _SERVER_OWNED_CHAT_META_KEYS = frozenset(
     {
+        GOAL_DRAFT_DELEGATION_META_KEY,
+        "expert_main_binding",
         "scenario_preset_snapshot",
         "scenario_preset_snapshot_source",
     },
@@ -107,6 +121,11 @@ def _merge_chat_update(
             **(existing.meta or {}),
             **incoming_meta,
         }
+        if incoming_meta.get("goal_mode_enabled") is False:
+            merged["meta"].pop(
+                GOAL_DRAFT_DELEGATION_META_KEY,
+                None,
+            )
 
     return ChatSpec.model_validate(merged)
 
@@ -805,6 +824,19 @@ async def _build_chat_history(
                 chat_spec.user_id,
             )
         )
+    from .turn_ledger import TurnHistorySnapshot
+
+    if state.get("schema_version") == 3 and not (
+        isinstance(state, TurnHistorySnapshot)
+        and state.chat_id == chat_spec.id
+    ):
+        state = await session.materialize_turn_states(
+            chat_spec.session_id,
+            chat_spec.user_id,
+            state,
+            chat_spec.id,
+        )
+    assert isinstance(state, dict)
     if status_override is not None:
         status = status_override
     else:
@@ -1206,6 +1238,12 @@ async def get_answer_turn(
                 candidate.session_id,
                 candidate.user_id,
             )
+            state = await _hydrate_history_turn(
+                session,
+                candidate,
+                state,
+                msgid,
+            )
             stored_chat_id = _turn_state_chat_id(state, msgid)
             if stored_chat_id is not None and stored_chat_id != candidate.id:
                 continue
@@ -1233,6 +1271,12 @@ async def get_answer_turn(
             session,
             chat_spec.session_id,
             chat_spec.user_id,
+        )
+        selected_state = await _hydrate_history_turn(
+            session,
+            chat_spec,
+            selected_state,
+            msgid,
         )
         selected_history = await _build_chat_history(
             chat_spec,
@@ -1266,6 +1310,29 @@ async def get_answer_turn(
         status=history.status,
         turn_status=turn_status,
     )
+
+
+async def _hydrate_history_turn(session, chat, state, msgid):
+    return await _select_history_turns(session, chat, state, (msgid,))
+
+
+async def _select_history_turns(session, chat, state, turn_ids):
+    """Project selected cold turns without expanding the complete ledger."""
+    if state.get("schema_version") != 3:
+        return state
+    from .turn_ledger import TurnHistorySnapshot
+
+    turns = dict(state.get("turn_states", {}))
+    for turn_id in dict.fromkeys(turn_ids):
+        turn = await session.get_turn_state(
+            chat.session_id,
+            chat.user_id,
+            state,
+            turn_id,
+        )
+        if turn is not None:
+            turns[turn_id] = turn
+    return TurnHistorySnapshot({**state, "turn_states": turns}, chat.id)
 
 
 @router.get("/{chat_id}/history", response_model=ChatArchivePage)
@@ -1392,6 +1459,110 @@ async def get_chat(
     )
 
 
+@router.get("/{chat_id}/expert-binding", response_model=ExpertBindingView)
+async def get_chat_expert_binding(
+    chat_id: str,
+    request: Request,
+    mgr: ChatManager = Depends(get_chat_manager),
+    workspace=Depends(get_workspace),
+):
+    chat = await mgr.get_chat(chat_id)
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    _authorize_chat(request, chat, workspace)
+    enabled = await expert_main_enabled_for_request(request)
+    previous = read_expert_binding(chat)
+    try:
+        chat = await reconcile_binding(workspace, chat, enabled=enabled)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Chat not found") from exc
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    view = await binding_view(workspace, chat, enabled=enabled)
+    if not enabled and (
+        previous.expert_id or view.revision != previous.revision
+    ):
+        view = view.model_copy(update={"reason": "expert_main_disabled"})
+    return view
+
+
+@router.put("/{chat_id}/expert-binding", response_model=ExpertBindingView)
+async def put_chat_expert_binding(
+    chat_id: str,
+    request: Request,
+    patch: ExpertBindingUpdate,
+    mgr: ChatManager = Depends(get_chat_manager),
+    workspace=Depends(get_workspace),
+):
+    from swe.runtime_workers import run_runtime_state_work
+
+    chat = await mgr.get_chat(chat_id)
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    _authorize_chat(request, chat, workspace)
+    enabled = await expert_main_enabled_for_request(request)
+    try:
+        chat = await reconcile_binding(workspace, chat, enabled=enabled)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Chat not found") from exc
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    code = None
+    if not enabled:
+        code = "expert_main_disabled"
+    elif (
+        patch.expert_id
+        and await run_runtime_state_work(
+            resolve_bound_expert,
+            workspace,
+            patch.expert_id,
+        )
+        is None
+    ):
+        code = "expert_unavailable"
+    if code is None:
+        try:
+            await mgr.compare_and_set_expert_binding(
+                chat_id,
+                patch.expected_revision,
+                patch.expert_id,
+            )
+        except ExpertBindingConflict:
+            code = "expert_binding_changed"
+        except ExpertBindingModeConflict as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="Chat not found",
+            ) from exc
+        enabled = await expert_main_enabled_for_request(request)
+        if not enabled:
+            try:
+                await mgr.release_current_expert_binding(chat_id)
+            except KeyError as exc:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Chat not found",
+                ) from exc
+            code = "expert_main_disabled"
+        chat = await mgr.get_chat(chat_id)
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    view = await binding_view(workspace, chat, enabled=enabled)
+    if code == "expert_main_disabled":
+        view = view.model_copy(update={"reason": code})
+    if code:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": code,
+                "expert_binding": view.model_dump(),
+            },
+        )
+    return view
+
+
 @router.put("/{chat_id}", response_model=ChatSpec)
 async def update_chat(
     chat_id: str,
@@ -1429,7 +1600,10 @@ async def update_chat(
         _authorize_requested_user(request, patch.user_id)
 
     spec = _merge_chat_update(existing, patch)
-    updated = await mgr.update_chat(spec)
+    try:
+        updated = await mgr.update_chat(spec)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Chat not found") from exc
     return updated
 
 
