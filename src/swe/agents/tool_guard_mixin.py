@@ -2578,6 +2578,10 @@ class ToolGuardMixin:
             str(replay_info.get("tool_call_id") or ""),
             include_structured_failure=True,
         )
+        if isinstance(response, list) and len(response) == 1:
+            block = self._tool_result_block_to_dict(response[0])
+            if block and block.get("type") == "text":
+                response = block.get("text")
         if isinstance(response, str):
             try:
                 response = _json.loads(response)

@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from agentscope.message import Msg
 from agentscope.tool import ToolResponse
 
 from swe.agents import react_agent as react_agent_module
@@ -200,6 +201,75 @@ class _FakeGuardAgent(ToolGuardMixin, _BaseAgent):
 
     async def print(self, msg, *args, **kwargs):
         self.printed.append(msg)
+
+
+@pytest.mark.asyncio
+async def test_selected_expert_reads_actual_tool_result_blocks(
+    tmp_path: Path,
+) -> None:
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent._request_context["selected_expert_execution"] = True
+    agent._tool_guard_replay_done = {
+        "tool_name": "start_subagent",
+        "tool_call_id": "start-1",
+        "remaining_queue": [],
+    }
+    response = ToolResponse(
+        content=[
+            {
+                "type": "text",
+                "text": json.dumps({"accepted": True, "run_id": "subagent-1"}),
+            },
+        ],
+    )
+    await agent.memory.add(
+        Msg(
+            "system",
+            [
+                {
+                    "type": "tool_result",
+                    "id": "start-1",
+                    "name": "start_subagent",
+                    "output": response.content,
+                },
+            ],
+            "system",
+        ),
+    )
+
+    reply = await agent._reason_about_replay_done()
+
+    assert reply.get_content_blocks("tool_use")[0]["name"] == "wait_subagent"
+    assert agent._request_context["selected_expert_run_id"] == "subagent-1"
+
+    agent._tool_guard_replay_done = {
+        "tool_name": "wait_subagent",
+        "tool_call_id": "wait-1",
+        "remaining_queue": [],
+    }
+    await agent.memory.add(
+        Msg(
+            "system",
+            [
+                {
+                    "type": "tool_result",
+                    "id": "wait-1",
+                    "name": "wait_subagent",
+                    "output": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {"active_runs": [{"run_id": "subagent-1"}]},
+                            ),
+                        },
+                    ],
+                },
+            ],
+            "system",
+        ),
+    )
+    reply = await agent._reason_about_replay_done()
+    assert reply.get_content_blocks("tool_use")[0]["name"] == "wait_subagent"
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,11 @@
 # 常见报错
 
+## 选择专家后提示无法启动
+
+- **现象**：提示 `The selected expert could not be started`，但这条兜底提示本身不能区分启动拒绝与结果解析失败。
+- **排查**：检查 `start_subagent` 的工具结果及 `src/swe/agents/tool_guard_mixin.py` 的 `_selected_expert_tool_response`。AgentScope 将工具输出保存为文本块列表；其中 JSON 里的 `accepted`、`run_id` 和失败原因才能反映启动结果。等待和查询工具也使用相同格式。
+- **回归入口**：`tests/unit/subagents/test_react_agent_and_guard_integration.py` 的 `test_selected_expert_reads_actual_tool_result_blocks`。
+
 本文档只收录仓库中已经出现过、且有明确入口可追的高频报错。
 
 ## SSE 客户端断连后订阅未释放
