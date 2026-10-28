@@ -15,7 +15,6 @@ _ROUTER_MODULES = (
     (".console", "router"),
     ("..crons.api", "router"),
     (".external_jobs", "router"),
-    ("..crons.migration_api", "router"),
     ("..crons.managed_api", "router"),
     ("..crons.managed_model_api", "router"),
     ("..crons.managed_execution_api", "router"),
