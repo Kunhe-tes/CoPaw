@@ -22,6 +22,7 @@ export interface FileDetailProps {
   error?: string | null;
   editable: boolean;
   onDownload: () => void;
+  onPreview?: () => void;
   onEditStateChange?: (dirty: boolean) => void;
   onSave: (content: string, revision: string) => Promise<FileManagerTextPreview | void>;
   onArchive: () => void;
@@ -63,6 +64,7 @@ const FileDetail = forwardRef<FileDetailHandle, FileDetailProps>(function FileDe
   error,
   editable,
   onDownload,
+  onPreview,
   onEditStateChange,
   onSave,
   onArchive,
@@ -120,6 +122,7 @@ const FileDetail = forwardRef<FileDetailHandle, FileDetailProps>(function FileDe
     if (loading) return <div className={styles.previewState}><Spin /></div>;
     if (error) return <Alert type="error" showIcon message="无法读取文件" description={error} />;
     if (entry.kind !== "file") return <Alert type="warning" showIcon message="受限项目" description="符号链接和特殊文件不可读取或下载。" />;
+    if (!entry.capabilities.read) return <Alert type="warning" showIcon message="无权读取文件" />;
     if (preview?.is_truncated) {
       return <>
         <Alert type="info" showIcon message="仅预览前 1 MB 内容" description="文件超过 1 MB，完整内容请下载后处理，不能编辑。" />
@@ -154,7 +157,10 @@ const FileDetail = forwardRef<FileDetailHandle, FileDetailProps>(function FileDe
       </header>
       <Tabs
         className={styles.detailTabs}
-        defaultActiveKey="preview"
+        defaultActiveKey={preview || binaryPreviewUrl ? "preview" : "details"}
+        onChange={(key) => {
+          if (key === "preview" && !preview && !binaryPreviewUrl && !loading) onPreview?.();
+        }}
         items={[
           { key: "preview", label: "预览", children: visualPreview() },
           { key: "details", label: "详情", children: <Descriptions size="small" column={1} items={[

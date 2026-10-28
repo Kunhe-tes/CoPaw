@@ -833,6 +833,58 @@ describe("FileManager", () => {
     fireEvent.click(screen.getByRole("button", { name: "note.txt" }));
     await screen.findByRole("region", { name: "文件详情" });
     expect(screen.getAllByRole("button", { name: "note.txt" })).toHaveLength(1);
+    expect(screen.getByRole("tab", { name: "详情" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByText("docs/note.txt")).toBeInTheDocument();
+    expect(readFile).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("tab", { name: "预览" }));
+    expect(await screen.findByText("hello")).toBeInTheDocument();
+    expect(readFile).toHaveBeenCalledWith({
+      root: "working",
+      path: "docs/note.txt",
+    });
+  });
+
+  it("ignores a pending preview after selecting another file", async () => {
+    const pending = deferred<Awaited<ReturnType<typeof readFile>>>();
+    const files = ["first.txt", "second.txt"].map((name) => ({
+      name,
+      path: `docs/${name}`,
+      kind: "file" as const,
+      capabilities: rootPage.capabilities,
+    }));
+    listDirectory.mockImplementation(({ path }: { path: string }) =>
+      Promise.resolve(
+        path === "" ? rootPage : { ...rootPage, path: "docs", items: files },
+      ),
+    );
+    readFile
+      .mockReturnValueOnce(pending.promise)
+      .mockReturnValue(new Promise(() => {}));
+    render(<FileManager />);
+    fireEvent.click(screen.getByRole("button", { name: "文件管理器" }));
+    fireEvent.click(await screen.findByRole("button", { name: "first.txt" }));
+    fireEvent.click(screen.getByRole("tab", { name: "预览" }));
+    fireEvent.click(screen.getByRole("button", { name: "second.txt" }));
+    await act(async () => {
+      pending.resolve({
+        path: "docs/first.txt",
+        size_bytes: 3,
+        is_text: true,
+        content: "old content",
+        is_truncated: false,
+        editable: true,
+        revision: "r1",
+      });
+      await pending.promise;
+    });
+    await waitFor(() =>
+      expect(screen.getByText("docs/second.txt")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "预览" }));
+    expect(screen.queryByText("old content")).not.toBeInTheDocument();
   });
 
   it("keeps directory columns compact with an item count and no disclosure arrow", () => {
