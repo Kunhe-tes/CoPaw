@@ -78,7 +78,7 @@ describe("ScheduleEditor", () => {
     );
     const repeatRule = screen.getByLabelText("紧凑排程场景自定义重复规则");
     const time = screen.getByRole("button", {
-      name: "紧凑排程场景自定义执行时刻",
+      name: "紧凑排程场景自定义名单推送时间",
     });
     expect(repeatRule).toHaveValue(mode);
     expect(repeatRule.closest(`.${styles.customScheduleRow}`)).toContainElement(

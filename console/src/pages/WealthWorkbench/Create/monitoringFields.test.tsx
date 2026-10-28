@@ -86,7 +86,7 @@ it("默认60%和每日09:00，编辑后重新挂载可正常回显", () => {
     ),
   ).toHaveAttribute("aria-pressed", "true");
   expect(
-    screen.getByRole("button", { name: "经营场景监控执行时刻" }),
+    screen.getByRole("button", { name: "经营场景监控名单推送时间" }),
   ).toHaveTextContent("09:00");
   fireEvent.change(screen.getByLabelText("经营场景预期完成率"), {
     target: { value: "85" },
@@ -106,7 +106,9 @@ it("默认60%和每日09:00，编辑后重新挂载可正常回显", () => {
   const days = screen.getByRole("group", { name: "经营场景监控日" });
   fireEvent.click(within(days).getByRole("button", { name: "星期二" }));
   fireEvent.click(within(days).getByRole("button", { name: "星期一" }));
-  fireEvent.click(screen.getByRole("button", { name: "经营场景监控执行时刻" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "经营场景监控名单推送时间" }),
+  );
   fireEvent.click(
     within(screen.getByLabelText("小时")).getByRole("button", {
       name: "12",
@@ -127,7 +129,7 @@ it("默认60%和每日09:00，编辑后重新挂载可正常回显", () => {
     ),
   ).toHaveAttribute("aria-pressed", "true");
   expect(
-    screen.getByRole("button", { name: "经营场景监控执行时刻" }),
+    screen.getByRole("button", { name: "经营场景监控名单推送时间" }),
   ).toHaveTextContent("12:30");
   expect(screen.getByRole("button", { name: "星期二" })).toHaveAttribute(
     "aria-pressed",

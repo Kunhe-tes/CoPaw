@@ -924,7 +924,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                         <th scope="col" className={styles.metricsCol}>
                           客户指标
                         </th>
-                        <th className={doneView ? styles.channelCol : undefined}>
+                        <th className={doneView ? styles.channelCol : styles.schemeCol}>
                           {doneView ? "触达方式" : "经营方案"}
                         </th>
                         {showContactStatus && (
@@ -978,7 +978,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                               />
                             </td>
                             <td
-                              className={doneView ? styles.channelCol : undefined}
+                              className={doneView ? styles.channelCol : styles.schemeCol}
                             >
                               {doneView ? (
                                 <>
@@ -1021,7 +1021,9 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                               className={styles.recentContactCol}
                               title={c.time || undefined}
                             >
-                              {c.time || "—"}
+                              <span className={styles.recentContactValue}>
+                                {c.time || "—"}
+                              </span>
                             </td>
                             <td className={styles.executionCol}>
                               {doneView ? (

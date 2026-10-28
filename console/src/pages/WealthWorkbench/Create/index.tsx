@@ -39,6 +39,8 @@ import {
 import type { PlanItem, Scene } from "../types";
 import { defaultMonitoring, type SceneMonitoring } from "../monitoring";
 
+const PUSH_TIME_LABEL = "名单推送时间";
+
 const STEP_DEFS = [
   {
     n: 1,
@@ -274,14 +276,14 @@ export function ScheduleEditor({
       </div>
       {(type === "daily" || type === "weekly") && (
         <div className={styles.scheduleField}>
-          <span>执行时刻</span>
+          <span>{PUSH_TIME_LABEL}</span>
           <TimeField
             hour={schedule.hour ?? 9}
             minute={schedule.minute ?? 0}
             onChange={(hour, minute) =>
               updateSchedule(item.id, { hour, minute })
             }
-            ariaLabel={`${sceneName}执行时刻`}
+            ariaLabel={`${sceneName}${PUSH_TIME_LABEL}`}
           />
         </div>
       )}
@@ -341,14 +343,14 @@ export function ScheduleEditor({
               customConfig?.mode === "monthly" ||
               customConfig?.mode === "yearly") && (
               <div className={styles.scheduleField}>
-                <span>执行时刻</span>
+                <span>{PUSH_TIME_LABEL}</span>
                 <TimeField
                   hour={customConfig.hour}
                   minute={customConfig.minute}
                   onChange={(hour, minute) =>
                     updateCustomSchedule({ ...customConfig, hour, minute })
                   }
-                  ariaLabel={`${sceneName}自定义执行时刻`}
+                  ariaLabel={`${sceneName}自定义${PUSH_TIME_LABEL}`}
                 />
               </div>
             )}
@@ -645,11 +647,11 @@ export function MonitoringFields({
           ))}
         </div>
         <div className={styles.scheduleField}>
-          <span>执行时刻</span>
+          <span>{PUSH_TIME_LABEL}</span>
           <TimeField
             hour={schedule.hour}
             minute={schedule.minute}
-            ariaLabel={`${sceneName}监控执行时刻`}
+            ariaLabel={`${sceneName}监控${PUSH_TIME_LABEL}`}
             onChange={(hour, minute) =>
               update({ schedule: { ...schedule, hour, minute } })
             }

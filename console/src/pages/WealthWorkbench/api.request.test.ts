@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as api from "./api";
+import {
+  fetchDistributeBranches,
+  fetchDistributeTargets,
+} from "./distributeTargets";
 import { useIframeStore } from "../../stores/iframeStore";
 
 const auth = vi.hoisted(() => ({
@@ -109,4 +113,21 @@ it("规划 200 HTML 响应仍按格式错误处理", async () => {
     }),
   );
   await expect(api.fetchPlanList(true)).rejects.toThrow("规划接口响应格式错误");
+});
+
+it.each([
+  ["/api/zt/wealth/wmadm/branchTreeInfo", fetchDistributeBranches],
+  ["/api/zt/wealth/wmadm/getUserPostionByBrn", fetchDistributeTargets],
+] as const)("分发 %s 通过统一 request 拼接路径和鉴权", async (path, call) => {
+  useIframeStore
+    .getState()
+    .setContext({ sysId: "retail", orgCode: "100001", orgLvl: "70" });
+  vi.mocked(fetch).mockResolvedValueOnce(
+    Response.json({ code: "200", data: [] }),
+  );
+  await expect(call()).resolves.toEqual([]);
+  const [url, options] = vi.mocked(fetch).mock.calls[0];
+  expect(String(url)).toBe(`https://gateway.example${path}`);
+  expect(new Headers(options?.headers).get("X-Source-Id")).toBe("RCZT");
+  expect(options?.signal).toBeInstanceOf(AbortSignal);
 });

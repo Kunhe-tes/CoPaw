@@ -309,7 +309,7 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 
 - 经营视角“经营机会”必须显式保留 260px，不能在 fixed 表格中依赖 `width:auto` 或 `min-width` 分配剩余空间；姓名 110px、方案 135px，表格最小宽度按其余固定列合计 1029px（含边框）加指标区宽度计算。指标区按断点为 520 / 356 / 190px，空间不足时表格内部滚动，执行列继续固定在右侧。只调整经营视角，不覆盖客户视角、待触达和已完成的列宽。
 
-- 今日任务（经营/客户视角）、待触达及已完成清单在执行/完成时间列之前展示“最近接触时间”，直接使用 `name-list.strongContactTime` 映射的 `Customer.time`，空值显示“—”，悬停可读原值。新列固定 168px，标准日期时间以 12px 数字展示；各视角表格最小宽度同步增加 168px，保留指标区宽度及执行列固定能力，窄屏仅表格内部横向滚动。空态 `colSpan` 必须包含新列。已完成页原“完成时间”也沿用 `Customer.time`，暂保留原行为；将来若接口提供独立完成时间，应分别映射。回归入口：`Tasks/groupTables.test.tsx`。
+- 今日任务（经营/客户视角）、待触达及已完成清单在执行/完成时间列之前展示“最近接触时间”，直接使用 `name-list.strongContactTime` 映射的 `Customer.time`，空值显示“—”，悬停可读原值。最近接触时间列宽 128px，标题保持单行；内容使用 12px 数字，日期正常展示，完整日期时间超宽时省略，单元格 title 保留原值。`.recentContactValue` 限制内容宽度，避免自动表格布局被完整时间撑宽。窄屏仅表格内部横向滚动。空态 `colSpan` 必须包含新列。已完成页原“完成时间”也沿用 `Customer.time`，暂保留原行为；将来若接口提供独立完成时间，应分别映射。回归入口：`Tasks/groupTables.test.tsx`。
 
 - 今日任务客户视角、待触达和已完成的“经营场景”列提供单选筛选，选项从当前模块原始名单的 `skillNames` 去重生成，按展示名称精确匹配任一场景；不使用客户的首个 `skillId` 代表全部场景。同名场景合并为一个筛选项。选中标签单行显示，超长省略；悬停或键盘聚焦通过 Tooltip 查看完整名称，清除按钮不收缩。支持“全部场景”和清除，与搜索、重点标签、接触状态筛选叠加；仅过滤表格，不重算顶部后端汇总。经营视角不应用该列筛选。入口为 `Tasks/SceneFilter.tsx` 和 `Tasks/index.tsx`，回归入口为 `Tasks/groupTables.test.tsx`。
 
@@ -326,20 +326,20 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 - `allFields` 提供中文名称；经营视角按技能的 `fields` 顺序与客户实际字段取交集，客户视角按全局字段顺序展示客户实际字段。不为其他客户的字段生成占位。
 - 只有今日任务经营视角使用 `groupField`。组合值完全一致才合并，空数组不分组；把客户姓名配置为分组字段可能导致每人一组。每个分类对应独立表格，分类标题、人数和折叠按钮放在表格上方；多个字段以 ` / ` 分隔。
 - `touched=1` 标记客户已触达；客户字段缺失不展示、返回空值显示“未提供”、数值 `0` 正常展示。
-- 今日任务的经营/客户双视角在经营方案与执行之间展示“接触状态”：保留接口原始 `Customer.touched`，`0` 显示灰色“未接触”，`1` 显示绿色“已接触”，其余或缺失显示灰色 `--`。顶部汇总使用后端独立计数字段，不按明细 `touched` 或 `done` 计算；不要由 `done` 布尔值反推接触状态 `0`。今日任务表格使用固定 135px 状态列，最小宽度同步增加，指标空间和执行列保持可用；回归入口为 `api.test.ts`、`Tasks/groupTables.test.tsx`。
-- 接触状态表头通过 `Tasks/ContactStatusFilter.tsx` 单选筛选“全部 / 未接触 / 已接触 / --”，复用重点标签浮层和已选条件的样式，支持一键清除、方向键、Escape、外部点击及滚动/缩放关闭。选项人数基于其他筛选条件下的名单（排除接触状态自身），筛选与经营任务/重点标签叠加，表格和分类人数同步更新，顶部四项后端汇总保持不变。状态列为 135px 以容纳筛选图标，表格最小宽度同步增加。回归入口增加 `Tasks/ContactStatusFilter.test.tsx`。
+- 今日任务的经营/客户双视角在经营方案与执行之间展示“接触状态”：保留接口原始 `Customer.touched`，`0` 显示灰色“未接触”，`1` 显示绿色“已接触”，其余或缺失显示灰色 `--`。顶部汇总使用后端独立计数字段，不按明细 `touched` 或 `done` 计算；不要由 `done` 布尔值反推接触状态 `0`。今日任务表格的状态列宽 110px，标题及筛选图标保持单行，指标空间和执行列保持可用；回归入口为 `api.test.ts`、`Tasks/groupTables.test.tsx`。
+- 接触状态表头通过 `Tasks/ContactStatusFilter.tsx` 单选筛选“全部 / 未接触 / 已接触 / --”，复用重点标签浮层和已选条件的样式，支持一键清除、方向键、Escape、外部点击及滚动/缩放关闭。选项人数基于其他筛选条件下的名单（排除接触状态自身），筛选与经营任务/重点标签叠加，表格和分类人数同步更新，顶部四项后端汇总保持不变。状态列需容纳筛选图标，长筛选值不得反向撑宽表格。回归入口增加 `Tasks/ContactStatusFilter.test.tsx`。
 - 指标交互入口为 `components/CustomerMetrics.tsx`；分组入口为 `Tasks/customerGroups.ts`。大量指标先查展开状态；长字段先查悬停或聚焦提示，不应依靠增加全部动态表头排查。
 - 工作任务树的技能名称单行省略；统一 Tooltip 在悬停或键盘聚焦时展示完整技能名称与来源规划，移除按钮原生 `title`，避免重复提示。
 - 视角切换时统计数量先增后减，先查 `Tasks/index.tsx` 是否把旧经营名单直接用于客户视角：经营名单按技能与客户组合去重，客户名单由接口聚合，计数口径不同。名单查询在绘制前进入加载状态；加载时保留缓存，但不渲染旧名单，四个汇总及总记录数显示 `--`。使用延迟接口响应验证首个客户视角绘制帧，不能只检查请求完成后的数量。
-- 已完成列表不重复展示“经营任务”，技能名称统一在“经营场景”展示。指标越界覆盖触达方式或完成时间时，检查 `.sceneTable.completedTable` 的固定列宽与最小表宽：客户姓名 150px、重点标签 135px、经营场景 180px、触达方式 150px、完成时间 190px、经营结果 160px，固定列合计 965px，表格最小宽度 1485px（视口不超过 1600px 时为 1321px），为指标区保留至少 520px（窄屏两列指标为 356px）。用六项以上指标并展开验证，不能只用单项指标验证列宽。
-- 客户视角、待触达和已完成表格的重点标签溢出时，检查 `index.module.less` 的 `.customerTable.metricsTable.sceneTable`：标签列固定 135px，多标签内容限定在单元格内换行。经营场景列 160px，由 `components/CustomerScenes.tsx` 每行展示一个背景项，超宽省略并支持悬停或键盘聚焦查看全名；默认两项，更多通过“展开剩余 X 项”查看。经营机会列 240px，预览最多三行并通过悬停或键盘聚焦查看完整内容。今日任务客户视角的经营方案列固定 135px。新增或加宽列时同步调整表格最小宽度，保留其他列空间并使用表格内部滚动。
+- 已完成列表不重复展示“经营任务”，技能名称统一在“经营场景”展示。客户清单使用自动表格布局，常规最小宽度 1000px、今日客户视角 1100px、今日经营视角 800px；不再通过固定指标列及大量屏宽断点抬高最小表宽。长姓名允许换行，最近接触时间保留单行与完整值 title。今日任务和待触达的时间列与执行列一起吸附右侧，滚动时不得互相遮挡。经营方案列通过 `.schemeCol` 的 `width: 1%` 配合 `white-space: nowrap` 收缩到“查看经营方案”及单元格留白所需的宽度，不分摊多余空间。
+- 客户指标通过 `components/CustomerMetrics.tsx` 展示，每项固定 125px，横向间距 10px；指标列按表格宽度的 26% 优先分配（空间不足时由自动表格布局调整），内容区最小 125px、最大 395px，Grid 使用 `repeat(auto-fit, 125px)` 按列内可用宽度自动排 1–3 项。内容区达到 260px 排两项，达到 395px 排三项，不按视口固定切换数量。经营场景通过 `components/CustomerScenes.tsx` 每行展示一个固定 160px 宽的背景项，短名称也保持相同宽度，默认两项。两者超宽均省略，支持悬停或键盘聚焦查看全文、展开更多。样式入口为 `index.module.less` 的 `.customerMetrics`、`.metricGrid`、`.metricItem`、`.customerScenes`；指标区的 `contain: inline-size` 避免长内容反向撑宽表格（Chromium 105+，符合 108 基线）。验证至少包含六项以上指标展开、长场景筛选、1280/1440/1920px 嵌入和普通视图；优先确保 1920px 下完整展示，较窄容器允许表内滚动，不得产生页面横向溢出。
 - 今日任务进入页面、切回经营视角或点击经营视角的刷新图标时，经 `store.ts` 的 `refreshTodayCustomers` 先查询最新规划，再用新规划查询当前视角名单。页内切到客户视角只调用 `loadTodayCustomers` 查询聚合名单，不重复查询规划。刷新期间禁用重复刷新和视角切换；已失效的选中任务回退到首个任务。不自动轮询，发布尚未完成时需完成后手动刷新。
 - 浏览器标签页从隐藏切回可见时，工作台入口的 `useVisibilityRefresh` 调用 `refreshTaskLists`，每次直接后台更新今日任务（保持最近查询视角）、待触达和已完成名单及侧栏数量，不再先查询或比较客户数量；人数相同但客户或明细变化时也会同步。刷新期间保留当前名单和统计，不展示列表加载占位。仅客户经理且初始化/规划加载完成后生效，刷新期间忽略重复切回请求，已有名单请求进行中时不重复发起。iframe 内同样适用；宿主内部业务页签仅通过 CSS 隐藏 iframe 时不会触发该事件。回归入口：`useVisibilityRefresh.test.tsx`、`store.test.ts` 和 `Tasks/loading.test.tsx`。
 
 ### 财富规划分发目标
 
-- 前端入口：`console/src/pages/WealthWorkbench/distributeTargets.ts`，使用原生 fetch 直接 POST 同源网关路径 `/zt/wealth/wmadm/getUserPostionByBrn`（人员，`USER_POSITION_PATH`）与 `/zt/wealth/wmadm/branchTreeInfo`（支行，`BRANCH_TREE_PATH`），不再调用 `/api/user-info/*/by-branch` 或统一 request。仅显式设置 JSON Content-Type，沿用默认同源 Cookie；60 秒超时取消请求，人员失败返回空列表，支行失败返回 null 以保留重试。
-- 部署前端 Nginx 需将上述两个同源路径转发到对应环境的网关，并按原后端 `SWE_USER_POSITION_HEADER_KEY/VALUE` 配置附加网关凭证，保留请求 Cookie；凭证不能放进前端包。原 Python 代理保留兼容。
+- 前端入口：`console/src/pages/WealthWorkbench/distributeTargets.ts`，使用统一 request POST `/zt/wealth/wmadm/getUserPostionByBrn`（人员，`USER_POSITION_PATH`）与 `/zt/wealth/wmadm/branchTreeInfo`（支行，`BRANCH_TREE_PATH`），最终路径为 `{API base}/api/zt/wealth/wmadm/*`，不再调用 `/api/user-info/*/by-branch`。复用统一鉴权、上下文请求头和 401 刷新逻辑；60 秒超时取消请求，人员失败返回空列表，支行失败返回 null 以保留重试。
+- 部署侧需将上述两个 `{API base}/api/zt/wealth/wmadm/*` 路径转发到对应环境的网关，并按原后端 `SWE_USER_POSITION_HEADER_KEY/VALUE` 配置附加网关凭证，保留请求 Cookie；凭证不能放进前端包。原 Python 代理保留兼容。
 - 地址配置：`src/swe/config/envs/dev.json` 和 `prd.json` 中的 `SWE_USER_POSITION_API_URL`，分别使用 `wmcomsrvgatewayxc.paasst.cmbchina.cn` 和 `platform-gateway.paasoa.cmbchina.cn`；由 `SWE_ENV` 选择，环境变量可覆盖默认值；这些配置仍用于 Python 兼容代理，前端直连需在部署 Nginx 中同步对应环境的目标地址。
 - 入参来自 `iframeStore`：`bbkOrgId ← bbk (vbbk)`、`mmOrgCode ← orgCode (vorgcode)`、`mmOrgLvl ← Number(orgLvl) (vorglvl)`。缺少机构参数时不会查询。
 - 两个新接口统一返回 `{code,message,data,success}`，仅校验 `code="200"`，不依赖 `success`；`data` 是非空数组时读取机构或人员列表，空数组或非数组按无数据处理。业务码非 `200` 按查询失败处理，支行保留重试。旧 Python 代理的 `code=success` 及裸机构数组不适用于新接口；目标 ID 使用 `sapID`（保留前导零），姓名为 `userName`，机构名称优先 `subBranchName`，其次 `branchName`。按上游返回名单展示，不再查询本地租户或按分行号二次过滤，也不额外过滤岗位。
@@ -392,7 +392,7 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 
 - 规划请求在 `console/src/pages/WealthWorkbench/api.ts` 使用统一 `request("/zt/wealth/plans")`，由全局配置拼接为 `{API base}/api/zt/wealth/plans`；规划业务码仍在适配层解包。网关负责转 Java；创建后的任务编排、资源处理与状态回写由 Java 负责。
 - 列表通过 Query 传 sapId/role/bbkId；创建/更新通过 camelCase JSON 传身份和业务数据；删除通过 DELETE Body 传 sapId。响应解包 code/message/data，HTTP 200 的非 200 业务码也上抛。
-- 场景、名单、统计同样通过统一 request 拼接 API base 和 /api 前缀；机构人员、签名保持各自已有同源路径；不回退 Python 工作台 handler。网关必须优先匹配规划接口并透传 DELETE Body，避免 SPA 返回 HTML。具体评估与配置见 [Java 网关接入](../../docs/api/wealth-plans-java-gateway.md)，回归入口为 `planGateway.test.ts`、`store.test.ts`。
+- 场景、名单、统计、机构人员和支行树同样通过统一 request 拼接 API base 和 /api 前缀；仅 `/expert/get-sign` 按接入约定保留原生 fetch 与原路径；不回退 Python 工作台 handler。网关必须优先匹配规划接口并透传 DELETE Body，避免 SPA 返回 HTML。具体评估与配置见 [Java 网关接入](../../docs/api/wealth-plans-java-gateway.md)，回归入口为 `planGateway.test.ts`、`store.test.ts`。
 
 ### 财富工作台多渠道 iframe 消息入口
 

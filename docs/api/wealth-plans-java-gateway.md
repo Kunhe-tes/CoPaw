@@ -4,7 +4,7 @@
 
 ## 评估结论
 
-方案可行，前端改造可限定在工作台数据适配层。规划、场景、名单和统计使用统一 request 接入 Java/智拓网关；机构人员和签名仍保持各自已有传输。页面布局、权限映射、草稿、统计缓存和刷新策略继续沿用。
+方案可行，前端改造可限定在工作台数据适配层。规划、场景、名单和统计使用统一 request 接入 Java/智拓网关；机构人员和支行树也通过统一 request，签名仍保持原生 fetch。页面布局、权限映射、草稿、统计缓存和刷新策略继续沿用。
 
 按用户确认，规划创建后的定时任务、分发、资源处理和状态回写由新服务完整负责；前端不接入 market 分发腿，也不继续调用 Python 发布编排。原方案中 market 等 TODO 不作为本次前端切换的前置项。
 
@@ -55,15 +55,15 @@ Java 入参/返回使用驼峰：
 
 ## 工作台其他请求路由
 
-场景、统计和名单通过统一 request 调用下列路径（配置 API base 时带对应前缀），机构和签名接口保持现有调用方式：
+场景、统计、名单、机构人员和支行树通过统一 request 调用下列路径（配置 API base 时带对应前缀）；仅 `/expert/get-sign` 按接入约定保留原生 fetch，不改变原有路径与鉴权方式：
 
 | 方法 | 浏览器路径 | 目标能力 |
 |---|---|---|
 | POST | `/api/agent/workspace/skill-config/list` | 场景池，bbkId/category |
 | POST | `/api/agent/workspace/skill-stats` | 规划统计，planIds |
 | POST | `/api/agent/workspace/name-list` | 名单/汇总，skillIds/sapId/touched 等 |
-| POST | `/xcapi-auth/wmadm/services/v1/wmadm/combox/BranchTreeInfoService` | 机构树 |
-| POST | `/xcapi-auth/wmadm/services/v1/wmutadm/getUserPostionByBrn` | 分发人员 |
+| POST | `/api/zt/wealth/wmadm/branchTreeInfo` | 机构树 |
+| POST | `/api/zt/wealth/wmadm/getUserPostionByBrn` | 分发人员 |
 | POST | `/expert/get-sign` | 客户操作签名 |
 
 不向 Python `/api/wealth/*` 或 `/api/user-info/*` 回退。旧 Python handler 保留供已有调用方兼容，本次没有删除共享后端代码或切换全局 API base。
