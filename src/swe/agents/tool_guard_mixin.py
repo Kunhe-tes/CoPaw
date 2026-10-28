@@ -417,7 +417,7 @@ class ToolGuardMixin:
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
             ):
-                if self._tool_has_specific_timeout(tool_name) or (
+                if (
                     tool_name == "wait_selected_expert"
                     and getattr(
                         self,
@@ -426,6 +426,13 @@ class ToolGuardMixin:
                     )
                     and self._request_context.get("selected_expert_execution")
                 ):
+                    # This JSON is also the trusted replay control payload.
+                    # Display compaction must not truncate it before parsing.
+                    return await self._run_plan_interaction_tool_call(
+                        tool_call,
+                        tool_name,
+                    )
+                if self._tool_has_specific_timeout(tool_name):
                     return await super()._acting(tool_call)  # type: ignore[misc]
 
                 started_at = time.monotonic()

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
 
 from swe.agents.tool_output_budget_mixin import ToolOutputBudgetMixin
+from swe.agents.tool_guard_mixin import ToolGuardMixin
 from swe.app.source_system_config.models import (
     EffectiveSourceSystemConfig,
     SourceSystemConfig,
@@ -114,6 +116,77 @@ def _source_config(raw_config: dict) -> EffectiveSourceSystemConfig:
         raw_config=source_config,
         version=1,
     )
+
+
+class _SelectedExpertAgent(ToolGuardMixin, _AgentScopeLikeAgent):
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._request_context = {
+            "selected_expert_execution": True,
+            "selected_expert_run_id": "expert-run-1",
+        }
+        self._tool_guard_forced_replay_active = True
+        self.memory.content = self.memory.messages
+
+    def _resolve_mcp_server(self, _tool_name):
+        return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recent_max_bytes", [1000, 50000])
+@pytest.mark.parametrize("status", ["completed", "partial"])
+async def test_selected_expert_terminal_payload_survives_output_budget(
+    tmp_path,
+    recent_max_bytes,
+    status,
+):
+    payload = {
+        "run_id": "expert-run-1",
+        "status": status,
+        "result": {"summary": "expert result " * 5000},
+    }
+    agent = _SelectedExpertAgent(
+        config=ToolResultCompactConfig(recent_max_bytes=recent_max_bytes),
+        workspace_dir=tmp_path,
+        chunks=[_chunk(json.dumps(payload))],
+    )
+    call = {"id": "wait-1", "name": "wait_selected_expert", "input": {}}
+    await agent._run_tool_call_with_hard_timeout_impl(
+        call,
+        call["name"],
+        call["input"],
+    )
+    replay = {"tool_call_id": call["id"], "tool_name": call["name"]}
+    assert agent._selected_expert_tool_response(replay) == payload
+    assert await agent._selected_expert_follow_up(replay) is None
+    assert agent._request_context["selected_expert_execution"] is False
+    assert not agent._request_context.get("selected_expert_execution_error")
+    output = agent.printed[-1][0].content[0]["output"][0]["text"]
+    assert json.loads(output) == payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("forced_replay", "selected_execution"),
+    [(False, True), (True, False), (False, False)],
+)
+async def test_unforced_selected_expert_wait_keeps_output_budget(
+    tmp_path,
+    forced_replay,
+    selected_execution,
+):
+    agent = _SelectedExpertAgent(
+        config=ToolResultCompactConfig(recent_max_bytes=1000),
+        workspace_dir=tmp_path,
+        chunks=[_chunk("x" * 60000)],
+    )
+    agent._tool_guard_forced_replay_active = forced_replay
+    agent._request_context["selected_expert_execution"] = selected_execution
+    call = {"id": "wait-1", "name": "wait_selected_expert", "input": {}}
+    await agent._run_tool_call_with_hard_timeout_impl(call, call["name"], {})
+    output = agent.memory.messages[-1].content[0]["output"][0]["text"]
+    assert len(output.encode()) <= 1000
+    assert "<<<TRUNCATED>>>" in output
 
 
 @pytest.mark.asyncio

@@ -1246,8 +1246,9 @@ async def test_approved_pre_tool_hook_ask_replay_executes_once(
 @pytest.mark.asyncio
 async def test_selected_expert_hook_approval_resumes_only_original_wait(
     tmp_path,
-    monkeypatch,
 ) -> None:
+    from agentscope.tool import Toolkit
+
     from swe.agents.tools.subagent_background import (
         create_background_subagent_tools,
     )
@@ -1348,25 +1349,12 @@ async def test_selected_expert_hook_approval_resumes_only_original_wait(
     )
     executed = []
 
-    async def execute_tool(self, call):
-        executed.append(call["name"])
-        response = await tools[call["name"]](**call["input"])
-        await self.memory.add(
-            Msg(
-                "system",
-                [
-                    {
-                        "type": "tool_result",
-                        "id": call["id"],
-                        "name": call["name"],
-                        "output": response.content,
-                    },
-                ],
-                "system",
-            ),
-        )
+    async def wait_selected_expert():
+        executed.append("wait_selected_expert")
+        return await tools["wait_selected_expert"]()
 
-    monkeypatch.setattr(_BaseAgent, "_acting", execute_tool)
+    resumed.toolkit = Toolkit()
+    resumed.toolkit.register_tool_function(wait_selected_expert)
     resumed._emit_tool_hook = AsyncMock(return_value=hook_result)
     resumed._acting_with_approval = AsyncMock()
     message = await resumed._reasoning()
