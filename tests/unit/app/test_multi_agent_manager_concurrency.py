@@ -1330,6 +1330,7 @@ async def test_workspace_stop_cleans_starting_services_before_started(
 @pytest.mark.asyncio
 async def test_workspace_start_cancellation_stops_partially_started_services(
     tmp_path,
+    monkeypatch,
 ) -> None:
     workspace = Workspace("default", tmp_path)
     start_entered = asyncio.Event()
@@ -1354,10 +1355,12 @@ async def test_workspace_start_cancellation_stops_partially_started_services(
             )
 
     workspace._service_manager = FakeServiceManager()
-    workspace._config = object()
+    monkeypatch.setattr(
+        workspace_module, "load_agent_config", lambda *_a, **_k: object(),
+    )
 
     start_task = asyncio.create_task(workspace.start())
-    await start_entered.wait()
+    await asyncio.wait_for(start_entered.wait(), timeout=2)
     start_task.cancel()
     cancel_may_finish.set()
 
@@ -1372,6 +1375,7 @@ async def test_workspace_start_cancellation_stops_partially_started_services(
 @pytest.mark.asyncio
 async def test_workspace_start_cancellation_preserves_reused_services(
     tmp_path,
+    monkeypatch,
 ) -> None:
     workspace = Workspace("default", tmp_path)
     start_entered = asyncio.Event()
@@ -1396,10 +1400,12 @@ async def test_workspace_start_cancellation_preserves_reused_services(
             )
 
     workspace._service_manager = FakeServiceManager()
-    workspace._config = object()
+    monkeypatch.setattr(
+        workspace_module, "load_agent_config", lambda *_a, **_k: object(),
+    )
 
     start_task = asyncio.create_task(workspace.start())
-    await start_entered.wait()
+    await asyncio.wait_for(start_entered.wait(), timeout=2)
     start_task.cancel()
     cancel_may_finish.set()
 

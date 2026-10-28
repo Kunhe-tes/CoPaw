@@ -84,14 +84,8 @@ def test_app_cmd_disables_uvicorn_access_log(monkeypatch):
     monkeypatch.setattr(app_cmd_module, "write_last_api", Mock())
     monkeypatch.setattr(app_cmd_module, "setup_logger", Mock())
 
-    app_cmd(
-        host="127.0.0.1",
-        port=9123,
-        reload=False,
-        workers=None,
-        log_level="info",
-        hide_access_paths=(),
-    )
+    result = CliRunner().invoke(app_cmd, ["--host", "127.0.0.1", "--port", "9123"])
 
+    assert result.exit_code == 0
     assert uvicorn_run.call_args.kwargs["access_log"] is False
     assert app_cmd_module.os.environ["SWE_CONSOLE_OUTPUT_ENABLED"] == "false"

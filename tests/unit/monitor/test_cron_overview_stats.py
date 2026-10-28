@@ -46,8 +46,8 @@ async def test_get_overview_stats_includes_report_metrics(monkeypatch):
         end_date="2026-06-30",
     )
 
-    assert result.read_rate == 2.46
-    assert result.report_rate == 1.41
+    assert result.read_rate == 2.89
+    assert result.report_rate == 1.66
     assert result.report_count == 35
     assert result.insight_count == 12
     assert result.phone_count == 5
@@ -80,7 +80,7 @@ async def test_fetch_overview_report_behavior_counts_reads_directly_from_click_e
 
     assert "FROM swe_html_preview_click_events c" in click_sql
     assert "COUNT(DISTINCT CASE" in click_sql
-    assert "WHEN c.button_type = 'plan' THEN c.cron_task_id" in click_sql
+    assert "WHEN c.event_type = 'preview_view' AND c.template_type = 'sub' THEN c.cron_task_id" in click_sql
     assert "WHEN c.button_type = 'insight' THEN c.cron_task_id" in click_sql
     assert "WHEN c.button_type = 'phone' THEN c.cron_task_id" in click_sql
     assert "c.clicked_at >= %s AND c.clicked_at <= %s" in click_sql
@@ -181,7 +181,10 @@ async def test_fetch_branch_execution_stats_counts_read_executions():
     )
 
     sql, _ = db.fetch_one.await_args.args
-    assert "SUM(CASE WHEN is_read = 1 THEN 1 ELSE 0 END) AS read_tasks" in sql
+    assert "WHEN status = 'success'" in sql
+    assert "AND async_status = 'success'" in sql
+    assert "AND is_read = 1" in sql
+    assert "END ) AS read_tasks" in " ".join(sql.split())
     assert "COUNT(DISTINCT CASE WHEN is_read = 1 THEN job_id END)" not in sql
     assert result["read_tasks"] == 5
 

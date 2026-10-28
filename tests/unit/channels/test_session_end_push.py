@@ -136,7 +136,7 @@ async def test_ruice_chat_failure_falls_back_to_session_id():
 
 @pytest.mark.asyncio
 async def test_ruice_without_any_link_is_skipped():
-    """ruice + no prefix + no file link -> no push."""
+    """历史测试名：ruice 无链接时仍发送完成通知。"""
     zhaohu_cfg = _build_zhaohu_cfg(prefix="")
     channel, zhaohu_ch = _build_channel(zhaohu_cfg)
     await channel._try_session_end_push(
@@ -144,7 +144,9 @@ async def test_ruice_without_any_link_is_skipped():
         "user-1",
         reply_text="done",
     )
-    zhaohu_ch.send.assert_not_called()
+    zhaohu_ch.send.assert_awaited_once_with(
+        "user-1", "任务已完成请及时查看", None,
+    )
 
 
 @pytest.mark.asyncio

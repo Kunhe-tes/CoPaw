@@ -16,11 +16,12 @@ async function settle() {
 function setup(
   onNearStart = vi.fn().mockResolvedValue(true),
   options: Partial<Parameters<typeof useHistoryPreload>[0]> = {},
+  scrollHeight = 1000,
 ) {
   const element = document.createElement("div");
   Object.defineProperties(element, {
     clientHeight: { configurable: true, value: 400 },
-    scrollHeight: { configurable: true, value: 1000 },
+    scrollHeight: { configurable: true, value: scrollHeight },
     scrollTop: { configurable: true, value: 0, writable: true },
   });
   const hook = renderHook(
@@ -64,11 +65,24 @@ describe("useHistoryPreload", () => {
     vi.unstubAllGlobals();
   });
 
-  it("does not load on mount even when the list is too short to scroll", async () => {
-    const { element, onNearStart } = setup();
-    Object.defineProperty(element, "scrollHeight", { value: 300 });
+  it("does not load a scrollable list on mount", async () => {
+    const { onNearStart } = setup();
     await settle();
     expect(onNearStart).not.toHaveBeenCalled();
+  });
+
+  it("automatically checks history when the list is too short to scroll", async () => {
+    const { onNearStart } = setup(undefined, {}, 300);
+    await act(async () => {});
+    expect(onNearStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops initial filling as soon as the content becomes scrollable", async () => {
+    const { element, onNearStart } = setup(undefined, {}, 300);
+    await act(async () => {});
+    Object.defineProperty(element, "scrollHeight", { value: 500 });
+    await settle();
+    expect(onNearStart).toHaveBeenCalledTimes(1);
   });
 
   it("continues at the top after layout settles without requiring a downward scroll", async () => {

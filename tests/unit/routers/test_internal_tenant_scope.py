@@ -926,7 +926,7 @@ def test_internal_batch_initialize_tenants(monkeypatch) -> None:
     assert data["success_count"] == 0
     assert data["fail_count"] == 0
     assert "INSERT INTO swe_async_tasks" in db.executed[0][0]
-    assert "INSERT INTO swe_async_task_items" in db.executed_many[0][0]
+    assert "INSERT IGNORE INTO swe_async_task_items" in db.executed_many[0][0]
     assert [row[1] for row in db.executed_many[0][1]] == ["111", "222"]
     pool.ensure_bootstrap.assert_not_awaited()
 

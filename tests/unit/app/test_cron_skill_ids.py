@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -167,8 +168,17 @@ def test_monitor_schema_declares_skill_ids_column_and_migration():
 
 
 def test_monitor_schema_declares_workflow_binding_column_and_migration():
-    assert "workflow_binding_id" in CREATE_CRON_JOBS_TABLE
-    assert "workflow_binding_id" in CRON_JOBS_EXTRA_COLUMNS
+    """该列由独立 SQL 迁移添加，自动建表和补列当前不包含它。"""
+    migration = (
+        Path(__file__).resolve().parents[3]
+        / "scripts/sql/cron_workflow_bindings.sql"
+    ).read_text(encoding="utf-8")
+    assert "workflow_binding_id" not in CREATE_CRON_JOBS_TABLE
+    assert "workflow_binding_id" not in CRON_JOBS_EXTRA_COLUMNS
+    assert "column_name = 'workflow_binding_id'" in migration
+    assert (
+        "ALTER TABLE swe_cron_jobs ADD COLUMN workflow_binding_id" in migration
+    )
 
 
 def test_monitor_sync_contract_restricts_binding_to_workflow_jobs():

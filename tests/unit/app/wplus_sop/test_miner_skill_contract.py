@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Cross-check the bundled W+ Miner contract against the platform protocol."""
 
 from __future__ import annotations
@@ -6,11 +7,17 @@ import json
 from pathlib import Path
 import re
 
+import pytest
+
 from swe.app.wplus_sop.models import MemoryWriteBatchResultPayload, TrialPlanPayload
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 MINER_ROOT = REPO_ROOT / "skills" / "wplus-sop-miner"
+pytestmark = pytest.mark.skipif(
+    not MINER_ROOT.exists(),
+    reason="wplus-sop-miner skill bundle is not installed",
+)
 
 
 def test_example_result_templates_include_a_local_generic_fallback() -> None:

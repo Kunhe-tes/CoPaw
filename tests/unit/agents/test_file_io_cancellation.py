@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import suppress
 from pathlib import Path
 import threading
@@ -125,6 +126,11 @@ async def test_write_file_rejects_direct_workspace_skill_write(
     monkeypatch,
 ) -> None:
     workspace_dir = _workspace(tmp_path)
+    (workspace_dir / "skills" / "uploaded").mkdir(parents=True)
+    (workspace_dir / "skill.json").write_text(
+        json.dumps({"skills": {"uploaded": {"source": "market"}}}),
+        encoding="utf-8",
+    )
 
     with monkeypatch.context() as m:
         m.setattr("swe.security.tenant_path_boundary.WORKING_DIR", tmp_path)

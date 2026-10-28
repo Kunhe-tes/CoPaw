@@ -2,6 +2,7 @@
 """Regression tests for ReMe lazy loading and optional chromadb handling."""
 
 import importlib
+from pathlib import Path
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -37,11 +38,13 @@ def test_importing_workspace_runtime_does_not_import_reme():
             "-c",
             (
                 "import sys; "
+                "sys.path.insert(0, sys.argv[1]); "
                 "import swe.app.workspace.workspace; "
                 "raise SystemExit("
                 "0 if not any(name.startswith('reme') for name in sys.modules)"
                 " else 1)"
             ),
+            str(Path(__file__).resolve().parents[3] / "fakes"),
         ],
         capture_output=True,
         text=True,
@@ -51,25 +54,26 @@ def test_importing_workspace_runtime_does_not_import_reme():
     assert result.returncode == 0, result.stderr or result.stdout
 
 
-def test_importing_reme_light_memory_manager_does_not_import_reme(monkeypatch):
+def test_importing_reme_light_memory_manager_does_not_import_reme():
     """The memory manager module should import without touching reme."""
-    module_name = "swe.agents.memory.reme_light_memory_manager"
-
-    for name in [module_name, "swe.agents.memory"]:
-        sys.modules.pop(name, None)
-
-    original_import = __import__
-
-    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if name.startswith("reme.reme_light"):
-            raise AssertionError("reme.reme_light imported eagerly")
-        return original_import(name, globals, locals, fromlist, level)
-
-    monkeypatch.setattr("builtins.__import__", fake_import)
-
-    module = importlib.import_module(module_name)
-
-    assert module.ReMeLightMemoryManager is not None
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "from swe.agents.memory.reme_light_memory_manager "
+                "import ReMeLightMemoryManager; "
+                "raise SystemExit("
+                "0 if not any(name.startswith('reme.reme_light') "
+                "for name in sys.modules) else 1)"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
 
 
 def test_import_reme_light_retries_with_shim_for_local_backend(monkeypatch):

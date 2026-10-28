@@ -17,6 +17,8 @@ async def test_send_message_prefers_request_scope_id() -> None:
     manager = SimpleNamespace(get_agent=AsyncMock(return_value=workspace))
     http_request = SimpleNamespace(
         state=SimpleNamespace(
+            tenant_id="tenant-a",
+            source_id="source-a",
             scope_id=encode_scope_id("tenant-a", "source-a"),
         ),
         app=SimpleNamespace(

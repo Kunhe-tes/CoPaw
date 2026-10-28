@@ -2,10 +2,19 @@
 """验证正常服务入口能打印业务日志，且不改变其他库的日志级别。"""
 
 import os
+from pathlib import Path
 import subprocess
 import sys
 
 import pytest
+
+
+def _scheduler_env(level):
+    scheduler_src = Path(__file__).resolve().parents[3] / "scheduler" / "src"
+    pythonpath = os.pathsep.join(
+        [str(scheduler_src), os.environ.get("PYTHONPATH", "")],
+    )
+    return {**os.environ, "PYTHONPATH": pythonpath, "SCHEDULER_LOG_LEVEL": level}
 
 
 @pytest.mark.parametrize("level", ["info", "invalid-level"])
@@ -25,7 +34,7 @@ assert not logging.getLogger('unrelated_library').isEnabledFor(logging.INFO)
 """
     result = subprocess.run(
         [sys.executable, "-c", code],
-        env={**os.environ, "SCHEDULER_LOG_LEVEL": level},
+        env=_scheduler_env(level),
         capture_output=True,
         text=True,
         check=False,
@@ -48,7 +57,7 @@ logger.info('INFO_SHOULD_BE_HIDDEN')
 logger.warning('SCHEDULER_WARNING_PROBE')
 """,
         ],
-        env={**os.environ, "SCHEDULER_LOG_LEVEL": "warning"},
+        env=_scheduler_env("warning"),
         capture_output=True,
         text=True,
         check=False,

@@ -5,7 +5,7 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock
 from pathlib import Path
 
-from market.marketplace.service import MarketplaceService
+from market.marketplace.service import MarketplaceService, MCPNameConflictError
 from market.marketplace.schemas import (
     MCPDistributionRequest,
     PublishMCPRequest,
@@ -19,7 +19,7 @@ from market.marketplace.fs import resolve_effective_user_id
 def mock_db():
     """Mock 数据库连接."""
     db = MagicMock()
-    db.is_connected = False
+    db.is_connected = True
     db.fetch_one = AsyncMock(return_value=None)
     db.fetch_all = AsyncMock(return_value=[])
     db.execute = AsyncMock()
@@ -40,7 +40,38 @@ def mock_paths(tmp_path):
 def service(mock_db, mock_paths):
     """创建 MarketplaceService 实例."""
     marketplace_root, swe_root = mock_paths
-    return MarketplaceService(mock_db, marketplace_root, swe_root)
+    marketplace = MarketplaceService(mock_db, marketplace_root, swe_root)
+    synced_items = {}
+
+    async def upsert_market_mcp(*, source_id, item, **_kwargs):
+        synced_items[(source_id, item.item_id)] = item.model_copy(deep=True)
+        return True
+
+    async def list_market_mcps(*, source_id, **_kwargs):
+        return [
+            item for (source, _), item in synced_items.items() if source == source_id
+        ]
+
+    async def get_market_mcp(source_id, item_id):
+        return synced_items.get((source_id, item_id))
+
+    async def mark_deleted(*, source_id, item_id, **_kwargs):
+        synced_items.pop((source_id, item_id), None)
+        return True
+
+    marketplace.mcp_market_registry.upsert_market_mcp = AsyncMock(
+        side_effect=upsert_market_mcp,
+    )
+    marketplace.mcp_market_registry.list_market_mcps = AsyncMock(
+        side_effect=list_market_mcps,
+    )
+    marketplace.mcp_market_registry.get_market_mcp = AsyncMock(
+        side_effect=get_market_mcp,
+    )
+    marketplace.mcp_market_registry.mark_deleted = AsyncMock(
+        side_effect=mark_deleted,
+    )
+    return marketplace
 
 
 def _user_agent_path(swe_root: Path, tenant_id: str, source_id: str) -> Path:
@@ -167,7 +198,7 @@ class TestPublishMCPNameConflict:
         self,
         service,
     ):
-        """不同 creator 的同名 MCP 会续接到已有条目。"""
+        """不同 creator 的同名 MCP 未确认覆盖时报告冲突。"""
         source_id = "test-source"
 
         # 用户 A 发布 MCP
@@ -189,13 +220,9 @@ class TestPublishMCPNameConflict:
             config={"command": "npx", "args": ["weather-b"]},
         )
 
-        item_b = await _publish_mcp_item(service, source_id, req_b)
-
-        assert item_b.item_id == item_a.item_id
-        assert item_b.creator_id == "user-b"
-        assert item_b.creator_name == "用户B"
-        assert item_b.client_key == "user-b-weather"
-        assert item_b.version == "1.0.1"
+        with pytest.raises(MCPNameConflictError) as exc_info:
+            await _publish_mcp_item(service, source_id, req_b)
+        assert exc_info.value.existing_item_id == item_a.item_id
 
     async def test_name_conflict_overwrite(self, service):
         """不同 creator 的同名 MCP，overwrite=True 覆盖已有条目。"""
@@ -246,7 +273,10 @@ class TestPublishMCPNameConflict:
         )
         item1, first_unchanged = await service.publish_mcp(source_id, req)
 
-        item2, second_unchanged = await service.publish_mcp(source_id, req)
+        item2, second_unchanged = await service.publish_mcp(
+            source_id,
+            req.model_copy(update={"overwrite": True}),
+        )
 
         assert first_unchanged is False
         assert second_unchanged is True
@@ -282,7 +312,7 @@ class TestPublishMCPNameConflict:
         self,
         service,
     ):
-        """同一 creator 改 client_key 发布同名 MCP 时更新已有条目。"""
+        """同一 creator 更换 client_key 时仍需确认覆盖同名 MCP。"""
         source_id = "test-source"
 
         req1 = PublishMCPRequest(
@@ -298,11 +328,9 @@ class TestPublishMCPNameConflict:
             config={"command": "npx"},
         )
         item1 = await _publish_mcp_item(service, source_id, req1)
-        item2 = await _publish_mcp_item(service, source_id, req2)
-
-        assert item2.item_id == item1.item_id
-        assert item2.client_key == "weather-v2"
-        assert item2.version == "1.0.0"
+        with pytest.raises(MCPNameConflictError) as exc_info:
+            await _publish_mcp_item(service, source_id, req2)
+        assert exc_info.value.existing_item_id == item1.item_id
 
     async def test_same_creator_client_key_changed_overwrite(self, service):
         """同一 creator 用不同 client_key 发同名 MCP，overwrite=True 时覆盖。"""
@@ -750,7 +778,7 @@ class TestDistributeMCP:
             encoding="utf-8",
         )
 
-        # 3. 分发 → 期望被拒，不覆盖用户已有配置
+        # 3. 分发 → 跳过已有自建 MCP，不覆盖用户配置
         dist_req = MCPDistributionRequest(
             target_tenant_ids=["alice"],
             overwrite=True,
@@ -765,7 +793,8 @@ class TestDistributeMCP:
 
         assert len(result.results) == 1
         assert result.results[0].tenant_id == "alice"
-        assert result.results[0].success is False
+        assert result.results[0].success is True
+        assert result.results[0].skipped is True
         assert "同名" in (result.results[0].error or "")
 
         # 用户原有配置未被覆盖

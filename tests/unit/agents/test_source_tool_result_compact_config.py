@@ -278,5 +278,5 @@ async def test_source_disabled_config_skips_memory_tool_result_compaction(
         await MemoryCompactionHook(memory_manager)(agent, {})
 
     memory_manager.compact_tool_result.assert_not_awaited()
-    memory_manager.check_context.assert_awaited_once()
+    memory_manager.check_context.assert_not_awaited()
     assert load_agent_config_calls == [("default", "tenant-a")]

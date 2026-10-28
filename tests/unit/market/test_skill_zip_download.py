@@ -6,7 +6,7 @@ from __future__ import annotations
 import io
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 import zipfile
 from pathlib import Path
 
@@ -88,6 +88,7 @@ class FakeMarketplace:
         self.marketplace_root = swe_root / "marketplace"
         self.get_my_skills = AsyncMock()
         self.get_skill_detail = AsyncMock()
+        self.get_registered_skill_dir = MagicMock()
 
 
 @pytest.fixture
@@ -169,12 +170,13 @@ def test_download_my_skill_returns_zip_file(
     test_app: FastAPI,
 ) -> None:
     """应下载我创建的技能 zip。"""
-    _create_my_skill(
+    skill_dir = _create_my_skill(
         test_app.state.marketplace.swe_root,
         "user-a",
         "src-a",
         "demo_skill",
     )
+    test_app.state.marketplace.get_registered_skill_dir.return_value = skill_dir
     test_app.state.marketplace.get_my_skills.return_value = [
         SimpleNamespace(skill_name="demo_skill", is_received=False),
     ]
@@ -191,7 +193,7 @@ def test_download_my_skill_returns_zip_file(
     assert response.headers["content-type"] == "application/zip"
     assert (
         response.headers["content-disposition"]
-        == 'attachment; filename="demo_skill.zip"'
+        == "attachment; filename=\"skill.zip\"; filename*=UTF-8''demo_skill.zip"
     )
     with zipfile.ZipFile(io.BytesIO(response.content)) as zip_file:
         assert sorted(zip_file.namelist()) == [
@@ -256,7 +258,7 @@ def test_download_market_skill_returns_current_version_zip(
     assert response.headers["content-type"] == "application/zip"
     assert (
         response.headers["content-disposition"]
-        == 'attachment; filename="demo_skill-1.2.3.zip"'
+        == "attachment; filename=\"skill.zip\"; filename*=UTF-8''demo_skill-1.2.3.zip"
     )
     with zipfile.ZipFile(io.BytesIO(response.content)) as zip_file:
         assert sorted(zip_file.namelist()) == [

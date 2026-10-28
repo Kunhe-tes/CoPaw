@@ -14,6 +14,7 @@ from swe.config.context import get_current_file_url_network
 
 def _fake_agent_config():
     return SimpleNamespace(
+        id="test-agent",
         mcp=None,
         hooks=SimpleNamespace(enabled=False),
         running=SimpleNamespace(
@@ -36,6 +37,10 @@ def _request(**extra):
 
 
 async def _run_query(monkeypatch, request):
+    monkeypatch.setattr(
+        "swe.agents.model_factory.prepare_model_config_async",
+        AsyncMock(return_value=SimpleNamespace(model_slot=None, provider=None)),
+    )
     runner = AgentRunner(agent_id="test-agent")
     runner.session = SimpleNamespace(
         load_session_state=AsyncMock(),

@@ -22,6 +22,7 @@ from swe.app.source_system_config.runtime import bind_source_system_config
 
 def _fake_agent_config():
     return SimpleNamespace(
+        id="test-agent",
         mcp=None,
         hooks=SimpleNamespace(enabled=False),
         running=SimpleNamespace(
@@ -49,6 +50,10 @@ async def _run_query(
     captured=None,
     context_directives=None,
 ):
+    monkeypatch.setattr(
+        "swe.agents.model_factory.prepare_model_config_async",
+        AsyncMock(return_value=SimpleNamespace(model_slot=None, provider=None)),
+    )
     runner = AgentRunner(agent_id="test-agent")
     runner.session = SimpleNamespace(
         load_session_state=AsyncMock(),
