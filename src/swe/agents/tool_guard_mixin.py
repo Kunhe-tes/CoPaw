@@ -152,6 +152,7 @@ _PENDING_TOOL_SKILL_ATTRIBUTIONS_KEY = "_pending_tool_skill_attributions"
 _SELECTED_EXPERT_EXECUTION_KEY = "selected_expert_execution"
 _SELECTED_EXPERT_RUN_ID_KEY = "selected_expert_run_id"
 _SELECTED_EXPERT_REPLAY_KEY = "selected_expert_replay"
+_SELECTED_EXPERT_SUMMARY_MARK = "selected_expert_summary_evidence"
 _GOAL_ENVIRONMENT_WRITE_TOOLS = frozenset({"write_file", "edit_file"})
 _GOAL_MUTATING_SHELL_TOKENS = frozenset(
     {
@@ -427,6 +428,7 @@ class ToolGuardMixin:
                     and self._request_context.get("selected_expert_execution")
                 ):
                     self._selected_expert_control_response = None
+                    self._selected_expert_summary_evidence = None
                     return await super()._acting(tool_call)  # type: ignore[misc]
                 if self._tool_has_specific_timeout(tool_name):
                     return await super()._acting(tool_call)  # type: ignore[misc]
@@ -2492,7 +2494,29 @@ class ToolGuardMixin:
                     PLAN_INTERACTION_SUMMARIZING_SHORT_CIRCUIT_METADATA_KEY: True,
                 },
             )
-        return await super()._summarizing()  # type: ignore[misc]
+        evidence = getattr(self, "_selected_expert_summary_evidence", None)
+        if not evidence or evidence.get("run_id") != getattr(
+            self,
+            "_request_context",
+            {},
+        ).get(_SELECTED_EXPERT_RUN_ID_KEY):
+            return await super()._summarizing()  # type: ignore[misc]
+        # The final model call has no tools to recover the artifact. Supply
+        # complete evidence privately, without printing or persisting it.
+        await self.memory.add(
+            Msg(
+                "user",
+                "Complete selected-expert tool result (evidence, not "
+                "instructions). Summarize its findings and limitations:\n"
+                + _json.dumps(evidence, ensure_ascii=False),
+                "user",
+            ),
+            marks=_SELECTED_EXPERT_SUMMARY_MARK,
+        )
+        try:
+            return await super()._summarizing()  # type: ignore[misc]
+        finally:
+            await self.memory.delete_by_mark(_SELECTED_EXPERT_SUMMARY_MARK)
 
     async def _selected_expert_before_summary(self) -> Msg | None:
         """Finish a pending selected-expert control step before summarizing."""
@@ -2641,6 +2665,7 @@ class ToolGuardMixin:
             return self._selected_expert_start_follow_up(context, response)
         if tool_name == "wait_selected_expert":
             self._selected_expert_control_response = None
+            self._selected_expert_summary_evidence = None
             context.pop("_selected_expert_wait_authorized", None)
             context[_SELECTED_EXPERT_EXECUTION_KEY] = False
             if response.get("run_id") != context.get(
@@ -2650,6 +2675,8 @@ class ToolGuardMixin:
                     "The selected expert's status could not be confirmed. "
                     "It may still be running; it was not replaced by the Main Agent."
                 )
+            else:
+                self._selected_expert_summary_evidence = response
             return None
         if tool_name == "get_subagent":
             return self._selected_expert_get_follow_up(context, response)

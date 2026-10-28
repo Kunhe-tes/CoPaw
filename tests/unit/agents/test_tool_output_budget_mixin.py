@@ -5,16 +5,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+import inspect
 import threading
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from agentscope.message import TextBlock
+from agentscope.agent import ReActAgent
+from agentscope.message import Msg
 from agentscope.tool import ToolResponse
+from unittest.mock import AsyncMock
 
 from swe.agents.tool_output_budget_mixin import ToolOutputBudgetMixin
 from swe.agents.tool_guard_mixin import ToolGuardMixin
+from swe.agents.react_agent import SWEAgent
 from swe.app.channels.console.channel import ConsoleChannel
 from swe.app.runner.sse_replay import ReplayStream
 from swe.app.source_system_config.models import (
@@ -132,6 +138,141 @@ class _SelectedExpertAgent(ToolGuardMixin, _AgentScopeLikeAgent):
 
     def _resolve_mcp_server(self, _tool_name):
         return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_iters", [1, 2])
+@pytest.mark.parametrize("status", ["completed", "partial"])
+@pytest.mark.parametrize("model_outcome", ["reply", "error", "cancel"])
+async def test_tool_free_summary_receives_complete_selected_expert_evidence(
+    tmp_path,
+    monkeypatch,
+    max_iters,
+    status,
+    model_outcome,
+):
+    conclusion = "MIDDLE_FINDING: rotate the compromised credential"
+    payload = {
+        "run_id": "expert-run-1",
+        "status": status,
+        "result": {"summary": "x" * 600000 + conclusion + "y" * 600000},
+    }
+    prompts = []
+
+    async def model(prompt):
+        prompts.append(deepcopy(prompt))
+        if model_outcome == "error":
+            raise RuntimeError("summary rejected")
+        if model_outcome == "cancel":
+            raise asyncio.CancelledError()
+        text = json.dumps([msg.content for msg in prompt])
+        answer = (
+            conclusion if conclusion in text else "expert evidence missing"
+        )
+        return SimpleNamespace(id="summary", content=answer)
+
+    class Agent(SWEAgent):
+        def __init__(self):
+            ReActAgent.__init__(
+                self,
+                name="Main",
+                sys_prompt="Summarize expert findings",
+                model=model,
+                formatter=SimpleNamespace(
+                    format=AsyncMock(side_effect=lambda msgs: msgs),
+                ),
+                max_iters=max_iters,
+                enable_rewrite_query=False,
+            )
+            self._request_context = {
+                "selected_expert_execution": True,
+                "forced_tool_call_json": json.dumps(
+                    {
+                        "id": "start-1",
+                        "name": "start_subagent",
+                        "input": {},
+                    },
+                ),
+            }
+            self._workspace_dir = tmp_path
+            self._agent_config = SimpleNamespace(
+                running=SimpleNamespace(
+                    tool_result_compact=ToolResultCompactConfig(
+                        recent_max_bytes=1000,
+                    ),
+                ),
+            )
+            self._init_agent_phase_state()
+            self.printed = []
+
+        async def print(self, msg, last=True, **kwargs):
+            self.printed.append(deepcopy(msg))
+
+        async def _reasoning(self, tool_choice=None):
+            return await ToolGuardMixin._reasoning(self, tool_choice)
+
+        async def _acting(self, tool_call):
+            call = tool_call
+            await self._run_tool_call_with_hard_timeout_impl(
+                call,
+                call["name"],
+                call["input"],
+            )
+            self._complete_forced_tool_replay(
+                call,
+                call["name"],
+                call["input"],
+            )
+
+    agent = Agent()
+
+    async def start_subagent():
+        return _chunk(json.dumps({"accepted": True, "run_id": "expert-run-1"}))
+
+    async def wait_selected_expert():
+        return _chunk(json.dumps(payload))
+
+    agent.toolkit.register_tool_function(start_subagent)
+    agent.toolkit.register_tool_function(wait_selected_expert)
+    monkeypatch.setattr(
+        "swe.agents.react_agent.get_active_model_supports_multimodal",
+        lambda: True,
+    )
+    reply = inspect.unwrap(ReActAgent.reply)(
+        agent,
+        Msg("user", "inspect", "user"),
+    )
+    if model_outcome == "reply":
+        answer = await reply
+        assert conclusion in answer.get_text_content()
+    else:
+        error = (
+            RuntimeError
+            if model_outcome == "error"
+            else asyncio.CancelledError
+        )
+        with pytest.raises(error):
+            await reply
+    assert len(prompts) == 1
+    assert payload["result"]["summary"] in json.dumps(
+        [msg.content for msg in prompts[0]],
+    )
+    assert agent._request_context["selected_expert_execution"] is False
+    assert agent._selected_expert_summary_evidence is None
+    memories = await agent.memory.get_memory()
+    assert payload["result"]["summary"] not in json.dumps(
+        [msg.content for msg in memories],
+    )
+    assert not any(
+        "selected_expert_summary_evidence" in marks
+        for _msg, marks in agent.memory.content
+    )
+    for msg in agent.printed:
+        for block in msg.get_content_blocks("tool_result"):
+            if block["name"] == "wait_selected_expert":
+                preview = block["output"][0]["text"]
+                assert len(preview.encode()) <= 1000
+                assert conclusion not in preview
 
 
 @pytest.mark.asyncio
@@ -262,6 +403,45 @@ async def test_selected_expert_control_cache_is_bound_to_current_call(
         )
         == {}
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("run_id", "status"),
+    [("other-run", "completed"), ("expert-run-1", "running")],
+)
+async def test_unconfirmed_selected_expert_has_no_summary_evidence(
+    tmp_path,
+    run_id,
+    status,
+):
+    agent = _SelectedExpertAgent(
+        config=ToolResultCompactConfig(recent_max_bytes=1000),
+        workspace_dir=tmp_path,
+        chunks=[
+            _chunk(
+                json.dumps(
+                    {
+                        "run_id": run_id,
+                        "status": status,
+                        "result": {
+                            "summary": "do not summarize this evidence",
+                        },
+                    },
+                ),
+            ),
+        ],
+    )
+    call = {"id": "wait-1", "name": "wait_selected_expert", "input": {}}
+    await agent._run_tool_call_with_hard_timeout_impl(call, call["name"], {})
+    await agent._selected_expert_follow_up(
+        {
+            "tool_call_id": call["id"],
+            "tool_name": call["name"],
+        },
+    )
+    assert agent._selected_expert_summary_evidence is None
+    assert agent._request_context["selected_expert_execution_error"]
 
 
 @pytest.mark.asyncio

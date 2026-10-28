@@ -7,6 +7,7 @@
 - **等待语义**：selected expert 只等待本次启动返回的 run ID；旧 run 的终态不会结束本次等待。只有读取到当前 run 的可信终态才汇总结果；身份或状态无法确认时不会改由 Main Agent 执行。等待触发 Hook 审批时，审批记录绑定原 run 和 session/chat，批准后恢复等待，不重新启动。
 - **状态无法确认**：检查当前 tenant/agent 的 `subagent_runs/<run_id>.json`、session/chat 归属、专家 worker 进程与对应 `swe.log`。若超时或停止后仍无法取得终态，先按 run ID 核实 worker 状态；不要把“未确认”当成已取消或已完成。
 - **大结果被误判或中断流**：`wait_selected_expert` 的完整控制响应须在输出预算压缩前单独缓存，并按 tool call ID 解析终态；展示和 memory 仍遵循输出预算，原文通过 artifact 恢复。不要跳过压缩：超过 1 MiB 的单个 SSE 事件会触发 `Stream frame exceeds replay capacity`，使后续回答无法提交。回归入口为 `tests/unit/agents/test_tool_output_budget_mixin.py`，覆盖 1,000 与 50,000 字节预算、完整终态解析及大结果后的 Console/replay 回答事件。
+- **迭代耗尽后汇总遗漏证据**：`ReActAgent._summarizing()` 不提供工具，不能依赖压缩预览中的 `read_file` 提示。校验 run ID 和终态后须保留完整专家证据，汇总时作为私有临时上下文注入，成功、失败或取消后清除；不要重新打印完整工具结果。回归测试 `test_tool_free_summary_receives_complete_selected_expert_evidence` 覆盖 `max_iters=1/2`、completed/partial、大结果中段结论及清理。
 - **回归入口**：`tests/unit/subagents/test_react_agent_and_guard_integration.py` 的 `test_selected_expert_reads_actual_tool_result_blocks`。
 
 本文档只收录仓库中已经出现过、且有明确入口可追的高频报错。

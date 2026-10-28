@@ -2260,6 +2260,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                     msg = await super()._summarizing()
             finally:
                 self._in_summarizing = False
+                self._selected_expert_summary_evidence = None
 
             metadata = getattr(msg, "metadata", None)
             if isinstance(metadata, dict) and metadata.pop(
