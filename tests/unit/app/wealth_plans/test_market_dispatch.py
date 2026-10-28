@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import httpx
 import pytest
 from fastapi import FastAPI
@@ -287,7 +289,7 @@ async def test_run_publish_records_skill_dispatch(
     monkeypatch.setattr(publish_module, "_publish_all_scenes", fake_scenes)
     monkeypatch.setattr(publish_module, "submit_distribution", fake_submit)
 
-    await publish_module._run_publish(None, store, plan.id)  # type: ignore[arg-type]
+    await publish_module._run_publish(SimpleNamespace(headers={}), store, plan.id)
 
     record = await store.get(plan.id)
     assert record is not None
@@ -314,7 +316,7 @@ async def test_run_publish_skill_failure_keeps_published(
     monkeypatch.setattr(publish_module, "_publish_all_scenes", fake_scenes)
     monkeypatch.setattr(publish_module, "submit_distribution", fake_submit)
 
-    await publish_module._run_publish(None, store, plan.id)  # type: ignore[arg-type]
+    await publish_module._run_publish(SimpleNamespace(headers={}), store, plan.id)
 
     record = await store.get(plan.id)
     assert record is not None

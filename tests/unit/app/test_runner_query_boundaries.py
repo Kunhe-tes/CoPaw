@@ -343,7 +343,7 @@ async def test_session_lifecycle_facades_preserve_restore_snapshot_save_order(
     from swe.app.runner.runner import _SkillFreshnessRefreshResult
 
     runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
-    runtime = SimpleNamespace()
+    runtime = SimpleNamespace(agent=SimpleNamespace(_request_context={}))
     events: list[str] = []
 
     async def restore(owner, *, runtime):

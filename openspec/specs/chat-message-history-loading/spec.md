@@ -35,7 +35,14 @@ When a persisted chat detail is restored, the Conversation Workspace SHALL initi
 - **AND** each step waits for message layout and anchor restoration before checking the current position
 - **AND** moving downward, leaving the preload region, an error, or exhaustion stops continuation
 - **AND** a later upward scroll or the accessible “加载更早消息” action can continue
-- **AND** mounting a short list alone does not initiate history requests
+- **AND** mounting a scrollable list alone does not initiate history requests
+
+#### Scenario: Short viewport automatically checks earlier history
+- **WHEN** the mounted message list has no scrollable overflow and history progression is enabled
+- **THEN** local batches and archive pages advance automatically within the same three-step budget
+- **AND** continuation stops as soon as content becomes scrollable, history is exhausted, or an error occurs
+- **AND** an archive response with `has_more=false` shows “已到达会话开始处” without a click
+- **AND** reaching the budget with more history retains the accessible “加载更早消息” action
 
 #### Scenario: Live output remains visible
 - **WHEN** a new user, assistant, tool, or progress card arrives while older historical cards remain hidden

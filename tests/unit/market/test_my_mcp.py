@@ -20,6 +20,7 @@ class FakeMarketplace:
 
     def __init__(self) -> None:
         self.swe_root = "D:/fake/.swe"
+        self.db = SimpleNamespace(is_connected=False)
         self.publish_mcp = AsyncMock()
 
 
@@ -291,8 +292,8 @@ class TestPublishMyMCP:
         agent_config = _agent_config(
             {"weather": MCPClientConfig(name="Weather", command="npx")},
         )
-        test_app.state.marketplace.publish_mcp.return_value = SimpleNamespace(
-            item_id="mcp-weather-123",
+        test_app.state.marketplace.publish_mcp.return_value = (
+            SimpleNamespace(item_id="mcp-weather-123"), False,
         )
         with patch(
             "market.app.routers.my_mcp.load_agent_config_for_request",

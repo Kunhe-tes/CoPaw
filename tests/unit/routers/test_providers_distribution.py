@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from swe.app.routers import providers as providers_router
+from swe.config.context import resolve_runtime_tenant_id
 
 
 class FakeTenantWorkspacePool:
@@ -150,7 +151,7 @@ def test_distribute_providers_success(
         ):
             self.tenant_id = tenant_id
             self.effective_tenant_id = (
-                providers_router.resolve_runtime_tenant_id(
+                resolve_runtime_tenant_id(
                     tenant_id,
                     source_id,
                 )
@@ -241,7 +242,7 @@ def test_distribute_providers_uses_request_scope_for_source_dir(
         ):
             self.tenant_id = tenant_id
             self.effective_tenant_id = (
-                providers_router.resolve_runtime_tenant_id(
+                resolve_runtime_tenant_id(
                     tenant_id,
                     source_id,
                 )
@@ -275,7 +276,7 @@ def test_distribute_providers_uses_request_scope_for_source_dir(
     assert result.results[0].success is True
     assert (
         secret_dir
-        / providers_router.resolve_runtime_tenant_id("tenant-target", "ruice")
+        / resolve_runtime_tenant_id("tenant-target", "ruice")
         / "providers"
     ).exists()
 
@@ -304,7 +305,7 @@ def test_distribute_providers_multiple_tenants(
         ):
             self.tenant_id = tenant_id
             self.effective_tenant_id = (
-                providers_router.resolve_runtime_tenant_id(
+                resolve_runtime_tenant_id(
                     tenant_id,
                     source_id,
                 )
@@ -511,7 +512,7 @@ def test_distribute_providers_bootstraps_tenant(
         ):
             self.tenant_id = tenant_id
             self.effective_tenant_id = (
-                providers_router.resolve_runtime_tenant_id(
+                resolve_runtime_tenant_id(
                     tenant_id,
                     source_id,
                 )

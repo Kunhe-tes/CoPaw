@@ -136,6 +136,10 @@ async def _fake_stream_printing_messages(*, agents, coroutine_task):
 
 
 def _patch_runner(monkeypatch, tmp_path: Path) -> AgentRunner:
+    monkeypatch.setattr(
+        "swe.agents.model_factory.prepare_model_config_async",
+        AsyncMock(return_value=SimpleNamespace(model_slot=None, provider=None)),
+    )
     runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
     runner.session = SafeJSONSession(save_dir=str(tmp_path / "sessions"))
     setattr(runner, "_chat_manager", None)

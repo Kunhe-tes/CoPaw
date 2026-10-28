@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
-from swe.config.context import encode_scope_id, tenant_context
+from swe.config.context import tenant_context
 from swe.agents.tools.file_search import (
     _is_text_file,
     _MAX_MATCHES,
@@ -162,11 +162,8 @@ def test_walk_and_grep_context_lines_at_start(temp_dir):
 def test_resolve_search_root_allows_source_scoped_absolute_path(
     mock_working_dir,
 ):
-    """default + source should allow absolute paths under encoded scope."""
-    source_root = mock_working_dir / encode_scope_id(
-        "default",
-        "RMASSIST",
-    )
+    """default + source should allow paths under the source directory."""
+    source_root = mock_working_dir / "default_RMASSIST"
     workspace_dir = source_root / "workspaces" / "default"
     workspace_dir.mkdir(parents=True, exist_ok=True)
     (source_root / "note.txt").write_text("rmassist visible content")

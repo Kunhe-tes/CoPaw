@@ -900,6 +900,7 @@ async def test_multi_agent_manager_passes_source_config_service_to_workspace(
         workspace_dir=str(workspace_dir),
         tenant_id="tenant-a",
         source_system_config_service=service,
+        workflow_config_store=None,
         continuous_governance_service=governance_service,
     )
 
@@ -931,5 +932,6 @@ async def test_tenant_workspace_pool_passes_source_config_service_to_workspace(
         ),
         tenant_id="tenant-a",
         source_system_config_service=service,
+        workflow_config_store=None,
         continuous_governance_service=governance_service,
     )

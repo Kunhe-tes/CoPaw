@@ -406,7 +406,9 @@ class TestReactAgentTaskProgressPrompt:
         with bind_source_system_config(_build_effective_config(False)):
             prompt = SWEAgent._build_sys_prompt(agent)
 
-        assert prompt == "base prompt"
+        assert prompt.startswith("base prompt")
+        assert "Persisted plan" not in prompt
+        assert "Read persisted step" not in prompt
 
     def test_build_sys_prompt_skips_accepted_plan_without_server_source(
         self,
@@ -701,6 +703,8 @@ def test_plan_interaction_tools_switch_is_disabled_by_default():
         "chat_task_progress_enabled": True,
         "database_access_guard_enabled": True,
         "normal_mode_plan_interaction_tools_enabled": False,
+        "expert_as_main_enabled": False,
+        "subagent_expert_discovery_enabled": False,
     }
 
 

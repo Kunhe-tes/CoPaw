@@ -741,7 +741,7 @@ async def test_agent_setup_skill_detector_passes_agent_local_registry(
 def test_subagent_toolkit_filters_builtins_and_excludes_delegate(
     tmp_path: Path,
 ) -> None:
-    """Readonly SubAgent toolkit contains only effective allowed built-ins."""
+    """Readonly toolkit includes the approved WPlus event tool exception."""
     config = AgentProfileConfig(
         id="default",
         name="Default",
@@ -767,6 +767,7 @@ def test_subagent_toolkit_filters_builtins_and_excludes_delegate(
         "grep_search",
         "glob_search",
         "get_current_time",
+        "emit_wplus_sop_event",
     }
     assert "delegate_to_subagent" not in toolkit.tools
 

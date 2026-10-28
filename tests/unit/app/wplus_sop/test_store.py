@@ -796,7 +796,7 @@ def test_commit_event_persists_incremental_projection_fields(
     store = WPlusSopStore(path)
     report = _report()
     snapshot = _snapshot()
-    preview = _cumulative()
+    preview = _cumulative().model_copy(update={"snapshots": [snapshot]})
     projection = _projection().model_copy(
         update={
             "stages": [
