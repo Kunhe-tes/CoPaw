@@ -924,9 +924,9 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                         <th scope="col" className={styles.metricsCol}>
                           客户指标
                         </th>
-                        <th className={doneView ? styles.channelCol : undefined}>
-                          {doneView ? "触达方式" : "经营方案"}
-                        </th>
+                        {doneView && (
+                          <th className={styles.channelCol}>触达方式</th>
+                        )}
                         {showContactStatus && (
                           <th
                             scope="col"
@@ -945,6 +945,9 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                         <th scope="col" className={styles.recentContactCol}>
                           最近接触时间
                         </th>
+                        {!doneView && (
+                          <th className={styles.schemeCol}>经营方案</th>
+                        )}
                         <th className={styles.executionCol}>
                           {doneView ? "完成时间" : "执行"}
                         </th>
@@ -977,32 +980,21 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                                 fields={c.dynamicFields}
                               />
                             </td>
-                            <td
-                              className={doneView ? styles.channelCol : undefined}
-                            >
-                              {doneView ? (
-                                <>
-                                  <Icon
-                                    name={
-                                      c.channel === "电话"
-                                        ? "phone"
-                                        : c.channel === "企微"
-                                        ? "chat"
-                                        : "user"
-                                    }
-                                  />
-                                  {"　"}
-                                  {contactMethodLabel(c.channel)}
-                                </>
-                              ) : (
-                                <button
-                                  className={styles.link}
-                                  onClick={() => showScheme(c.id)}
-                                >
-                                  查看经营方案
-                                </button>
-                              )}
-                            </td>
+                            {doneView && (
+                              <td className={styles.channelCol}>
+                                <Icon
+                                  name={
+                                    c.channel === "电话"
+                                      ? "phone"
+                                      : c.channel === "企微"
+                                      ? "chat"
+                                      : "user"
+                                  }
+                                />
+                                {"　"}
+                                {contactMethodLabel(c.channel)}
+                              </td>
+                            )}
                             {showContactStatus && (
                               <td className={styles.contactStatusCol}>
                                 <span
@@ -1021,8 +1013,20 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                               className={styles.recentContactCol}
                               title={c.time || undefined}
                             >
-                              {c.time || "—"}
+                              <span className={styles.recentContactValue}>
+                                {c.time || "—"}
+                              </span>
                             </td>
+                            {!doneView && (
+                              <td className={styles.schemeCol}>
+                                <button
+                                  className={styles.link}
+                                  onClick={() => showScheme(c.id)}
+                                >
+                                  查看经营方案
+                                </button>
+                              </td>
+                            )}
                             <td className={styles.executionCol}>
                               {doneView ? (
                                 c.time

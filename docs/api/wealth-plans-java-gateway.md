@@ -4,7 +4,7 @@
 
 ## 评估结论
 
-方案可行，前端改造可限定在工作台数据适配层。当前场景、名单、统计、机构人员和签名请求已通过同源网关，本次将剩余规划读写切换为同源 Java 接口。页面布局、权限映射、草稿、统计缓存和刷新策略继续沿用。
+方案可行，前端改造可限定在工作台数据适配层。规划、场景、名单和统计使用统一 request 接入 Java/智拓网关；机构人员和支行树也通过统一 request，签名仍保持原生 fetch。页面布局、权限映射、草稿、统计缓存和刷新策略继续沿用。
 
 按用户确认，规划创建后的定时任务、分发、资源处理和状态回写由新服务完整负责；前端不接入 market 分发腿，也不继续调用 Python 发布编排。原方案中 market 等 TODO 不作为本次前端切换的前置项。
 
@@ -12,17 +12,17 @@ Java 实现及实际网关部署不在本仓库，当前验证为前端契约测
 
 ## 规划接口适配
 
-浏览器路径固定为同源 `/zt/wealth/plans`，不经过全局 `request()`，不拼接 `/api`，也不受 `window.__env__.baseUrl` 或 `VITE_API_BASE_URL` 影响。网关上游 URI 如有差异，由网关重写，不依赖 Java Controller 命名。
+工作台通过 `api/request.ts` 的 `request()` 调用 `/zt/wealth/plans`，由统一层拼接 API base 和 `/api` 前缀，最终请求 `{API base}/api/zt/wealth/plans`；鉴权、响应解析、错误处理及 401 重试均复用统一层。网关上游 URI 如有差异，由网关重写，不依赖 Java Controller 命名。
 
 | 方法/浏览器路径 | 身份位置 | 业务数据/返回 |
 |---|---|---|
-| GET `/zt/wealth/plans` | Query：sapId、role、bbkId | `data.items` → 页面规划列表 |
-| POST `/zt/wealth/plans` | JSON：sapId、role、bbkId、creatorName、sourceId、agentId | JSON 携带规划、场景、目标；返回 data.id/publishStatus |
-| PUT `/zt/wealth/plans/{id}` | 同 POST | 整体替换；返回 data.id/publishStatus |
-| DELETE `/zt/wealth/plans/{id}` | JSON：sapId | `data=true` 才视为删除成功 |
-| GET `/zt/wealth/plans/{id}` | 文档约定同列表 Query | Java 提供的详情接口；当前页面复用列表数据，没有新增无调用方的详情请求 |
+| GET `/api/zt/wealth/plans` | Query：sapId、role、bbkId | `data.items` → 页面规划列表 |
+| POST `/api/zt/wealth/plans` | JSON：sapId、role、bbkId、creatorName、sourceId、agentId | JSON 携带规划、场景、目标；返回 data.id/publishStatus |
+| PUT `/api/zt/wealth/plans/{id}` | 同 POST | 整体替换；返回 data.id/publishStatus |
+| DELETE `/api/zt/wealth/plans/{id}` | JSON：sapId | `data=true` 才视为删除成功 |
+| GET `/api/zt/wealth/plans/{id}` | 文档约定同列表 Query | Java 提供的详情接口；当前页面复用列表数据，没有新增无调用方的详情请求 |
 
-所有请求显式发送 `Content-Type: application/json` 和 Cookie `token` 的原始值作为 Authorization，与当前名单/统计接入方式一致；浏览器使用默认同源凭证策略，不手工设置 Cookie 头。
+规划、场景、名单和统计请求共用 `request()`：有 JSON 请求体时由统一层补 Content-Type，鉴权及用户/租户/来源等请求头由 `buildAuthHeaders()` 构建，并复用 401 token 刷新处理。不再在这些调用点读取 Cookie token 设置 Authorization。超时、取消信号、业务码解包和页面读失败降级行为保留。
 
 身份取值：
 
@@ -55,15 +55,15 @@ Java 入参/返回使用驼峰：
 
 ## 工作台其他请求路由
 
-这些接口已经直连同源网关，本次保持现有调用契约：
+场景、统计、名单、机构人员和支行树通过统一 request 调用下列路径（配置 API base 时带对应前缀）；仅 `/expert/get-sign` 按接入约定保留原生 fetch，不改变原有路径与鉴权方式：
 
 | 方法 | 浏览器路径 | 目标能力 |
 |---|---|---|
 | POST | `/api/agent/workspace/skill-config/list` | 场景池，bbkId/category |
 | POST | `/api/agent/workspace/skill-stats` | 规划统计，planIds |
 | POST | `/api/agent/workspace/name-list` | 名单/汇总，skillIds/sapId/touched 等 |
-| POST | `/xcapi-auth/wmadm/services/v1/wmadm/combox/BranchTreeInfoService` | 机构树 |
-| POST | `/xcapi-auth/wmadm/services/v1/wmutadm/getUserPostionByBrn` | 分发人员 |
+| POST | `/api/zt/wealth/wmadm/branchTreeInfo` | 机构树 |
+| POST | `/api/zt/wealth/wmadm/getUserPostionByBrn` | 分发人员 |
 | POST | `/expert/get-sign` | 客户操作签名 |
 
 不向 Python `/api/wealth/*` 或 `/api/user-info/*` 回退。旧 Python handler 保留供已有调用方兼容，本次没有删除共享后端代码或切换全局 API base。
@@ -73,7 +73,7 @@ Java 入参/返回使用驼峰：
 以下为 Nginx 配置示意，`wealth_plan_java` 是需由部署方定义的上游，不是当前已部署地址：
 
 ```nginx
-location = /zt/wealth/plans {
+location = /api/zt/wealth/plans {
     proxy_pass http://wealth_plan_java/wealth/plans;
     proxy_set_header Authorization $http_authorization;
     proxy_pass_request_body on;
@@ -82,7 +82,7 @@ location = /zt/wealth/plans {
     add_header Cache-Control "no-store" always;
 }
 
-location ^~ /zt/wealth/plans/ {
+location ^~ /api/zt/wealth/plans/ {
     proxy_pass http://wealth_plan_java/wealth/plans/;
     proxy_set_header Authorization $http_authorization;
     proxy_pass_request_body on;
@@ -93,7 +93,7 @@ location ^~ /zt/wealth/plans/ {
 ```
 
 - 精确匹配列表和子路径，优先于 SPA 的 try_files，不能将请求返回 index.html。
-- 上述示例按 `/zt` 仅为网关前缀处理：浏览器 `/zt/wealth/plans` 转给 Java `/wealth/plans`，子路径和 Query 保留。如果 Java 本身也已改为 `/zt/wealth/plans`，两处 proxy_pass 应改为不带 URI 的 `http://wealth_plan_java`，原样转发。
+- 上述示例按 `/api/zt` 仅为网关前缀处理：浏览器 `/api/zt/wealth/plans` 转给 Java `/wealth/plans`，子路径和 Query 保留。如果 Java 本身使用 `/zt/wealth/plans`，两处 proxy_pass 应分别改为 `http://wealth_plan_java/zt/wealth/plans` 和 `http://wealth_plan_java/zt/wealth/plans/`，保留正确的上游路径。
 - 保留 Query、POST/PUT/DELETE 方法及 JSON Body，尤其不能剥离 DELETE 的 sapId。
 - 保留默认 Cookie/Authorization 转发；服务凭证由网关注入，不放浏览器代码。
 - 规划 GET 带用户身份，不应跨用户缓存；后端仍需按用户/分行/来源隔离。
@@ -102,7 +102,7 @@ location ^~ /zt/wealth/plans/ {
 
 ## 验收
 
-新增 `console/src/pages/WealthWorkbench/planGateway.test.ts` 验证真实 fetch 边界：同源 URL、Query/Body 身份、camelCase 映射、前导零、岗位切换、HTTP 200 业务失败、网关失败、DELETE、取消和失败不刷新。现有工作台 Store、编辑人员回显和看板取消测试改为 Java 包装夹具。
+新增 `console/src/pages/WealthWorkbench/planGateway.test.ts` 验证统一 request 的真实 fetch 边界：API URL、Query/Body 身份、camelCase 映射、前导零、岗位切换、HTTP 200 业务失败、网关失败、DELETE、取消和失败不刷新。现有工作台 Store、编辑人员回显和看板取消测试改为 Java 包装夹具。
 
 部署后还需核对：浏览器 Network 请求是否命中新服务；三类岗位的数据可见性；创建/修改后的真实后台结果与状态；删除级联结果；网关是否透传 DELETE Body。此类线上验收需要实际网关与 Java 服务，不能由本地 mock 代替。
 
@@ -113,3 +113,16 @@ location ^~ /zt/wealth/plans/ {
 - TypeScript 检查和改动文件 Prettier 检查通过。生产构建在 Node 堆上限提高到 6144MB 后通过（默认堆首次耗尽）。
 - 改动范围 ESLint 仅报原先已有的 `api.ts::signBaseUrl` 未使用；未顺带删除既有无关函数。
 - GitNexus 变更检查为 LOW；本次只调整工作台适配与测试，没有改动通用请求层、Python 发布编排或线上网关。
+
+
+## 督办策略字段接入（2026-10-28）
+
+创建与编辑继续使用原接口。请求顶层增加 `bbkOrgId`，取登录人的 `orgCode`；原 `bbkId` 保持现有登录上下文取值。
+
+`targets[]` 每项增加 `bbkId` 和 `bbkOrgId`：分别取接收人的人员接口 `branchID`、`subBranchID`，跨机构接收人各自取值，不能复用创建人机构。客户经理分发给本人时使用本人的登录上下文。规划查询返回的 `targets[]` 也需包含这两个同名字段，以便编辑后重新发布保留原接收人机构编码；均按字符串传递，保留前导零。
+
+仅 `role=president` 时，`scenes[]` 增加 `schedule`（1当日、2 T+7日内）、`monitorTimeCron`（与执行频率一致的五段cron）和 `finishRate`（整数百分比，80代表80%）。新场景默认值分别为1、`0 9 * * *`、60。客户经理和分行中台的场景项不发送这三个字段。
+
+`GET /zt/wealth/plans` 的 `scenes[]` 需返回同名字段，前端据此回填编辑页和行长工作任务详情。未返回字段的存量规划，在详情中显示未设置策略；编辑时使用默认值。取消编辑不会写入，提交成功后以服务端查询结果为准。
+
+督办配置的localStorage逻辑已移除，旧本地缓存不再读取或自动上传。Java必须依据可信登录态校验行长权限，负责落库和督办执行；本仓库前端不新增独立督办保存接口，也不修改旧Python发布流程。

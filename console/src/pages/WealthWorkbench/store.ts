@@ -12,14 +12,7 @@ import type { CronParts } from "@/utils/parseCron";
 import { useIframeStore } from "../../stores/iframeStore";
 import * as api from "./api";
 import { throwIfRequestAborted } from "./abortSignal";
-import {
-  defaultMonitoring,
-  MONITORING_SAVE_ERROR,
-  monitoringScope,
-  monitoringStorageKey,
-  readMonitoring,
-  writeMonitoring,
-} from "./monitoring";
+import { defaultMonitoring, type SceneMonitoring } from "./monitoring";
 import {
   canAccessPage,
   FALLBACK_ROLE,
@@ -164,6 +157,7 @@ interface WealthState {
   setTaskCycle: (id: string, cycle: string) => void;
   setItemDates: (id: string, field: "start" | "end", value: string) => void;
   updateSchedule: (id: string, patch: Partial<CronParts>) => void;
+  setItemMonitoring: (id: string, patch: Partial<SceneMonitoring>) => void;
   setItemDirection: (id: string, direction: string) => void;
   setItemCustNum: (id: string, custNum: number | undefined) => void;
   normalizeDraft: () => void;
@@ -627,6 +621,26 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
     });
   },
 
+  setItemMonitoring: (id, patch) => {
+    if (get().accountId !== "president") return;
+    set((state) => ({
+      draft: {
+        ...state.draft,
+        items: state.draft.items.map((item) =>
+          item.id === id
+            ? {
+                ...item,
+                monitoring: {
+                  ...(item.monitoring ?? defaultMonitoring()),
+                  ...patch,
+                },
+              }
+            : item,
+        ),
+      },
+    }));
+  },
+
   setItemDirection: (id, direction) => {
     const { draft } = get();
     set({
@@ -705,10 +719,6 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
 
   publishPlan: async () => {
     const state = get();
-    const scope = monitoringScope(useIframeStore.getState());
-    const monitoring = readMonitoring(
-      monitoringStorageKey(scope, state.editingId),
-    );
     const error = validateDraft(state.draft);
     if (error) {
       get().toast(error);
@@ -725,20 +735,11 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
     set({ acting: true });
     const draft = normalizeItems(state.draft);
     try {
-      const { plans, created, planId } = await api.publishPlan(
+      const { plans, created } = await api.publishPlan(
         account,
         draft,
         state.editingId,
         targets,
-      );
-      const monitoringSaved = writeMonitoring(
-        monitoringStorageKey(scope, planId),
-        Object.fromEntries(
-          draft.items.map((item) => [
-            item.id,
-            monitoring[item.id] ?? defaultMonitoring(),
-          ]),
-        ),
       );
       // 请求仍会完成并更新列表；已切换表单时不回写旧草稿，也不触发旧页面跳转。
       const isCurrentForm = get().planFormVersion === state.planFormVersion;
@@ -757,11 +758,7 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
       const successMessage = created
         ? "规划已发布，正在后台创建定时任务并分发"
         : "规划已修改，正在重新发布";
-      get().toast(
-        monitoringSaved
-          ? successMessage
-          : `${successMessage}；${MONITORING_SAVE_ERROR}`,
-      );
+      get().toast(successMessage);
       return isCurrentForm;
     } catch (error) {
       // HTTP 业务错误（409 发布中 / 403 非创建人 / 认证失效等）原样提示
@@ -802,12 +799,21 @@ function buildPublishTargets(
   account: Account,
 ): DistributeTarget[] {
   if (!needsDistributeTargets(account.id)) {
-    const sapId = useIframeStore.getState().userId ?? account.id;
-    return [{ sapId, name: account.name, orgName: account.department }];
+    const { userId, bbk, orgCode } = useIframeStore.getState();
+    return [
+      {
+        sapId: userId ?? account.id,
+        name: account.name,
+        orgName: account.department,
+        bbkId: bbk ?? "",
+        bbkOrgId: orgCode ?? "",
+      },
+    ];
   }
   return state.targetSapIds.map((sapId) => {
     const hit = state.targets.find((t) => t.sapId === sapId);
     return {
+      ...hit,
       sapId,
       name: hit?.name ?? sapId,
       orgName: hit?.orgName ?? "",
