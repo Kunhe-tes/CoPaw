@@ -512,6 +512,42 @@ describe("经营分类独立表格", () => {
     },
   );
 
+  it.each(["business", "customer", "pending"] as const)(
+    "%s 经营方案列紧邻执行列，表头与操作单元格一致",
+    (view) => {
+      state.pendingCustomers = state.customers;
+      render(
+        <MemoryRouter>
+          <Tasks page={view === "pending" ? "pending" : "today"} />
+        </MemoryRouter>,
+      );
+      if (view === "customer") {
+        fireEvent.click(screen.getByRole("button", { name: "客户视角" }));
+      }
+      for (const table of screen.getAllByRole("table")) {
+        const headers = within(table).getAllByRole("columnheader");
+        const schemeIndex = headers.findIndex(
+          (header) => header.textContent === "经营方案",
+        );
+        expect(schemeIndex).toBeGreaterThan(-1);
+        expect(headers[schemeIndex + 1]).toHaveTextContent("执行");
+        for (const row of within(table).getAllByRole("row").slice(1)) {
+          const cells = within(row).getAllByRole("cell");
+          expect(
+            within(cells[schemeIndex]).getByRole("button", {
+              name: "查看经营方案",
+            }),
+          ).toBeInTheDocument();
+          expect(
+            within(cells[schemeIndex + 1]).getByRole("button", {
+              name: "电访",
+            }),
+          ).toBeInTheDocument();
+        }
+      }
+    },
+  );
+
   it("今日任务客户视角在标签之后展示接口技能名称，缺失时保留占位", () => {
     state.customers[0].skillNames = ["接口技能一", "接口技能二"];
     const { rerender } = render(
@@ -534,9 +570,9 @@ describe("经营分类独立表格", () => {
       "经营场景",
       "经营机会",
       "客户指标",
-      "经营方案",
       "接触状态",
       "最近接触时间",
+      "经营方案",
       "执行",
     ]);
     const rows = within(table).getAllByRole("row");

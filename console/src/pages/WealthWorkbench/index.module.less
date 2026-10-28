@@ -3881,6 +3881,7 @@
   }
   .customerTable.metricsTable {
     --execution-width: 210px;
+    --scheme-width: 120px;
     table-layout: auto;
     min-width: 1000px;
     th,
@@ -3949,11 +3950,20 @@
   }
   .customerTable.metricsTable.opportunityTable .recentContactCol {
     position: sticky;
+    right: calc(var(--execution-width) + var(--scheme-width));
+    background: var(--console-management-surface, #fff);
+    z-index: 1;
+  }
+  .customerTable.metricsTable.opportunityTable .schemeCol {
+    position: sticky;
     right: var(--execution-width);
+    width: var(--scheme-width);
+    min-width: var(--scheme-width);
     background: var(--console-management-surface, #fff);
     z-index: 1;
   }
   .customerTable.metricsTable.opportunityTable th.executionCol,
+  .customerTable.metricsTable.opportunityTable th.schemeCol,
   .customerTable.metricsTable.opportunityTable th.recentContactCol {
     background: linear-gradient(100deg, #f0f8ff, #edf6ff);
   }
