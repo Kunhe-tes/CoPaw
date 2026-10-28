@@ -14,6 +14,12 @@ import { Result, Spin } from "antd";
 import { useChatContentOnly } from "@/components/agentscope-chat/ChatContentOnlyContext";
 import { chatApi } from "@/api/modules/chat";
 import sessionApi, { convertArchivedPage } from "@/pages/Chat/sessionApi";
+import {
+  INLINE_COMPACTION_TYPE,
+  mergeHistoryResponses,
+  normalizeHistoryMessages,
+  resolveHistoryAnchorId,
+} from "@/pages/Chat/sessionApi/historyAssembly";
 import useChatAnywhereEventEmitter from "../../Context/useChatAnywhereEventEmitter";
 import useHistoryPreload from "@/components/agentscope-chat/Bubble/hooks/useHistoryPreload";
 import { getScrollTopAfterAnchorOffset } from "@/components/agentscope-chat/Bubble/hooks/scrollAnchor";
@@ -123,6 +129,19 @@ function snapshotContainsCompactionBoundary(
     messages?.some(
       (message) =>
         message.cards?.some((card) => {
+          const inlineBoundaries = card.data?.output;
+          if (
+            Array.isArray(inlineBoundaries) &&
+            inlineBoundaries.some(
+              (item: {
+                type?: string;
+                content?: Array<{ data?: { id?: string } }>;
+              }) =>
+                item.type === INLINE_COMPACTION_TYPE &&
+                item.content?.[0]?.data?.id === boundaryId,
+            )
+          )
+            return true;
           if (card.code !== COMPACTION_BOUNDARY_CARD) return false;
           const data = card.data;
           return (
@@ -148,9 +167,23 @@ function getVisibleMessageAnchor(scrollElement: HTMLElement) {
     .sort((left, right) => left.rect.top - right.rect.top)[0];
 
   if (!anchorElement) return null;
+  const contentAnchor = Array.from(
+    anchorElement.element.querySelectorAll<HTMLElement>(
+      "[data-history-anchor-id]",
+    ),
+  )
+    .map((element) => ({ element, rect: element.getBoundingClientRect() }))
+    .filter(
+      ({ rect }) =>
+        rect.height > 0 &&
+        rect.bottom > containerRect.top &&
+        rect.top < containerRect.bottom,
+    )
+    .sort((left, right) => left.rect.top - right.rect.top)[0];
+  const selected = contentAnchor || anchorElement;
   return {
-    messageId: anchorElement.element.id,
-    offset: anchorElement.rect.top - containerRect.top,
+    messageId: selected.element.dataset.historyAnchorId || selected.element.id,
+    offset: selected.rect.top - containerRect.top,
   };
 }
 
@@ -159,8 +192,13 @@ function getHistoryAnchorElement(
   messageId: string,
 ) {
   return Array.from(
-    scrollElement.querySelectorAll<HTMLElement>("[data-role][id]"),
-  ).find((element) => element.id === messageId);
+    scrollElement.querySelectorAll<HTMLElement>(
+      "[data-role][id], [data-history-anchor-id]",
+    ),
+  ).find(
+    (element) =>
+      element.dataset.historyAnchorId === messageId || element.id === messageId,
+  );
 }
 
 export default function MessageList(props: {
@@ -398,7 +436,9 @@ export default function MessageList(props: {
         historyDoneRef.current = !page.has_more;
         setHistoryExhausted(!page.has_more);
         historyCursorRef.current = page.next_cursor || null;
-        const unseenMessages = (page.messages || []).filter((message) => {
+        const unseenMessages = normalizeHistoryMessages(
+          page.messages || [],
+        ).filter((message) => {
           if (typeof message.id !== "string") return true;
           if (loadedArchiveMessageIdsRef.current.has(message.id)) return false;
           loadedArchiveMessageIdsRef.current.add(message.id);
@@ -433,10 +473,10 @@ export default function MessageList(props: {
         // @ts-expect-error Context exposes a React-style updater at runtime but omits it from its public type.
         setMessages((current) => {
           const known = new Set(current.map((message) => message.id));
-          return [
+          return mergeHistoryResponses([
             ...uniqueOlder.filter((message) => !known.has(message.id)),
             ...current,
-          ];
+          ]);
         });
         setHistoryLoadState(page.has_more ? "idle" : "exhausted");
         return true;
@@ -506,7 +546,7 @@ export default function MessageList(props: {
     const restoreAnchor = (anchor: HistoryAnchorTransaction) => {
       const anchorElement = getHistoryAnchorElement(
         scrollElement,
-        anchor.messageId,
+        resolveHistoryAnchorId(messages || [], anchor.messageId),
       );
       if (!anchorElement) return;
       const nextOffset =
@@ -564,7 +604,7 @@ export default function MessageList(props: {
       cancelAnimationFrame(frameId);
       resizeObserver?.disconnect();
     };
-  }, [currentSessionId, historyScrollElement, visibleMessages]);
+  }, [currentSessionId, historyScrollElement, messages, visibleMessages]);
 
   const historyPreload = useHistoryPreload({
     scrollElement: historyScrollElement,

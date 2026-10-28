@@ -10,6 +10,7 @@ from swe.app.runner.api import (
     _archive_page,
     _archive_store,
     _filter_archived_turn_messages,
+    _messages_from_memory_state,
     get_chat_history_page,
 )
 from swe.app.runner.models import ChatMessage, ChatSpec
@@ -96,6 +97,62 @@ async def test_history_api_keeps_each_archived_message_source_identity(
         "old-1",
         "old-2",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_results", [False, True])
+async def test_archive_fragments_have_distinct_stable_display_ids(
+    tmp_path,
+    tool_results,
+):
+    workspace = SimpleNamespace(workspace_dir=tmp_path)
+    chat_id = str(uuid.uuid4())
+    message = Msg(
+        "assistant",
+        [
+            {"type": "thinking", "thinking": "checking"},
+            {
+                "type": "tool_use",
+                "id": "call-a",
+                "name": "read_file",
+                "input": {"path": "a"},
+            },
+            {
+                "type": "tool_use",
+                "id": "call-b",
+                "name": "read_file",
+                "input": {"path": "b"},
+            },
+        ],
+        "assistant",
+    )
+    if tool_results:
+        message.content = [
+            {
+                "type": "tool_result",
+                "id": call_id,
+                "name": "read_file",
+                "output": call_id,
+            }
+            for call_id in ("call-a", "call-b")
+        ]
+    message.id = "source-message"
+    await _archive_store(workspace).commit(chat_id, [message])
+
+    first = await _archive_page(workspace, chat_id, None, 20)
+    repeated = await _archive_page(workspace, chat_id, None, 50)
+    assert len(first.messages) == len(message.content)
+    assert len({item.id for item in first.messages}) == len(message.content)
+    assert [item.id for item in first.messages] == [
+        item.id for item in repeated.messages
+    ]
+    assert {item.metadata["original_id"] for item in first.messages} == {
+        message.id,
+    }
+    online = await _messages_from_memory_state(
+        {"content": [[message.to_dict(), []]]},
+    )
+    assert [item.id for item in online] == [item.id for item in first.messages]
 
 
 @pytest.mark.asyncio

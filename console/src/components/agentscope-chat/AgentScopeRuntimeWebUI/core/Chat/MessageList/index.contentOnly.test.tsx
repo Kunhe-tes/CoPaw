@@ -10,6 +10,7 @@ import { forwardRef, useImperativeHandle, useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatContentOnlyProvider } from "@/components/agentscope-chat/ChatContentOnlyContext";
 import MessageList from ".";
+import * as sessionApiModule from "@/pages/Chat/sessionApi";
 
 const mocks = vi.hoisted(() => ({
   messagesContext: {},
@@ -17,9 +18,9 @@ const mocks = vi.hoisted(() => ({
   messages: [] as Array<{
     id: string;
     history?: boolean;
-    msgStatus?: "generating" | "finished";
-    role?: "assistant" | "user";
-    cards?: Array<{ code: string; data: unknown }>;
+    msgStatus?: "generating" | "finished" | "error" | "interrupted";
+    role?: "assistant" | "user" | "system";
+    cards?: Array<{ code: string; data?: unknown }>;
   }>,
   setMessages: vi.fn(),
   isSessionLoading: false,
@@ -187,6 +188,7 @@ vi.mock("@/api/modules/chat", () => ({
   chatApi: {
     getChatHistory: apiMocks.getChatHistory,
   },
+  sessionApi: {},
 }));
 
 vi.mock("@/pages/Chat/sessionApi", () => ({
@@ -335,9 +337,80 @@ describe("MessageList content-only composition", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
     vi.unstubAllGlobals();
     cleanup();
+  });
+
+  it("retains same-source fragments and pairs one response across archive pages", async () => {
+    const actual = await vi.importActual<
+      typeof import("@/pages/Chat/sessionApi")
+    >("@/pages/Chat/sessionApi");
+    vi.spyOn(sessionApiModule, "convertArchivedPage").mockImplementation(
+      actual.convertArchivedPage,
+    );
+    const runtime = (type: string, callId: string) => ({
+      id: "legacy-source",
+      role: "assistant",
+      type,
+      metadata: { original_id: "legacy-source" },
+      content: [
+        {
+          type: "data",
+          data: { call_id: callId, arguments: "{}", output: "ok" },
+        },
+      ],
+    });
+    mocks.messages = actual
+      .convertMessages([
+        {
+          id: "result-a",
+          role: "system",
+          type: "plugin_call_output",
+          content: [{ type: "data", data: { call_id: "a", output: "ok" } }],
+        },
+      ])
+      .map((message) => ({ ...message, history: true }));
+    const responseId = mocks.messages[0].id;
+    apiMocks.getChatHistory
+      .mockResolvedValueOnce({
+        messages: [runtime("plugin_call", "a"), runtime("plugin_call", "b")],
+        boundaries: [],
+        has_more: true,
+        next_cursor: "older",
+      })
+      .mockResolvedValueOnce({
+        messages: [{ id: "question", role: "user", content: "question" }],
+        boundaries: [],
+        has_more: false,
+        next_cursor: null,
+      });
+    render(<MessageList onSubmit={vi.fn()} />);
+    const list = screen.getByTestId("bubble-list");
+    list.scrollTop = -380;
+    fireEvent.scroll(list);
+    await waitFor(() =>
+      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(1),
+    );
+    await waitFor(() => expect(mocks.messages).toHaveLength(1));
+    expect(mocks.messages[0].id).toBe(responseId);
+    expect(
+      (mocks.messages[0].cards?.[0].data as { output: unknown[] }).output,
+    ).toHaveLength(3);
+    await flushHistoryLayout();
+    await waitFor(() =>
+      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(mocks.messages.map((message) => message.role)).toEqual([
+        "user",
+        "assistant",
+      ]),
+    );
+    expect(
+      (mocks.messages[1].cards?.[0].data as { output: unknown[] }).output,
+    ).toHaveLength(3);
   });
 
   it.each([false, true])(
@@ -771,6 +844,41 @@ describe("MessageList content-only composition", () => {
       { id: "archived-message", history: true },
       { id: "online-message", history: true },
     ]);
+  });
+
+  it("preserves the visible content within a response when earlier history is inserted", async () => {
+    mocks.messages = [{ id: "online-message", history: true }];
+    apiMocks.getChatHistory.mockResolvedValue({
+      messages: [{ id: "archived-message" }],
+      boundaries: [],
+      has_more: true,
+      next_cursor: "next-page",
+    });
+    const rendered = render(<MessageList onSubmit={vi.fn()} />);
+    const list = screen.getByTestId("bubble-list");
+    const content = document.createElement("div");
+    content.dataset.historyAnchorId = "visible-runtime-message";
+    let contentTop = 120;
+    content.getBoundingClientRect = () => ({
+      top: contentTop,
+      bottom: contentTop + 48,
+      height: 48,
+      width: 400,
+      x: 0,
+      y: contentTop,
+      left: 0,
+      right: 400,
+      toJSON: () => ({}),
+    });
+    document.getElementById("online-message")!.appendChild(content);
+    list.scrollTop = -380;
+    fireEvent.scroll(list);
+    await waitFor(() => expect(mocks.messages).toHaveLength(2));
+    mocks.anchorTop = 240;
+    contentTop = 160;
+    rendered.rerender(<MessageList onSubmit={vi.fn()} />);
+    await flushHistoryFrame();
+    expect(list.scrollTop).toBe(-340);
   });
 
   it("restores the visible anchor after a post-commit history layout shift", async () => {

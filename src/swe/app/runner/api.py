@@ -278,6 +278,27 @@ def _model_call_failed_messages_from_state(state: dict) -> list[ChatMessage]:
     return messages
 
 
+def _history_msg_to_messages(
+    memories,
+    *,
+    session_id: str = "",
+    position_offset: int = 0,
+) -> list[ChatMessage]:
+    """Give historical fragments distinct IDs without changing live SSE IDs."""
+    messages: list[ChatMessage] = []
+    for position, memory in enumerate(memories, start=position_offset):
+        fragments = agentscope_msg_to_message(
+            memory,
+            session_id=session_id,
+            position_offset=position,
+        )
+        if len(fragments) > 1:
+            for index, fragment in enumerate(fragments):
+                fragment.id = f"{fragment.id}:fragment:{index}"
+        messages.extend(fragments)
+    return messages
+
+
 async def _messages_from_memory_state(
     memory_state: dict,
     *,
@@ -291,7 +312,7 @@ async def _messages_from_memory_state(
     normalized_state = _normalize_state_for_load(memory_state)
     memory.load_state_dict(normalized_state, strict=False)
     memories = await memory.get_memory(prepend_summary=False)
-    return agentscope_msg_to_message(
+    return _history_msg_to_messages(
         memories,
         session_id=session_id,
         position_offset=position_offset,
@@ -948,7 +969,7 @@ async def _archive_page(
     if store is None:
         return ChatArchivePage()
     page = await store.read_page(chat_id, before=before, limit=limit)
-    messages = agentscope_msg_to_message(
+    messages = _history_msg_to_messages(
         page.messages,
         session_id=chat_id,
     )

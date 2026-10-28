@@ -31,6 +31,10 @@ import {
 } from "../messageMeta";
 import { toDisplayUrl } from "../utils";
 import { readStopAppendMetadata, stopAppendBubbleId } from "../stopAppend";
+import {
+  mergeHistoryResponses,
+  normalizeHistoryMessages,
+} from "./historyAssembly";
 import { applyPreferredSessionSelection } from "./preferredSession";
 import { shouldNotifySessionSelected } from "./sessionRaceGuard";
 import { filterStaleTaskSessions } from "./taskSessions";
@@ -320,19 +324,31 @@ function isStandaloneOutputMessage(message: Message | OutputMessage): boolean {
   );
 }
 
-function isCronTaskOutputMessage(message: Message | OutputMessage): boolean {
+function getMessageMetadata(
+  message: Message | OutputMessage,
+): Record<string, unknown> | null {
   const metadata =
     message.metadata && typeof message.metadata === "object"
       ? (message.metadata as Record<string, unknown>)
       : null;
-  return Boolean(metadata?.cron_task);
+  if (!metadata) return null;
+  const nested = metadata.metadata;
+  return nested && typeof nested === "object"
+    ? { ...metadata, ...(nested as Record<string, unknown>) }
+    : metadata;
+}
+
+function getTaskRunId(message: Message | OutputMessage): string | null {
+  const value = getMessageMetadata(message)?.task_run_id;
+  return typeof value === "string" && value ? value : null;
+}
+
+function isCronTaskOutputMessage(message: Message | OutputMessage): boolean {
+  return Boolean(getMessageMetadata(message)?.cron_task);
 }
 
 function getTaskRunMetadata(message: Message): TaskRunMetadata | null {
-  const metadata =
-    message.metadata && typeof message.metadata === "object"
-      ? (message.metadata as Record<string, unknown>)
-      : null;
+  const metadata = getMessageMetadata(message);
   if (!metadata) return null;
 
   const runId = metadata.task_run_id;
@@ -683,8 +699,9 @@ function stableResponseId(messages: OutputMessage[]): string {
  *   into a single AgentScopeRuntimeResponseCard with all output messages.
  */
 export const convertMessages = (
-  messages: Message[],
+  rawMessages: Message[],
 ): IAgentScopeRuntimeWebUIMessage[] => {
+  const messages = normalizeHistoryMessages(rawMessages);
   const result: IAgentScopeRuntimeWebUIMessage[] = [];
   const submittedPlanReviews = collectSubmittedPlanReviews(messages);
   let i = 0;
@@ -707,8 +724,15 @@ export const convertMessages = (
       }
 
       const outputMsgs: OutputMessage[] = [];
+      const firstTaskRunId = getTaskRunId(messages[i]);
       while (i < messages.length && messages[i].role !== ROLE_USER) {
         if (isStandaloneOutputMessage(messages[i])) {
+          break;
+        }
+        if (
+          outputMsgs.length > 0 &&
+          getTaskRunId(messages[i]) !== firstTaskRunId
+        ) {
           break;
         }
         outputMsgs.push(toOutputMessage(messages[i++]));
@@ -757,9 +781,10 @@ function withArchiveBoundaries(
 
 /** Convert one archived page while keeping each divider after its batch. */
 export function convertArchivedPage(
-  messages: Message[],
+  rawMessages: Message[],
   boundaries: ChatCompactionBoundary[],
 ): IAgentScopeRuntimeWebUIMessage[] {
+  const messages = normalizeHistoryMessages(rawMessages);
   const boundariesByLastMessageId = new Map<string, ChatCompactionBoundary[]>();
   boundaries.forEach((boundary) => {
     const current = boundariesByLastMessageId.get(boundary.last_message_id);
@@ -784,7 +809,9 @@ export function convertArchivedPage(
     segmentStart = index + 1;
   });
   result.push(...convertMessages(messages.slice(segmentStart)));
-  return result;
+  return mergeHistoryResponses(
+    result.map((message) => ({ ...message, history: true })),
+  );
 }
 
 function buildTaskRunCard(

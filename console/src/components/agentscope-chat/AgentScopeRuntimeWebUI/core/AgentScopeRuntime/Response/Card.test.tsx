@@ -103,6 +103,77 @@ afterEach(() => {
   cleanup();
 });
 
+it("exposes stable reading anchors for process and answer content", () => {
+  const { container, rerender } = render(
+    <AgentScopeRuntimeResponseCard
+      data={response([
+        textMessage(
+          "thinking",
+          "checking",
+          AgentScopeRuntimeMessageType.REASONING,
+        ),
+        textMessage("final", "final answer"),
+      ])}
+    />,
+  );
+  expect(
+    container.querySelector('[data-history-anchor-id="process:response-1"]'),
+  ).toBeTruthy();
+  expect(
+    screen.getByText("final answer").closest("[data-history-anchor-id]"),
+  ).toHaveAttribute("data-history-anchor-id", "final");
+  rerender(
+    <AgentScopeRuntimeResponseCard
+      data={response([
+        textMessage("older", "earlier", AgentScopeRuntimeMessageType.REASONING),
+        textMessage(
+          "thinking",
+          "checking",
+          AgentScopeRuntimeMessageType.REASONING,
+        ),
+        textMessage("final", "final answer"),
+      ])}
+    />,
+  );
+  expect(
+    container.querySelector('[data-history-anchor-id="process:response-1"]'),
+  ).toBeTruthy();
+});
+
+it("renders an inline compaction separator without creating a second answer", () => {
+  const boundary: IAgentScopeRuntimeMessage = {
+    id: "boundary-inline",
+    role: AgentScopeRuntimeMessageRole.SYSTEM,
+    type: AgentScopeRuntimeMessageType.CONVERSATION_COMPACTION_BOUNDARY,
+    status: AgentScopeRuntimeRunStatus.Completed,
+    content: [
+      {
+        type: AgentScopeRuntimeContentType.DATA,
+        status: AgentScopeRuntimeRunStatus.Completed,
+        data: {
+          id: "archive-boundary",
+          archived_message_count: 2,
+          first_message_id: "q",
+          last_message_id: "tool",
+          created_at: "2026-10-28T01:00:00Z",
+        },
+      },
+    ],
+  };
+  render(
+    <AgentScopeRuntimeResponseCard
+      data={response([boundary, textMessage("final", "final answer")])}
+    />,
+  );
+  expect(screen.getByText("final answer")).toBeTruthy();
+  const process = screen.getByRole("button", { name: /执行过程/ });
+  fireEvent.click(process);
+  expect(screen.getByRole("separator")).toHaveAttribute(
+    "data-conversation-compaction-boundary-id",
+    "archive-boundary",
+  );
+});
+
 it("keeps copy actions but hides regeneration for appended messages", () => {
   const appended = {
     ...textMessage("runtime-id", "supplement"),
