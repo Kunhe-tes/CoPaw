@@ -733,6 +733,210 @@ describe("ChatPage plan mode wiring", () => {
     vi.restoreAllMocks();
   });
 
+  it("keeps a manual expert visible through new-chat creation, resolution, and repeated submissions", async () => {
+    mocks.currentSessionId = "";
+    mocks.pathname = "/chat";
+    mocks.sessions = [];
+    mocks.listExperts.mockResolvedValue([
+      {
+        definition_id: "expert-1",
+        enabled: true,
+        valid: true,
+        definition: { name: "研究专家" },
+      },
+    ]);
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("", { status: 200 }));
+    const view = render(<ChatPage />);
+    await waitFor(() => expect(mocks.expertSelectorProps).toBeTruthy());
+    await act(async () => {
+      await (
+        mocks.expertSelectorProps?.onChange as (id: string) => Promise<void>
+      )("expert-1");
+    });
+    await waitFor(() =>
+      expect(mocks.expertSelectorProps?.selectedExpertId).toBe("expert-1"),
+    );
+    let prepared: { biz_params: Record<string, unknown> } = { biz_params: {} };
+    await act(async () => {
+      prepared = await mocks.capturedOptions?.sender.beforeSubmit({
+        query: "研究任务",
+        fileList: [],
+      });
+    });
+    expect(prepared.biz_params.selected_expert_id).toBe("expert-1");
+    act(() => {
+      mocks.sessionApi?.onSessionCreated?.("1780000000000");
+    });
+    mocks.currentSessionId = "1780000000000";
+    view.rerender(<ChatPage />);
+    await waitFor(() =>
+      expect(mocks.expertSelectorProps?.selectedExpertId).toBe("expert-1"),
+    );
+    act(() => {
+      mocks.sessionApi?.onSessionIdResolved?.("1780000000000", "chat-created");
+    });
+    mocks.pathname = "/chat/chat-created";
+    view.rerender(<ChatPage />);
+    await waitFor(() =>
+      expect(mocks.expertSelectorProps?.selectedExpertId).toBe("expert-1"),
+    );
+    for (let turn = 0; turn < 2; turn += 1) {
+      await act(async () => {
+        await mocks.capturedOptions?.api.fetch({
+          input: [
+            { role: "user", content: [{ type: "text", text: "研究任务" }] },
+          ],
+          session_id: mocks.currentSessionId,
+          biz_params: prepared.biz_params,
+        });
+      });
+      const body = JSON.parse(
+        fetchMock.mock.calls[fetchMock.mock.calls.length - 1]?.[1]
+          ?.body as string,
+      );
+      expect(body.selected_expert_id).toBe("expert-1");
+      expect(mocks.expertSelectorProps?.selectedExpertId).toBe("expert-1");
+      expect(screen.getByTestId("chat-sender-prefix")).toHaveTextContent(
+        "研究专家",
+      );
+    }
+    mocks.currentSessionId = "chat-other";
+    mocks.pathname = "/chat/chat-other";
+    view.rerender(<ChatPage />);
+    await waitFor(() =>
+      expect(mocks.expertSelectorProps?.selectedExpertId).toBe(null),
+    );
+    mocks.currentSessionId = "";
+    mocks.pathname = "/chat";
+    view.rerender(<ChatPage />);
+    await waitFor(() =>
+      expect(mocks.expertSelectorProps?.selectedExpertId).toBe(null),
+    );
+    await act(async () => {
+      await (
+        mocks.expertSelectorProps?.onChange as (
+          id: string | null,
+        ) => Promise<void>
+      )("expert-1");
+    });
+    await waitFor(() =>
+      expect(mocks.expertSelectorProps?.selectedExpertId).toBe("expert-1"),
+    );
+    await act(async () => {
+      await (
+        mocks.expertSelectorProps?.onChange as (
+          id: string | null,
+        ) => Promise<void>
+      )(null);
+    });
+    await waitFor(() =>
+      expect(mocks.expertSelectorProps?.selectedExpertId).toBe(null),
+    );
+  });
+
+  it("clears a manual expert after a new chat's first reset command succeeds", async () => {
+    mocks.currentSessionId = "";
+    mocks.pathname = "/chat";
+    mocks.sessions = [];
+    mocks.listExperts.mockResolvedValue([
+      {
+        definition_id: "expert-1",
+        enabled: true,
+        valid: true,
+        definition: { name: "研究专家" },
+      },
+    ]);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("", { status: 200 }),
+    );
+    const view = render(<ChatPage />);
+    await waitFor(() => expect(mocks.expertSelectorProps).toBeTruthy());
+    await act(async () => {
+      await (
+        mocks.expertSelectorProps?.onChange as (id: string) => Promise<void>
+      )("expert-1");
+    });
+    let prepared: { biz_params: Record<string, unknown> } = { biz_params: {} };
+    await act(async () => {
+      prepared = await mocks.capturedOptions?.sender.beforeSubmit({
+        query: "/reset",
+        fileList: [],
+      });
+    });
+    act(() => {
+      mocks.sessionApi?.onSessionCreated?.("1780000000000");
+    });
+    mocks.currentSessionId = "1780000000000";
+    view.rerender(<ChatPage />);
+    await act(async () => {
+      await mocks.capturedOptions?.api.fetch({
+        input: [{ role: "user", content: [{ type: "text", text: "/reset" }] }],
+        session_id: mocks.currentSessionId,
+        biz_params: prepared.biz_params,
+      });
+    });
+    await waitFor(() =>
+      expect(mocks.expertSelectorProps?.selectedExpertId).toBe(null),
+    );
+  });
+
+  it.each(["计划模式", "目标模式"])(
+    "clears a manual expert when entering %s",
+    async (mode) => {
+      mocks.inputDisabled = false;
+      mocks.sessions[0].meta.plan_mode_enabled = false;
+      mocks.listExperts.mockResolvedValue([
+        {
+          definition_id: "expert-1",
+          enabled: true,
+          valid: true,
+          definition: { name: "研究专家" },
+        },
+      ]);
+      render(<ChatPage />);
+      await waitFor(() => expect(mocks.expertSelectorProps).toBeTruthy());
+      await act(async () => {
+        await (
+          mocks.expertSelectorProps?.onChange as (id: string) => Promise<void>
+        )("expert-1");
+      });
+      await waitFor(() =>
+        expect(mocks.expertSelectorProps?.selectedExpertId).toBe("expert-1"),
+      );
+      if (mode === "计划模式") {
+        const fetchMock = vi
+          .spyOn(globalThis, "fetch")
+          .mockResolvedValue(new Response("", { status: 200 }));
+        await act(async () => {
+          const prepared = await mocks.capturedOptions?.sender.beforeSubmit({
+            query: "/plan 研究任务",
+            fileList: [],
+          });
+          await mocks.capturedOptions?.api.fetch({
+            input: [
+              { role: "user", content: [{ type: "text", text: "研究任务" }] },
+            ],
+            session_id: "chat-1",
+            biz_params: prepared.biz_params,
+          });
+        });
+        const body = JSON.parse(
+          fetchMock.mock.calls[fetchMock.mock.calls.length - 1]?.[1]
+            ?.body as string,
+        );
+        expect(body.mode).toBe("plan");
+        expect(body.selected_expert_id).toBeUndefined();
+      } else {
+        fireEvent.click(screen.getByRole("switch", { name: mode }));
+      }
+      await waitFor(() =>
+        expect(mocks.expertSelectorProps?.selectedExpertId).toBe(null),
+      );
+    },
+  );
+
   it("restores persistent binding and submits its revision without clearing selection", async () => {
     mocks.getExpertBinding.mockResolvedValue({
       revision: 3,

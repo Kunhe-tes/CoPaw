@@ -38,3 +38,11 @@
 正式 Goal 使用快照 JSON 字段 `subagent_delegation_enabled`，旧记录缺省 false。Steering 可提升为 true；同一 Goal 内不能被旧快照降级。MySQL save 在同一事务 SELECT FOR UPDATE 后 OR 合并，内存存储同语义。不要只给部分 service 写者补锁，否则 completion review 等旧快照仍能覆盖授权。后续轮刷新 Source 配置与目录，已启动运行保持原快照。
 
 回归入口：`tests/unit/app/goals/test_delegation_intent.py`。SQL 事务单测不替代真实 Kubernetes 多实例 MySQL/NAS 验收。
+
+## 新会话首条消息未携带手选专家
+
+2026-10-28 诊断：两个 Source 开关均关闭时，普通 Chat 的手动专家选择仍应通过 `selected_expert_id` 强制启动对应 SubAgent；无需正文关键词授权。不要用开启自主发现作为补救。
+
+原 Console 存在首次发送时序缺口：`Chat/index.tsx` 的 `beforeSubmit` 仅快照专家绑定修订，没有快照 legacy 手选专家 ID；`useChatController.submitTurn` 在请求前执行 `ensureSession`，新建会话改变 `activeSessionId`；页面依赖该 ID 的 effect 清空 `legacySelectedExpertId`，而 `useChatRequest` 使用最新 `apiOptionsRef` 中的 fetch。随后 `customFetch` 从已清空的状态构造请求，省略 `selected_expert_id`，后端按默认 Agent 执行。
+
+已修复：`beforeSubmit` 将本轮手选专家 ID 冻结到提交参数；`customFetch` 优先使用该快照。会话创建和临时 ID 解析登记为同一选择范围的别名，避免误清空；发送后保留选择及输入框下方名称，后续消息继续提交该专家，切换其他会话/Profile、手动取消或进入 Plan/Goal 时清除。回归测试 `index.test.tsx` 的 `keeps a manual expert visible through new-chat creation, resolution, and repeated submissions` 覆盖首次发送、ID 解析、重复发送和切换会话。后端 `test_runner_auth_token_passthrough.py` 10 项通过，包含显式专家强制启动。定位实际会话仍应核对 `/console/chat` 请求字段及是否进入 Plan/Goal；此复现不代表所有未调用专家的会话均为同一原因。修复应在提交时冻结本轮选择并贯穿会话创建，保留切换其他会话时清空选择的行为。
