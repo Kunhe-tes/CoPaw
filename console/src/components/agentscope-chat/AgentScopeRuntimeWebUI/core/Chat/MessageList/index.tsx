@@ -492,21 +492,11 @@ export default function MessageList(props: {
             : null;
         }
         isPrependingHistoryRef.current = uniqueOlder.length > 0;
+        // Keep shared cards in their displayed positions and merge their outputs.
         // @ts-expect-error Context exposes a React-style updater at runtime but omits it from its public type.
-        setMessages((current) => {
-          const known = new Map(
-            current.map((message) => [message.id, message]),
-          );
-          const archiveIds = new Set(
-            archiveMessages.map((message) => message.id),
-          );
-          return mergeHistoryResponses([
-            ...archiveMessages.map(
-              (message) => known.get(message.id) || message,
-            ),
-            ...current.filter((message) => !archiveIds.has(message.id)),
-          ]);
-        });
+        setMessages((current) =>
+          reconcileHistoryLayers(archiveMessages, current),
+        );
         setHistoryLoadState(page.has_more ? "idle" : "exhausted");
         return true;
       } catch {
