@@ -101,6 +101,29 @@ describe("archived history assembly", () => {
     expect(result[0].cards?.[0].data.output).toHaveLength(3);
   });
 
+  it("resolves process anchors through repeated response merges", () => {
+    const older = convertArchivedPage([call], []);
+    const newer = convertArchivedPage([output], []);
+    const merged = mergeHistoryResponses([...older, ...newer]);
+    expect(resolveHistoryAnchorId(merged, `process:${older[0].id}`)).toBe(
+      `process:${newer[0].id}`,
+    );
+    const latest = convertArchivedPage(
+      [{ id: "answer", role: "assistant", content: "answer" }],
+      [],
+    );
+    const remerged = mergeHistoryResponses([...merged, ...latest]);
+    for (const response of [...older, ...newer, ...latest]) {
+      expect(resolveHistoryAnchorId(remerged, `process:${response.id}`)).toBe(
+        `process:${latest[0].id}`,
+      );
+    }
+    expect(resolveHistoryAnchorId(remerged, "process:unknown")).toBe(
+      "process:unknown",
+    );
+    expect(resolveHistoryAnchorId(remerged, call.id)).toBe(call.id);
+  });
+
   it("keeps user, standalone Stop and live response barriers", () => {
     const first = historical(convertMessages([call]));
     const second = historical(

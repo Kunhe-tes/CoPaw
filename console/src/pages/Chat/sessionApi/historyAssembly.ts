@@ -196,10 +196,13 @@ export function resolveHistoryAnchorId(
   messages: IAgentScopeRuntimeWebUIMessage[],
   anchorId: string,
 ): string {
-  return (
-    (messages as HistoryMessage[]).find(
-      (message) =>
-        message.id === anchorId || message.historyAnchorIds?.includes(anchorId),
-    )?.id || anchorId
+  // Process anchors belong to the response, unlike stable runtime item anchors.
+  const prefix = anchorId.startsWith("process:") ? "process:" : "";
+  const responseId = anchorId.slice(prefix.length);
+  const owner = (messages as HistoryMessage[]).find(
+    (message) =>
+      message.id === responseId ||
+      message.historyAnchorIds?.includes(responseId),
   );
+  return owner ? `${prefix}${owner.id}` : anchorId;
 }

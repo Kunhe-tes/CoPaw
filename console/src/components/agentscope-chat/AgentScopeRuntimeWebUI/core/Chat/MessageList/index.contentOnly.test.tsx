@@ -881,6 +881,59 @@ describe("MessageList content-only composition", () => {
     expect(list.scrollTop).toBe(-340);
   });
 
+  it("restores a merged process descendant instead of the response bubble", async () => {
+    const actual = await vi.importActual<
+      typeof import("@/pages/Chat/sessionApi")
+    >("@/pages/Chat/sessionApi");
+    vi.spyOn(sessionApiModule, "convertArchivedPage").mockImplementation(
+      actual.convertArchivedPage,
+    );
+    const response = (id: string) => ({
+      ...actual.convertArchivedPage(
+        [{ id: `runtime-${id}`, role: "assistant", content: id }],
+        [],
+      )[0],
+      id,
+    });
+    mocks.messages = [response("online-message"), response("newer-response")];
+    apiMocks.getChatHistory.mockResolvedValue({
+      messages: [{ id: "archive", role: "assistant", content: "earlier" }],
+      boundaries: [],
+      has_more: false,
+      next_cursor: null,
+    });
+    const rendered = render(<MessageList onSubmit={vi.fn()} />);
+    const list = screen.getByTestId("bubble-list");
+    const rect = (top: number) => ({
+      top,
+      bottom: top + 48,
+      height: 48,
+      width: 400,
+      x: 0,
+      y: top,
+      left: 0,
+      right: 400,
+      toJSON: () => ({}),
+    });
+    const olderElement = document.getElementById("online-message")!;
+    const oldProcess = document.createElement("div");
+    oldProcess.dataset.historyAnchorId = "process:online-message";
+    oldProcess.getBoundingClientRect = () => rect(120);
+    olderElement.appendChild(oldProcess);
+    list.scrollTop = -380;
+    fireEvent.scroll(list);
+    await waitFor(() => expect(mocks.messages).toHaveLength(1));
+
+    mocks.anchorTop = 240;
+    const process = document.createElement("div");
+    process.dataset.historyAnchorId = "process:newer-response";
+    process.getBoundingClientRect = () => rect(160);
+    document.getElementById("newer-response")!.appendChild(process);
+    rendered.rerender(<MessageList onSubmit={vi.fn()} />);
+    await flushHistoryFrame();
+    expect(list.scrollTop).toBe(-340);
+  });
+
   it("restores the visible anchor after a post-commit history layout shift", async () => {
     mocks.messages = [{ id: "online-message", history: true }];
     let resolveHistory!: (page: {
