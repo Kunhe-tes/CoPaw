@@ -6,6 +6,7 @@ from datetime import timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from ..runner.model_call_error_detail import redact_sensitive_fragments
+from .managed_daily_retry import daily_metadata
 from .managed_failure import public_error_message
 from ..source_system_config.runtime import (
     get_current_source_system_config,
@@ -88,6 +89,9 @@ def _notification_time(run, spec, now):
     except (ValueError, TypeError):
         delay = 0
     dispatch = json.loads(run["dispatch_meta_json"])
+    retry = dispatch.get("daily_failure_retry")
+    if isinstance(retry, dict) and retry.get("notification_at"):
+        return _utc(retry["notification_at"])
     original = dispatch.get("parent_scheduled_fire_at")
     if original:
         return _utc(original) + timedelta(minutes=delay)
@@ -101,6 +105,9 @@ def _notification_time(run, spec, now):
 
 def notification_fields(run, spec, outcome, now, *, deleted=False):
     zone = spec["schedule"].get("timezone", "UTC")
+    retry = json.loads(run["dispatch_meta_json"]).get("daily_failure_retry")
+    if isinstance(retry, dict) and retry.get("notification_timezone"):
+        zone = retry["notification_timezone"]
     needed = (
         outcome.status == "success"
         and spec["task_type"] in {"agent", "workflow"}
@@ -172,14 +179,15 @@ def history_metadata(run, outcome):
     execution = json.loads(
         bounded_json(safe_metadata(outcome.execution_meta or {}), 1024),
     )
-    return bounded_json(
-        {
-            "management_owner": "scheduler",
-            "managed_execution_id": run["execution_id"],
-            "source_id": run["source_id"],
-            "agent_id": run["agent_id"],
-            "definition_version": run["definition_version"],
-            "execution": execution,
-        },
-        2048,
-    )
+    values = {
+        "management_owner": "scheduler",
+        "managed_execution_id": run["execution_id"],
+        "source_id": run["source_id"],
+        "agent_id": run["agent_id"],
+        "definition_version": run["definition_version"],
+        "execution": execution,
+    }
+    retry = daily_metadata(run)
+    if retry:
+        values["daily_failure_retry"] = retry
+    return bounded_json(values, 2048)
