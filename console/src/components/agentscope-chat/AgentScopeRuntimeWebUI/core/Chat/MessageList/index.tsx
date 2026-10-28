@@ -18,6 +18,7 @@ import {
   INLINE_COMPACTION_TYPE,
   mergeHistoryResponses,
   normalizeHistoryMessages,
+  reconcileHistoryLayers,
   resolveHistoryAnchorId,
 } from "@/pages/Chat/sessionApi/historyAssembly";
 import useChatAnywhereEventEmitter from "../../Context/useChatAnywhereEventEmitter";
@@ -258,6 +259,12 @@ export default function MessageList(props: {
   const historyDoneRef = React.useRef(false);
   const loadedArchiveMessageIdsRef = React.useRef(new Set<string>());
   const loadedBoundaryIdsRef = React.useRef(new Set<string>());
+  const loadedArchiveMessagesRef = React.useRef<
+    IAgentScopeRuntimeWebUIMessage[]
+  >([]);
+  const retainedArchiveMessagesRef = React.useRef<
+    IAgentScopeRuntimeWebUIMessage[]
+  >([]);
   const historyGenerationRef = React.useRef(0);
   const latestMessagesRef = React.useRef(messages);
   const messagesRevisionRef = React.useRef(0);
@@ -339,6 +346,16 @@ export default function MessageList(props: {
         .getSession(pending.sessionId)
         .then((session) => {
           const latestPending = pendingCompactionRefreshRef.current;
+          const refreshedMessages = reconcileHistoryLayers(
+            reconcileHistoryLayers(
+              retainedArchiveMessagesRef.current,
+              loadedArchiveMessagesRef.current,
+            ),
+            (session.messages || []).map((message) => ({
+              ...message,
+              history: true,
+            })),
+          );
           const isConfirmed =
             latestPending === pending &&
             session.generating === false &&
@@ -350,15 +367,10 @@ export default function MessageList(props: {
               session.messages,
               pending.boundaryId,
             ) &&
-            snapshotContainsTail(session.messages, tailFingerprints);
+            snapshotContainsTail(refreshedMessages, tailFingerprints);
           if (isConfirmed) {
             pendingCompactionRefreshRef.current = null;
-            setMessages(
-              (session.messages || []).map((message) => ({
-                ...message,
-                history: true,
-              })),
-            );
+            setMessages(refreshedMessages);
             return;
           }
           scheduleCompactionRefreshRef.current();
@@ -393,6 +405,8 @@ export default function MessageList(props: {
     historyDoneRef.current = false;
     loadedArchiveMessageIdsRef.current = new Set();
     loadedBoundaryIdsRef.current = new Set();
+    loadedArchiveMessagesRef.current = [];
+    retainedArchiveMessagesRef.current = [];
     historyGenerationRef.current += 1;
     setHistoryGeneration(historyGenerationRef.current);
     pendingHistoryAnchorRef.current = null;
@@ -452,6 +466,14 @@ export default function MessageList(props: {
         const older = convertArchivedPage(unseenMessages, unseenBoundaries).map(
           (message) => ({ ...message, history: true }),
         );
+        loadedArchiveMessagesRef.current = mergeHistoryResponses([
+          ...older,
+          ...loadedArchiveMessagesRef.current,
+        ]);
+        const archiveMessages = reconcileHistoryLayers(
+          retainedArchiveMessagesRef.current,
+          loadedArchiveMessagesRef.current,
+        );
         const knownMessageIds = new Set(
           (messages || []).map((message) => message.id),
         );
@@ -472,10 +494,17 @@ export default function MessageList(props: {
         isPrependingHistoryRef.current = uniqueOlder.length > 0;
         // @ts-expect-error Context exposes a React-style updater at runtime but omits it from its public type.
         setMessages((current) => {
-          const known = new Set(current.map((message) => message.id));
+          const known = new Map(
+            current.map((message) => [message.id, message]),
+          );
+          const archiveIds = new Set(
+            archiveMessages.map((message) => message.id),
+          );
           return mergeHistoryResponses([
-            ...uniqueOlder.filter((message) => !known.has(message.id)),
-            ...current,
+            ...archiveMessages.map(
+              (message) => known.get(message.id) || message,
+            ),
+            ...current.filter((message) => !archiveIds.has(message.id)),
           ]);
         });
         setHistoryLoadState(page.has_more ? "idle" : "exhausted");
@@ -647,6 +676,13 @@ export default function MessageList(props: {
         historyCursorRef.current = null;
         historyLoadingRef.current = false;
         historyDoneRef.current = false;
+        // A reset starts at the newest archive page; retain the previous prefix
+        // separately until the new traversal overlaps it.
+        retainedArchiveMessagesRef.current = reconcileHistoryLayers(
+          retainedArchiveMessagesRef.current,
+          loadedArchiveMessagesRef.current,
+        );
+        loadedArchiveMessagesRef.current = [];
         loadedArchiveMessageIdsRef.current = new Set();
         loadedBoundaryIdsRef.current = new Set();
         historyGenerationRef.current += 1;

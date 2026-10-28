@@ -725,6 +725,7 @@ export const convertMessages = (
 
       const outputMsgs: OutputMessage[] = [];
       const firstTaskRunId = getTaskRunId(messages[i]);
+      let turnId = getMessageMetadata(messages[i])?.turn_id;
       while (i < messages.length && messages[i].role !== ROLE_USER) {
         if (isStandaloneOutputMessage(messages[i])) {
           break;
@@ -735,6 +736,17 @@ export const convertMessages = (
         ) {
           break;
         }
+        const nextTurnId = getMessageMetadata(messages[i])?.turn_id;
+        if (
+          typeof turnId === "string" &&
+          turnId &&
+          typeof nextTurnId === "string" &&
+          nextTurnId &&
+          turnId !== nextTurnId
+        ) {
+          break;
+        }
+        if (typeof nextTurnId === "string" && nextTurnId) turnId = nextTurnId;
         outputMsgs.push(toOutputMessage(messages[i++]));
       }
       if (outputMsgs.length) {

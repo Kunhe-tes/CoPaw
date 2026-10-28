@@ -3,6 +3,7 @@ import { convertArchivedPage, convertMessages } from "./index";
 import {
   INLINE_COMPACTION_TYPE,
   mergeHistoryResponses,
+  reconcileHistoryLayers,
   normalizeHistoryMessages,
   resolveHistoryAnchorId,
 } from "./historyAssembly";
@@ -30,6 +31,34 @@ const historical = (messages: ReturnType<typeof convertMessages>) =>
   messages.map((message) => ({ ...message, history: true }));
 
 describe("archived history assembly", () => {
+  it("aligns retained history with a refreshed traversal that reaches an older prefix", () => {
+    const user = (id: string) =>
+      historical(convertMessages([{ id, role: "user", content: id }]))[0];
+    const retained = [user("b"), user("c")];
+    const traversal = [user("a"), user("b"), user("c"), user("d")];
+    expect(
+      reconcileHistoryLayers(retained, traversal).map((message) => message.id),
+    ).toEqual(["a", "b", "c", "d"]);
+    expect(
+      reconcileHistoryLayers(retained, [user("d")]).map(
+        (message) => message.id,
+      ),
+    ).toEqual(["b", "c", "d"]);
+  });
+
+  it("retains descendant aliases when an identical response is refreshed", () => {
+    const older = convertArchivedPage([call], []);
+    const newer = convertArchivedPage([output], []);
+    const retained = mergeHistoryResponses([...older, ...newer]);
+    const refreshed = reconcileHistoryLayers(retained, newer);
+    expect(
+      resolveHistoryAnchorId(
+        refreshed,
+        "process:" + older[0].cards![0].data.id,
+      ),
+    ).toBe("process:" + newer[0].cards![0].data.id);
+    expect(refreshed[0].cards![0].data.output).toHaveLength(2);
+  });
   it("keeps legacy fragments with shared IDs and stable source identity", () => {
     const raw = [
       { ...call, id: "source" },
@@ -191,6 +220,124 @@ describe("archived history assembly", () => {
         tasks.flatMap((task) => convertArchivedPage([task], [])),
       ),
     ).toHaveLength(2);
+  });
+
+  it("removes duplicated response fragments across an online user boundary", () => {
+    const user = convertMessages([
+      { id: "question", role: "user", content: "question" },
+    ])[0];
+    const archived = convertMessages([
+      { id: "answer-1", role: "assistant", content: "first answer" },
+    ])[0];
+    const online = convertMessages([
+      { id: "answer-1", role: "assistant", content: "first answer" },
+      { id: "answer-2", role: "assistant", content: "second answer" },
+    ])[0];
+
+    const merged = mergeHistoryResponses(historical([archived, user, online]));
+
+    expect(merged).toHaveLength(2);
+    expect(merged[0].role).toBe("user");
+    expect(merged[1].cards?.[0].data.output).toHaveLength(2);
+  });
+
+  it("preserves unique overlap fragments, newer values and both anchor namespaces", () => {
+    const older = convertArchivedPage([call, output], [boundary]);
+    const newer = historical(
+      convertMessages([
+        { id: "question", role: "user", content: "question" },
+        {
+          ...output,
+          content: [
+            { type: "data", data: { call_id: "tool-a", output: "latest" } },
+          ],
+        },
+        { id: "answer", role: "assistant", content: "answer" },
+      ]),
+    );
+    const merged = mergeHistoryResponses([...older, ...newer]);
+    expect(merged.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+    ]);
+    const items = merged[1].cards![0].data.output;
+    expect(items.map((item: { id: string }) => item.id)).toEqual([
+      "call",
+      "conversation-compaction-boundary",
+      "output",
+      "answer",
+    ]);
+    expect(items[2].content[0].data.output).toBe("latest");
+    expect(resolveHistoryAnchorId(merged, older[0].id)).toBe(newer[1].id);
+    expect(
+      resolveHistoryAnchorId(merged, "process:" + older[0].cards![0].data.id),
+    ).toBe("process:" + newer[1].cards![0].data.id);
+    expect(mergeHistoryResponses(merged)).toEqual(merged);
+  });
+
+  it("keeps explicit conflicting turn IDs separate, including nested metadata", () => {
+    const turns = [
+      { ...call, metadata: { turn_id: "turn-a" } },
+      { ...output, metadata: { metadata: { turn_id: "turn-b" } } },
+    ];
+    expect(convertArchivedPage(turns, [])).toHaveLength(2);
+    expect(
+      mergeHistoryResponses(
+        turns.flatMap((message) => convertArchivedPage([message], [])),
+      ),
+    ).toHaveLength(2);
+  });
+
+  it("keeps the newer response order when its overlap includes an earlier prefix", () => {
+    const older = convertArchivedPage([output], []);
+    const newer = convertArchivedPage([call, output], []);
+    const merged = mergeHistoryResponses([...older, ...newer]);
+    expect(
+      merged[0].cards![0].data.output.map((item: { id: string }) => item.id),
+    ).toEqual(["call", "output"]);
+  });
+
+  it("moves trailing archive dividers with their overlapping response", () => {
+    const older = convertArchivedPage([call], [boundary]);
+    const newer = historical(
+      convertMessages([
+        { id: "question", role: "user", content: "question" },
+        call,
+        output,
+      ]),
+    );
+    const merged = mergeHistoryResponses([...older, ...newer]);
+    expect(merged.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+    ]);
+    expect(
+      merged[1].cards![0].data.output.map((item: { id: string }) => item.id),
+    ).toEqual(["call", "conversation-compaction-boundary", "output"]);
+  });
+
+  it("allows legacy fragments without turn IDs to join a known turn", () => {
+    const turns = [call, { ...output, metadata: { turn_id: "turn-a" } }];
+    expect(convertArchivedPage(turns, [])).toHaveLength(1);
+    expect(
+      mergeHistoryResponses(
+        turns.flatMap((message) => convertArchivedPage([message], [])),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("does not reconcile shared IDs across explicit turns or live responses", () => {
+    const first = convertArchivedPage(
+      [{ ...call, metadata: { turn_id: "a" } }],
+      [],
+    );
+    const second = convertArchivedPage(
+      [{ ...call, metadata: { turn_id: "b" } }],
+      [],
+    );
+    expect(mergeHistoryResponses([...first, ...second])).toHaveLength(2);
+    const live = { ...first[0], msgStatus: "generating" as const };
+    expect(mergeHistoryResponses([...first, live])).toHaveLength(2);
   });
 
   it("keeps tools from the same explicit task run in one response", () => {

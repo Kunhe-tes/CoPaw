@@ -58,10 +58,13 @@ function isIndependentOutput(message: Message): boolean {
   return Boolean(historyMessageMetadata(message).cron_task);
 }
 
-function responseTaskRunId(messages: Message[]): string | null | undefined {
+function responseIdentity(
+  messages: Message[],
+  key: string,
+): string | null | undefined {
   const runIds = new Set(
     messages
-      .map((message) => historyMessageMetadata(message).task_run_id)
+      .map((message) => historyMessageMetadata(message)[key])
       .filter((runId): runId is string => typeof runId === "string" && !!runId),
   );
   if (runIds.size > 1) return undefined;
@@ -69,10 +72,17 @@ function responseTaskRunId(messages: Message[]): string | null | undefined {
 }
 
 function canMergeResponses(older: Message[], newer: Message[]): boolean {
-  const olderRunId = responseTaskRunId(older);
-  const newerRunId = responseTaskRunId(newer);
-  if (olderRunId === null && newerRunId === null) return true;
-  return typeof olderRunId === "string" && olderRunId === newerRunId;
+  const olderRunId = responseIdentity(older, "task_run_id");
+  const newerRunId = responseIdentity(newer, "task_run_id");
+  const olderTurnId = responseIdentity(older, "turn_id");
+  const newerTurnId = responseIdentity(newer, "turn_id");
+  return (
+    ((olderRunId === null && newerRunId === null) ||
+      (typeof olderRunId === "string" && olderRunId === newerRunId)) &&
+    olderTurnId !== undefined &&
+    newerTurnId !== undefined &&
+    (!olderTurnId || !newerTurnId || olderTurnId === newerTurnId)
+  );
 }
 
 function responseOutput(message: HistoryMessage): Message[] | null {
@@ -101,9 +111,30 @@ function inlineBoundary(message: HistoryMessage): Message {
   };
 }
 
-function uniqueOutput(messages: Message[]): Message[] {
+function mergeOrderedMessages<T extends { id?: unknown }>(
+  older: T[],
+  newer: T[],
+): T[] {
+  const newerIds = new Set(newer.map((message) => message.id));
+  const before = new Map<unknown, T[]>();
+  let pending: T[] = [];
+  let lastSharedId: unknown;
+  for (const message of older) {
+    if (typeof message.id === "string" && newerIds.has(message.id)) {
+      before.set(message.id, pending);
+      pending = [];
+      lastSharedId = message.id;
+    } else {
+      pending.push(message);
+    }
+  }
+  const result = lastSharedId === undefined ? [...pending] : [];
+  for (const message of newer) {
+    result.push(...(before.get(message.id) || []), message);
+    if (message.id === lastSharedId) result.push(...pending);
+  }
   const seen = new Set<string>();
-  return messages.filter((message) => {
+  return result.filter((message) => {
     if (typeof message.id !== "string") return true;
     if (seen.has(message.id)) return false;
     seen.add(message.id);
@@ -120,11 +151,10 @@ function mergeResponsePair(
   const newerCard = newer.cards![0];
   const data = {
     ...newerCard.data,
-    output: uniqueOutput([
-      ...olderCard.data.output,
-      ...separators.map(inlineBoundary),
-      ...newerCard.data.output,
-    ]),
+    output: mergeOrderedMessages(
+      [...olderCard.data.output, ...separators.map(inlineBoundary)],
+      newerCard.data.output,
+    ),
     headerMeta: olderCard.data.headerMeta || newerCard.data.headerMeta,
     planReviewCard:
       newerCard.data.planReviewCard || olderCard.data.planReviewCard,
@@ -165,12 +195,66 @@ function mergeResponsePair(
   };
 }
 
+function reconcileOverlappingResponses(
+  messages: HistoryMessage[],
+): HistoryMessage[] {
+  const result = [...messages];
+  const owners = new Map<string, number>();
+  const removed = new Set<number>();
+  const messageIds = new Set<string>();
+  for (let index = result.length - 1; index >= 0; index -= 1) {
+    const message = result[index];
+    const output = responseOutput(message);
+    if (!output) {
+      if (messageIds.has(message.id)) removed.add(index);
+      messageIds.add(message.id);
+      continue;
+    }
+    const overlaps = new Set(
+      output
+        .map((item) =>
+          typeof item.id === "string" ? owners.get(item.id) : undefined,
+        )
+        .filter((owner): owner is number => owner !== undefined),
+    );
+    const owner =
+      overlaps.size === 1 ? overlaps.values().next().value : undefined;
+    if (
+      owner !== undefined &&
+      canMergeResponses(output, responseOutput(result[owner])!)
+    ) {
+      const separators: HistoryMessage[] = [];
+      for (
+        let separator = index + 1;
+        separator < owner &&
+        result[separator].cards?.[0]?.code === BOUNDARY_CARD;
+        separator += 1
+      ) {
+        separators.push(result[separator]);
+        removed.add(separator);
+      }
+      result[owner] = mergeResponsePair(message, separators, result[owner]);
+      removed.add(index);
+      output.forEach((item) => {
+        if (typeof item.id === "string") owners.set(item.id, owner);
+      });
+    } else {
+      output.forEach((item) => {
+        if (typeof item.id === "string") owners.set(item.id, index);
+      });
+    }
+  }
+  return result.filter((_, index) => !removed.has(index));
+}
+
 /** HTTP pages and compaction dividers are not user-turn boundaries. */
 export function mergeHistoryResponses(
   messages: IAgentScopeRuntimeWebUIMessage[],
 ): IAgentScopeRuntimeWebUIMessage[] {
   const result: HistoryMessage[] = [];
-  for (const message of messages as HistoryMessage[]) {
+  for (const message of reconcileOverlappingResponses(
+    messages as HistoryMessage[],
+  )) {
     if (responseOutput(message)) {
       let previousIndex = result.length - 1;
       while (
@@ -198,6 +282,25 @@ export function mergeHistoryResponses(
     result.push(message);
   }
   return result;
+}
+
+/** Reconcile chronological layers using shared IDs, with newer data winning. */
+export function reconcileHistoryLayers(
+  retained: IAgentScopeRuntimeWebUIMessage[],
+  newer: IAgentScopeRuntimeWebUIMessage[],
+): IAgentScopeRuntimeWebUIMessage[] {
+  const retainedById = new Map(
+    retained.map((message) => [message.id, message]),
+  );
+  const refreshed = newer.map((message) => {
+    const previous = retainedById.get(message.id);
+    const previousOutput = previous && responseOutput(previous);
+    const output = responseOutput(message);
+    return previousOutput && output && canMergeResponses(previousOutput, output)
+      ? mergeResponsePair(previous!, [], message)
+      : message;
+  });
+  return mergeHistoryResponses(mergeOrderedMessages(retained, refreshed));
 }
 
 export function resolveHistoryAnchorId(
