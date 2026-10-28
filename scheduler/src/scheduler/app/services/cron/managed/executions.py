@@ -104,13 +104,24 @@ def _not_before_time(command):
     return command.not_before_at.astimezone(timezone.utc).replace(tzinfo=None)
 
 
-async def _snapshot(tx, current, command, execution_id):
+async def _snapshot(
+    tx,
+    current,
+    command,
+    execution_id,
+    *,
+    resolved_model=None,
+):
     spec = copy.deepcopy(json.loads(current["spec_json"]))
     meta = public_value(copy.deepcopy(command.dispatch_meta or {}))
     # 纯文本不调用模型，沿用原有容量分组；Agent 使用解析后的真实模型。
     slot = {"provider_id": "default", "model": "default"}
     if spec["task_type"] == "agent":
-        slot = await resolve_agent_model(current, spec)
+        slot = (
+            resolved_model
+            if resolved_model is not None
+            else await resolve_agent_model(current, spec)
+        )
         spec["model_slot"] = slot
     meta.update(
         {
@@ -150,7 +161,15 @@ class ExecutionStore:
                 command,
             )
 
-    async def enqueue_in_transaction(self, tx, caller, job_id, command):
+    async def enqueue_in_transaction(
+        self,
+        tx,
+        caller,
+        job_id,
+        command,
+        *,
+        resolved_model=None,
+    ):
         """在已有事务中固定本次执行，供批回调原子登记整组快照。"""
         key = caller.job_key(job_id)
         execution_id, digest = execution_identity(key, command)
@@ -187,6 +206,7 @@ class ExecutionStore:
             current,
             command,
             execution_id,
+            resolved_model=resolved_model,
         )
         row = self._new_row(caller, current, command, execution_id, digest)
         row.update(

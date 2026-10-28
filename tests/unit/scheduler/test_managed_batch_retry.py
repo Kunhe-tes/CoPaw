@@ -193,7 +193,10 @@ async def test_final_history_update_failure_rolls_back_new_history(
 
 
 @pytest.mark.asyncio
-async def test_retry_history_cannot_replace_another_tenant(callback_setup, monkeypatch):
+async def test_retry_history_cannot_replace_another_tenant(
+    callback_setup,
+    monkeypatch,
+):
     import json
     from swe.app.crons.managed_results import ExecutionOutcome
     from tests.unit.scheduler.test_managed_cron_executions import (
@@ -201,6 +204,7 @@ async def test_retry_history_cannot_replace_another_tenant(callback_setup, monke
         stub_execution_models,
     )
 
+    # 该用例只验证历史身份隔离，不应依赖外部 SWE 模型查询配置。
     stub_execution_models(monkeypatch)
     db, caller, management = callback_setup
     writer, run, key = await _running_retry(callback_setup)

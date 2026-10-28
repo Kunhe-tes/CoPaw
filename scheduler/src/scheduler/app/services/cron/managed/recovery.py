@@ -18,6 +18,7 @@ from .auto_pause import AutoPauseController
 from .settlement import ExecutionSettlement
 from .run_accounting import occupied_run_sql
 from .async_batch_delete import AsyncBatchDelete
+from .daily_retry_service import DailyFailureRetry
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ class ManagedRecoveryWorker:
         self.work = ManagedWorkQuery(db, limit)
         self.auto_pause = AutoPauseController(db, platform, limit=limit)
         self.settlement = ExecutionSettlement(db, limit=limit)
+        self.daily_retry = DailyFailureRetry(db, page_size=min(limit, 100))
 
     async def tick(self):
         """执行一次恢复巡检，分开报告各类已有工作的处理数量。"""
@@ -62,6 +64,7 @@ class ManagedRecoveryWorker:
                 self._isolated("cleanup", self._cleanup),
                 self._isolated("dispatched", self._dispatch),
                 self._isolated("recovered", self._recover),
+                self._isolated("daily_failure_retry", self.daily_retry.tick),
             ),
         )
 
@@ -187,6 +190,7 @@ class ManagedRecoveryWorker:
             self._cleanup,
             self._dispatch,
             self._recover,
+            self.daily_retry.tick,
         )
         tasks = [
             asyncio.create_task(

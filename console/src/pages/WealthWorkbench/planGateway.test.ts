@@ -82,6 +82,26 @@ afterEach(() => {
 });
 
 describe("Java 规划网关契约", () => {
+  it.each([
+    [null, "RCZT"],
+    ["plan-a", "RCZT"],
+    [null, "NEW_CHANNEL"],
+    ["plan-a", "NEW_CHANNEL"],
+  ] as const)(
+    "创建/更新规划 %s 时保留消息渠道 %s",
+    async (editingId, source) => {
+      useIframeStore.getState().setContext({ source });
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(
+          ok({ id: "plan-a", publishStatus: "publishing" }),
+        )
+        .mockResolvedValueOnce(ok({ items: [view] }));
+      await api.publishPlan(account, draft, editingId, []);
+      expect(
+        JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body)),
+      ).toMatchObject({ sourceId: source, sapId: "000123" });
+    },
+  );
   it("列表在同源发送查询身份，解包并映射驼峰模型", async () => {
     vi.mocked(fetch).mockResolvedValue(ok({ items: [view] }));
     const plans = await api.fetchPlanList(true);

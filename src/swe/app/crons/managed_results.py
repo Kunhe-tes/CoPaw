@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from .managed_history import history_values, safe_metadata
 from .managed_events import append_run_event
 from .managed_failure import public_error_message
+from .managed_daily_retry import finalize_daily_history, newer_success_exists
 from ..source_system_config.runtime import (
     get_current_source_system_config,
     resolve_cron_unread_auto_pause_config,
@@ -189,6 +190,16 @@ class ExecutionWriter:
                 due = datetime.fromisoformat(due)
             if due is not None and due > utc_now():
                 return None
+            if await newer_success_exists(self.db, run):
+                await self._complete(
+                    definition,
+                    run,
+                    ExecutionOutcome(
+                        "skipped",
+                        error_code="cron_daily_retry_superseded",
+                    ),
+                )
+                return None
             spec = json.loads(run["spec_json"])
             active = await self.db.fetch_one(
                 f"SELECT COUNT(*) AS count FROM {TABLE} WHERE {WHERE} AND status='running'",
@@ -330,6 +341,8 @@ class ExecutionWriter:
 
     async def _finalize_previous_history(self, run):
         """与新历史同事务替换业务重试结果，不影响其他任务或其他批次。"""
+        if await finalize_daily_history(self.db, run):
+            return
         meta = json.loads(run["dispatch_meta_json"])
         previous_id = meta.get("previous_execution_id")
         if run["kind"] != "batch" or not previous_id:

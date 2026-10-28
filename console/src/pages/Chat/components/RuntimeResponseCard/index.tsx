@@ -1,3 +1,4 @@
+//！！！！！！ 注意
 import AgentScopeRuntimeResponseCard from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Response/Card";
 import type { FeedbackRecord } from "@/api/types/feedback";
 import { useIframeStore } from "@/stores/iframeStore";
@@ -13,8 +14,8 @@ import ResponseFeedbackCard, {
 } from "../ResponseFeedbackCard";
 import { PlanReviewMessageCard } from "../PlanInteractionCards";
 
-const ASSISTANT_MESSAGE_NAME = "小助 Claw";
-const ORIGIN_Y_ASSISTANT_MESSAGE_NAME = "AI伙伴";
+const ASSISTANT_MESSAGE_NAME = "AI 伙伴";
+const ORIGIN_Y_ASSISTANT_MESSAGE_NAME = "金葵花RM";
 const ORIGIN_Y_SOURCE = "RMASSIST";
 
 type AssistantMessageContext = {
