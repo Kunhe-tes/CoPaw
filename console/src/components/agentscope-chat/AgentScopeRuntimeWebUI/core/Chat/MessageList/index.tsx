@@ -190,6 +190,16 @@ export default function MessageList(props: {
     ChatAnywhereSessionsContext,
     (v) => v.isSessionLoading,
   );
+  const [loadedSessionId, setLoadedSessionId] =
+    React.useState(currentSessionId);
+  const loadingSessionIdRef = React.useRef<string | undefined>();
+  React.useLayoutEffect(() => {
+    if (isSessionLoading) {
+      loadingSessionIdRef.current = currentSessionId;
+    } else if (loadingSessionIdRef.current === currentSessionId) {
+      setLoadedSessionId(currentSessionId);
+    }
+  }, [currentSessionId, isSessionLoading]);
   const sessionNotFound = useContextSelector(
     ChatAnywhereSessionsContext,
     (v) => v.sessionNotFound,
@@ -561,6 +571,8 @@ export default function MessageList(props: {
     onNearStart: advanceHistory,
     onRetry: () => loadOlderHistory(true),
     disabled:
+      isSessionLoading ||
+      loadedSessionId !== currentSessionId ||
       historyLoadState !== "idle" ||
       (!hasHiddenLocalHistory && (!backendChatId || historyExhausted)),
     resetKey: `${currentSessionId}:${backendChatId}:${historyGeneration}`,

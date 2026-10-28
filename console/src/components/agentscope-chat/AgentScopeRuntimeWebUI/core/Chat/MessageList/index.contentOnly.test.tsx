@@ -374,6 +374,39 @@ describe("MessageList content-only composition", () => {
     },
   );
 
+  it("waits for the switched session and its list before checking history", async () => {
+    mocks.messages = [{ id: "old", history: true }];
+    mocks.scrollHeight = 300;
+    apiMocks.getChatHistory.mockResolvedValue({
+      messages: [],
+      boundaries: [],
+      has_more: false,
+      next_cursor: null,
+    });
+    const rendered = render(<MessageList onSubmit={vi.fn()} />);
+    await waitFor(() =>
+      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(1),
+    );
+    apiMocks.getChatHistory.mockClear();
+
+    mocks.currentSessionId = "chat-2";
+    rendered.rerender(<MessageList onSubmit={vi.fn()} />);
+    expect(apiMocks.getChatHistory).not.toHaveBeenCalled();
+    mocks.isSessionLoading = true;
+    rendered.rerender(<MessageList onSubmit={vi.fn()} />);
+    expect(apiMocks.getChatHistory).not.toHaveBeenCalled();
+    mocks.messages = [{ id: "new", history: true }];
+    mocks.isSessionLoading = false;
+    rendered.rerender(<MessageList onSubmit={vi.fn()} />);
+    await waitFor(() =>
+      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(1),
+    );
+    expect(screen.getByTestId("bubble-list")).toHaveAttribute(
+      "data-item-ids",
+      "new",
+    );
+  });
+
   it("bounds initial short-list paging even when empty pages keep advancing", async () => {
     mocks.messages = [{ id: "online-message", history: true }];
     mocks.scrollHeight = 300;
