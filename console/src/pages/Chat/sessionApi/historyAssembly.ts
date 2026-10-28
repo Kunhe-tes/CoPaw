@@ -10,6 +10,7 @@ export const INLINE_COMPACTION_TYPE = "conversation_compaction_boundary";
 type HistoryMessage = IAgentScopeRuntimeWebUIMessage & {
   history?: boolean;
   historyAnchorIds?: string[];
+  historyResponseCardIds?: string[];
 };
 
 function fragmentIdentity(message: Message): string | null {
@@ -149,6 +150,13 @@ function mergeResponsePair(
         ...(newer.historyAnchorIds || []),
       ]),
     ).filter((id) => id !== newer.id),
+    historyResponseCardIds: Array.from(
+      new Set([
+        olderCard.data.id,
+        ...(older.historyResponseCardIds || []),
+        ...(newer.historyResponseCardIds || []),
+      ]),
+    ).filter((id) => typeof id === "string" && id !== newerCard.data.id),
     cards: [
       { ...newerCard, data },
       ...extraCards.values(),
@@ -196,13 +204,22 @@ export function resolveHistoryAnchorId(
   messages: IAgentScopeRuntimeWebUIMessage[],
   anchorId: string,
 ): string {
-  // Process anchors belong to the response, unlike stable runtime item anchors.
+  // Process anchors use response-card IDs; bubble aliases are a separate namespace.
   const prefix = anchorId.startsWith("process:") ? "process:" : "";
   const responseId = anchorId.slice(prefix.length);
-  const owner = (messages as HistoryMessage[]).find(
-    (message) =>
+  const owner = (messages as HistoryMessage[]).find((message) => {
+    if (prefix) {
+      return (
+        message.cards?.[0]?.code === RESPONSE_CARD &&
+        (message.cards[0].data?.id === responseId ||
+          message.historyResponseCardIds?.includes(responseId))
+      );
+    }
+    return (
       message.id === responseId ||
-      message.historyAnchorIds?.includes(responseId),
-  );
-  return owner ? `${prefix}${owner.id}` : anchorId;
+      message.historyAnchorIds?.includes(responseId)
+    );
+  });
+  if (!owner) return anchorId;
+  return prefix ? `${prefix}${owner.cards![0].data.id}` : owner.id;
 }

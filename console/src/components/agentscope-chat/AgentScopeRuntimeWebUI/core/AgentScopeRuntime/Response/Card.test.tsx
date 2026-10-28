@@ -2,6 +2,11 @@ import React from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import AgentScopeRuntimeResponseCard from "./Card";
+import { convertArchivedPage } from "@/pages/Chat/sessionApi";
+import {
+  mergeHistoryResponses,
+  resolveHistoryAnchorId,
+} from "@/pages/Chat/sessionApi/historyAssembly";
 import {
   AgentScopeRuntimeContentType,
   AgentScopeRuntimeMessageRole,
@@ -137,6 +142,42 @@ it("exposes stable reading anchors for process and answer content", () => {
   );
   expect(
     container.querySelector('[data-history-anchor-id="process:response-1"]'),
+  ).toBeTruthy();
+});
+
+it("resolves an archived process anchor to the element rendered after merging", () => {
+  const older = convertArchivedPage(
+    [
+      {
+        ...textMessage(
+          "thinking",
+          "checking",
+          AgentScopeRuntimeMessageType.REASONING,
+        ),
+      },
+    ],
+    [],
+  )[0];
+  const newer = convertArchivedPage(
+    [{ ...textMessage("final", "final answer") }],
+    [],
+  )[0];
+  const merged = mergeHistoryResponses([older, newer]);
+  const anchorId = `process:${older.cards![0].data.id}`;
+  const { container } = render(
+    <AgentScopeRuntimeResponseCard data={older.cards![0].data} />,
+  );
+  expect(
+    container.querySelector(`[data-history-anchor-id="${anchorId}"]`),
+  ).toBeTruthy();
+  cleanup();
+  const rendered = render(
+    <AgentScopeRuntimeResponseCard data={merged[0].cards![0].data} />,
+  );
+  const resolved = resolveHistoryAnchorId(merged, anchorId);
+  expect(resolved).toBe(`process:${newer.cards![0].data.id}`);
+  expect(
+    rendered.container.querySelector(`[data-history-anchor-id="${resolved}"]`),
   ).toBeTruthy();
 });
 

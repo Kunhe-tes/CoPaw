@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   isSessionLoading: false,
   sessionNotFound: false,
   currentSessionId: "chat-1",
+  anchorId: "online-message",
   anchorTop: 100,
   scrollHeight: 1000,
   animationFrame: undefined as FrameRequestCallback | undefined,
@@ -154,18 +155,16 @@ vi.mock("@/components/agentscope-chat", () => ({
                     configurable: true,
                     value: () => ({
                       bottom:
-                        (item.id === "online-message"
-                          ? mocks.anchorTop
-                          : -100) + 48,
+                        (item.id === mocks.anchorId ? mocks.anchorTop : -100) +
+                        48,
                       height: 48,
                       left: 0,
                       right: 400,
                       toJSON: () => ({}),
-                      top:
-                        item.id === "online-message" ? mocks.anchorTop : -100,
+                      top: item.id === mocks.anchorId ? mocks.anchorTop : -100,
                       width: 400,
                       x: 0,
-                      y: item.id === "online-message" ? mocks.anchorTop : -100,
+                      y: item.id === mocks.anchorId ? mocks.anchorTop : -100,
                     }),
                   });
                 }}
@@ -321,6 +320,7 @@ describe("MessageList content-only composition", () => {
     mocks.isSessionLoading = false;
     mocks.sessionNotFound = false;
     mocks.currentSessionId = "chat-1";
+    mocks.anchorId = "online-message";
     mocks.anchorTop = 100;
     mocks.scrollHeight = 1000;
     mocks.animationFrame = undefined;
@@ -888,14 +888,15 @@ describe("MessageList content-only composition", () => {
     vi.spyOn(sessionApiModule, "convertArchivedPage").mockImplementation(
       actual.convertArchivedPage,
     );
-    const response = (id: string) => ({
-      ...actual.convertArchivedPage(
+    const response = (id: string) =>
+      actual.convertArchivedPage(
         [{ id: `runtime-${id}`, role: "assistant", content: id }],
         [],
-      )[0],
-      id,
-    });
-    mocks.messages = [response("online-message"), response("newer-response")];
+      )[0];
+    const older = response("online-message");
+    const newer = response("newer-response");
+    mocks.anchorId = older.id;
+    mocks.messages = [older, newer];
     apiMocks.getChatHistory.mockResolvedValue({
       messages: [{ id: "archive", role: "assistant", content: "earlier" }],
       boundaries: [],
@@ -915,9 +916,9 @@ describe("MessageList content-only composition", () => {
       right: 400,
       toJSON: () => ({}),
     });
-    const olderElement = document.getElementById("online-message")!;
+    const olderElement = document.getElementById(older.id)!;
     const oldProcess = document.createElement("div");
-    oldProcess.dataset.historyAnchorId = "process:online-message";
+    oldProcess.dataset.historyAnchorId = `process:${older.cards![0].data.id}`;
     oldProcess.getBoundingClientRect = () => rect(120);
     olderElement.appendChild(oldProcess);
     list.scrollTop = -380;
@@ -926,9 +927,9 @@ describe("MessageList content-only composition", () => {
 
     mocks.anchorTop = 240;
     const process = document.createElement("div");
-    process.dataset.historyAnchorId = "process:newer-response";
+    process.dataset.historyAnchorId = `process:${newer.cards![0].data.id}`;
     process.getBoundingClientRect = () => rect(160);
-    document.getElementById("newer-response")!.appendChild(process);
+    document.getElementById(newer.id)!.appendChild(process);
     rendered.rerender(<MessageList onSubmit={vi.fn()} />);
     await flushHistoryFrame();
     expect(list.scrollTop).toBe(-340);

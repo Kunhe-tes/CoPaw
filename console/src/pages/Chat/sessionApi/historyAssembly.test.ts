@@ -104,9 +104,12 @@ describe("archived history assembly", () => {
   it("resolves process anchors through repeated response merges", () => {
     const older = convertArchivedPage([call], []);
     const newer = convertArchivedPage([output], []);
+    const processAnchor = (message: (typeof older)[number]) =>
+      `process:${message.cards![0].data.id}`;
+    expect(older[0].id).not.toBe(older[0].cards![0].data.id);
     const merged = mergeHistoryResponses([...older, ...newer]);
-    expect(resolveHistoryAnchorId(merged, `process:${older[0].id}`)).toBe(
-      `process:${newer[0].id}`,
+    expect(resolveHistoryAnchorId(merged, processAnchor(older[0]))).toBe(
+      processAnchor(newer[0]),
     );
     const latest = convertArchivedPage(
       [{ id: "answer", role: "assistant", content: "answer" }],
@@ -114,10 +117,11 @@ describe("archived history assembly", () => {
     );
     const remerged = mergeHistoryResponses([...merged, ...latest]);
     for (const response of [...older, ...newer, ...latest]) {
-      expect(resolveHistoryAnchorId(remerged, `process:${response.id}`)).toBe(
-        `process:${latest[0].id}`,
+      expect(resolveHistoryAnchorId(remerged, processAnchor(response))).toBe(
+        processAnchor(latest[0]),
       );
     }
+    expect(resolveHistoryAnchorId(remerged, older[0].id)).toBe(latest[0].id);
     expect(resolveHistoryAnchorId(remerged, "process:unknown")).toBe(
       "process:unknown",
     );

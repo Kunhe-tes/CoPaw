@@ -101,8 +101,10 @@ Prettier 和 `git diff --check` 通过。定向 ESLint 通过，新增 effect �
 ## 检视修正：过程区子锚点
 
 合并响应保存的 `historyAnchorIds` 是响应卡别名，而过程区 DOM 锚点使用
-`process:<response-id>`。原解析器直接查找整个字符串，无法关联旧响应的子锚点，
-导致归档加载后跳过滚动恢复。现在解析时保留 `process:` 前缀，通过响应 ID 别名
-找到合并后的卡片，再返回它的过程区锚点。runtime 内容锚点及未知锚点保持原值。
+`process:<response-card-data-id>`。外层历史气泡 ID 为 `history-response-*`，
+卡片数据 ID 为 `response_*`；二者不是同一命名空间。首次修正错误地按外层 ID
+解析，测试也用了外层 ID，因此没有覆盖真实渲染。现将卡片数据 ID 别名单独保留在
+`historyResponseCardIds`，过程区按该别名解析并返回存活卡片的 `cards[0].data.id`。
+外层气泡仍用 `historyAnchorIds`；runtime 内容锚点及未知锚点保持原值。
 新增回归覆盖多次合并的子锚点映射，以及实际 MessageList 归档加载后的滚动偏移。
-修正后相关前端测试 230 项通过，TypeScript、定向 ESLint、Prettier 与差异检查通过。
+新增转换器到真实响应渲染器的 DOM 断言，避免测试再次混淆这两套 ID。
