@@ -386,15 +386,17 @@ async def test_start_subagent_serializes_real_run_record(tmp_path):
     )
     supervisor = SimpleNamespace()
     supervisor.start = _AsyncReturn(record)
+    request_context = {
+        "tenant_id": "tenant-1",
+        "agent_id": "agent-1",
+        "selected_expert_execution": True,
+        "_subagent_definition_store_dir": str(tmp_path / "definitions"),
+    }
     tools = create_background_subagent_tools(
         supervisor=supervisor,
         parent_agent_config=_agent_config(tmp_path),
         workspace_dir=tmp_path,
-        request_context={
-            "tenant_id": "tenant-1",
-            "agent_id": "agent-1",
-            "_subagent_definition_store_dir": str(tmp_path / "definitions"),
-        },
+        request_context=request_context,
     )
 
     response = await tools["start_subagent"](
@@ -405,6 +407,7 @@ async def test_start_subagent_serializes_real_run_record(tmp_path):
     payload = json.loads(response.content[0]["text"])
 
     assert payload["run_id"] == record.run_id
+    assert request_context["selected_expert_run_id"] == record.run_id
     assert payload["accepted"] is True
     assert payload["nickname"] == "研究员"
     assert "definition_match" not in payload
@@ -806,7 +809,10 @@ async def test_start_subagent_uses_matched_definition(tmp_path):
             "enabled": True,
         },
     )
-    repository.enable(package.definition_id, expected_revision=package.revision)
+    repository.enable(
+        package.definition_id,
+        expected_revision=package.revision,
+    )
     supervisor = SimpleNamespace(start=_start)
     tools = create_background_subagent_tools(
         supervisor=supervisor,
@@ -871,8 +877,10 @@ async def test_get_subagent_includes_manageable_and_stderr_tail(tmp_path):
     store = PerRunSubAgentRunStore(run_store_dir)
     record = await store.create(
         DelegationSpec(
-            name="plan-researcher", objective="Inspect",
-            parent_thread_id="session-1", parent_chat_id="chat-1",
+            name="plan-researcher",
+            objective="Inspect",
+            parent_thread_id="session-1",
+            parent_chat_id="chat-1",
         ),
         definition,
         PermissionPolicy.readonly(),
@@ -924,8 +932,10 @@ async def test_get_subagent_exposes_launch_diagnostics_only_in_details(
     store = PerRunSubAgentRunStore(run_store_dir)
     record = await store.create(
         DelegationSpec(
-            name="plan-researcher", objective="Inspect",
-            parent_thread_id="session-1", parent_chat_id="chat-1",
+            name="plan-researcher",
+            objective="Inspect",
+            parent_thread_id="session-1",
+            parent_chat_id="chat-1",
         ),
         definition,
         PermissionPolicy.readonly(),
@@ -973,8 +983,10 @@ async def test_get_subagent_defaults_to_parent_facing_partial_projection(
     store = PerRunSubAgentRunStore(tmp_path / "runs")
     record = await store.create(
         DelegationSpec(
-            name="plan-researcher", objective="Inspect",
-            parent_thread_id="session-1", parent_chat_id="chat-1",
+            name="plan-researcher",
+            objective="Inspect",
+            parent_thread_id="session-1",
+            parent_chat_id="chat-1",
         ),
         definition,
         PermissionPolicy.readonly(),
@@ -1025,8 +1037,10 @@ async def test_get_subagent_returns_error_summary_for_failed_no_result_run(
     store = PerRunSubAgentRunStore(tmp_path / "runs")
     record = await store.create(
         DelegationSpec(
-            name="plan-researcher", objective="Inspect",
-            parent_thread_id="session-1", parent_chat_id="chat-1",
+            name="plan-researcher",
+            objective="Inspect",
+            parent_thread_id="session-1",
+            parent_chat_id="chat-1",
         ),
         definition,
         PermissionPolicy.readonly(),

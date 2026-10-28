@@ -4,6 +4,8 @@
 
 - **现象**：提示 `The selected expert could not be started`，但这条兜底提示本身不能区分启动拒绝与结果解析失败。
 - **排查**：检查 `start_subagent` 的工具结果及 `src/swe/agents/tool_guard_mixin.py` 的 `_selected_expert_tool_response`。AgentScope 将工具输出保存为文本块列表；其中 JSON 里的 `accepted`、`run_id` 和失败原因才能反映启动结果。等待和查询工具也使用相同格式。
+- **等待语义**：selected expert 只等待本次启动返回的 run ID；旧 run 的终态不会结束本次等待。只有读取到当前 run 的可信终态才汇总结果；身份或状态无法确认时不会改由 Main Agent 执行。等待触发 Hook 审批时，审批记录绑定原 run 和 session/chat，批准后恢复等待，不重新启动。
+- **状态无法确认**：检查当前 tenant/agent 的 `subagent_runs/<run_id>.json`、session/chat 归属、专家 worker 进程与对应 `swe.log`。若超时或停止后仍无法取得终态，先按 run ID 核实 worker 状态；不要把“未确认”当成已取消或已完成。
 - **回归入口**：`tests/unit/subagents/test_react_agent_and_guard_integration.py` 的 `test_selected_expert_reads_actual_tool_result_blocks`。
 
 本文档只收录仓库中已经出现过、且有明确入口可追的高频报错。

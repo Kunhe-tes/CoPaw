@@ -1041,7 +1041,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         if intent:
             names.append("wait_subagent")
         if intent:
-            names.extend(["get_subagent", "cancel_subagent"])
+            names.extend(
+                ["get_subagent", "cancel_subagent", "wait_selected_expert"],
+            )
         return names
 
     def _register_source_tools(self, toolkit: Toolkit) -> None:
@@ -2201,6 +2203,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         no tools are provided.  We set ``_in_summarizing`` so that
         ``print`` can strip tool_use blocks from streaming chunks.
         """
+        selected_expert_reply = await self._selected_expert_before_summary()
+        if selected_expert_reply is not None:
+            return selected_expert_reply
         with self.agent_phase(AgentPhase.SUMMARIZING, reason="summarizing"):
             if getattr(self, "_request_context", {}).get(
                 "expert_main_execution",
@@ -2685,7 +2690,13 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 parent_agent_config=agent_config,
                 request_context=request_context,
             )
-            await supervisor.cancel(scope, run_id)
+            cancel = getattr(supervisor, "cancel_run", None)
+            if cancel is None:
+                cancel = supervisor.cancel
+            await asyncio.wait_for(
+                cancel(scope, run_id),
+                timeout=5,
+            )
         except asyncio.CancelledError:
             raise
         except Exception:

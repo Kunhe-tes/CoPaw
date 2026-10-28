@@ -219,6 +219,17 @@ class BackgroundSubAgentSupervisor:
                 start_request=start_request,
                 definition_match=definition_match,
             )
+        except asyncio.CancelledError:
+            if run_id in active:
+                cleanup = asyncio.create_task(self.cancel(scope, run_id))
+                try:
+                    await asyncio.wait_for(asyncio.shield(cleanup), timeout=5)
+                except (Exception, asyncio.CancelledError):
+                    logger.warning(
+                        "background_subagent_start_cancel_unconfirmed run_id=%s",
+                        run_id,
+                    )
+            raise
         finally:
             starting.discard(run_id)
 
@@ -511,6 +522,19 @@ class BackgroundSubAgentSupervisor:
             timed_out=bool(active_runs and not terminal_runs),
         )
 
+    async def reap_run(
+        self,
+        scope: BackgroundSubAgentScope,
+        run_id: str,
+    ) -> BackgroundSubAgentRunRecord | None:
+        """Reap only one worker handle after its caller verifies ownership."""
+        handle = self._active_for_scope(scope).get(run_id)
+        if handle is None:
+            return await PerRunSubAgentRunStore(scope.run_store_dir).get(
+                run_id,
+            )
+        return await self._reap_one(scope, run_id, handle)
+
     async def wait_for_run(
         self,
         scope: BackgroundSubAgentScope,
@@ -565,6 +589,14 @@ class BackgroundSubAgentSupervisor:
     ) -> BackgroundSubAgentRunRecord | BackgroundSubAgentNotManageable | None:
         """Cancel an active worker process group for a run in scope."""
         await self._reap_scope(scope)
+        return await self.cancel_run(scope, run_id)
+
+    async def cancel_run(
+        self,
+        scope: BackgroundSubAgentScope,
+        run_id: str,
+    ) -> BackgroundSubAgentRunRecord | BackgroundSubAgentNotManageable | None:
+        """Cancel one run without reaping unrelated workers in the scope."""
         store = PerRunSubAgentRunStore(scope.run_store_dir)
         record = await store.get(run_id)
         if record is None:
@@ -649,46 +681,54 @@ class BackgroundSubAgentSupervisor:
     ) -> list[BackgroundSubAgentRunRecord]:
         active = self._active_for_scope(scope)
         terminal_runs: list[BackgroundSubAgentRunRecord] = []
-        store = PerRunSubAgentRunStore(scope.run_store_dir)
         for run_id, handle in list(active.items()):
-            if handle.cancel_task is not None:
-                continue
-            if handle.process.poll() is None:
-                continue
-            _remove_private_launch_snapshot(
-                str(scope.run_store_dir / f".{run_id}.mcp.json"),
-                scope.run_store_dir,
-                run_id,
-            )
-            _remove_private_launch_snapshot(
-                str(scope.run_store_dir / f".{run_id}.model.json"),
-                scope.run_store_dir,
-                run_id,
-            )
-            try:
-                record = await store.mark_worker_exited(
-                    run_id,
-                    exit_code=handle.process.returncode,
-                )
-            except KeyError:
-                active.pop(run_id, None)
-                continue
-            if record.status in TERMINAL_BACKGROUND_RUN_STATUSES:
+            record = await self._reap_one(scope, run_id, handle)
+            if (
+                record is not None
+                and record.status in TERMINAL_BACKGROUND_RUN_STATUSES
+            ):
                 terminal_runs.append(record)
-            else:
-                message = (
-                    f"{_WORKER_EXITED_WITHOUT_RESULT}: "
-                    f"exit_code={handle.process.returncode}"
-                )
-                terminal_runs.append(
-                    await store.fail(
-                        run_id,
-                        message,
-                        error_code=_WORKER_EXITED_WITHOUT_RESULT,
-                    ),
-                )
-            active.pop(run_id, None)
         return terminal_runs
+
+    async def _reap_one(
+        self,
+        scope: BackgroundSubAgentScope,
+        run_id: str,
+        handle: _ActiveRun,
+    ) -> BackgroundSubAgentRunRecord | None:
+        if handle.cancel_task is not None or handle.process.poll() is None:
+            return None
+        _remove_private_launch_snapshot(
+            str(scope.run_store_dir / f".{run_id}.mcp.json"),
+            scope.run_store_dir,
+            run_id,
+        )
+        _remove_private_launch_snapshot(
+            str(scope.run_store_dir / f".{run_id}.model.json"),
+            scope.run_store_dir,
+            run_id,
+        )
+        store = PerRunSubAgentRunStore(scope.run_store_dir)
+        try:
+            record = await store.mark_worker_exited(
+                run_id,
+                exit_code=handle.process.returncode,
+            )
+        except KeyError:
+            self._active_for_scope(scope).pop(run_id, None)
+            return None
+        if record.status not in TERMINAL_BACKGROUND_RUN_STATUSES:
+            message = (
+                f"{_WORKER_EXITED_WITHOUT_RESULT}: "
+                f"exit_code={handle.process.returncode}"
+            )
+            record = await store.fail(
+                run_id,
+                message,
+                error_code=_WORKER_EXITED_WITHOUT_RESULT,
+            )
+        self._active_for_scope(scope).pop(run_id, None)
+        return record
 
     @staticmethod
     def _scope_key(scope: BackgroundSubAgentScope) -> tuple[str, str, str]:
