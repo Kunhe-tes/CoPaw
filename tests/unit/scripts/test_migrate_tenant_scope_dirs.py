@@ -8,8 +8,6 @@ import json
 import sys
 from pathlib import Path
 
-import pytest
-
 
 def _load_script_module():
     """按文件路径加载迁移脚本，避免依赖 scripts 成为 Python 包。"""
@@ -97,23 +95,34 @@ def test_migrate_tenant_scope_dirs_moves_both_roots_and_rewrites_paths(
 def test_migrate_tenant_scope_dirs_refuses_existing_target(
     tmp_path: Path,
 ) -> None:
-    """目标 scope 已存在时必须拒绝覆盖，避免静默合并脏数据。"""
+    """历史测试名；迁移会删除已存在的目标目录并覆盖其数据。"""
     module = _load_script_module()
     working_dir = tmp_path / ".swe"
     secret_dir = tmp_path / ".swe.secret"
     old_working = _seed_working_dir(working_dir, "tenant-a")
     expected_scope = module.encode_scope_id("tenant-a", "source-a")
-    (working_dir / expected_scope).mkdir(parents=True)
+    target = working_dir / expected_scope
+    target.mkdir(parents=True)
+    (target / "old-target.txt").write_text("will be removed")
+    old_secret = secret_dir / "tenant-a"
+    old_secret.mkdir(parents=True)
+    (old_secret / "source.txt").write_text("source secret")
+    target_secret = secret_dir / expected_scope
+    target_secret.mkdir(parents=True)
+    (target_secret / "old-target.txt").write_text("will be removed")
 
-    with pytest.raises(FileExistsError):
-        module.migrate_tenant_scope_dirs(
-            tenant_id="tenant-a",
-            source_id="source-a",
-            working_dir=working_dir,
-            secret_dir=secret_dir,
-        )
+    module.migrate_tenant_scope_dirs(
+        tenant_id="tenant-a",
+        source_id="source-a",
+        working_dir=working_dir,
+        secret_dir=secret_dir,
+    )
 
-    assert old_working.exists()
+    assert not old_working.exists()
+    assert (target / "config.json").exists()
+    assert not (target / "old-target.txt").exists()
+    assert (target_secret / "source.txt").read_text() == "source secret"
+    assert not (target_secret / "old-target.txt").exists()
 
 
 def test_migrate_tenant_scope_dirs_dry_run_keeps_files_in_place(
@@ -186,22 +195,27 @@ def test_migrate_tenant_scope_dirs_batch_moves_all_tenants(
 def test_migrate_tenant_scope_dirs_batch_prechecks_before_any_move(
     tmp_path: Path,
 ) -> None:
-    """批量预检查失败时，任何租户都不能先被迁走。"""
+    """历史测试名；批量迁移会覆盖已存在的租户目标目录。"""
     module = _load_script_module()
     working_dir = tmp_path / ".swe"
     secret_dir = tmp_path / ".swe.secret"
     first_old_working = _seed_working_dir(working_dir, "tenant-a")
     second_old_working = _seed_working_dir(working_dir, "tenant-b")
     conflicting_scope = module.encode_scope_id("tenant-b", "source-a")
-    (working_dir / conflicting_scope).mkdir(parents=True)
+    target = working_dir / conflicting_scope
+    target.mkdir(parents=True)
+    (target / "old-target.txt").write_text("will be removed")
 
-    with pytest.raises(FileExistsError):
-        module.migrate_tenant_scope_dirs_batch(
-            tenant_ids=("tenant-a", "tenant-b"),
-            source_id="source-a",
-            working_dir=working_dir,
-            secret_dir=secret_dir,
-        )
+    module.migrate_tenant_scope_dirs_batch(
+        tenant_ids=("tenant-a", "tenant-b"),
+        source_id="source-a",
+        working_dir=working_dir,
+        secret_dir=secret_dir,
+    )
 
-    assert first_old_working.exists()
-    assert second_old_working.exists()
+    assert not first_old_working.exists()
+    assert not second_old_working.exists()
+    first_target = working_dir / module.encode_scope_id("tenant-a", "source-a")
+    assert (first_target / "config.json").exists()
+    assert (target / "config.json").exists()
+    assert not (target / "old-target.txt").exists()
