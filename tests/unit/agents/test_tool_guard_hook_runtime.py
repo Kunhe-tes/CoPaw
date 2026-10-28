@@ -33,6 +33,8 @@ from swe.agents.tool_guard_mixin import (
     ToolGuardMixin,
 )
 from swe.agents.tool_failure import TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD
+from swe.agents.tool_output_budget_mixin import ToolOutputBudgetMixin
+from swe.config.config import ToolResultCompactConfig
 from swe.security.tool_guard.models import (
     GuardFinding,
     GuardSeverity,
@@ -1318,7 +1320,17 @@ async def test_selected_expert_hook_approval_resumes_only_original_wait(
             **pending_kwargs,
         ),
     )
-    resumed = _FakeAgent(tmp_path)
+
+    class BudgetedAgent(_FakeAgent, ToolOutputBudgetMixin, _BaseAgent):
+        # Put the output budget between ToolGuardMixin and the base executor.
+        finish_function_name = "finish"
+
+    resumed = BudgetedAgent(tmp_path)
+    resumed._agent_config = SimpleNamespace(
+        running=SimpleNamespace(
+            tool_result_compact=ToolResultCompactConfig(),
+        ),
+    )
     resumed._request_context.update(
         {
             "tenant_id": "tenant-1",

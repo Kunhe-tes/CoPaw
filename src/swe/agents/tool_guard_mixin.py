@@ -426,12 +426,8 @@ class ToolGuardMixin:
                     )
                     and self._request_context.get("selected_expert_execution")
                 ):
-                    # This JSON is also the trusted replay control payload.
-                    # Display compaction must not truncate it before parsing.
-                    return await self._run_plan_interaction_tool_call(
-                        tool_call,
-                        tool_name,
-                    )
+                    self._selected_expert_control_response = None
+                    return await super()._acting(tool_call)  # type: ignore[misc]
                 if self._tool_has_specific_timeout(tool_name):
                     return await super()._acting(tool_call)  # type: ignore[misc]
 
@@ -2644,6 +2640,7 @@ class ToolGuardMixin:
         if tool_name == "start_subagent":
             return self._selected_expert_start_follow_up(context, response)
         if tool_name == "wait_selected_expert":
+            self._selected_expert_control_response = None
             context.pop("_selected_expert_wait_authorized", None)
             context[_SELECTED_EXPERT_EXECUTION_KEY] = False
             if response.get("run_id") != context.get(
@@ -2673,15 +2670,46 @@ class ToolGuardMixin:
             str(context.get("msgid") or ""),
         )
 
+    def _capture_tool_control_response(
+        self,
+        tool_call: dict[str, Any],
+        output: Any,
+    ) -> None:
+        """Keep trusted selected-expert control data outside display memory."""
+        if (
+            tool_call.get("name") == "wait_selected_expert"
+            and getattr(self, "_tool_guard_forced_replay_active", False)
+            and self._request_context.get(_SELECTED_EXPERT_EXECUTION_KEY)
+        ):
+            self._selected_expert_control_response = (
+                str(tool_call.get("id") or ""),
+                output,
+            )
+
     def _selected_expert_tool_response(
         self,
         replay_info: dict[str, Any],
     ) -> dict[str, Any]:
         """Read the current forced-call result without trusting model text."""
+        tool_call_id = str(replay_info.get("tool_call_id") or "")
+        cached = getattr(self, "_selected_expert_control_response", None)
+        if (
+            replay_info.get("tool_name") == "wait_selected_expert"
+            and cached is not None
+            and cached[0] == tool_call_id
+        ):
+            return self._parse_selected_expert_tool_response(cached[1])
         response = self._extract_current_tool_response(
-            str(replay_info.get("tool_call_id") or ""),
+            tool_call_id,
             include_structured_failure=True,
         )
+        return self._parse_selected_expert_tool_response(response)
+
+    def _parse_selected_expert_tool_response(
+        self,
+        response: Any,
+    ) -> dict[str, Any]:
+        """Decode the trusted tool response before any display compaction."""
         if isinstance(response, list) and len(response) == 1:
             block = self._tool_result_block_to_dict(response[0])
             if block and block.get("type") == "text":

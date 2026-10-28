@@ -55,6 +55,13 @@ class ToolOutputBudgetMixin:
                 tool_res = await self.toolkit.call_tool_function(tool_call)
                 async for chunk in tool_res:
                     output: Any = chunk.content
+                    capture = getattr(
+                        self,
+                        "_capture_tool_control_response",
+                        None,
+                    )
+                    if callable(capture):
+                        capture(tool_call, output)
                     # Cancellation during compaction must retain this chunk.
                     tool_res_msg.content[0]["output"] = output
                     if tool_result_compact.enabled:

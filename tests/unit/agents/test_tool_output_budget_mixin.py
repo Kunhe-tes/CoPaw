@@ -15,6 +15,8 @@ from agentscope.tool import ToolResponse
 
 from swe.agents.tool_output_budget_mixin import ToolOutputBudgetMixin
 from swe.agents.tool_guard_mixin import ToolGuardMixin
+from swe.app.channels.console.channel import ConsoleChannel
+from swe.app.runner.sse_replay import ReplayStream
 from swe.app.source_system_config.models import (
     EffectiveSourceSystemConfig,
     SourceSystemConfig,
@@ -161,8 +163,105 @@ async def test_selected_expert_terminal_payload_survives_output_budget(
     assert await agent._selected_expert_follow_up(replay) is None
     assert agent._request_context["selected_expert_execution"] is False
     assert not agent._request_context.get("selected_expert_execution_error")
+    assert agent._selected_expert_control_response is None
     output = agent.printed[-1][0].content[0]["output"][0]["text"]
-    assert json.loads(output) == payload
+    assert len(output.encode()) <= recent_max_bytes
+    assert "<<<TRUNCATED>>>" in output
+    artifacts = list((tmp_path / "tool_result").glob("*.txt"))
+    assert len(artifacts) == 1
+    assert json.loads(artifacts[0].read_text()) == payload
+    assert agent.memory.messages[-1] is agent.printed[-1][0]
+
+
+@pytest.mark.asyncio
+async def test_selected_expert_display_stays_below_replay_frame_limit(
+    tmp_path,
+):
+    payload = {
+        "run_id": "expert-run-1",
+        "status": "completed",
+        "result": {"summary": "expert result " * 100000},
+    }
+    agent = _SelectedExpertAgent(
+        config=ToolResultCompactConfig(recent_max_bytes=50000),
+        workspace_dir=tmp_path,
+        chunks=[_chunk(json.dumps(payload))],
+    )
+    call = {
+        "id": "wait-oversized",
+        "name": "wait_selected_expert",
+        "input": {},
+    }
+
+    await agent._run_tool_call_with_hard_timeout_impl(
+        call,
+        call["name"],
+        call["input"],
+    )
+
+    output = agent.printed[-1][0].content[0]["output"][0]["text"]
+    assert len(output.encode()) <= 50000
+    assert "<<<TRUNCATED>>>" in output
+    replay = {"tool_call_id": call["id"], "tool_name": call["name"]}
+    assert agent._selected_expert_tool_response(replay) == payload
+
+    def event(content):
+        return SimpleNamespace(
+            object="message",
+            status=None,
+            type="message",
+            model_dump_json=lambda: json.dumps(
+                {"object": "message", "content": content},
+            ),
+        )
+
+    async def process(_request):
+        yield event(agent.printed[-1][0].content)
+        yield event("final expert answer")
+
+    channel = ConsoleChannel(process=process, enabled=True, bot_prefix="SWE")
+    request = SimpleNamespace(input=None, channel_meta={})
+    events = [item async for item in channel.stream_one(request)]
+    stream = ReplayStream()
+    subscriber = stream.subscribe()
+    try:
+        for item in events:
+            await stream.append(item)
+        assert stream.error is None
+        assert stream.committed == 2
+        assert await subscriber.get() == events[0]
+        assert "final expert answer" in await subscriber.get()
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_selected_expert_control_cache_is_bound_to_current_call(
+    tmp_path,
+):
+    payload = {"run_id": "expert-run-1", "status": "completed"}
+    agent = _SelectedExpertAgent(
+        config=ToolResultCompactConfig(recent_max_bytes=1000),
+        workspace_dir=tmp_path,
+        chunks=[_chunk(json.dumps(payload))],
+    )
+    call = {"id": "wait-1", "name": "wait_selected_expert", "input": {}}
+    await agent._run_tool_call_with_hard_timeout_impl(call, call["name"], {})
+    assert (
+        agent._selected_expert_tool_response(
+            {"tool_call_id": "different-call", "tool_name": call["name"]},
+        )
+        == {}
+    )
+    agent.toolkit = _Toolkit([])
+    call["id"] = "wait-2"
+    await agent._run_tool_call_with_hard_timeout_impl(call, call["name"], {})
+    assert (
+        agent._selected_expert_tool_response(
+            {"tool_call_id": call["id"], "tool_name": call["name"]},
+        )
+        == {}
+    )
 
 
 @pytest.mark.asyncio
@@ -187,6 +286,7 @@ async def test_unforced_selected_expert_wait_keeps_output_budget(
     output = agent.memory.messages[-1].content[0]["output"][0]["text"]
     assert len(output.encode()) <= 1000
     assert "<<<TRUNCATED>>>" in output
+    assert getattr(agent, "_selected_expert_control_response", None) is None
 
 
 @pytest.mark.asyncio
