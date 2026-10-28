@@ -554,6 +554,75 @@ describe("MessageList content-only composition", () => {
     );
   });
 
+  it.each([false, true])(
+    "preserves online response precedence before a shared later user (archive prefix: %s)",
+    async (withPrefix) => {
+      const actual = await vi.importActual<
+        typeof import("@/pages/Chat/sessionApi")
+      >("@/pages/Chat/sessionApi");
+      vi.spyOn(sessionApiModule, "convertArchivedPage").mockImplementation(
+        actual.convertArchivedPage,
+      );
+      const laterUser = { id: "q2", role: "user", content: "next" };
+      mocks.messages = actual.convertArchivedPage(
+        [
+          { id: "q1", role: "user", content: "question" },
+          { id: "a1", role: "assistant", content: "first" },
+          { id: "a2", role: "assistant", content: "online latest" },
+          laterUser,
+        ],
+        [],
+      );
+      const online = mocks.messages[1];
+      const archive = [
+        ...(withPrefix
+          ? [{ id: "a0", role: "assistant", content: "archived prefix" }]
+          : []),
+        { id: "a2", role: "assistant", content: "archive stale" },
+        laterUser,
+      ];
+      const archivedResponse = actual.convertArchivedPage(archive, [])[0];
+      apiMocks.getChatHistory.mockResolvedValueOnce({
+        messages: archive,
+        boundaries: [],
+        has_more: false,
+        next_cursor: null,
+      });
+      render(<MessageList onSubmit={vi.fn()} />);
+      const list = screen.getByTestId("bubble-list");
+      list.scrollTop = -380;
+      fireEvent.scroll(list);
+      await waitFor(() =>
+        expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(1),
+      );
+      const response = mocks.messages[1];
+      expect
+        .soft(mocks.messages.map((message) => message.id))
+        .toEqual(["q1", online.id, "q2"]);
+      const data = response.cards![0].data as {
+        id: string;
+        output: Array<{ id: string; content: unknown }>;
+      };
+      expect.soft(data.id).toBe((online.cards![0].data as { id: string }).id);
+      expect
+        .soft(data.output.find((message) => message.id === "a2")?.content)
+        .toEqual(
+          (online.cards![0].data as typeof data).output.find(
+            (message) => message.id === "a2",
+          )?.content,
+        );
+      expect(data.output.map((message) => message.id)).toEqual(
+        withPrefix ? ["a1", "a0", "a2"] : ["a1", "a2"],
+      );
+      expect(
+        resolveHistoryAnchorId(
+          mocks.messages as Parameters<typeof resolveHistoryAnchorId>[0],
+          "process:" + archivedResponse.cards![0].data.id,
+        ),
+      ).toBe("process:" + data.id);
+    },
+  );
+
   it("reconciles archive overlap with the online response after its user", async () => {
     const actual = await vi.importActual<
       typeof import("@/pages/Chat/sessionApi")

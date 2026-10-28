@@ -284,23 +284,64 @@ export function mergeHistoryResponses(
   return result;
 }
 
-/** Reconcile chronological layers using shared IDs, with newer data winning. */
+/** Resolve source precedence before shared user IDs determine timeline positions. */
 export function reconcileHistoryLayers(
   retained: IAgentScopeRuntimeWebUIMessage[],
   newer: IAgentScopeRuntimeWebUIMessage[],
 ): IAgentScopeRuntimeWebUIMessage[] {
-  const retainedById = new Map(
-    retained.map((message) => [message.id, message]),
-  );
-  const refreshed = newer.map((message) => {
-    const previous = retainedById.get(message.id);
-    const previousOutput = previous && responseOutput(previous);
-    const output = responseOutput(message);
-    return previousOutput && output && canMergeResponses(previousOutput, output)
-      ? mergeResponsePair(previous!, [], message)
-      : message;
+  const refreshed = [...newer];
+  const owners = new Map<string, number>();
+  refreshed.forEach((message, index) => {
+    responseOutput(message)?.forEach((item) => {
+      if (typeof item.id === "string") owners.set(item.id, index);
+    });
   });
-  return mergeHistoryResponses(mergeOrderedMessages(retained, refreshed));
+  const removed = new Set<number>();
+  const matched = new Map<number, number>();
+  for (let index = retained.length - 1; index >= 0; index -= 1) {
+    const message = retained[index];
+    const output = responseOutput(message);
+    if (!output) continue;
+    const overlaps = new Set(
+      output.flatMap((item) => {
+        const owner =
+          typeof item.id === "string" ? owners.get(item.id) : undefined;
+        return owner === undefined ? [] : [owner];
+      }),
+    );
+    const owner =
+      overlaps.size === 1 ? overlaps.values().next().value : undefined;
+    if (
+      owner === undefined ||
+      !canMergeResponses(output, responseOutput(refreshed[owner])!)
+    )
+      continue;
+    const separators: HistoryMessage[] = [];
+    for (
+      let separator = index + 1;
+      separator < retained.length &&
+      retained[separator].cards?.[0]?.code === BOUNDARY_CARD;
+      separator += 1
+    ) {
+      separators.push(retained[separator]);
+      removed.add(separator);
+    }
+    refreshed[owner] = mergeResponsePair(message, separators, refreshed[owner]);
+    matched.set(index, owner);
+    output.forEach((item) => {
+      if (typeof item.id === "string") owners.set(item.id, owner);
+    });
+  }
+  return mergeHistoryResponses(
+    mergeOrderedMessages(
+      retained.flatMap((message, index) => {
+        if (removed.has(index)) return [];
+        const owner = matched.get(index);
+        return [owner === undefined ? message : refreshed[owner]];
+      }),
+      refreshed,
+    ),
+  );
 }
 
 export function resolveHistoryAnchorId(

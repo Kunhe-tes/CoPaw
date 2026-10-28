@@ -31,6 +31,59 @@ const historical = (messages: ReturnType<typeof convertMessages>) =>
   messages.map((message) => ({ ...message, history: true }));
 
 describe("archived history assembly", () => {
+  it("keeps retained users before a response matched by fragment identity", () => {
+    const laterUser = { id: "q2", role: "user", content: "next" };
+    const retained = convertArchivedPage(
+      [
+        { id: "q1", role: "user", content: "question" },
+        call,
+        output,
+        laterUser,
+      ],
+      [],
+    );
+    const newer = convertArchivedPage(
+      [{ ...output, content: "latest" }, laterUser],
+      [],
+    );
+    const result = reconcileHistoryLayers(retained, newer);
+    expect(result.map((message) => message.id)).toEqual([
+      "q1",
+      newer[0].id,
+      "q2",
+    ]);
+    expect(
+      result[1].cards![0].data.output.map(
+        (message: { id: string }) => message.id,
+      ),
+    ).toEqual(["call", "output"]);
+    expect(result[1].cards![0].data.output[1].content).toBe("latest");
+  });
+
+  it("keeps a trailing archive divider inside its online response before a shared user", () => {
+    const laterUser = { id: "q2", role: "user", content: "next" };
+    const retained = convertArchivedPage([call, laterUser], [boundary]);
+    const newer = convertArchivedPage(
+      [
+        { id: "q1", role: "user", content: "question" },
+        call,
+        output,
+        laterUser,
+      ],
+      [],
+    );
+    const result = reconcileHistoryLayers(retained, newer);
+    expect(result.map((message) => message.id)).toEqual(
+      newer.map((message) => message.id),
+    );
+    expect(
+      result[1].cards![0].data.output.map(
+        (message: { id: string }) => message.id,
+      ),
+    ).toEqual(["call", "conversation-compaction-boundary", "output"]);
+    expect(reconcileHistoryLayers(retained, result)).toEqual(result);
+  });
+
   it("aligns retained history with a refreshed traversal that reaches an older prefix", () => {
     const user = (id: string) =>
       historical(convertMessages([{ id, role: "user", content: id }]))[0];
