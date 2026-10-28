@@ -81,6 +81,8 @@ export async function fetchDistributeBranches(
 interface UserPosition {
   sapID: string;
   userName: string;
+  branchID?: string | null;
+  subBranchID?: string | null;
   branchName: string | null;
   subBranchName: string | null;
 }
@@ -115,6 +117,8 @@ export async function fetchDistributeTargets(
         sapId: user.sapID,
         name: user.userName || user.sapID,
         orgName: user.subBranchName || user.branchName || "",
+        ...(user.branchID != null ? { bbkId: user.branchID } : {}),
+        ...(user.subBranchID != null ? { bbkOrgId: user.subBranchID } : {}),
       }));
   } catch (error) {
     console.warn("[Wealth] 分发目标用户池查询失败，按无数据处理", error);

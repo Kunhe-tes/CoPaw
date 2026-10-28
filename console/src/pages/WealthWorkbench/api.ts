@@ -3,6 +3,7 @@
  * ！！！！！！！
  */
 import { parseCron, serializeCron } from "@/utils/parseCron";
+import { request } from "../../api/request";
 import { buildAuthHeaders } from "../../api/authHeaders";
 import { getWPlusCookie } from "../../utils/cookie-utils";
 import { getIframeContext } from "../../stores/iframeStore";
@@ -14,6 +15,7 @@ import { throwIfRequestAborted } from "./abortSignal";
 // import { Base64 } from "js-base64";
 import { SCENE_CATEGORIES } from "./mock/data";
 import { DEFAULT_SCHEDULE } from "./utils";
+import { defaultMonitoring } from "./monitoring";
 import type {
   Account,
   Customer,
@@ -48,6 +50,9 @@ interface PlanSceneView {
   itemId?: string | null;
   direction?: string | null;
   custNum?: number | null;
+  schedule?: 1 | 2 | null;
+  monitorTimeCron?: string | null;
+  finishRate?: number | null;
   cycle?: string | null;
   startDate?: string | null;
   endDate?: string | null;
@@ -59,6 +64,8 @@ interface PlanSceneView {
 interface PlanTargetView {
   sapId: string;
   name?: string | null;
+  bbkId?: string | null;
+  bbkOrgId?: string | null;
 }
 
 interface PlanView {
@@ -135,6 +142,7 @@ function mapScene(item: SceneSkillItem): Scene {
 }
 
 function mapSceneItem(scene: PlanSceneView): PlanItem {
+  const monitorSchedule = parseCron(scene.monitorTimeCron ?? "");
   return {
     id: scene.sceneId,
     sceneName: scene.sceneName,
@@ -149,6 +157,28 @@ function mapSceneItem(scene: PlanSceneView): PlanItem {
     start: scene.startDate ?? undefined,
     end: scene.endDate ?? undefined,
     schedule: parseCron(scene.cronExpr),
+    ...(scene.schedule != null ||
+    scene.monitorTimeCron != null ||
+    scene.finishRate != null
+      ? {
+          monitoring: {
+            cycle:
+              scene.schedule === 2
+                ? ("within7days" as const)
+                : ("today" as const),
+            schedule: {
+              type:
+                monitorSchedule.type === "weekly"
+                  ? ("weekly" as const)
+                  : ("daily" as const),
+              hour: monitorSchedule.hour ?? 9,
+              minute: monitorSchedule.minute ?? 0,
+              daysOfWeek: monitorSchedule.daysOfWeek ?? ["mon"],
+            },
+            expectedCompletionRate: scene.finishRate ?? 60,
+          },
+        }
+      : {}),
   };
 }
 
@@ -175,12 +205,14 @@ function mapPlan(view: PlanView): Plan {
       sapId: t.sapId,
       name: t.name || t.sapId,
       orgName: "",
+      ...(t.bbkId != null ? { bbkId: t.bbkId } : {}),
+      ...(t.bbkOrgId != null ? { bbkOrgId: t.bbkOrgId } : {}),
     })),
   };
 }
 
 // ---------------------------------------------------------------------------
-// 场景查询：同源 skill-config/list，由前端 Nginx 转发
+// 场景查询：统一 request 调用 skill-config/list
 // ---------------------------------------------------------------------------
 
 async function fetchSceneSkills(category: string): Promise<SceneSkillItem[]> {
@@ -188,14 +220,17 @@ async function fetchSceneSkills(category: string): Promise<SceneSkillItem[]> {
   const timeout = setTimeout(() => controller.abort(), 60000);
   try {
     const context = getIframeContext();
-    const resp = await fetch("/api/agent/workspace/skill-config/list", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bbkId: context.bbk || DEFAULT_BBK_ID, category }),
-      signal: controller.signal,
-    });
-    if (!resp.ok) throw new Error(`场景请求失败：HTTP ${resp.status}`);
-    const payload = (await resp.json()) as SceneSkillListResponse;
+    const payload = await request<SceneSkillListResponse>(
+      "/agent/workspace/skill-config/list",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          bbkId: context.bbk || DEFAULT_BBK_ID,
+          category,
+        }),
+        signal: controller.signal,
+      },
+    );
     if (String(payload.code) !== "200") {
       throw new Error(`场景接口返回失败：${payload.code}`);
     }
@@ -237,7 +272,7 @@ export async function fetchAvailableSceneCount(): Promise<number | null> {
 }
 
 // ---------------------------------------------------------------------------
-// 规划统计：同源直连，由 Nginx 转发到外部服务
+// 规划统计：统一 request 调用 skill-stats
 // ---------------------------------------------------------------------------
 
 interface SkillStatItemView {
@@ -253,7 +288,7 @@ interface SkillStatsResponse {
 
 /**
  * 按规划 ID 批量查询，返回以 planId 为键的结果表。
- * 不经过 CoPaw 后端；请求失败返回 null，由看板保持 "--" 占位。
+ * 请求失败返回 null，由看板保持 "--" 占位。
  */
 export async function fetchSkillStats(
   planIds: string[],
@@ -261,17 +296,14 @@ export async function fetchSkillStats(
 ): Promise<Record<string, SkillStat> | null> {
   if (!planIds.length) return {};
   try {
-    const resp = await fetch("/api/agent/workspace/skill-stats", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: getWPlusCookie("token") ?? "",
+    const payload = await request<SkillStatsResponse>(
+      "/agent/workspace/skill-stats",
+      {
+        method: "POST",
+        body: JSON.stringify({ planIds: [...new Set(planIds)] }),
+        signal,
       },
-      body: JSON.stringify({ planIds: [...new Set(planIds)] }),
-      signal,
-    });
-    if (!resp.ok) throw new Error(`规划统计请求失败：HTTP ${resp.status}`);
-    const payload = (await resp.json()) as SkillStatsResponse;
+    );
     if (String(payload.code) !== "200") {
       throw new Error(`规划统计接口返回失败：${payload.code}`);
     }
@@ -290,7 +322,7 @@ export async function fetchSkillStats(
 }
 
 // ---------------------------------------------------------------------------
-// 客户名单查询：同源 /api/agent/workspace/name-list，由前端 Nginx 转发
+// 客户名单查询：统一 request 调用 /agent/workspace/name-list
 // ---------------------------------------------------------------------------
 
 interface NameListSkillView {
@@ -398,26 +430,23 @@ export async function fetchNameList(
   const timeout = setTimeout(() => controller.abort(), 60000);
   try {
     const context = getIframeContext();
-    const resp = await fetch("/api/agent/workspace/name-list", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: getWPlusCookie("token") ?? "",
+    const payload = await request<ExternalNameListResponse>(
+      "/agent/workspace/name-list",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          skillIds: [...skillsById.values()],
+          bbkId: context.bbk || DEFAULT_BBK_ID,
+          platformSource: "WP",
+          pageSource: "WP_AGENT_WORKSPACE_TASK_LIST",
+          ...(touched !== undefined ? { touched } : {}),
+          ...(sapId ? { sapId } : {}),
+          ...(context.orgCode ? { subBbkId: context.orgCode } : {}),
+          ...(context.positionId ? { posId: context.positionId } : {}),
+        }),
+        signal: controller.signal,
       },
-      body: JSON.stringify({
-        skillIds: [...skillsById.values()],
-        bbkId: context.bbk || DEFAULT_BBK_ID,
-        platformSource: "WP",
-        pageSource: "WP_AGENT_WORKSPACE_TASK_LIST",
-        ...(touched !== undefined ? { touched } : {}),
-        ...(sapId ? { sapId } : {}),
-        ...(context.orgCode ? { subBbkId: context.orgCode } : {}),
-        ...(context.positionId ? { posId: context.positionId } : {}),
-      }),
-      signal: controller.signal,
-    });
-    if (!resp.ok) throw new Error(`客户名单请求失败：HTTP ${resp.status}`);
-    const payload = (await resp.json()) as ExternalNameListResponse;
+    );
     if (String(payload.code) !== "200") {
       throw new Error(`客户名单接口返回失败：${payload.code}`);
     }
@@ -737,7 +766,7 @@ export function buildInsightUrl(
 // 规划接口：/zt/wealth/plans
 // ---------------------------------------------------------------------------
 
-// 同源网关将该路径转发至 Java，不能使用 CoPaw 的全局 API base。
+// 统一 request 负责拼接 API base 和 /api 前缀。
 const PLAN_PATH = "/zt/wealth/plans";
 
 interface PlanResult<T> {
@@ -761,34 +790,20 @@ async function requestPlan<T>(
   options: RequestInit = {},
 ): Promise<T> {
   throwIfRequestAborted(options.signal);
-  const response = await fetch(path, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: getWPlusCookie("token") ?? "",
-    },
-  });
-  const payload = (await response
-    .json()
-    .catch(() => null)) as PlanResult<T> | null;
+  const payload = await request<PlanResult<T>>(path, options);
   throwIfRequestAborted(options.signal);
-  if (!payload) {
-    throw Object.assign(
-      new Error(`规划接口响应格式错误：HTTP ${response.status}`),
-      {
-        status: response.status,
-      },
-    );
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw Object.assign(new Error("规划接口响应格式错误"), {
+      status: 200,
+    });
   }
-  if (!response.ok || String(payload.code) !== "200") {
+  if (String(payload.code) !== "200") {
     throw Object.assign(
       new Error(
-        payload.message ||
-          payload.detail ||
-          `规划请求失败：HTTP ${response.status}`,
+        payload.message || payload.detail || `规划请求失败：${payload.code}`,
       ),
       {
-        status: response.ok ? Number(payload.code) : response.status,
+        status: Number(payload.code),
         data: payload,
       },
     );
@@ -808,6 +823,9 @@ interface PlanScenePayload {
   startDate?: string;
   endDate?: string;
   cronExpr: string;
+  schedule?: 1 | 2;
+  monitorTimeCron?: string;
+  finishRate?: number;
   cronExample?: string | null;
   mcpRelations: string[];
 }
@@ -816,6 +834,7 @@ interface PlanUpsertPayload {
   sapId: string;
   role: string;
   bbkId: string;
+  bbkOrgId: string;
   creatorName: string;
   sourceId: string;
   agentId: string;
@@ -823,10 +842,16 @@ interface PlanUpsertPayload {
   description?: string;
   sourceLabel?: string;
   scenes: PlanScenePayload[];
-  targets: { sapId: string; name?: string }[];
+  targets: { sapId: string; name?: string; bbkId: string; bbkOrgId: string }[];
 }
 
-function buildScenePayload(item: PlanItem): PlanScenePayload {
+function buildScenePayload(
+  item: PlanItem,
+  canMonitor: boolean,
+): PlanScenePayload {
+  const monitoring = canMonitor
+    ? item.monitoring ?? defaultMonitoring()
+    : undefined;
   return {
     sceneId: item.id,
     sceneName: item.sceneName,
@@ -839,6 +864,14 @@ function buildScenePayload(item: PlanItem): PlanScenePayload {
     startDate: item.start,
     endDate: item.end,
     cronExpr: serializeCron(item.schedule ?? DEFAULT_SCHEDULE),
+    ...(monitoring
+      ? {
+          schedule:
+            monitoring.cycle === "within7days" ? (2 as const) : (1 as const),
+          monitorTimeCron: serializeCron(monitoring.schedule),
+          finishRate: monitoring.expectedCompletionRate,
+        }
+      : {}),
     mcpRelations: item.mcpRelations,
   };
 }
@@ -959,15 +992,24 @@ export async function publishPlan(
   targets: DistributeTarget[],
 ): Promise<PublishResult> {
   const context = getIframeContext();
+  const viewer = planViewer();
   const payload: PlanUpsertPayload = {
-    ...planViewer(),
+    ...viewer,
+    bbkOrgId: context.orgCode ?? "",
     creatorName: context.userName ?? "",
     sourceId: context.source || DEFAULT_SOURCE_ID,
     agentId: useAgentStore.getState().selectedAgent || "default",
     name: draft.name.trim(),
     sourceLabel: account.source,
-    scenes: draft.items.map(buildScenePayload),
-    targets: targets.map((t) => ({ sapId: t.sapId, name: t.name })),
+    scenes: draft.items.map((item) =>
+      buildScenePayload(item, viewer.role === "president"),
+    ),
+    targets: targets.map((t) => ({
+      sapId: t.sapId,
+      name: t.name,
+      bbkId: t.bbkId ?? "",
+      bbkOrgId: t.bbkOrgId ?? "",
+    })),
   };
   let saved: PlanCreateResponse;
   if (editingId != null) {

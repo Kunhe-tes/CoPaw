@@ -107,7 +107,8 @@ describe("机构岗位人员分发目标", () => {
           userID: "00080008",
           sapID: "00000000",
           userName: "邓XX",
-          branchID: "100",
+          branchID: "00100",
+          subBranchID: "001001",
           branchName: "XXX全行",
           subBranchName: null,
           postionId: "RB0101",
@@ -115,6 +116,8 @@ describe("机构岗位人员分发目标", () => {
         {
           sapID: "00000001",
           userName: "李XX",
+          branchID: "00200",
+          subBranchID: "002002",
           branchName: "XXX全行",
           subBranchName: "某支行",
           postionId: "RB1101",
@@ -122,8 +125,20 @@ describe("机构岗位人员分发目标", () => {
       ],
     });
     expect(await fetchDistributeTargets()).toEqual([
-      { sapId: "00000000", name: "邓XX", orgName: "XXX全行" },
-      { sapId: "00000001", name: "李XX", orgName: "某支行" },
+      {
+        sapId: "00000000",
+        name: "邓XX",
+        orgName: "XXX全行",
+        bbkId: "00100",
+        bbkOrgId: "001001",
+      },
+      {
+        sapId: "00000001",
+        name: "李XX",
+        orgName: "某支行",
+        bbkId: "00200",
+        bbkOrgId: "002002",
+      },
     ]);
     expect(request).not.toHaveBeenCalled();
     expect(mockRequest).toHaveBeenCalledWith(

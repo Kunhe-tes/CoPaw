@@ -2761,6 +2761,9 @@
     border: 0;
     display: block;
   }
+  .selectedList.withoutMonitoring {
+    --selected-columns: minmax(170px, 0.8fr) minmax(0, 2.9fr) 120px 28px;
+  }
 
   .schemePreviewEmpty {
     height: 100%;
@@ -3129,6 +3132,24 @@
       }
       > .scheduleField {
         grid-column: 2;
+      }
+    }
+  }
+  .withoutMonitoring .selectedRow .configurationColumn > .scheduleBlock {
+    display: flex;
+    flex-direction: row;
+    min-height: 0;
+    height: 40px;
+    padding: 0;
+  }
+  .calendarDetailTable .detailMonitoring {
+    min-width: 210px;
+    > div {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      + div {
+        margin-top: 12px;
       }
     }
   }
