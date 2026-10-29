@@ -480,10 +480,7 @@ def _create_selected_expert_wait_tool(
                 if failures >= _SELECTED_EXPERT_RETRY_LIMIT:
                     _log_selected_expert_unconfirmed(context, run_id, category)
                     return _json_response({"status": "unavailable"})
-                delay = _SELECTED_EXPERT_POLL_SECONDS
-                if deadline is not None:
-                    delay = min(delay, max(deadline - time.monotonic(), 0))
-                await asyncio.sleep(delay)
+                await asyncio.sleep(_selected_expert_poll_delay(deadline))
         except asyncio.CancelledError:
             if authorized:
                 await _cancel_selected_expert(context, run_id)
@@ -494,6 +491,15 @@ def _create_selected_expert_wait_tool(
 
 def _selected_expert_failure_count(failures, category):
     return failures + 1 if category is not None else 0
+
+
+def _selected_expert_poll_delay(deadline):
+    if deadline is None:
+        return _SELECTED_EXPERT_POLL_SECONDS
+    return min(
+        _SELECTED_EXPERT_POLL_SECONDS,
+        max(deadline - time.monotonic(), 0),
+    )
 
 
 async def _poll_selected_expert_record(
