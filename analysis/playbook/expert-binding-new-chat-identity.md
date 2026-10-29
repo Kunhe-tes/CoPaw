@@ -1,0 +1,52 @@
+# 新草稿选择专家后的会话身份排查
+
+## 适用现象与结论边界
+
+新聊天选择专家后进入历史内容，或专家绑定的 Chat 与下一条消息实际执行的 Chat 不一致。2026-10-29 本地分析确认了固定逻辑 ID 的产生条件与重复 ID 下的后端定位漂移；尚未取得用户现场网络请求，因此不把这些最小复现直接等同于现场完整根因。
+
+## 两种新聊天状态
+
+- 显式点击新建：`console/src/pages/Chat/sessionApi/index.ts` 的 `createSession` 使用 `createLocalSessionId` 生成时间戳加毫秒内序号，将其写入草稿 `id` 和 `sessionId`。
+- 初始空白 `/chat`：`initialSessionSelection.ts` 在 URL 无 ID 时返回空选择；初始化不会主动分配草稿 ID。普通首次提交由 `useChatController.submitTurn` 调用 `ensureSession` 后才创建草稿。
+- 提交前选择专家会提前落库：`Chat/index.tsx` 的 `useExpertBinding.ensureChat` 在草稿对象、URL ID 和 activeSessionId 均为空时回退到 `${getChannel()}:${getUserId()}`。实际执行该函数的最小探针分别得到 `console:user-1`、显式新建的时间戳、仅 activeSessionId 存在时的时间戳。
+
+## 重复逻辑 ID 的后果
+
+`POST /chats` 为每条记录生成新 UUID，但没有阻止多个 Chat 共用逻辑 `session_id`。`_get_or_create_console_chat` 的普通发送分支按 session_id、user_id、channel 调用 ChatManager，而不使用请求里的 chat_id 选择目标。JsonChatRepository 的逻辑索引在重复键中选择 updated_at 最新的 Chat。
+
+最小复现使用临时 JsonChatRepository 和真实 `_get_or_create_console_chat`：先创建 old-history-chat、new-expert-chat，二者 session_id 均为 console:user-1；请求指定 new-expert-chat 时最初解析到新 Chat。随后更新旧 Chat 名称，相同请求解析到 old-history-chat。临时文件已随 TemporaryDirectory 清理。
+
+底层会话文件按 session_id 和 user_id 定位；新版 v3 历史还按 Chat UUID 投影，不能断言重复逻辑 ID 必然展示全部旧消息。旧格式、无 chat_id 归属记录及后端重新定位仍需分别核对。
+
+## 为什么存在独立专家绑定接口
+
+ADR 0042 和 `2026-10-27-expert-as-main-execution-design.md` 要求绑定立即保存、后续消息生效、在途消息身份保持快照、多页面旧状态拒绝。当前 GET/PUT expert-binding 负责所有权与专家有效性验证、Source 开关协调、修订号比较、Plan/Goal 互斥及冲突视图；通用 meta 写入禁止客户端提交 expert_main_binding。
+
+这些要求支持保留已有 Chat 的独立绑定更新接口，但不要求新 Chat 的创建和初始绑定必须分为两个请求。当前无 Chat 时执行 POST chats → GET binding → PUT binding，失败会留下无绑定的空 Chat；这是实现取舍，不是产品决策必然要求。
+
+另一个静态可见的生命周期问题：无 Chat 且尚无 binding view 时，`useExpertBinding.change` 会先 ensureChat，再 GET binding 检查 enabled。即使 Source 实际关闭主执行模式，也可能先创建空 Chat，随后才返回 legacy；此分支不会执行 saved 分支的新旧身份映射和导航。该问题尚未做浏览器复现。
+
+## 现场判别顺序与改进方向
+
+1. 核对选择专家前 URL、activeSessionId、草稿 sessionId 和 POST chats 的 session_id；显式新建仍走固定值时继续查状态同步，不能直接归因于初始空白页。
+2. 记录 POST 返回的 Chat UUID、PUT expert-binding 的目标 UUID、选择后 URL；区分新 UUID 展示旧内容与直接进入旧 UUID。
+3. 对照随后 POST console/chat 的 chat_id、session_id 和响应 X-Swe-Chatid；若不一致，检查重复逻辑 ID 及逻辑索引选择。
+4. 新草稿应先获得稳定独立的逻辑 ID；已有 Chat 的普通发送应按经授权且身份一致的 chat_id 精确定位。缺失 ID 的旧客户端兼容路径不能模糊覆盖明确目标。
+5. 如优化创建流程，可为创建请求提供显式初始专家字段，由服务端验证后一次提交 Chat 与初始绑定；继续保留已有 Chat 的修订号更新。仅减少接口数量不能修复重复 session_id 或发送定位漂移。
+
+## 本次验证
+
+- 前端原函数探针：空白页固定 ID、显式草稿时间戳、无草稿对象但 active ID 存在时使用 active ID。
+- 后端真实 JsonChatRepository/ChatManager/Console 解析探针：重复逻辑 ID 随旧 Chat 更新发生定位漂移。
+- `venv/bin/python -m pytest tests/unit/app/test_expert_main_binding.py -q`：23 passed。
+- 前端指定 index、initialSessionSelection、useExpertBinding 测试并筛选 creates and immediately binds / initial / binding：10 passed、59 skipped。未执行浏览器现场端到端复现。
+
+## 2026-10-29 修复结果
+
+用户授权继续后已实施：专家与 Plan 提前创建不再使用固定用户级逻辑 ID，改为复用草稿独立时间戳 ID；POST chats 支持 initial_expert_id，经验证后一次原子提交 Chat 和初始绑定，返回绑定视图；已有 Chat 继续使用独立 CAS 更新。主执行关闭时初始绑定请求不创建空记录，前端转为旧的单消息选择。
+
+初始专家创建按逻辑草稿键幂等：响应丢失后的重试返回原记录，不覆盖另一页面的新绑定。发生绑定冲突时响应包含经授权的 Chat UUID，前端同步身份和修订再导航，避免把已有绑定修订写入未知身份的草稿。
+
+普通请求提取阶段保留并校验 chat_id；明确 Chat 发送按其 UUID 和归属精确定位，逻辑身份不一致返回冲突，不改投其他 Chat。保留旧客户端把未解析逻辑 ID 同时放入 chat_id 的兼容路径；即使 chat_id 与 session_id 文本相同，明确 UUID 也不能在不存在时被解释为新草稿。
+
+最终后端相关 166 项通过；前端相关 118 项通过，两个已确认基线失败的上下文占用按钮测试单独跳过。TypeScript 通过，业务变更 ESLint 无错误（保留页面三项既有 Hook 警告）。未改动历史数据，未做现场浏览器端到端验收。

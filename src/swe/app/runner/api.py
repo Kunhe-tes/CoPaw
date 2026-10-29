@@ -9,7 +9,13 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+)
 from agentscope.memory import InMemoryMemory
 
 from .session import (
@@ -26,6 +32,8 @@ from .context_usage import (
 )
 from .manager import ChatManager
 from .expert_binding import (
+    ChatExpertBinding,
+    EXPERT_BINDING_META_KEY,
     ExpertBindingUpdate,
     ExpertBindingView,
     ExpertBindingConflict,
@@ -35,6 +43,7 @@ from .expert_binding import (
     read_expert_binding,
     reconcile_binding,
     resolve_bound_expert,
+    is_ordinary_chat,
 )
 from .models import (
     ChatArchiveMetadata,
@@ -1147,11 +1156,71 @@ async def list_chats(
     ]
 
 
-@router.post("", response_model=ChatSpec)
+class ChatCreateRequest(ChatSpec):
+    initial_expert_id: str | None = Field(
+        default=None,
+        min_length=1,
+        strict=True,
+    )
+
+    @field_validator("initial_expert_id")
+    @classmethod
+    def reject_blank_expert_id(cls, value):
+        return ExpertBindingUpdate.reject_blank_expert_id(value)
+
+
+class ChatCreateResponse(ChatSpec):
+    expert_binding: ExpertBindingView | None = None
+
+
+async def _initialize_expert_binding(request, workspace, spec, expert_id):
+    from swe.runtime_workers import run_runtime_state_work
+
+    if not is_ordinary_chat(spec):
+        raise HTTPException(
+            status_code=400,
+            detail="Expert main execution requires ordinary Chat",
+        )
+    enabled = await expert_main_enabled_for_request(request)
+    definition = (
+        await run_runtime_state_work(
+            resolve_bound_expert,
+            workspace,
+            expert_id,
+        )
+        if enabled
+        else None
+    )
+    if not enabled or definition is None:
+        view = await binding_view(workspace, spec, enabled=enabled)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": (
+                    "expert_unavailable" if enabled else "expert_main_disabled"
+                ),
+                "expert_binding": view.model_dump(),
+            },
+        )
+    spec.meta[EXPERT_BINDING_META_KEY] = ChatExpertBinding(
+        revision=1,
+        expert_id=expert_id,
+    ).model_dump()
+    return ExpertBindingView(
+        revision=1,
+        expert_id=expert_id,
+        enabled=True,
+        available=True,
+        expert_name=definition.name,
+    )
+
+
+@router.post("", response_model=ChatCreateResponse)
 async def create_chat(
     request_context: Request,
-    request: ChatSpec,
+    request: ChatCreateRequest,
     mgr: ChatManager = Depends(get_chat_manager),
+    workspace=Depends(get_workspace),
 ):
     """Create a new chat.
 
@@ -1188,7 +1257,30 @@ async def create_chat(
         channel=request.channel,
         meta=meta,
     )
-    return await mgr.create_chat(spec)
+    binding = None
+    if request.initial_expert_id is not None:
+        binding = await _initialize_expert_binding(
+            request_context,
+            workspace,
+            spec,
+            request.initial_expert_id,
+        )
+        created, inserted = await mgr.create_chat_if_absent_by_session(spec)
+        if not inserted:
+            _authorize_chat(request_context, created, workspace)
+            binding = await binding_view(workspace, created, enabled=True)
+            if binding.expert_id != request.initial_expert_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "expert_binding_changed",
+                        "chat_id": created.id,
+                        "expert_binding": binding.model_dump(),
+                    },
+                )
+    else:
+        created = await mgr.create_chat(spec)
+    return ChatCreateResponse(**created.model_dump(), expert_binding=binding)
 
 
 @router.post("/batch-delete", response_model=dict)
