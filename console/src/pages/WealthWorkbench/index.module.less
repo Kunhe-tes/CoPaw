@@ -73,14 +73,14 @@
   textarea {
     outline: none;
   }
-  button:focus,
-  input:focus,
-  select:focus,
-  textarea:focus,
-  a:focus {
-    outline: 3px solid #8bbaff;
-    outline-offset: 2px;
-  }
+  // button:focus,
+  // input:focus,
+  // select:focus,
+  // textarea:focus,
+  // a:focus {
+  //   outline: 3px solid #8bbaff;
+  //   outline-offset: 2px;
+  // }
   button {
     transition:
       background 0.15s,
@@ -3222,6 +3222,10 @@
     flex-direction: column;
     gap: 5px;
     min-width: 0;
+    .customerLimitControl {
+      width: 96px;
+      max-width: 100%;
+    }
     small {
       font-size: 11px;
       color: var(--muted);
@@ -3893,7 +3897,8 @@
       overflow-wrap: anywhere;
     }
     .metricsCol {
-      width: 26%;
+      width: auto;
+      min-width: 84px;
       white-space: normal;
     }
     .contactStatusCol {
@@ -3925,8 +3930,6 @@
       padding-right: 0;
     }
     .opportunityPreview {
-      min-width: 100px;
-      max-width: 240px;
       -webkit-line-clamp: 3;
       line-clamp: 3;
       max-height: 4.95em;
@@ -3997,8 +4000,7 @@
     white-space: nowrap;
   }
   .customerMetrics {
-    // 按列内可用宽度排布，长指标不反向撑宽表格。
-    contain: inline-size;
+    // 指标块参与列宽计算，长文本仍在块内省略。
     min-width: 125px;
     max-width: 395px;
   }
@@ -4013,7 +4015,7 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 8px;
-    width: 160px;
+    width: 140px;
     margin: 0;
     padding: 0;
     list-style: none;
@@ -4022,7 +4024,7 @@
       max-width: 100%;
     }
     .metricItem {
-      width: 160px;
+      width: 140px;
     }
     .metricItem:focus {
       outline: 2px solid var(--blue);
@@ -4030,11 +4032,12 @@
     }
   }
   .metricGrid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, 125px);
+    display: flex;
+    flex-wrap: wrap;
     gap: 8px 10px;
     margin: 0;
     .metricItem {
+      flex: 0 0 125px;
       width: 125px;
     }
   }
