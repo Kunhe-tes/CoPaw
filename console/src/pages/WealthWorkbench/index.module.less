@@ -73,14 +73,14 @@
   textarea {
     outline: none;
   }
-  button:focus-visible,
-  input:focus-visible,
-  select:focus-visible,
-  textarea:focus-visible,
-  a:focus-visible {
-    outline: 3px solid #8bbaff;
-    outline-offset: 2px;
-  }
+  // button:focus,
+  // input:focus,
+  // select:focus,
+  // textarea:focus,
+  // a:focus {
+  //   outline: 3px solid #8bbaff;
+  //   outline-offset: 2px;
+  // }
   button {
     transition:
       background 0.15s,
@@ -133,7 +133,9 @@
   .topbar {
     height: 74px;
     position: fixed;
-    inset: 0 0 auto;
+    top: 0;
+    right: 0;
+    left: 0;
     z-index: 20;
     background: linear-gradient(105deg, #f8fcff, #edf7ff 65%, #f8fcff);
     border-bottom: 1px solid var(--line);
@@ -740,7 +742,7 @@
   .createForm {
     border: 0;
     margin: 0;
-    min-inline-size: 0;
+    min-width: 0;
     padding: 0;
   }
   .createForm:disabled {
@@ -1715,7 +1717,8 @@
   }
   .toast {
     position: fixed;
-    inset: auto;
+    top: auto;
+    right: auto;
     margin: 0;
     bottom: 30px;
     left: 50%;
@@ -2758,6 +2761,9 @@
     border: 0;
     display: block;
   }
+  .selectedList.withoutMonitoring {
+    --selected-columns: minmax(240px, 1.5fr) minmax(0, 2.2fr) 150px 28px;
+  }
 
   .schemePreviewEmpty {
     height: 100%;
@@ -2888,64 +2894,81 @@
     min-width: 0;
   }
   .selectedList {
-    --selected-columns: 16px 27px minmax(225px, 3fr) minmax(135px, 2fr)
-      max-content max-content 110px 82px;
-    grid-template-columns: var(--selected-columns);
-    column-gap: 22px;
-    row-gap: 0;
-    overflow-x: auto;
-    > .empty {
-      grid-column: 1 / -1;
+    --selected-columns: minmax(170px, 0.8fr) minmax(0, 1.7fr) minmax(0, 1.2fr)
+      150px 28px;
+    display: block;
+  }
+  @media (min-width: 1600px) {
+    .selectedList {
+      --selected-columns: minmax(170px, 0.8fr) minmax(0, 1.6fr) minmax(0, 1.4fr)
+        150px 28px;
     }
   }
   .selectedListHeader,
   .selectedRow {
-    grid-column: 1 / -1;
-    grid-template-columns: subgrid;
-    column-gap: 22px;
+    grid-template-columns: var(--selected-columns);
+    column-gap: 20px;
     min-width: 0;
   }
   .selectedListHeader {
     display: grid;
-    padding: 10px;
+    padding: 10px 6px;
     border: 1px solid transparent;
-    border-block-color: #e6edf7;
+    border-top-color: #e6edf7;
+    border-bottom-color: #e6edf7;
     background: #f7faff;
     color: #596e8c;
     font-size: 12px;
     font-weight: 600;
     line-height: 18px;
+  }
+  .customerLimitHeader {
     white-space: nowrap;
-    > span:first-child {
-      grid-column: 3;
-    }
   }
   .selectedRow {
-    min-height: 56px;
+    position: relative;
     align-items: center;
-    padding: 10px;
+    row-gap: 16px;
+    padding: 14px 6px;
     border: 1px solid transparent;
     border-top: 0;
     border-bottom-color: #e6edf7;
     border-radius: 0;
+    > * {
+      min-width: 0;
+    }
   }
+  .selectedRow .selectedMain,
   .selectedRow .taskCycleBlock,
   .selectedRow .scheduleBlock,
-  .selectedRow .customScheduleFields {
+  .selectedRow .customScheduleFields,
+  .selectedRow .customScheduleRow,
+  .monitoringBlock {
     display: flex;
-    flex-direction: row;
-    align-items: center;
+    flex-direction: column;
+    align-items: flex-start;
     gap: 8px;
+    min-width: 0;
+    width: 100%;
+    margin: 0;
   }
   .selectedRow .selectedMain {
-    display: contents;
+    padding-left: 33px;
   }
   .selectedRow .selectedTitle {
     display: flex;
     align-items: center;
+    width: 100%;
     min-width: 0;
-    flex: 1;
-    white-space: nowrap;
+    .order {
+      position: absolute;
+      top: 50%;
+      left: 6px;
+      transform: translateY(-50%);
+      flex-shrink: 0;
+      margin-right: 6px;
+      font-size: 12px;
+    }
     .tag {
       flex-shrink: 0;
     }
@@ -2954,84 +2977,255 @@
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-  .selectedRow .scheduleBlock {
-    width: max-content;
-    margin-top: 0;
-  }
-  .selectedRow .taskCycleBlock,
-  .selectedRow .scheduleField,
-  .selectedRow .customFrequencyControls,
-  .selectedRow .scheduleDateParts {
-    flex-shrink: 0;
-    width: max-content;
-  }
-  .selectedRow .direction,
-  .selectedRow .scheduleField,
-  .selectedRow .taskRangeLabel,
-  .selectedRow .taskCustomDates {
-    display: flex;
-    align-items: center;
-    min-height: 32px;
-    margin: 0;
     white-space: nowrap;
   }
   .selectedRow .direction {
-    display: block;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
     width: 100%;
+    padding-left: 0;
+    input {
+      width: 100%;
+      height: 32px;
+    }
   }
-  .selectedRow .direction input {
+  .selectedRow .cycle,
+  .selectedRow .scheduleField,
+  .selectedRow .customScheduleRow > .scheduleField {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
     width: 100%;
-    height: 32px;
+    min-width: 0;
+    margin: 0;
   }
   .selectedRow .taskCycleBlock > .cycle > span,
   .selectedRow .scheduleBlock > .cycle > span {
     display: none;
   }
+  .selectedRow .cycleGroup {
+    flex-wrap: wrap;
+    max-width: 100%;
+    button {
+      padding: 5px 4px;
+    }
+  }
   .selectedRow .taskRangeLabel {
-    padding-left: 0;
+    margin: 0;
+    padding: 0;
+    white-space: normal;
   }
-  .selectedRow .taskDatePicker:global(.ant-picker) {
+  .selectedRow .taskCustomDates {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    width: 100%;
+    min-width: 0;
+  }
+  .selectedRow .taskDatePicker {
+    flex: 0 1 108px;
     width: 108px;
-  }
-  .selectedRow .expandedSchedule {
-    display: grid;
-    grid-template-columns: max-content max-content;
-    gap: 8px;
-    > .cycle {
-      min-height: 32px;
-    }
-    > .scheduleField:last-child,
-    > .customScheduleFields {
-      grid-column: 1 / -1;
-    }
-  }
-  .selectedRow .cycleGroup button {
-    padding: 5px 6px;
+    max-width: 100%;
   }
   .selectedRow .scheduleNumber {
-    flex: 0 0 44px !important;
+    flex: 0 1 44px !important;
     width: 44px;
   }
+  .selectedRow .customFrequencyControls,
+  .selectedRow .scheduleDateParts {
+    flex-wrap: wrap;
+    min-width: 0;
+  }
   .selectedRow .customFrequencyControls select {
-    flex: 0 0 70px;
+    flex: 0 1 70px;
     width: 70px;
   }
   .selectedRow .scheduleDateParts select {
-    flex: 0 0 60px;
+    flex: 0 1 60px;
     width: 60px;
   }
   .selectedRow .rowTools {
+    justify-content: center;
+  }
+  .monitoringCycleOptions button {
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .monitoringBlock .customerLimitControl {
+    width: 100%;
+  }
+  .selectedRow .configurationColumn {
     display: flex;
-    flex-wrap: nowrap;
-    align-items: center;
-    gap: 2px;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+    > [data-label] {
+      flex-direction: row;
+      flex-wrap: nowrap;
+      align-items: center;
+      gap: 8px;
+      height: 40px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      white-space: nowrap;
+      &::-webkit-scrollbar {
+        height: 8px;
+      }
+      &::before {
+        content: attr(data-label);
+        flex: 0 0 72px;
+        color: #596e8c;
+        font-size: 12px;
+      }
+      > * {
+        flex-shrink: 0;
+        width: auto;
+        max-width: none;
+      }
+    }
+    .cycle,
+    .cycleGroup,
+    .scheduleField,
+    .taskCustomDates,
+    .customScheduleFields,
+    .customScheduleRow,
+    .customFrequencyControls,
+    .scheduleDateParts,
+    .monitoringWeekdays {
+      display: flex;
+      flex-direction: row;
+      flex-wrap: nowrap;
+      align-items: center;
+      width: auto;
+      max-width: none;
+      flex-shrink: 0;
+      white-space: nowrap;
+    }
+    .taskRangeLabel {
+      white-space: nowrap;
+    }
+    .monitoringBlock .customerLimitControl {
+      width: 84px;
+    }
+    > .monitoringBlock::before {
+      flex-basis: 60px;
+    }
+    > .scheduleBlock,
+    > .scheduleBlock.customConfiguration {
+      display: grid;
+      grid-template-columns: 72px max-content;
+      grid-template-rows: repeat(2, 32px);
+      grid-auto-rows: 32px;
+      row-gap: 16px;
+      height: auto;
+      min-height: 88px;
+      padding: 4px 0;
+      &::before {
+        grid-column: 1;
+        grid-row: 1;
+      }
+      > .cycle {
+        grid-column: 2;
+        grid-row: 1;
+      }
+      > .taskCustomDates,
+      > .taskRangeLabel,
+      > .customScheduleFields {
+        grid-column: 2;
+        grid-row: 2;
+      }
+      > .scheduleField {
+        grid-column: 2;
+      }
+    }
+  }
+  .withoutMonitoring .selectedRow .configurationColumn > .scheduleBlock {
+    display: flex;
+    flex-direction: row;
+    min-height: 0;
+    height: 40px;
+    padding: 0;
+  }
+  .calendarDetailTable .detailMonitoring {
+    min-width: 210px;
+    > div {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      + div {
+        margin-top: 12px;
+      }
+    }
+  }
+  .monitoringWeekdays {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+  }
+  .monitoringDay {
+    width: 20px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid #d4e4fa;
+    border-radius: 3px;
+    background: white;
+    color: var(--text);
+    font-size: 12px;
+    &.active {
+      border-color: var(--blue);
+      background: var(--blue);
+      color: white;
+    }
+  }
+  @media (max-width: 1350px) {
+    .selectedListHeader {
+      display: none;
+    }
+    .selectedRow {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      padding: 14px 10px;
+      > [data-label]::before {
+        content: attr(data-label);
+        color: #596e8c;
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 18px;
+      }
+      .selectedMain {
+        position: relative;
+        grid-column: 1 / -1;
+        .order {
+          left: 0;
+        }
+      }
+      .rowTools {
+        grid-column: 2;
+        justify-self: end;
+      }
+    }
+  }
+  @media (max-width: 650px) {
+    .selectedRow {
+      grid-template-columns: minmax(0, 1fr);
+      .rowTools {
+        grid-column: 1;
+      }
+    }
   }
   .customerLimitField {
     display: flex;
     flex-direction: column;
     gap: 5px;
     min-width: 0;
+    .customerLimitControl {
+      width: 96px;
+      max-width: 100%;
+    }
     small {
       font-size: 11px;
       color: var(--muted);
@@ -3068,7 +3262,7 @@
       appearance: none;
       margin: 0;
     }
-    input:focus-visible {
+    input:focus {
       outline: none;
     }
     > span {
@@ -3124,7 +3318,7 @@
     color: var(--muted);
     font-size: 12px;
   }
-  .taskDatePicker:global(.ant-picker) {
+  .taskDatePicker {
     width: 142px;
     height: 29px;
     min-width: 0;
@@ -3135,7 +3329,7 @@
     color: var(--ink);
     cursor: pointer;
   }
-  .taskDatePicker:global(.ant-picker) :global(.ant-picker-input > input) {
+  .taskDatePicker input {
     color: var(--ink);
     font-size: 12px;
     cursor: pointer;
@@ -3149,16 +3343,17 @@
     width: 270px;
     height: 34px;
   }
-  .taskDatePicker:global(.ant-picker) :global(.ant-picker-suffix) {
+  .taskDatePicker :global(.ant-picker-suffix),
+  .taskDatePicker :global(.swe-picker-suffix) {
     color: var(--muted);
     font-size: 13px;
   }
-  .taskDatePicker:global(.ant-picker):hover,
-  .taskDatePicker:global(.ant-picker-focused) {
+  .taskDatePicker:hover,
+  .taskDatePicker:focus-within {
     border-color: #bcd5ff;
     outline: none;
   }
-  .taskDatePicker:global(.ant-picker-focused) {
+  .taskDatePicker:focus-within {
     box-shadow: 0 0 0 2px rgba(55, 105, 252, 0.16);
   }
   .scheduleBlock {
@@ -3483,7 +3678,7 @@
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
   }
-  .opportunityPreview:focus-visible {
+  .opportunityPreview:focus {
     outline: 2px solid var(--blue);
     outline-offset: 2px;
   }
@@ -3551,7 +3746,7 @@
     background: white;
     border-color: #9ec6ff;
   }
-  .accountSwitcher .switcherTrigger:focus-visible {
+  .accountSwitcher .switcherTrigger:focus {
     outline: 3px solid #8bbaff;
     outline-offset: 2px;
   }
@@ -3688,117 +3883,97 @@
     padding: 7px 10px;
     vertical-align: middle;
   }
-  .tasksLayout.business .customerTable {
-    min-width: 920px;
-  }
   .customerTable.metricsTable {
-    table-layout: fixed;
-    min-width: 1308px;
-  }
-  .customerTable.metricsTable .metricsCol {
-    width: 520px;
-    white-space: normal;
-  }
-  .customerTable.metricsTable.todayTaskTable {
-    min-width: 1443px;
-    .contactStatusCol {
-      width: 135px;
+    --execution-width: 210px;
+    --scheme-width: 120px;
+    table-layout: auto;
+    min-width: 1000px;
+    th,
+    td {
+      width: auto;
     }
-  }
-  .customerTable.metricsTable.sceneTable {
-    min-width: 1678px;
-    th:nth-child(1),
-    td:nth-child(1),
-    th:nth-child(6),
-    td:nth-child(6) {
-      width: 100px;
+    .name {
+      white-space: normal;
+      overflow-wrap: anywhere;
     }
-    th:nth-child(2),
-    td:nth-child(2) {
-      width: 135px;
+    .metricsCol {
+      width: auto;
+      min-width: 84px;
       white-space: normal;
     }
+    .contactStatusCol {
+      width: 110px;
+      white-space: nowrap;
+    }
+    .schemeCol {
+      width: 1%;
+      white-space: nowrap;
+    }
+    .sceneCol {
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
     td:nth-child(2) .tag {
-      box-sizing: border-box;
       max-width: 100%;
       white-space: normal;
       overflow-wrap: anywhere;
     }
-    .sceneCol {
-      width: 160px;
+    .opportunityCol,
+    .reason {
+      width: auto;
+      min-width: 0;
       white-space: normal;
-      overflow-wrap: anywhere;
+    }
+    .tagFilterTrigger {
+      gap: 4px;
+      padding-left: 0;
+      padding-right: 0;
     }
     .opportunityPreview {
       -webkit-line-clamp: 3;
       line-clamp: 3;
       max-height: 4.95em;
     }
-    .metricsCol {
-      width: auto;
+    &.completedTable .channelCol {
+      white-space: normal;
     }
-    &.opportunityTable .opportunityCol,
-    &.opportunityTable .reason {
-      width: 240px;
-      min-width: 0;
-    }
-    &.todayCustomerTable th:nth-child(6),
-    &.todayCustomerTable td:nth-child(6) {
-      width: 135px;
-    }
-    &.todayCustomerTable th:nth-child(2),
-    &.todayCustomerTable td:nth-child(2) {
-      width: 125px;
-    }
-    &.opportunityTable:not(.todayCustomerTable) {
-      min-width: 1733px;
-      .opportunityCol,
-      .reason {
-        width: 260px;
-      }
-      th:nth-child(6),
-      td:nth-child(6) {
-        width: 135px;
-      }
-    }
-    &.completedTable {
-      // 含最近接触时间的固定列合计 1133px，指标区至少保留 520px（窄屏 356px）。
-      min-width: 1653px;
-      th:first-child,
-      td:first-child {
-        width: 150px;
-      }
-      .sceneCol {
-        width: 180px;
-      }
-      .channelCol {
-        width: 150px;
-        white-space: normal;
-      }
-      .executionCol {
-        width: 190px;
-        white-space: normal;
-        overflow-wrap: anywhere;
-      }
-      th:last-child,
-      td:last-child {
-        width: 160px;
-      }
-    }
+  }
+  .customerTable.metricsTable.todayCustomerTable,
+  .customerTable.metricsTable.todayTaskTable {
+    min-width: 1100px;
   }
   .customerTable.metricsTable.opportunityTable .executionCol {
     position: sticky;
     right: 0;
-    width: 220px;
+    width: var(--execution-width);
+    min-width: var(--execution-width);
     background: var(--console-management-surface, #fff);
     border-left: 1px solid var(--console-management-border, #e5e7eb);
     z-index: 1;
   }
-  .customerTable.metricsTable.sceneTable.todayTaskTable {
-    min-width: 1803px;
+  .customerTable.metricsTable.opportunityTable .recentContactCol {
+    position: sticky;
+    right: calc(var(--execution-width) + var(--scheme-width));
+    background: var(--console-management-surface, #fff);
+    z-index: 1;
   }
-  .customerTable.metricsTable.opportunityTable th.executionCol {
+  .customerTable.metricsTable.opportunityTable .schemeCol {
+    position: sticky;
+    right: var(--execution-width);
+    width: var(--scheme-width);
+    min-width: var(--scheme-width);
+    background: var(--console-management-surface, #fff);
+    z-index: 1;
+  }
+  .customerTable.metricsTable.opportunityTable th.executionCol,
+  .customerTable.metricsTable.opportunityTable th.schemeCol,
+  .customerTable.metricsTable.opportunityTable th.recentContactCol {
     background: linear-gradient(100deg, #f0f8ff, #edf6ff);
+  }
+  @media (min-width: 1600px) {
+    .customerTable.metricsTable {
+      --execution-width: 240px;
+    }
   }
   .customerTable.metricsTable .reason {
     min-width: 0;
@@ -3808,7 +3983,7 @@
   .customerTable.metricsTable td.recentContactCol,
   .customerTable.metricsTable.sceneTable th.recentContactCol,
   .customerTable.metricsTable.sceneTable td.recentContactCol {
-    width: 168px;
+    width: 128px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -3817,8 +3992,17 @@
   .customerTable td.recentContactCol {
     font-size: 12px;
   }
+  .recentContactValue {
+    display: block;
+    max-width: 100px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .customerMetrics {
-    width: 100%;
+    // 指标块参与列宽计算，长文本仍在块内省略。
+    min-width: 125px;
+    max-width: 395px;
   }
   .customerLabels {
     display: flex;
@@ -3829,26 +4013,38 @@
   .customerScenes {
     display: flex;
     flex-direction: column;
+    align-items: flex-start;
     gap: 8px;
+    width: 140px;
     margin: 0;
     padding: 0;
     list-style: none;
     li {
       min-width: 0;
+      max-width: 100%;
     }
-    .metricItem:focus-visible {
+    .metricItem {
+      width: 140px;
+    }
+    .metricItem:focus {
       outline: 2px solid var(--blue);
       outline-offset: 2px;
     }
   }
   .metricGrid {
-    display: grid;
-    grid-template-columns: repeat(3, 156px);
+    display: flex;
+    flex-wrap: wrap;
     gap: 8px 10px;
     margin: 0;
+    .metricItem {
+      flex: 0 0 125px;
+      width: 125px;
+    }
   }
   .metricItem {
     display: block;
+    width: max-content;
+    max-width: min(240px, 100%);
     min-width: 0;
     padding: 3px 7px;
     border-radius: 6px;
@@ -3934,74 +4130,8 @@
     font-size: 14px;
     font-weight: 500;
   }
-  @media (max-width: 1600px) {
-    .customerTable.metricsTable {
-      min-width: 1128px;
-    }
-    .customerTable.metricsTable.sceneTable {
-      min-width: 1514px;
-    }
-    .customerTable.metricsTable.sceneTable.opportunityTable:not(
-        .todayCustomerTable
-      ) {
-      min-width: 1569px;
-    }
-    .customerTable.metricsTable.sceneTable.completedTable {
-      min-width: 1489px;
-    }
-    .tasksLayout.business .customerTable.metricsTable {
-      min-width: 1128px;
-    }
-    .customerTable.metricsTable.sceneTable.todayTaskTable {
-      min-width: 1639px;
-    }
-    .tasksLayout.business .customerTable.metricsTable.todayTaskTable {
-      min-width: 1263px;
-    }
-    .customerTable.metricsTable .metricsCol {
-      width: 356px;
-    }
-    .metricGrid {
-      grid-template-columns: repeat(2, 156px);
-    }
-  }
-  @media (max-width: 1000px) {
-    .customerTable.metricsTable .metricsCol {
-      width: 190px;
-    }
-    .metricGrid {
-      grid-template-columns: 156px;
-    }
-  }
   .tasksLayout.business .customerTable.metricsTable.opportunityTable {
-    --business-metrics-width: 520px;
-    // 固定列合计 1028px，另预留 1px 表格边框，避免经营机会承受剩余宽度。
-    min-width: calc(1029px + var(--business-metrics-width));
-    th:first-child,
-    td:first-child {
-      width: 110px;
-    }
-    .opportunityCol,
-    .reason {
-      width: 260px;
-    }
-    th.opportunityCol {
-      white-space: nowrap;
-    }
-    th:nth-child(4),
-    td:nth-child(4) {
-      width: 135px;
-    }
-  }
-  @media (max-width: 1600px) {
-    .tasksLayout.business .customerTable.metricsTable.opportunityTable {
-      --business-metrics-width: 356px;
-    }
-  }
-  @media (max-width: 1000px) {
-    .tasksLayout.business .customerTable.metricsTable.opportunityTable {
-      --business-metrics-width: 190px;
-    }
+    min-width: 800px;
   }
   @media (max-width: 1250px) {
     .accountSwitcher .switcherTrigger {
@@ -4050,6 +4180,7 @@
 .root {
   .sceneFilterApplied {
     min-width: 0;
+    max-width: 180px;
     span {
       flex: 1;
       min-width: 0;

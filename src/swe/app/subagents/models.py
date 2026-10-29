@@ -63,6 +63,7 @@ SAFE_WORKER_REQUEST_CONTEXT_KEYS = frozenset(
         "tenant_id",
         "scope_id",
         "agent_id",
+        "plan_mode_enabled",
     },
 )
 SECRET_LIKE_FIELD_FRAGMENTS = (
@@ -803,6 +804,10 @@ class WorkerLaunchSpec(BaseModel):
             for key, value in self.request_context.items()
             if key in SAFE_WORKER_REQUEST_CONTEXT_KEYS
         }
+        if "plan_mode_enabled" in self.request_context:
+            self.request_context["plan_mode_enabled"] = (
+                self.request_context["plan_mode_enabled"] is True
+            )
         return self
 
 

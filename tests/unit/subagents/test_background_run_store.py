@@ -6,20 +6,22 @@ from __future__ import annotations
 import pytest
 
 from swe.app.subagents import (
-    AgentRegistry,
     AgentResult,
     DefinitionMatchMetadata,
     DelegationSpec,
     PerRunSubAgentRunStore,
     PermissionPolicy,
     SubAgentStartRequest,
-    builtin_definition_provider,
+    SubAgentDefinition,
 )
 
 
 def _definition():
-    registry = AgentRegistry([builtin_definition_provider()])
-    return registry.resolve("plan-researcher")
+    return SubAgentDefinition(
+        name="plan-researcher",
+        description="Persistence test expert",
+        instruction="Inspect background run persistence",
+    )
 
 
 def _spec() -> DelegationSpec:

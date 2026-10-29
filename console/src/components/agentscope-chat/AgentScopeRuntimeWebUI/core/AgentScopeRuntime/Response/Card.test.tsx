@@ -2,6 +2,11 @@ import React from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import AgentScopeRuntimeResponseCard from "./Card";
+import { convertArchivedPage } from "@/pages/Chat/sessionApi";
+import {
+  mergeHistoryResponses,
+  resolveHistoryAnchorId,
+} from "@/pages/Chat/sessionApi/historyAssembly";
 import {
   AgentScopeRuntimeContentType,
   AgentScopeRuntimeMessageRole,
@@ -101,6 +106,125 @@ vi.mock("./RetryStatusMessage", () => ({
 
 afterEach(() => {
   cleanup();
+});
+
+it("exposes stable reading anchors for process and answer content", () => {
+  const { container, rerender } = render(
+    <AgentScopeRuntimeResponseCard
+      data={response([
+        textMessage(
+          "thinking",
+          "checking",
+          AgentScopeRuntimeMessageType.REASONING,
+        ),
+        textMessage("final", "final answer"),
+      ])}
+    />,
+  );
+  expect(
+    container.querySelector('[data-history-anchor-id="process:response-1"]'),
+  ).toBeTruthy();
+  expect(
+    screen.getByText("final answer").closest("[data-history-anchor-id]"),
+  ).toHaveAttribute("data-history-anchor-id", "final");
+  rerender(
+    <AgentScopeRuntimeResponseCard
+      data={response([
+        textMessage("older", "earlier", AgentScopeRuntimeMessageType.REASONING),
+        textMessage(
+          "thinking",
+          "checking",
+          AgentScopeRuntimeMessageType.REASONING,
+        ),
+        textMessage("final", "final answer"),
+      ])}
+    />,
+  );
+  expect(
+    container.querySelector('[data-history-anchor-id="process:response-1"]'),
+  ).toBeTruthy();
+});
+
+it("resolves an archived process anchor to the element rendered after merging", () => {
+  const older = convertArchivedPage(
+    [
+      {
+        ...textMessage(
+          "thinking",
+          "checking",
+          AgentScopeRuntimeMessageType.REASONING,
+        ),
+      },
+    ],
+    [],
+  )[0];
+  const newer = convertArchivedPage(
+    [{ ...textMessage("final", "final answer") }],
+    [],
+  )[0];
+  const merged = mergeHistoryResponses([older, newer]);
+  const anchorId = `process:${older.cards![0].data.id}`;
+  const { container } = render(
+    <AgentScopeRuntimeResponseCard data={older.cards![0].data} />,
+  );
+  expect(
+    container.querySelector(`[data-history-anchor-id="${anchorId}"]`),
+  ).toBeTruthy();
+  cleanup();
+  const rendered = render(
+    <AgentScopeRuntimeResponseCard data={merged[0].cards![0].data} />,
+  );
+  const resolved = resolveHistoryAnchorId(merged, anchorId);
+  expect(resolved).toBe(`process:${newer.cards![0].data.id}`);
+  expect(
+    rendered.container.querySelector(`[data-history-anchor-id="${resolved}"]`),
+  ).toBeTruthy();
+});
+
+it("renders an inline compaction separator without creating a second answer", () => {
+  const boundary: IAgentScopeRuntimeMessage = {
+    id: "boundary-inline",
+    role: AgentScopeRuntimeMessageRole.SYSTEM,
+    type: AgentScopeRuntimeMessageType.CONVERSATION_COMPACTION_BOUNDARY,
+    status: AgentScopeRuntimeRunStatus.Completed,
+    content: [
+      {
+        type: AgentScopeRuntimeContentType.DATA,
+        status: AgentScopeRuntimeRunStatus.Completed,
+        data: {
+          id: "archive-boundary",
+          archived_message_count: 2,
+          first_message_id: "q",
+          last_message_id: "tool",
+          created_at: "2026-10-28T01:00:00Z",
+        },
+      },
+    ],
+  };
+  render(
+    <AgentScopeRuntimeResponseCard
+      data={response([boundary, textMessage("final", "final answer")])}
+    />,
+  );
+  expect(screen.getByText("final answer")).toBeTruthy();
+  const process = screen.getByRole("button", { name: /执行过程/ });
+  fireEvent.click(process);
+  expect(screen.getByRole("separator")).toHaveAttribute(
+    "data-conversation-compaction-boundary-id",
+    "archive-boundary",
+  );
+});
+
+it("keeps copy actions but hides regeneration for appended messages", () => {
+  const appended = {
+    ...textMessage("runtime-id", "supplement"),
+    metadata: { stop_append: { message_id: "append-1" } },
+  };
+  render(<AgentScopeRuntimeResponseCard data={response([appended])} isLast />);
+  expect(screen.getByTestId("actions").getAttribute("data-hide-replace")).toBe(
+    "true",
+  );
+  expect(screen.getByText("supplement")).toBeTruthy();
 });
 
 function textMessage(

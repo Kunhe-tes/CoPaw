@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import signal
 import json
+import asyncio
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -37,6 +39,16 @@ def _snapshot_model_for_supervisor_tests(monkeypatch):
     from swe.app.subagents import supervisor as supervisor_module
     from swe.providers.models import ModelSlotConfig
 
+    monkeypatch.setitem(
+        globals(),
+        "builtin_definition_provider",
+        _definition_provider,
+    )
+    monkeypatch.setattr(
+        supervisor_module,
+        "builtin_definition_provider",
+        _definition_provider,
+    )
     monkeypatch.setattr(
         supervisor_module,
         "capture_model_launch_snapshot",
@@ -47,8 +59,21 @@ def _snapshot_model_for_supervisor_tests(monkeypatch):
     )
 
 
+def _definition_provider():
+    """Lifecycle tests provide their own expert after builtins were removed."""
+    return InMemoryDefinitionProvider(
+        [
+            _builtin(
+                name="plan-researcher",
+                description="test",
+                instruction="test",
+            ),
+        ],
+    )
+
+
 class _FakeProcess:
-    def __init__(self, pid: int = 4321):
+    def __init__(self, pid: int = 99999999):
         self.pid = pid
         self.returncode: int | None = None
         self.wait_calls = 0
@@ -69,7 +94,7 @@ class _FakePopenFactory:
         self.commands: list[list[str]] = []
 
     def __call__(self, command, **kwargs):
-        process = _FakeProcess(pid=4321 + len(self.processes))
+        process = _FakeProcess(pid=99999999 + len(self.processes))
         self.processes.append(process)
         self.commands.append(list(command))
         return process
@@ -90,6 +115,39 @@ def _spec() -> DelegationSpec:
         name="plan-researcher",
         objective="Inspect supervisor behavior",
     )
+
+
+@pytest.mark.asyncio
+async def test_start_cancellation_cleans_registered_worker(
+    tmp_path,
+    monkeypatch,
+):
+    supervisor = BackgroundSubAgentSupervisor()
+    scope = _scope(tmp_path)
+    entered = asyncio.Event()
+
+    async def start_reserved(**kwargs):
+        supervisor._active_for_scope(scope)[kwargs["run_id"]] = object()
+        entered.set()
+        await asyncio.Future()
+
+    cancel = AsyncMock()
+    monkeypatch.setattr(supervisor, "_start_reserved", start_reserved)
+    monkeypatch.setattr(supervisor, "cancel", cancel)
+    task = asyncio.create_task(
+        supervisor.start(
+            scope=scope,
+            spec=_spec(),
+            parent_agent_config=AgentProfileConfig(id="agent-1", name="Main"),
+            workspace_dir=tmp_path,
+        ),
+    )
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    cancel.assert_awaited_once()
+    assert cancel.await_args.args[0] == scope
 
 
 @pytest.mark.asyncio
@@ -308,6 +366,36 @@ async def test_wait_lazy_reaps_worker_without_result(tmp_path):
     assert record.worker is not None
     assert record.worker.exit_code == 1
     assert record.errors[-1].code == "worker_exited_without_result"
+
+
+@pytest.mark.asyncio
+async def test_reap_run_does_not_reap_other_workers(tmp_path):
+    popen_factory = _FakePopenFactory()
+    supervisor = BackgroundSubAgentSupervisor(
+        max_running_per_scope=2,
+        popen_factory=popen_factory,
+    )
+    scope = _scope(tmp_path)
+    first = await supervisor.start(
+        scope=scope,
+        spec=_spec(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+    )
+    second = await supervisor.start(
+        scope=scope,
+        spec=_spec(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+    )
+    popen_factory.processes[0].returncode = 0
+    popen_factory.processes[1].returncode = None
+
+    result = await supervisor.reap_run(scope, first.run_id)
+
+    assert result is not None and result.status == "failed"
+    assert first.run_id not in supervisor._active_for_scope(scope)
+    assert second.run_id in supervisor._active_for_scope(scope)
 
 
 @pytest.mark.asyncio

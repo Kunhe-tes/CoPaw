@@ -12,6 +12,7 @@ import type { CronParts } from "@/utils/parseCron";
 import { useIframeStore } from "../../stores/iframeStore";
 import * as api from "./api";
 import { throwIfRequestAborted } from "./abortSignal";
+import { defaultMonitoring, type SceneMonitoring } from "./monitoring";
 import {
   canAccessPage,
   FALLBACK_ROLE,
@@ -156,6 +157,7 @@ interface WealthState {
   setTaskCycle: (id: string, cycle: string) => void;
   setItemDates: (id: string, field: "start" | "end", value: string) => void;
   updateSchedule: (id: string, patch: Partial<CronParts>) => void;
+  setItemMonitoring: (id: string, patch: Partial<SceneMonitoring>) => void;
   setItemDirection: (id: string, direction: string) => void;
   setItemCustNum: (id: string, custNum: number | undefined) => void;
   normalizeDraft: () => void;
@@ -619,6 +621,26 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
     });
   },
 
+  setItemMonitoring: (id, patch) => {
+    if (get().accountId !== "president") return;
+    set((state) => ({
+      draft: {
+        ...state.draft,
+        items: state.draft.items.map((item) =>
+          item.id === id
+            ? {
+                ...item,
+                monitoring: {
+                  ...(item.monitoring ?? defaultMonitoring()),
+                  ...patch,
+                },
+              }
+            : item,
+        ),
+      },
+    }));
+  },
+
   setItemDirection: (id, direction) => {
     const { draft } = get();
     set({
@@ -724,14 +746,19 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
       set({
         plans,
         ...(isCurrentForm
-          ? { draft, editingId: null, dialog: null, savedAt: "", targetSapIds: [] }
+          ? {
+              draft,
+              editingId: null,
+              dialog: null,
+              savedAt: "",
+              targetSapIds: [],
+            }
           : {}),
       });
-      get().toast(
-        created
-          ? "规划已发布，正在后台创建定时任务并分发"
-          : "规划已修改，正在重新发布",
-      );
+      const successMessage = created
+        ? "规划已发布，正在后台创建定时任务并分发"
+        : "规划已修改，正在重新发布";
+      get().toast(successMessage);
       return isCurrentForm;
     } catch (error) {
       // HTTP 业务错误（409 发布中 / 403 非创建人 / 认证失效等）原样提示
@@ -772,12 +799,21 @@ function buildPublishTargets(
   account: Account,
 ): DistributeTarget[] {
   if (!needsDistributeTargets(account.id)) {
-    const sapId = useIframeStore.getState().userId ?? account.id;
-    return [{ sapId, name: account.name, orgName: account.department }];
+    const { userId, bbk, orgCode } = useIframeStore.getState();
+    return [
+      {
+        sapId: userId ?? account.id,
+        name: account.name,
+        orgName: account.department,
+        bbkId: bbk ?? "",
+        bbkOrgId: orgCode ?? "",
+      },
+    ];
   }
   return state.targetSapIds.map((sapId) => {
     const hit = state.targets.find((t) => t.sapId === sapId);
     return {
+      ...hit,
       sapId,
       name: hit?.name ?? sapId,
       orgName: hit?.orgName ?? "",

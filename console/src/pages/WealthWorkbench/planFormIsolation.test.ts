@@ -78,7 +78,7 @@ it("离开旧表单后发布请求完成不会覆盖新表单或触发成功跳�
   const publishing = useWealthStore.getState().publishPlan();
   useWealthStore.getState().resetPlanForm();
   useWealthStore.getState().setDraftName("新的未发布计划");
-  resolve({ plans: [], created: false });
+  resolve({ plans: [], created: false, planId: "old-plan" });
   expect(await publishing).toBe(false);
   expect(useWealthStore.getState().draft).toEqual({
     name: "新的未发布计划",
@@ -88,7 +88,11 @@ it("离开旧表单后发布请求完成不会覆盖新表单或触发成功跳�
 });
 
 it("正常发布成功仍返回成功，保留最新规划列表", async () => {
-  vi.mocked(api.publishPlan).mockResolvedValue({ plans: [], created: false });
+  vi.mocked(api.publishPlan).mockResolvedValue({
+    plans: [],
+    created: false,
+    planId: "old-plan",
+  });
   expect(await useWealthStore.getState().publishPlan()).toBe(true);
   expect(useWealthStore.getState().editingId).toBeNull();
   expect(useWealthStore.getState().acting).toBe(false);

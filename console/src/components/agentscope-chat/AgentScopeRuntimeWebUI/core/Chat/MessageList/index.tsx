@@ -14,6 +14,13 @@ import { Result, Spin } from "antd";
 import { useChatContentOnly } from "@/components/agentscope-chat/ChatContentOnlyContext";
 import { chatApi } from "@/api/modules/chat";
 import sessionApi, { convertArchivedPage } from "@/pages/Chat/sessionApi";
+import {
+  INLINE_COMPACTION_TYPE,
+  mergeHistoryResponses,
+  normalizeHistoryMessages,
+  reconcileHistoryLayers,
+  resolveHistoryAnchorId,
+} from "@/pages/Chat/sessionApi/historyAssembly";
 import useChatAnywhereEventEmitter from "../../Context/useChatAnywhereEventEmitter";
 import useHistoryPreload from "@/components/agentscope-chat/Bubble/hooks/useHistoryPreload";
 import { getScrollTopAfterAnchorOffset } from "@/components/agentscope-chat/Bubble/hooks/scrollAnchor";
@@ -123,6 +130,19 @@ function snapshotContainsCompactionBoundary(
     messages?.some(
       (message) =>
         message.cards?.some((card) => {
+          const inlineBoundaries = card.data?.output;
+          if (
+            Array.isArray(inlineBoundaries) &&
+            inlineBoundaries.some(
+              (item: {
+                type?: string;
+                content?: Array<{ data?: { id?: string } }>;
+              }) =>
+                item.type === INLINE_COMPACTION_TYPE &&
+                item.content?.[0]?.data?.id === boundaryId,
+            )
+          )
+            return true;
           if (card.code !== COMPACTION_BOUNDARY_CARD) return false;
           const data = card.data;
           return (
@@ -148,9 +168,23 @@ function getVisibleMessageAnchor(scrollElement: HTMLElement) {
     .sort((left, right) => left.rect.top - right.rect.top)[0];
 
   if (!anchorElement) return null;
+  const contentAnchor = Array.from(
+    anchorElement.element.querySelectorAll<HTMLElement>(
+      "[data-history-anchor-id]",
+    ),
+  )
+    .map((element) => ({ element, rect: element.getBoundingClientRect() }))
+    .filter(
+      ({ rect }) =>
+        rect.height > 0 &&
+        rect.bottom > containerRect.top &&
+        rect.top < containerRect.bottom,
+    )
+    .sort((left, right) => left.rect.top - right.rect.top)[0];
+  const selected = contentAnchor || anchorElement;
   return {
-    messageId: anchorElement.element.id,
-    offset: anchorElement.rect.top - containerRect.top,
+    messageId: selected.element.dataset.historyAnchorId || selected.element.id,
+    offset: selected.rect.top - containerRect.top,
   };
 }
 
@@ -159,8 +193,13 @@ function getHistoryAnchorElement(
   messageId: string,
 ) {
   return Array.from(
-    scrollElement.querySelectorAll<HTMLElement>("[data-role][id]"),
-  ).find((element) => element.id === messageId);
+    scrollElement.querySelectorAll<HTMLElement>(
+      "[data-role][id], [data-history-anchor-id]",
+    ),
+  ).find(
+    (element) =>
+      element.dataset.historyAnchorId === messageId || element.id === messageId,
+  );
 }
 
 export default function MessageList(props: {
@@ -190,6 +229,16 @@ export default function MessageList(props: {
     ChatAnywhereSessionsContext,
     (v) => v.isSessionLoading,
   );
+  const [loadedSessionId, setLoadedSessionId] =
+    React.useState(currentSessionId);
+  const loadingSessionIdRef = React.useRef<string | undefined>();
+  React.useLayoutEffect(() => {
+    if (isSessionLoading) {
+      loadingSessionIdRef.current = currentSessionId;
+    } else if (loadingSessionIdRef.current === currentSessionId) {
+      setLoadedSessionId(currentSessionId);
+    }
+  }, [currentSessionId, isSessionLoading]);
   const sessionNotFound = useContextSelector(
     ChatAnywhereSessionsContext,
     (v) => v.sessionNotFound,
@@ -200,12 +249,22 @@ export default function MessageList(props: {
   } | null>(null);
   const [historyScrollElement, setHistoryScrollElement] =
     React.useState<HTMLDivElement | null>(null);
+  const bindListRef = React.useCallback((list: typeof listRef.current) => {
+    listRef.current = list;
+    setHistoryScrollElement(list?.getScrollElement() ?? null);
+  }, []);
   const prevMessagesLengthRef = React.useRef(safeMessages.length);
   const historyCursorRef = React.useRef<string | null>(null);
   const historyLoadingRef = React.useRef(false);
   const historyDoneRef = React.useRef(false);
   const loadedArchiveMessageIdsRef = React.useRef(new Set<string>());
   const loadedBoundaryIdsRef = React.useRef(new Set<string>());
+  const loadedArchiveMessagesRef = React.useRef<
+    IAgentScopeRuntimeWebUIMessage[]
+  >([]);
+  const retainedArchiveMessagesRef = React.useRef<
+    IAgentScopeRuntimeWebUIMessage[]
+  >([]);
   const historyGenerationRef = React.useRef(0);
   const latestMessagesRef = React.useRef(messages);
   const messagesRevisionRef = React.useRef(0);
@@ -218,6 +277,8 @@ export default function MessageList(props: {
   const pendingHistoryAnchorRef = React.useRef<HistoryAnchorTransaction | null>(
     null,
   );
+  const readingAnchorRef = React.useRef<HistoryAnchorTransaction | null>(null);
+  const restoredScrollTopRef = React.useRef<number | null>(null);
   const [visibleHistoryCount, setVisibleHistoryCount] = React.useState(
     CURRENT_HISTORY_BATCH_SIZE,
   );
@@ -226,6 +287,7 @@ export default function MessageList(props: {
   const [historyLoadState, setHistoryLoadState] =
     React.useState<HistoryLoadState>("idle");
   const [historyRetrying, setHistoryRetrying] = React.useState(false);
+  const [historyGeneration, setHistoryGeneration] = React.useState(0);
   const backendChatId = sessionApi.getChatIdForSession(currentSessionId || "");
   const historicalMessageCount = React.useMemo(
     () => safeMessages.filter(isHistoricalMessage).length,
@@ -284,6 +346,16 @@ export default function MessageList(props: {
         .getSession(pending.sessionId)
         .then((session) => {
           const latestPending = pendingCompactionRefreshRef.current;
+          const refreshedMessages = reconcileHistoryLayers(
+            reconcileHistoryLayers(
+              retainedArchiveMessagesRef.current,
+              loadedArchiveMessagesRef.current,
+            ),
+            (session.messages || []).map((message) => ({
+              ...message,
+              history: true,
+            })),
+          );
           const isConfirmed =
             latestPending === pending &&
             session.generating === false &&
@@ -295,15 +367,10 @@ export default function MessageList(props: {
               session.messages,
               pending.boundaryId,
             ) &&
-            snapshotContainsTail(session.messages, tailFingerprints);
+            snapshotContainsTail(refreshedMessages, tailFingerprints);
           if (isConfirmed) {
             pendingCompactionRefreshRef.current = null;
-            setMessages(
-              (session.messages || []).map((message) => ({
-                ...message,
-                history: true,
-              })),
-            );
+            setMessages(refreshedMessages);
             return;
           }
           scheduleCompactionRefreshRef.current();
@@ -332,19 +399,26 @@ export default function MessageList(props: {
     return clearPendingCompactionRefresh;
   }, [backendChatId, clearPendingCompactionRefresh, currentSessionId]);
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     historyCursorRef.current = null;
     historyLoadingRef.current = false;
     historyDoneRef.current = false;
     loadedArchiveMessageIdsRef.current = new Set();
     loadedBoundaryIdsRef.current = new Set();
+    loadedArchiveMessagesRef.current = [];
+    retainedArchiveMessagesRef.current = [];
     historyGenerationRef.current += 1;
+    setHistoryGeneration(historyGenerationRef.current);
+    pendingHistoryAnchorRef.current = null;
+    readingAnchorRef.current = null;
+    restoredScrollTopRef.current = null;
+    isPrependingHistoryRef.current = false;
     setVisibleHistoryCount(CURRENT_HISTORY_BATCH_SIZE);
     setArchivePagingStarted(false);
     setHistoryExhausted(false);
     setHistoryLoadState("idle");
     setHistoryRetrying(false);
-  }, [backendChatId]);
+  }, [backendChatId, currentSessionId]);
 
   const loadOlderHistory = React.useCallback(
     async (retrying = false) => {
@@ -353,7 +427,7 @@ export default function MessageList(props: {
         historyLoadingRef.current ||
         historyDoneRef.current
       ) {
-        return;
+        return false;
       }
       historyLoadingRef.current = true;
       setHistoryRetrying(retrying);
@@ -365,11 +439,20 @@ export default function MessageList(props: {
           historyCursorRef.current,
           ARCHIVE_HISTORY_PAGE_LIMIT,
         );
-        if (generation !== historyGenerationRef.current) return;
+        if (generation !== historyGenerationRef.current) return false;
+        if (
+          page.has_more &&
+          (!page.next_cursor || page.next_cursor === historyCursorRef.current)
+        ) {
+          setHistoryLoadState("error");
+          return false;
+        }
         historyDoneRef.current = !page.has_more;
         setHistoryExhausted(!page.has_more);
         historyCursorRef.current = page.next_cursor || null;
-        const unseenMessages = (page.messages || []).filter((message) => {
+        const unseenMessages = normalizeHistoryMessages(
+          page.messages || [],
+        ).filter((message) => {
           if (typeof message.id !== "string") return true;
           if (loadedArchiveMessageIdsRef.current.has(message.id)) return false;
           loadedArchiveMessageIdsRef.current.add(message.id);
@@ -382,6 +465,14 @@ export default function MessageList(props: {
         });
         const older = convertArchivedPage(unseenMessages, unseenBoundaries).map(
           (message) => ({ ...message, history: true }),
+        );
+        loadedArchiveMessagesRef.current = mergeHistoryResponses([
+          ...older,
+          ...loadedArchiveMessagesRef.current,
+        ]);
+        const archiveMessages = reconcileHistoryLayers(
+          retainedArchiveMessagesRef.current,
+          loadedArchiveMessagesRef.current,
         );
         const knownMessageIds = new Set(
           (messages || []).map((message) => message.id),
@@ -401,19 +492,18 @@ export default function MessageList(props: {
             : null;
         }
         isPrependingHistoryRef.current = uniqueOlder.length > 0;
+        // Keep shared cards in their displayed positions and merge their outputs.
         // @ts-expect-error Context exposes a React-style updater at runtime but omits it from its public type.
-        setMessages((current) => {
-          const known = new Set(current.map((message) => message.id));
-          return [
-            ...uniqueOlder.filter((message) => !known.has(message.id)),
-            ...current,
-          ];
-        });
+        setMessages((current) =>
+          reconcileHistoryLayers(archiveMessages, current),
+        );
         setHistoryLoadState(page.has_more ? "idle" : "exhausted");
+        return true;
       } catch {
         if (generation === historyGenerationRef.current) {
           setHistoryLoadState("error");
         }
+        return false;
       } finally {
         if (generation === historyGenerationRef.current) {
           historyLoadingRef.current = false;
@@ -444,11 +534,11 @@ export default function MessageList(props: {
       setVisibleHistoryCount((current) =>
         Math.min(current + CURRENT_HISTORY_BATCH_SIZE, historicalMessageCount),
       );
-      return;
+      return true;
     }
 
     setArchivePagingStarted(true);
-    await loadOlderHistory();
+    return loadOlderHistory();
   }, [
     captureVisibleHistoryAnchor,
     hasHiddenLocalHistory,
@@ -457,14 +547,9 @@ export default function MessageList(props: {
   ]);
 
   React.useLayoutEffect(() => {
-    const nextScrollElement = listRef.current?.getScrollElement() ?? null;
-    setHistoryScrollElement((current) =>
-      current === nextScrollElement ? current : nextScrollElement,
-    );
-  }, [currentSessionId, safeMessages.length]);
-
-  React.useLayoutEffect(() => {
-    const transaction = pendingHistoryAnchorRef.current;
+    const transaction =
+      pendingHistoryAnchorRef.current ||
+      (!isAtLatestRef.current ? readingAnchorRef.current : null);
     const scrollElement = listRef.current?.getScrollElement();
     if (
       !transaction ||
@@ -475,11 +560,12 @@ export default function MessageList(props: {
       pendingHistoryAnchorRef.current = null;
       return;
     }
+    pendingHistoryAnchorRef.current = transaction;
 
     const restoreAnchor = (anchor: HistoryAnchorTransaction) => {
       const anchorElement = getHistoryAnchorElement(
         scrollElement,
-        anchor.messageId,
+        resolveHistoryAnchorId(messages || [], anchor.messageId),
       );
       if (!anchorElement) return;
       const nextOffset =
@@ -490,10 +576,13 @@ export default function MessageList(props: {
         previousOffset: anchor.offset,
         nextOffset,
       });
+      restoredScrollTopRef.current = scrollElement.scrollTop;
     };
 
     restoreAnchor(transaction);
-    const frameId = requestAnimationFrame(() => {
+    let framesRemaining = 2;
+    let frameId: number;
+    const restoreAfterLayout = () => {
       const pending = pendingHistoryAnchorRef.current;
       if (
         !pending ||
@@ -504,18 +593,60 @@ export default function MessageList(props: {
         return;
       }
       restoreAnchor(pending);
-      pendingHistoryAnchorRef.current = null;
-    });
-    return () => cancelAnimationFrame(frameId);
-  }, [currentSessionId, visibleMessages]);
+      framesRemaining -= 1;
+      if (framesRemaining > 0) {
+        frameId = requestAnimationFrame(restoreAfterLayout);
+      } else {
+        pendingHistoryAnchorRef.current = null;
+        readingAnchorRef.current = pending;
+      }
+    };
+    frameId = requestAnimationFrame(restoreAfterLayout);
+    const resizeObserver =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(() => {
+            if (
+              transaction.generation === historyGenerationRef.current &&
+              transaction.sessionId === currentSessionId &&
+              (pendingHistoryAnchorRef.current === transaction ||
+                readingAnchorRef.current === transaction)
+            ) {
+              restoreAnchor(transaction);
+            }
+          });
+    // Observe content boxes: the fixed-height viewport does not resize as cards grow.
+    Array.from(scrollElement.children).forEach(
+      (child) => resizeObserver?.observe(child),
+    );
+    return () => {
+      cancelAnimationFrame(frameId);
+      resizeObserver?.disconnect();
+    };
+  }, [currentSessionId, historyScrollElement, messages, visibleMessages]);
 
-  useHistoryPreload({
+  const historyPreload = useHistoryPreload({
     scrollElement: historyScrollElement,
     onNearStart: advanceHistory,
+    onRetry: () => loadOlderHistory(true),
     disabled:
+      isSessionLoading ||
+      loadedSessionId !== currentSessionId ||
       historyLoadState !== "idle" ||
       (!hasHiddenLocalHistory && (!backendChatId || historyExhausted)),
-    resetKey: backendChatId,
+    resetKey: `${currentSessionId}:${backendChatId}:${historyGeneration}`,
+    isAnchorRecoveryPending: () => pendingHistoryAnchorRef.current !== null,
+    isRestoringAnchor: () => {
+      const restoredTop = restoredScrollTopRef.current;
+      if (
+        restoredTop !== null &&
+        historyScrollElement &&
+        Math.abs(historyScrollElement.scrollTop - restoredTop) <= 2
+      )
+        return true;
+      restoredScrollTopRef.current = null;
+      return false;
+    },
   });
 
   useChatAnywhereEventEmitter(
@@ -535,9 +666,21 @@ export default function MessageList(props: {
         historyCursorRef.current = null;
         historyLoadingRef.current = false;
         historyDoneRef.current = false;
+        // A reset starts at the newest archive page; retain the previous prefix
+        // separately until the new traversal overlaps it.
+        retainedArchiveMessagesRef.current = reconcileHistoryLayers(
+          retainedArchiveMessagesRef.current,
+          loadedArchiveMessagesRef.current,
+        );
+        loadedArchiveMessagesRef.current = [];
         loadedArchiveMessageIdsRef.current = new Set();
         loadedBoundaryIdsRef.current = new Set();
         historyGenerationRef.current += 1;
+        setHistoryGeneration(historyGenerationRef.current);
+        pendingHistoryAnchorRef.current = null;
+        readingAnchorRef.current = null;
+        restoredScrollTopRef.current = null;
+        isPrependingHistoryRef.current = false;
         setHistoryExhausted(false);
         setHistoryLoadState("idle");
         setHistoryRetrying(false);
@@ -601,7 +744,7 @@ export default function MessageList(props: {
 
   return (
     <Bubble.List
-      ref={listRef}
+      ref={bindListRef}
       pagination={false}
       disableBrowserScrollAnchoring
       order="desc"
@@ -614,12 +757,38 @@ export default function MessageList(props: {
       autoScrollToBottom="initial"
       onBottomStateChange={(isAtBottom) => {
         isAtLatestRef.current = isAtBottom;
+        const scrollElement = listRef.current?.getScrollElement();
+        if (
+          restoredScrollTopRef.current !== null &&
+          scrollElement &&
+          Math.abs(scrollElement.scrollTop - restoredScrollTopRef.current) <= 2
+        )
+          return;
+        restoredScrollTopRef.current = null;
+        pendingHistoryAnchorRef.current = null;
+        const anchor =
+          !isAtBottom && scrollElement
+            ? getVisibleMessageAnchor(scrollElement)
+            : null;
+        readingAnchorRef.current = anchor
+          ? {
+              ...anchor,
+              generation: historyGenerationRef.current,
+              sessionId: currentSessionId,
+            }
+          : null;
       }}
       topContent={
         <HistoryLoadStatus
           state={historyLoadState}
           retrying={historyRetrying}
-          onRetry={() => void loadOlderHistory(true)}
+          onRetry={historyPreload.retry}
+          onLoadMore={
+            hasHiddenLocalHistory || (backendChatId && !historyExhausted)
+              ? historyPreload.loadMore
+              : undefined
+          }
+          advancing={historyPreload.isAdvancing}
         />
       }
     />

@@ -2,51 +2,15 @@
 """Tenant-scoped skill pool router tests."""
 
 import asyncio
-import importlib.util
 import json
 import sys
-import types
-from importlib.machinery import ModuleSpec
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
-from typing import cast
+from types import SimpleNamespace
+
+from swe.agents import skills_manager
+from swe.app.routers import skills as skills_router
 from swe.config.context import encode_scope_id, resolve_storage_tenant_id
 
-SRC_ROOT = Path(__file__).parent.parent.parent.parent / "src"
-_ROUTER_FILE = SRC_ROOT / "swe" / "app" / "routers" / "skills.py"
-_SKILLS_MANAGER_FILE = SRC_ROOT / "swe" / "agents" / "skills_manager.py"
-
-
-def _ensure_package(package_name: str) -> None:
-    parts = package_name.split(".")
-    for index in range(1, len(parts) + 1):
-        name = ".".join(parts[:index])
-        if name in sys.modules:
-            continue
-        package = types.ModuleType(name)
-        package.__path__ = [str(SRC_ROOT.joinpath(*parts[:index]))]
-        sys.modules[name] = package
-
-
-def _load_module(
-    module_name: str,
-    file_path: Path,
-    package_name: str,
-) -> ModuleType:
-    _ensure_package(package_name)
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(cast(ModuleSpec, spec))
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return cast(ModuleType, module)
-
-
-skills_manager = _load_module(
-    "swe.agents.skills_manager",
-    _SKILLS_MANAGER_FILE,
-    "swe.agents",
-)
 get_pool_skill_manifest_path = skills_manager.get_pool_skill_manifest_path
 get_skill_pool_dir = skills_manager.get_skill_pool_dir
 get_workspace_skill_manifest_path = (
@@ -58,12 +22,6 @@ get_workspace_disabled_skills_dir = (
 )
 reconcile_pool_manifest = skills_manager.reconcile_pool_manifest
 reconcile_workspace_manifest = skills_manager.reconcile_workspace_manifest
-
-skills_router = _load_module(
-    "swe.app.routers.skills",
-    _ROUTER_FILE,
-    "swe.app.routers",
-)
 
 
 class _FakeTenantWorkspacePool:

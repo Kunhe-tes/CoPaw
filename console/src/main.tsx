@@ -9,6 +9,8 @@ import {
   resetIframeContextForStandalone,
   handleUrlOriginParam,
   fetchAndSetUserName,
+  isWealthMessageEntry,
+  waitForWealthUserData,
 } from "./utils/iframeMessage";
 import { isExternalTokenEnabled, ensureValidToken } from "./api/externalToken";
 import { applyConsoleDesignTokens } from "./config/consoleDesignTokens";
@@ -57,8 +59,12 @@ async function initializeAllowedApp(
   // 处理传递URL参数的场景（需要在 token 初始化之后）
   await handleUrlOriginParam();
 
-  // 查询用户名称（在 userId 和 token 获取完毕后）
-  await fetchAndSetUserName();
+  // 财富消息入口等待父应用身份，避免用残留用户挂载业务页面。
+  if (isWealthMessageEntry()) {
+    await waitForWealthUserData();
+  } else {
+    await fetchAndSetUserName();
+  }
 
   root.render(<App />);
 }

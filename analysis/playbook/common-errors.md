@@ -1,6 +1,35 @@
 # 常见报错
 
+## 选择专家后提示无法启动
+
+- **现象**：提示 `The selected expert could not be started`，但这条兜底提示本身不能区分启动拒绝与结果解析失败。
+- **排查**：检查 `start_subagent` 的工具结果及 `src/swe/agents/tool_guard_mixin.py` 的 `_selected_expert_tool_response`。AgentScope 将工具输出保存为文本块列表；其中 JSON 里的 `accepted`、`run_id` 和失败原因才能反映启动结果。等待和查询工具也使用相同格式。
+- **等待语义**：selected expert 只等待本次启动返回的 run ID；旧 run 的终态不会结束本次等待。只有读取到当前 run 的可信终态才汇总结果；身份或状态无法确认时不会改由 Main Agent 执行。等待触发 Hook 审批时，审批记录绑定原 run 和 session/chat，批准后恢复等待，不重新启动。
+- **状态无法确认**：检查当前 tenant/agent 的 `subagent_runs/<run_id>.json`、session/chat 归属、专家 worker 进程与对应 `swe.log`。若超时或停止后仍无法取得终态，先按 run ID 核实 worker 状态；不要把“未确认”当成已取消或已完成。
+- **大结果被误判或中断流**：`wait_selected_expert` 的完整控制响应须在输出预算压缩前单独缓存，并按 tool call ID 解析终态；展示和 memory 仍遵循输出预算，原文通过 artifact 恢复。不要跳过压缩：超过 1 MiB 的单个 SSE 事件会触发 `Stream frame exceeds replay capacity`，使后续回答无法提交。回归入口为 `tests/unit/agents/test_tool_output_budget_mixin.py`，覆盖 1,000 与 50,000 字节预算、完整终态解析及大结果后的 Console/replay 回答事件。
+- **迭代耗尽后汇总遗漏证据或超限**：`ReActAgent._summarizing()` 不提供工具，不能依赖 `read_file` 提示，也不能直接注入无界原文。校验 run ID 和终态后，复用主会话的 `get_swe_token_counter()`，按 UTF-8 字节数除以配置的 `token_count_estimate_divisor` 并四舍五入估算 token，结构化内容使用 `ensure_ascii=False`；按 `max_input_length` 扣除当前上下文及预留空间，超预算证据分块滚动归纳，再注入有界摘要。归纳调用不进入展示或 memory，预算不足时明确报告未完整汇总。`memory.add()` 须在清理 `finally` 内，覆盖 archive 写入异常和取消。回归入口为 `test_tool_free_summary_receives_complete_selected_expert_evidence` 与 `tests/unit/agents/utils/test_selected_expert_summary.py`。
+- **回归入口**：`tests/unit/subagents/test_react_agent_and_guard_integration.py` 的 `test_selected_expert_reads_actual_tool_result_blocks`。
+
 本文档只收录仓库中已经出现过、且有明确入口可追的高频报错。
+
+## 移除财富规划时提示 plan not found
+
+- 规划已被删除但看板仍保留旧数据时，删除请求可能返回 HTTP 404 与 `detail: "plan not found"`，或业务响应 `code: 404, message: "plan not found"`。
+- 前端 `console/src/pages/WealthWorkbench/api.ts` 的 `removePlan()` 仅按错误文案精确匹配 `plan not found`，不限制 HTTP 状态码或业务码，并翻译为「该规划已被删除，请刷新页面后重试」，看板显示「移除失败：该规划已被删除，请刷新页面后重试」。其他错误保留原文，不自动刷新或移除本地规划。
+- 回归入口：`console/src/pages/WealthWorkbench/api.http-errors.test.ts`；后端接口无需调整。
+
+## SSE 客户端断连后订阅未释放
+
+- 症状：协商式 SSE 响应返回后，`TaskTracker._runs[chat_id].queues`
+  仍保留已断连客户端的订阅，且 `subscriber.detached` 为 `False`。
+- 触发条件：ASGI 2.0 客户端在 body send 阻塞时断连，同时 tracker 锁被占用。
+  Starlette 的 AnyIO 取消作用域会中断 close callback 获取锁，继而跳过迭代器关闭。
+- 处理：`ReplayStreamingResponse.stream_response()` 的 callback 和
+  `body_iterator.aclose()` 都应位于 `anyio.CancelScope(shield=True)` 内；
+  用 `try/finally` 保证 callback 抛错时仍执行迭代器关闭。
+- 回归入口：`tests/unit/routers/test_console_stream_replay.py` 的断连测试必须
+  同时覆盖阻塞 body send 和锁竞争，并断言释放订阅后 producer 继续运行；
+  `tests/unit/routers/test_sse_response.py` 覆盖 callback 抛错时关闭 source。
 
 ## 财富规划看板在旧内核浏览器点击刷新不发请求
 
@@ -807,3 +836,25 @@
 - **典型来源**：原生 `dialog` 关闭会将焦点还给「查看全部」按钮；`:focus-within` 会导致持续暂停。整个播报条的 `:hover` 也会覆盖「继续」操作：按钮状态已恢复，但鼠标停在按钮上时动画仍暂停。改成 `:has(:focus-visible)` 仍无法解决悬停冲突和键盘操作后继续的问题。
 - **第一落点**：`console/src/pages/WealthWorkbench/index.module.less` 的播报暂停选择器。仅在 `.tickerWindow` 文字区域悬停或手动暂停时停止动画，不因操作按钮的悬停或焦点暂停；键盘用户通过同一暂停/继续按钮控制，减少动态效果偏好仍保持静态展示。
 - **回归**：鼠标点击暂停再点击继续，鼠标留在按钮上也应滚动；键盘激活暂停/继续时保持焦点并验证动画状态；关闭按钮、Esc、遮罩关闭详情后均应恢复原播放状态；手动暂停不应被关闭弹窗重置。浏览器验证应读取实际 `animation-play-state` 和 `transform`，不能只检查按钮文案或点击外部区域后再判断。
+
+## 360 浏览器中创建规划的已选场景表格错位
+
+- **现象**：表头文字换行到不同列，推送客户数、排序和删除按钮掉到下一行，任务周期与执行频率重叠。
+- **典型来源**：`console/src/pages/WealthWorkbench/index.module.less` 的表头和数据行曾使用 `grid-template-columns: subgrid`；Chromium 从 117 才支持该值，客户常用的 108 内核也不支持。忽略该声明后会暴露之前的六列布局。
+- **处理**：移除 subgrid，表头和各行使用普通 Grid。当前布局为场景/方向、执行周期、督办策略、客户数、操作五列；组内各配置行的控件横向排列，任务周期的日期范围与按钮同排，执行频率的附加控件在按钮下一行，督办策略内控件保持横向排列；超宽时只滚动对应配置行，不撑宽整表；窄屏切换分组布局。拖动、上移和下移入口已移除；不要恢复旧的整表 nowrap 和固定最小表宽。新字段存储规则见 [监控配置维护记录](wealth-scene-monitoring.md)。
+- **周期自定义后遮挡频率列**：App 的 ConfigProvider 使用 `prefixCls="swe"`，只匹配 `.ant-picker` 的日期框尺寸规则在正式页面不会生效，日期框会越过周期列边界。通过 `.taskDatePicker` 自有类名控制宽度、高度和输入字体，避免依赖组件前缀；验证同时覆盖 `swe` 与 `ant`，并使用正式 ConfigProvider、主题和全局样式。只挂裸页面的模拟验证不能代表正式尺寸。
+- **其他检查**：顶栏和 Toast 的 inset 改用常规定位；焦点提示改用 :focus；min-inline-size 和 border-block-color 改用常规宽度及上下边框。`clamp()`、普通 Grid 已兼容 Chromium 80，保留；Flex gap 在 80–83 不支持，按用户确认暂不整改。Popover 和请求取消 API 已有能力检测或兼容处理。
+- **验证**：普通/自定义周期、多条不同排程、长场景名、客户数、排序、删除、空状态，及 1280、1440、1920 宽度与头部隐藏场景。真实内核版本和极速/兼容模式仍需在目标环境确认；仅修改 User-Agent 不能模拟 CSS 支持能力。完整边界见 [财富工作台兼容性记录](../../console/src/pages/WealthWorkbench/COMPATIBILITY.md)。
+
+## 客户名单调整列顺序后，右侧固定列互相遮挡
+
+- **现象**：表头和数据顺序已调整，但横向滚动时“最近接触时间”遮住“经营方案”，或经营方案按钮与执行按钮重叠。
+- **原因**：Tasks 表格的右侧列使用 `position: sticky`，DOM 顺序变化后仍保留旧的 `right` 偏移。
+- **处理**：当前非已完成名单右侧依次为最近接触时间、经营方案、执行。执行列 `right: 0`；经营方案列 `right: var(--execution-width)`，固定宽度为 `--scheme-width: 120px`；最近接触时间列的偏移为两个操作列宽度之和。表头与单元格同步移动，已完成名单的触达方式列不随经营方案移动。
+- **验证**：检查今日任务经营/客户视角和待触达名单的表头、数据、按钮对应关系；在1920、1440、1280px下将表格横向滚动到两端，确认固定列边界不重叠，方案弹窗仍能打开。
+
+## 客户指标取消百分比列宽后，指标挤成单列
+
+- **原因**：`customerMetrics` 曾使用 `contain: inline-size`，阻止指标内容参与表格的自动列宽计算；单独把26%改为auto会让多指标和单指标使用相同的最小尺寸提示。
+- **处理**：客户指标列使用auto列宽，保留84px的最低可读宽度；取消区域的inline-size隔离，内部改为可换行Flex，指标块保持125px，区域上限395px。内容数量参与表格的固有尺寸计算，长文字仍在指标块内省略并通过Tooltip显示。
+- **验证**：检查空指标、1项、6项、超过6项、超长标签与数值；覆盖今日、待触达、已完成及1920/1440/1280宽度，确认展开收起可用、指标不超出单元格、经营方案与执行操作不重叠。

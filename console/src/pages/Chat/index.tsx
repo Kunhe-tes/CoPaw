@@ -6,6 +6,7 @@ import {
   type IAgentScopeRuntimeWebUISenderOptions,
   type IAgentScopeRuntimeWebUIRef,
   type IChatInputProps,
+  type IAgentScopeRuntimeWebUIInputData,
   useChatAnywhereSessions,
   useChatAnywhereSessionsState,
 } from "@/components/agentscope-chat";
@@ -25,13 +26,13 @@ import {
   useState,
 } from "react";
 import { flushSync } from "react-dom";
+import { Target, UserRound } from "lucide-react";
 import { Button, Modal, Result, Switch } from "antd";
 import { useAppMessage } from "../../hooks/useAppMessage";
 import {
   ControlOutlined,
   ExclamationCircleOutlined,
   SettingOutlined,
-  TeamOutlined,
 } from "@ant-design/icons";
 import { SparkCopyLine } from "@agentscope-ai/icons";
 import { useTranslation } from "react-i18next";
@@ -67,6 +68,15 @@ import type {
 import type { FeedbackRecord } from "../../api/types/feedback";
 import ModelSelector from "./ModelSelector";
 import ExpertSelector from "./ExpertSelector";
+import {
+  useExpertBinding,
+  readExpertBindingConflict,
+} from "./useExpertBinding";
+import {
+  RUNTIME_INPUT_SET_CONTENT_EVENT,
+  type RuntimeInputRestorePayload,
+} from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Chat/hooks/followUpSubmit";
+import { rememberResolvedChatId } from "./sessionApi/resolvedSessionMapping";
 import {
   normalizeSelectableExperts,
   resolveExpertLabel,
@@ -643,7 +653,7 @@ function ActiveGoalModeControl({
       enabled={enabled}
       disabled={Boolean(inputState.disabled)}
       label="目标"
-      showIcon={false}
+      icon={<Target size={18} strokeWidth={1.5} aria-hidden />}
       onDisable={onDisable}
     />
   );
@@ -652,7 +662,9 @@ function ActiveGoalModeControl({
 function ActiveExpertControl({
   expert,
   onDisable,
+  disabled = false,
 }: {
+  disabled?: boolean;
   expert: SelectableExpert | null;
   onDisable: () => void;
 }) {
@@ -663,9 +675,9 @@ function ActiveExpertControl({
   return (
     <ActivePlanModeButton
       enabled={Boolean(expert)}
-      disabled={Boolean(inputState.disabled)}
+      disabled={disabled || Boolean(inputState.disabled)}
       label={expert ? resolveExpertLabel(expert) : "专家"}
-      showIcon={false}
+      icon={<UserRound size={18} strokeWidth={1.5} aria-hidden />}
       onDisable={onDisable}
     />
   );
@@ -725,7 +737,9 @@ function ChatPageContent() {
   );
   const [subAgentMonitorResetKey, setSubAgentMonitorResetKey] = useState(0);
   const { selectedAgent } = useAgentStore();
-  const [selectedExpertId, setSelectedExpertId] = useState<string | null>(null);
+  const [legacySelectedExpertId, setSelectedExpertId] = useState<string | null>(
+    null,
+  );
   const [experts, setExperts] = useState<SelectableExpert[]>([]);
   const [expertsLoading, setExpertsLoading] = useState(true);
   const [modelRefreshKey, setModelRefreshKey] = useState(0);
@@ -792,9 +806,21 @@ function ChatPageContent() {
     pendingContextReferencesRef.current = [];
   }, [activeSessionId, chatId]);
 
+  const expertSelectionScopeRef = useRef({
+    agent: selectedAgent,
+    aliases: new Set([chatId || activeSessionId || ""]),
+  });
   useEffect(() => {
-    setSelectedExpertId(null);
-  }, [selectedAgent]);
+    const scope = expertSelectionScopeRef.current;
+    const identity = chatId || activeSessionId || "";
+    if (scope.agent !== selectedAgent || !scope.aliases.has(identity)) {
+      setSelectedExpertId(null);
+      expertSelectionScopeRef.current = {
+        agent: selectedAgent,
+        aliases: new Set([identity]),
+      };
+    }
+  }, [selectedAgent, activeSessionId, chatId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -961,6 +987,8 @@ function ChatPageContent() {
     const annotationSessionMigrations = annotationSessionMigrationRef.current;
     sessionApi.onSessionIdResolved = (tempId, realId) => {
       if (!isChatActiveRef.current) return;
+      const expertScope = expertSelectionScopeRef.current;
+      if (expertScope.aliases.has(tempId)) expertScope.aliases.add(realId);
       migrateHtmlAnnotationBundle(tempId, realId);
       const annotationMigration = annotationSessionMigrations.get(tempId);
       if (annotationMigration) {
@@ -1062,6 +1090,9 @@ function ChatPageContent() {
 
     sessionApi.onSessionCreated = (sessionId) => {
       if (!isChatActiveRef.current) return;
+      // Session creation gives the current draft a new identity, not a new expert selection.
+      const expertScope = expertSelectionScopeRef.current;
+      if (expertScope.aliases.delete("")) expertScope.aliases.add(sessionId);
       const pendingAnnotation = pendingHtmlAnnotationBundleRef.current;
       if (isAnnotationForNewChat(pendingAnnotation)) {
         annotationSessionMigrations.set(sessionId, {
@@ -1167,10 +1198,8 @@ function ChatPageContent() {
     },
     [message],
   );
-  const {
-    perform: performManagedTask,
-    update: updateManagedTask,
-  } = useManagedTaskActions(taskScopeKey, refreshJobs, notifyManagedTask);
+  const { perform: performManagedTask, update: updateManagedTask } =
+    useManagedTaskActions(taskScopeKey, refreshJobs, notifyManagedTask);
   const notifyReadFailure = useCallback(
     (text: string) => {
       message.warning(text);
@@ -1427,12 +1456,131 @@ function ChatPageContent() {
     [activeSessionId, chatId],
   );
 
-  const persistPlanMode = useCallback(
+  const expertBindingSource = useIframeStore((state) => state.source);
+  const expertBinding = useExpertBinding({
+    chatId: contextUsageChatId,
+    scopeKey: JSON.stringify([
+      expertBindingSource,
+      selectedAgent,
+      getUserId(),
+      contextUsageChatId ? null : chatId || activeSessionId || "",
+    ]),
+    ensureChat: async () => {
+      const session = activePlanModeSessionRef.current;
+      const created = await chatApi.createChat({
+        session_id:
+          session?.sessionId ||
+          session?.session_id ||
+          sessionApi.getLogicalSessionId(chatId || activeSessionId || "") ||
+          `${getChannel()}:${getUserId()}`,
+        user_id: getUserId(),
+        channel: getChannel(),
+        name: session?.name || "新会话",
+        meta: session?.meta || {},
+      });
+      return created.id;
+    },
+    notify: (text) => messageRef.current.warning(text),
+  });
+  const {
+    change: changeExpertBinding,
+    getSnapshot: getExpertBindingSnapshot,
+    refresh: refreshExpertBinding,
+    syncConflict: syncExpertBindingConflict,
+  } = expertBinding;
+  const expertMainEnabled = expertBinding.view?.enabled === true;
+  const selectedExpertId = expertMainEnabled
+    ? expertBinding.view?.expert_id || null
+    : legacySelectedExpertId;
+  const bindingBusy = expertBinding.loading || expertBinding.saving;
+  const pendingExpertDraftRef = useRef<{
+    owner: ReturnType<typeof getExpertBindingSnapshot>;
+    data: IAgentScopeRuntimeWebUIInputData;
+  } | null>(null);
+  const [rejectedExpertDraft, setRejectedExpertDraft] = useState<{
+    owner: ReturnType<typeof getExpertBindingSnapshot>;
+    payload: RuntimeInputRestorePayload;
+  } | null>(null);
+
+  const changeExpert = useCallback(
+    async (expertId: string | null) => {
+      const owner = getExpertBindingSnapshot();
+      const result = await changeExpertBinding(expertId);
+      if (owner !== getExpertBindingSnapshot()) return false;
+      if (result === "legacy") setSelectedExpertId(expertId);
+      if (result === "saved" || result === "legacy") {
+        if (result === "saved" && !contextUsageChatId && owner.chatId) {
+          const temporaryId = chatId || activeSessionId;
+          if (temporaryId) rememberResolvedChatId(temporaryId, owner.chatId);
+          navigate(`/chat/${owner.chatId}`, { replace: true });
+          void sessionApi.getSessionList();
+        }
+        return true;
+      }
+      return false;
+    },
+    [
+      changeExpertBinding,
+      getExpertBindingSnapshot,
+      contextUsageChatId,
+      chatId,
+      activeSessionId,
+      navigate,
+    ],
+  );
+
+  const handleGoalModeChange = useCallback(
     async (enabled: boolean) => {
-      const previousSelectedExpertId = selectedExpertId;
+      const snapshot = getExpertBindingSnapshot();
+      if (enabled) {
+        if (snapshot.saving)
+          throw new Error("会话专家状态正在保存，请稍后重试");
+        if (snapshot.loading && !(await refreshExpertBinding()))
+          throw new Error("会话专家状态加载失败，请重试");
+      }
+      const targetChatId = feedbackChatId || snapshot.chatId;
+      const hadBinding = Boolean(snapshot.view?.expert_id);
+      if (targetChatId) {
+        try {
+          await chatApi.updateChat(targetChatId, {
+            meta: enabled
+              ? { goal_mode_enabled: true, plan_mode_enabled: false }
+              : { goal_mode_enabled: false },
+          });
+        } catch (error) {
+          message.error("目标模式状态保存失败，请重试");
+          throw error;
+        }
+      }
+      if (snapshot !== getExpertBindingSnapshot()) return;
       if (enabled) {
         setSelectedExpertId(null);
+        setPlanModeEnabledForActiveScope(false);
+        if (hadBinding && (await refreshExpertBinding()))
+          messageRef.current.info("已解除会话专家绑定，当前模式使用默认 Agent");
       }
+      setGoalModeEnabled(enabled);
+    },
+    [
+      feedbackChatId,
+      message,
+      getExpertBindingSnapshot,
+      refreshExpertBinding,
+      setPlanModeEnabledForActiveScope,
+    ],
+  );
+
+  const persistPlanMode = useCallback(
+    async (enabled: boolean) => {
+      const snapshot = getExpertBindingSnapshot();
+      if (enabled) {
+        if (snapshot.saving)
+          throw new Error("会话专家状态正在保存，请稍后重试");
+        if (snapshot.loading && !(await refreshExpertBinding()))
+          throw new Error("会话专家状态加载失败，请重试");
+      }
+      const hadBinding = Boolean(snapshot.view?.expert_id);
+      const previousSelectedExpertId = selectedExpertId;
       const scopeKey = activePlanModeScopeKeyRef.current;
       const retainBlankScope =
         enabled && scopeKey === "" && !activePlanModeMetadataEnabled;
@@ -1443,7 +1591,16 @@ function ChatPageContent() {
           enabled,
           session: activePlanModeSessionRef.current,
           ensureChatId: ensurePlanModeChatId,
-          updateChat: chatApi.updateChat,
+          updateChat: (targetChatId, patch) =>
+            chatApi.updateChat(
+              targetChatId,
+              enabled && goalModeEnabled
+                ? {
+                    ...patch,
+                    meta: { ...patch.meta, goal_mode_enabled: false },
+                  }
+                : patch,
+            ),
           updateSession: async (session) => {
             const nextSessions = await sessionApi.updateSession(
               session as Parameters<typeof sessionApi.updateSession>[0] & {
@@ -1463,6 +1620,14 @@ function ChatPageContent() {
           },
         });
         persistSucceeded = true;
+        if (enabled && snapshot === getExpertBindingSnapshot()) {
+          setSelectedExpertId(null);
+          setGoalModeEnabled(false);
+          if (hadBinding && (await refreshExpertBinding()))
+            messageRef.current.info(
+              "已解除会话专家绑定，当前模式使用默认 Agent",
+            );
+        }
       } catch (error) {
         if (enabled) {
           setSelectedExpertId(previousSelectedExpertId);
@@ -1482,6 +1647,9 @@ function ChatPageContent() {
     },
     [
       activePlanModeMetadataEnabled,
+      getExpertBindingSnapshot,
+      refreshExpertBinding,
+      goalModeEnabled,
       ensurePlanModeChatId,
       message,
       selectedExpertId,
@@ -1497,21 +1665,19 @@ function ChatPageContent() {
       setPendingPlanRevision({
         planId: data.plan_id,
       });
-      setPlanModeEnabledForActiveScope(true);
       if (!planModeEnabled) {
         void persistPlanMode(true);
       }
     },
-    [persistPlanMode, planModeEnabled, setPlanModeEnabledForActiveScope],
+    [persistPlanMode, planModeEnabled],
   );
 
   const handlePlanModeDecision = useCallback(
     (enabled: boolean) => {
       setPendingPlanRevision(null);
-      setPlanModeEnabledForActiveScope(enabled);
       void persistPlanMode(enabled);
     },
-    [persistPlanMode, setPlanModeEnabledForActiveScope],
+    [persistPlanMode],
   );
 
   const activePlanModeControl = useMemo(
@@ -1533,25 +1699,37 @@ function ChatPageContent() {
     () => (
       <ActiveGoalModeControl
         enabled={goalModeEnabled}
-        onDisable={() => setGoalModeEnabled(false)}
+        onDisable={() => {
+          void handleGoalModeChange(false).catch(() => {});
+        }}
       />
     ),
-    [goalModeEnabled],
+    [goalModeEnabled, handleGoalModeChange],
   );
 
-  const selectedExpert = useMemo(
-    () => experts.find((expert) => expert.id === selectedExpertId) || null,
-    [experts, selectedExpertId],
-  );
+  const selectedExpert = useMemo(() => {
+    if (expertMainEnabled && expertBinding.view?.expert_id)
+      return {
+        id: expertBinding.view.expert_id,
+        name: `${
+          expertBinding.view.expert_name || expertBinding.view.expert_id
+        }${expertBinding.view.available ? "" : "（不可用）"}`,
+        description: "",
+      };
+    return experts.find((expert) => expert.id === selectedExpertId) || null;
+  }, [experts, selectedExpertId, expertMainEnabled, expertBinding.view]);
 
   const activeExpertControl = useMemo(
     () => (
       <ActiveExpertControl
         expert={selectedExpert}
-        onDisable={() => setSelectedExpertId(null)}
+        disabled={bindingBusy}
+        onDisable={() => {
+          void changeExpert(null);
+        }}
       />
     ),
-    [selectedExpert],
+    [selectedExpert, bindingBusy, changeExpert],
   );
 
   useEffect(() => {
@@ -2038,6 +2216,9 @@ function ChatPageContent() {
       logical_session_id?: string;
       chat_id?: string | null;
     }): Promise<Response> => {
+      const bindingOwner = getExpertBindingSnapshot();
+      const expertSelectionScope = expertSelectionScopeRef.current;
+      const draft = pendingExpertDraftRef.current;
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
         ...buildAuthHeaders(),
@@ -2103,6 +2284,7 @@ function ChatPageContent() {
         channel: getChannel(session?.channel),
         // ==================== userId 统一整改结束 ====================
         stream: true,
+        stream_protocol: "cursor-v1",
         mode: getPlanModeForRequest(planModeEnabled),
         goal_mode_enabled: goalModeEnabled,
         ...biz_params,
@@ -2113,7 +2295,22 @@ function ChatPageContent() {
             : pendingContextReferencesRef.current,
         scenario_preset_id: pendingScenarioPresetIdRef.current || undefined,
         file_url_network: resolveCurrentFileUrlNetwork(),
-        selected_expert_id: selectedExpertId || undefined,
+        selected_expert_id:
+          expertMainEnabled ||
+          goalModeEnabled ||
+          (biz_params?.mode ?? getPlanModeForRequest(planModeEnabled)) ===
+            "plan"
+            ? undefined
+            : (Object.prototype.hasOwnProperty.call(
+                biz_params ?? {},
+                "selected_expert_id",
+              )
+                ? biz_params?.selected_expert_id
+                : selectedExpertId) || undefined,
+        expert_binding_revision:
+          biz_params?.expert_binding_revision ??
+          bindingOwner.view?.revision ??
+          0,
       };
       pendingContextReferencesRef.current = [];
 
@@ -2125,6 +2322,7 @@ function ChatPageContent() {
         },
         requestBody.session_id,
       );
+      Object.assign(requestBody, { chat_id: backendChatId || undefined });
       let routedAsSteering = false;
       if (backendChatId && userText && !submittedDocumentAnnotations) {
         try {
@@ -2168,11 +2366,9 @@ function ChatPageContent() {
       }
 
       const timeoutSignal = createTimedAbortSignal(data.signal);
-      // The expert is a one-turn selection. Clear it as soon as the request
-      // has been submitted so aborts/network failures cannot leave stale UI
-      // state for the next turn.
-      setSelectedExpertId(null);
-      setSubAgentMonitorResetKey((value) => value + 1);
+      if (!expertMainEnabled) {
+        setSubAgentMonitorResetKey((value) => value + 1);
+      }
       try {
         const response = await fetch(getApiUrl("/console/chat"), {
           method: "POST",
@@ -2181,6 +2377,60 @@ function ChatPageContent() {
           signal: timeoutSignal.signal,
         });
 
+        if (response.status === 409) {
+          const payload = await response
+            .clone()
+            .json()
+            .catch(() => null);
+          if (
+            readExpertBindingConflict(payload) &&
+            bindingOwner === getExpertBindingSnapshot()
+          ) {
+            if (draft?.owner === bindingOwner)
+              setRejectedExpertDraft({
+                owner: bindingOwner,
+                payload: {
+                  content: draft.data.query,
+                  fileList: draft.data.fileList,
+                  biz_params: draft.data.biz_params,
+                },
+              });
+            syncExpertBindingConflict(payload, bindingOwner.chatId);
+            if (draft?.owner === bindingOwner) {
+              // Let admission rejection remove the optimistic rows and remount the welcome composer first.
+              window.setTimeout(() => {
+                if (bindingOwner !== getExpertBindingSnapshot()) return;
+                document.dispatchEvent(
+                  new CustomEvent(RUNTIME_INPUT_SET_CONTENT_EVENT, {
+                    detail: {
+                      content: draft.data.query,
+                      fileList: draft.data.fileList,
+                      biz_params: draft.data.biz_params,
+                    },
+                  }),
+                );
+              }, 0);
+            }
+          }
+        }
+        if (pendingExpertDraftRef.current === draft)
+          pendingExpertDraftRef.current = null;
+        if (
+          response.ok &&
+          !expertMainEnabled &&
+          expertSelectionScope === expertSelectionScopeRef.current &&
+          /^\s*\/(?:new|clear|reset)(?:\s|$)/i.test(userText)
+        ) {
+          setSelectedExpertId(null);
+        }
+        if (
+          response.ok &&
+          draft?.owner === bindingOwner &&
+          bindingOwner === getExpertBindingSnapshot() &&
+          /^\s*\/(?:new|clear|reset)(?:\s|$)/i.test(draft.data.query)
+        ) {
+          await refreshExpertBinding();
+        }
         if (
           response.ok &&
           submittedDocumentAnnotations &&
@@ -2203,8 +2453,11 @@ function ChatPageContent() {
       goalModeEnabled,
       resolveLogicalRequestSessionId,
       resolveRequestChatId,
-      selectedAgent,
       selectedExpertId,
+      expertMainEnabled,
+      getExpertBindingSnapshot,
+      refreshExpertBinding,
+      syncExpertBindingConflict,
       pendingHtmlAnnotationBundle,
       consumeHtmlAnnotationBundle,
     ],
@@ -2305,12 +2558,16 @@ function ChatPageContent() {
           if (!feedbackChatId) {
             throw new Error("当前会话尚未创建，无法确认 Goal");
           }
-          return chatApi.createGoal(feedbackChatId, {
-            objective: proposal.objective,
-            completion_criteria: proposal.completion_criteria,
-            constraints: proposal.constraints,
-            autonomy_boundary: proposal.autonomy_boundary,
-          });
+          return chatApi.createGoal(
+            feedbackChatId,
+            {
+              objective: proposal.objective,
+              completion_criteria: proposal.completion_criteria,
+              constraints: proposal.constraints,
+              autonomy_boundary: proposal.autonomy_boundary,
+            },
+            proposal.enable_subagents === true,
+          );
         },
       }),
       [feedbackChatId, handleContinueModifyingPlan, handlePlanModeDecision],
@@ -2394,15 +2651,38 @@ function ChatPageContent() {
       IAgentScopeRuntimeWebUISenderOptions["beforeSubmit"]
     > = async (data) => {
       if (isComposingRef.current) return false;
-      let annotationPrepared = discardStaleHtmlAnnotationSubmission(data);
+      const snapshot = getExpertBindingSnapshot();
+      if (snapshot.loading && !(await refreshExpertBinding())) return false;
+      if (snapshot.saving || (snapshot.chatId && !snapshot.view)) {
+        messageRef.current.warning("会话专家状态尚未保存，请稍后重试");
+        return false;
+      }
+      const draft = {
+        ...data,
+        fileList: data.fileList?.map((file) => ({ ...file })),
+        biz_params: { ...data.biz_params },
+      };
+      setRejectedExpertDraft(null);
+      pendingExpertDraftRef.current = { owner: snapshot, data: draft };
+      const requestData = {
+        ...data,
+        biz_params: {
+          ...data.biz_params,
+          expert_binding_revision: snapshot.view?.revision ?? 0,
+          selected_expert_id: expertMainEnabled ? null : selectedExpertId,
+        },
+      };
+      let annotationPrepared =
+        discardStaleHtmlAnnotationSubmission(requestData);
       if (pendingHtmlAnnotationBundle) {
         try {
+          if (goalModeEnabled) await handleGoalModeChange(false);
           annotationPrepared = await prepareHtmlAnnotationExecutionMode(
             annotationPrepared,
             {
               planModeEnabled,
               persistPlanMode,
-              goalModeEnabled,
+              goalModeEnabled: false,
               setGoalModeEnabled,
             },
           );
@@ -2429,18 +2709,27 @@ function ChatPageContent() {
       const skillPrepared = await handleSkillMentionsBeforeSubmit(
         annotationPrepared,
       );
-      if (skillPrepared === false) return false;
+      if (skillPrepared === false || snapshot !== getExpertBindingSnapshot())
+        return false;
       if (pendingHtmlAnnotationBundle) {
         return skillPrepared;
       }
-      const prepared = await preparePlanModeSubmit(skillPrepared, {
+      let prepared = await preparePlanModeSubmit(skillPrepared, {
         planModeEnabled,
         persistPlanMode,
         setPlanModeEnabled: setPlanModeEnabledForActiveScope,
       });
+      if (snapshot !== getExpertBindingSnapshot()) return false;
       if (isPlanModeSubmitCancelled(prepared)) {
         return prepared;
       }
+      prepared = {
+        ...prepared,
+        biz_params: {
+          ...prepared.biz_params,
+          expert_binding_revision: snapshot.view?.revision ?? 0,
+        },
+      };
       const hasExplicitPlanInteractionResponse = Boolean(
         prepared.biz_params &&
           Object.prototype.hasOwnProperty.call(
@@ -2493,7 +2782,6 @@ function ChatPageContent() {
           showIcon={false}
           tooltip={t("chat.planMode.tooltip", "计划模式使用只读工具先产出计划")}
           onChange={(enabled) => {
-            if (enabled) setGoalModeEnabled(false);
             void persistPlanMode(enabled);
           }}
         />
@@ -2508,23 +2796,24 @@ function ChatPageContent() {
               disabled={composerDisabled}
               aria-label="目标模式"
               onChange={(enabled) => {
-                setGoalModeEnabled(enabled);
-                if (enabled) {
-                  setSelectedExpertId(null);
-                  if (planModeEnabled) void persistPlanMode(false);
-                }
+                void handleGoalModeChange(enabled).catch(() => {});
               }}
             />
           }
         />
       </ComposerQuickMenuSubmenu>,
-      ...(expertsLoading || experts.length > 0
+      ...(expertMainEnabled || expertsLoading || experts.length > 0
         ? [
             <ComposerQuickMenuSubmenu
               key="expert"
-              icon={<TeamOutlined />}
+              icon={<UserRound size={18} strokeWidth={1.5} aria-hidden />}
               label="专家"
-              disabled={composerDisabled || goalModeEnabled || expertsLoading}
+              disabled={
+                composerDisabled ||
+                bindingBusy ||
+                goalModeEnabled ||
+                expertsLoading
+              }
               panelWidth="min(240px, calc(100vw - 32px))"
             >
               <ExpertSelector
@@ -2533,11 +2822,22 @@ function ChatPageContent() {
                 planModeEnabled={planModeEnabled}
                 goalModeEnabled={goalModeEnabled}
                 selectedExpertId={selectedExpertId}
-                onChange={setSelectedExpertId}
-                onDisablePlanMode={() => {
-                  void persistPlanMode(false);
+                persistent={expertMainEnabled}
+                boundExpertName={expertBinding.view?.expert_name}
+                unavailable={
+                  expertMainEnabled && !expertBinding.view?.available
+                }
+                onChange={(expertId) => {
+                  if (expertId && goalModeEnabled) {
+                    void handleGoalModeChange(false)
+                      .then(() => changeExpert(expertId))
+                      .catch(() => {});
+                  } else {
+                    void changeExpert(expertId);
+                  }
                 }}
-                disabled={composerDisabled}
+                onDisablePlanMode={() => persistPlanMode(false)}
+                disabled={composerDisabled || bindingBusy}
                 inline
               />
             </ComposerQuickMenuSubmenu>,
@@ -2585,13 +2885,20 @@ function ChatPageContent() {
                   ? greeting
                   : "你好，有什么可以帮您？"
               }
+              disabled={bindingBusy}
               placeholder={t("chat.inputPlaceholder")}
               beforeSubmit={handleBeforeSubmit}
+              restoreDraft={
+                rejectedExpertDraft?.owner === getExpertBindingSnapshot()
+                  ? rejectedExpertDraft.payload
+                  : undefined
+              }
               quickMenuItems={planModeQuickMenuItems}
               prefixItems={
                 <>
                   {activePlanModeControl}
                   {activeGoalModeControl}
+                  {activeExpertControl}
                   {contextUsageIndicator}
                 </>
               }
@@ -2619,6 +2926,9 @@ function ChatPageContent() {
         renderComposer: (defaultComposer) => (
           <ActivePlanInteractionComposer
             defaultComposer={cloneElement<IChatInputProps>(defaultComposer, {
+              disabled:
+                Boolean((defaultComposer.props as IChatInputProps).disabled) ||
+                bindingBusy,
               actions: (defaultActions) => (
                 <div className={styles.composerActions}>
                   {contextUsageIndicator}
@@ -2679,6 +2989,7 @@ function ChatPageContent() {
           signal?: AbortSignal;
           logical_session_id?: string;
           chat_id?: string | null;
+          after_event_id?: string;
         }) {
           const headers: Record<string, string> = {
             "Content-Type": "application/json",
@@ -2697,6 +3008,8 @@ function ChatPageContent() {
               headers,
               body: JSON.stringify({
                 reconnect: true,
+                stream_protocol: "cursor-v1",
+                after_event_id: data.after_event_id,
                 reconnect_mode: "current",
                 session_id: reconnectSessionId,
                 chat_id: data.chat_id || undefined,
@@ -2736,6 +3049,13 @@ function ChatPageContent() {
       },
     } as unknown as IAgentScopeRuntimeWebUIOptions;
   }, [
+    expertBinding.view,
+    rejectedExpertDraft,
+    getExpertBindingSnapshot,
+    refreshExpertBinding,
+    bindingBusy,
+    expertMainEnabled,
+    changeExpert,
     activeGoalModeControl,
     activeExpertControl,
     activePlanModeControl,
@@ -2751,6 +3071,7 @@ function ChatPageContent() {
     handleFileUpload,
     handleContinueModifyingPlan,
     handlePlanModeDecision,
+    handleGoalModeChange,
     isComposingRef,
     isContentOnly,
     isDark,
@@ -2785,11 +3106,14 @@ function ChatPageContent() {
   const handleCreateSessionFromSidebar = useCallback(async () => {
     const newId = await chatRef.current?.createSession?.();
     if (newId) {
+      setSelectedExpertId(null);
+      if (expertBinding.view?.expert_id)
+        messageRef.current.info("新会话使用默认 Agent，原会话专家绑定保留");
       navigate(`/chat/${newId}`, { replace: true });
     } else {
       navigate("/chat", { replace: true });
     }
-  }, [navigate]);
+  }, [navigate, expertBinding.view?.expert_id]);
   // ==================== 首页改版结束 ====================
 
   // 定义 cards 配置（与 AgentScopeRuntimeWebUI 内部一致）

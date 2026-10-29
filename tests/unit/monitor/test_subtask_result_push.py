@@ -55,7 +55,7 @@ def test_push_result_index_users_deduplicates_and_posts(monkeypatch):
     )
 
     asyncio.run(
-        SyncService()._push_result_index_users(
+        SyncService(query_service=object())._push_result_index_users(
             [
                 {"custUid": "cust1", "bbkId": "110"},
                 {"custUid": "cust1", "bbkId": "110"},

@@ -37,6 +37,9 @@ import {
   isValidCustNum,
 } from "../utils";
 import type { PlanItem, Scene } from "../types";
+import { defaultMonitoring, type SceneMonitoring } from "../monitoring";
+
+const PUSH_TIME_LABEL = "名单推送时间";
 
 const STEP_DEFS = [
   {
@@ -232,8 +235,10 @@ export function ScheduleEditor({
 
   return (
     <div
+      data-label="执行频率"
       className={cx(
         styles.scheduleBlock,
+        type === "custom" && styles.customConfiguration,
         (type === "weekly" || type === "custom") && styles.expandedSchedule,
       )}
     >
@@ -271,14 +276,14 @@ export function ScheduleEditor({
       </div>
       {(type === "daily" || type === "weekly") && (
         <div className={styles.scheduleField}>
-          <span>执行时刻</span>
+          <span>{PUSH_TIME_LABEL}</span>
           <TimeField
             hour={schedule.hour ?? 9}
             minute={schedule.minute ?? 0}
             onChange={(hour, minute) =>
               updateSchedule(item.id, { hour, minute })
             }
-            ariaLabel={`${sceneName}执行时刻`}
+            ariaLabel={`${sceneName}${PUSH_TIME_LABEL}`}
           />
         </div>
       )}
@@ -338,14 +343,14 @@ export function ScheduleEditor({
               customConfig?.mode === "monthly" ||
               customConfig?.mode === "yearly") && (
               <div className={styles.scheduleField}>
-                <span>执行时刻</span>
+                <span>{PUSH_TIME_LABEL}</span>
                 <TimeField
                   hour={customConfig.hour}
                   minute={customConfig.minute}
                   onChange={(hour, minute) =>
                     updateCustomSchedule({ ...customConfig, hour, minute })
                   }
-                  ariaLabel={`${sceneName}自定义执行时刻`}
+                  ariaLabel={`${sceneName}自定义${PUSH_TIME_LABEL}`}
                 />
               </div>
             )}
@@ -507,7 +512,13 @@ export function TaskSchedule({
 
   return (
     <>
-      <div className={styles.taskCycleBlock}>
+      <div
+        className={cx(
+          styles.taskCycleBlock,
+          item.cycle === "自定义" && styles.customConfiguration,
+        )}
+        data-label="任务周期"
+      >
         <div className={styles.cycle}>
           <span>任务周期</span>
           <div
@@ -573,6 +584,144 @@ export function TaskSchedule({
   );
 }
 
+export function MonitoringFields({
+  sceneName,
+  config,
+  onChange: update,
+}: {
+  sceneName: string;
+  config: SceneMonitoring;
+  onChange: (patch: Partial<SceneMonitoring>) => void;
+}) {
+  const [completionRateInput, setCompletionRateInput] = useState(() =>
+    String(config.expectedCompletionRate),
+  );
+  const { schedule } = config;
+  return (
+    <>
+      <div className={styles.monitoringBlock} data-label="监控周期">
+        <div
+          className={cx(styles.cycleGroup, styles.monitoringCycleOptions)}
+          role="group"
+          aria-label={`${sceneName}监控周期`}
+        >
+          {(
+            [
+              ["today", "当日"],
+              ["within7days", "T+7日内"],
+            ] as const
+          ).map(([cycle, label]) => (
+            <button
+              type="button"
+              key={cycle}
+              aria-pressed={config.cycle === cycle}
+              className={config.cycle === cycle ? styles.active : ""}
+              onClick={() => update({ cycle })}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className={styles.monitoringBlock} data-label="监控时间">
+        <div
+          className={styles.cycleGroup}
+          role="group"
+          aria-label={`${sceneName}监控频率`}
+        >
+          {(
+            [
+              ["daily", "每日"],
+              ["weekly", "每周"],
+            ] as const
+          ).map(([type, label]) => (
+            <button
+              type="button"
+              key={type}
+              aria-pressed={schedule.type === type}
+              className={schedule.type === type ? styles.active : ""}
+              onClick={() => update({ schedule: { ...schedule, type } })}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <div className={styles.scheduleField}>
+          <span>{PUSH_TIME_LABEL}</span>
+          <TimeField
+            hour={schedule.hour}
+            minute={schedule.minute}
+            ariaLabel={`${sceneName}监控${PUSH_TIME_LABEL}`}
+            onChange={(hour, minute) =>
+              update({ schedule: { ...schedule, hour, minute } })
+            }
+          />
+        </div>
+        {schedule.type === "weekly" && (
+          <div
+            className={styles.monitoringWeekdays}
+            role="group"
+            aria-label={`${sceneName}监控日`}
+          >
+            {WEEKDAYS.map((day) => {
+              const active = schedule.daysOfWeek.includes(day.value);
+              return (
+                <button
+                  type="button"
+                  key={day.value}
+                  aria-pressed={active}
+                  aria-label={`星期${day.label}`}
+                  disabled={active && schedule.daysOfWeek.length === 1}
+                  className={cx(styles.monitoringDay, active && styles.active)}
+                  onClick={() =>
+                    update({
+                      schedule: {
+                        ...schedule,
+                        daysOfWeek: active
+                          ? schedule.daysOfWeek.filter(
+                              (value) => value !== day.value,
+                            )
+                          : [...schedule.daysOfWeek, day.value],
+                      },
+                    })
+                  }
+                >
+                  {day.label}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+      <div className={styles.monitoringBlock} data-label="预期完成率">
+        <div className={styles.customerLimitControl}>
+          <input
+            type="number"
+            min={0}
+            max={100}
+            step={1}
+            aria-label={`${sceneName}预期完成率`}
+            value={completionRateInput}
+            onChange={(event) => {
+              const raw = event.target.value;
+              const rate = Math.min(
+                100,
+                Math.max(0, Math.round(Number(raw) || 0)),
+              );
+              setCompletionRateInput(raw === "" ? "" : String(rate));
+              update({ expectedCompletionRate: rate });
+            }}
+            onBlur={() =>
+              setCompletionRateInput(String(config.expectedCompletionRate))
+            }
+          />
+          <span aria-hidden="true">%</span>
+        </div>
+      </div>
+    </>
+  );
+}
+
 export default function Create() {
   const account = useWealthStore(selectCurrentAccount);
   const draft = useWealthStore((s) => s.draft);
@@ -583,9 +732,9 @@ export default function Create() {
   // 「保存草稿」功能暂缓上线，入口已注释；恢复时一并解开下方 saveDraft 与 savedAt
   // const savedAt = useWealthStore((s) => s.savedAt);
   const editingId = useWealthStore((s) => s.editingId);
+  const canMonitor = account.id === "president";
+  const setItemMonitoring = useWealthStore((s) => s.setItemMonitoring);
   const toggleScene = useWealthStore((s) => s.toggleScene);
-  const moveScene = useWealthStore((s) => s.moveScene);
-  const dropScene = useWealthStore((s) => s.dropScene);
   const setItemDirection = useWealthStore((s) => s.setItemDirection);
   const setItemCustNum = useWealthStore((s) => s.setItemCustNum);
   const setDraftName = useWealthStore((s) => s.setDraftName);
@@ -602,7 +751,6 @@ export default function Create() {
 
   const [filterCategory, setFilterCategory] = useState("全部");
   const [activeStep, setActiveStep] = useState(0);
-  const dragId = useRef<string | null>(null);
 
   const sceneRef = useRef<HTMLElement>(null);
   const directionRef = useRef<HTMLElement>(null);
@@ -889,25 +1037,25 @@ export default function Create() {
               <span style={{ color: "var(--blue)" }}>
                 （{draft.items.length}）
               </span>
-              <span
-                className={styles.muted}
-                style={{ fontSize: 12, fontWeight: 400, marginLeft: 8 }}
-              >
-                拖动调整顺序，或使用上下箭头
-              </span>
             </h3>
-            <div className={styles.selectedList}>
+            <div
+              className={cx(
+                styles.selectedList,
+                !canMonitor && styles.withoutMonitoring,
+              )}
+            >
               {draft.items.length > 0 && (
                 <div className={styles.selectedListHeader}>
-                  <span>经营场景</span>
-                  <span>
-                    经营方向 <b style={{ color: "var(--red)" }}>·</b>
-                  </span>
-                  <span>任务周期</span>
-                  <span>执行频率</span>
-                  <span title="不填写则不限制推送客户数">
+                  <span>经营场景 / 经营方向</span>
+                  <span>执行周期</span>
+                  {canMonitor && <span>督办策略</span>}
+                  <span
+                    className={styles.customerLimitHeader}
+                    title="不填写则不限制推送客户数"
+                  >
                     推送客户数（选填）
                   </span>
+                  <span>操作</span>
                 </div>
               )}
               {draft.items.length ? (
@@ -926,30 +1074,10 @@ export default function Create() {
                       mcpRelations: x.mcpRelations,
                     } as Scene);
                   return (
-                    <div
-                      className={styles.selectedRow}
-                      key={x.id}
-                      onDragOver={(e) => e.preventDefault()}
-                      onDrop={(e) => {
-                        e.preventDefault();
-                        if (dragId.current != null)
-                          dropScene(dragId.current, x.id);
-                      }}
-                    >
-                      <span
-                        className={styles.drag}
-                        draggable
-                        onDragStart={(e) => {
-                          dragId.current = x.id;
-                          e.dataTransfer.setData("text/plain", x.id);
-                        }}
-                        title="拖动排序"
-                      >
-                        ⠿
-                      </span>
-                      <span className={styles.order}>{i + 1}</span>
+                    <div className={styles.selectedRow} key={x.id}>
                       <div className={styles.selectedMain}>
                         <div className={styles.selectedTitle}>
+                          <span className={styles.order}>{i + 1}</span>
                           <span
                             className={styles.selectedSceneName}
                             title={x.sceneName}
@@ -970,8 +1098,23 @@ export default function Create() {
                           />
                         </label>
                       </div>
-                      <TaskSchedule item={x} scene={display} />
-                      <div className={styles.customerLimitField}>
+                      <div className={styles.configurationColumn}>
+                        <TaskSchedule item={x} scene={display} />
+                      </div>
+                      {canMonitor && (
+                        <div className={styles.configurationColumn}>
+                          <MonitoringFields
+                            key={`${planFormVersion}:${x.id}`}
+                            sceneName={x.sceneName}
+                            config={x.monitoring ?? defaultMonitoring()}
+                            onChange={(patch) => setItemMonitoring(x.id, patch)}
+                          />
+                        </div>
+                      )}
+                      <div
+                        className={styles.customerLimitField}
+                        data-label="推送客户数（选填）"
+                      >
                         <div
                           className={cx(
                             styles.customerLimitControl,
@@ -1016,24 +1159,6 @@ export default function Create() {
                         </small>
                       </div>
                       <div className={styles.rowTools}>
-                        <button
-                          className={styles.iconbtn}
-                          title="上移"
-                          aria-label={`上移${x.sceneName}`}
-                          disabled={i === 0}
-                          onClick={() => moveScene(i, -1)}
-                        >
-                          <Icon name="up" />
-                        </button>
-                        <button
-                          className={styles.iconbtn}
-                          title="下移"
-                          aria-label={`下移${x.sceneName}`}
-                          disabled={i === draft.items.length - 1}
-                          onClick={() => moveScene(i, 1)}
-                        >
-                          <Icon name="down" />
-                        </button>
                         <button
                           className={styles.iconbtn}
                           title="移除"

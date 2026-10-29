@@ -24,6 +24,9 @@ import RetryStatusMessage from "./RetryStatusMessage";
 import { getCompletedReasoningFallbackText } from "./reasoningFallback";
 import ProcessDisclosure from "./ProcessDisclosure";
 import { resolveToolName } from "./ToolTitle";
+import { readStopAppendMetadata } from "@/pages/Chat/stopAppend";
+import ConversationCompactionBoundary from "@/pages/Chat/components/ConversationCompactionBoundary";
+import type { ChatCompactionBoundary } from "@/api/types/chat";
 // import { Avatar, Flex } from "antd";
 
 type RetryMetadata = {
@@ -227,6 +230,16 @@ function getMessagesDurationText(messages: IAgentScopeRuntimeMessage[]) {
 
 function renderResponseItem(item: IAgentScopeRuntimeMessage) {
   switch (item.type) {
+    case AgentScopeRuntimeMessageType.CONVERSATION_COMPACTION_BOUNDARY: {
+      const content = item.content[0];
+      if (content?.type !== AgentScopeRuntimeContentType.DATA) return null;
+      return (
+        <ConversationCompactionBoundary
+          key={item.id}
+          data={content.data as ChatCompactionBoundary}
+        />
+      );
+    }
     case AgentScopeRuntimeMessageType.MESSAGE: {
       // 检测重试状态，使用专用卡片渲染。
       // SSE 流式路径: metadata.retry_status
@@ -257,10 +270,16 @@ function renderResponseItem(item: IAgentScopeRuntimeMessage) {
 }
 
 function renderGroupedItem(item: OperationGroupedItem) {
-  return item.kind === "group" ? (
-    <OperationGroup key={item.key} entry={item} />
-  ) : (
-    renderResponseItem(item.message)
+  const anchorId =
+    item.kind === "group" ? `operation:${item.key}` : item.message.id;
+  return (
+    <div key={anchorId} data-history-anchor-id={anchorId}>
+      {item.kind === "group" ? (
+        <OperationGroup entry={item} />
+      ) : (
+        renderResponseItem(item.message)
+      )}
+    </div>
   );
 }
 
@@ -366,25 +385,33 @@ export default function AgentScopeRuntimeResponseCard(props: {
         </Flex>
       )} */}
       {groupedMessages.process.length > 0 && (
-        <ProcessDisclosure
-          durationText={durationText}
-          failedCount={groupedMessages.failedProcessCount}
-          processCount={groupedMessages.processStepCount}
-          toolCallCount={groupedMessages.toolCallCount}
-          status={
-            props.data.status === AgentScopeRuntimeRunStatus.Canceled
-              ? "canceled"
-              : "completed"
-          }
-        >
-          {groupedMessages.process.map(renderGroupedItem)}
-        </ProcessDisclosure>
+        <div data-history-anchor-id={`process:${props.data.id}`}>
+          <ProcessDisclosure
+            durationText={durationText}
+            failedCount={groupedMessages.failedProcessCount}
+            processCount={groupedMessages.processStepCount}
+            toolCallCount={groupedMessages.toolCallCount}
+            status={
+              props.data.status === AgentScopeRuntimeRunStatus.Canceled
+                ? "canceled"
+                : "completed"
+            }
+          >
+            {groupedMessages.process.map(renderGroupedItem)}
+          </ProcessDisclosure>
+        </div>
       )}
       {groupedMessages.direct.map(renderGroupedItem)}
       {reasoningFallbackText && <Markdown content={reasoningFallbackText} />}
       {props.data.error && <Error data={props.data.error} />}
       {props.beforeActions}
-      <Actions {...props} hideReplace={hasModelCallFailed} />
+      <Actions
+        {...props}
+        hideReplace={
+          hasModelCallFailed ||
+          messages.some((message) => Boolean(readStopAppendMetadata(message)))
+        }
+      />
       {props.data.suggestions?.length > 0 && (
         <Suggestions
           suggestions={props.data.suggestions}

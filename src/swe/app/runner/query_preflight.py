@@ -6,6 +6,7 @@ from __future__ import annotations
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
 
 from ...agents.hook_runtime.models import HookDecision
+from ...runtime_workers import run_runtime_state_work
 from .query_contracts import _QueryPreflight, QueryPreflightOwner
 
 
@@ -36,13 +37,24 @@ async def prepare_query_preflight(
             approved_tool_call=approved_tool_call,
         )
 
-    agent_config, tenant_hooks = owner._load_query_preflight_config()
+    agent_config, tenant_hooks = await run_runtime_state_work(
+        owner._load_query_preflight_config,
+    )
     hook_overlay = await owner._load_query_preflight_overlay(
         session_id=session_id,
         user_id=user_id,
         session_execution=session_execution,
     )
     hook_additional_context = ""
+    expert_lease = getattr(
+        owner,
+        "_get_expert_main_execution",
+        lambda _: None,
+    )(request)
+    if expert_lease is not None:
+        from .expert_main_runtime import restrict_expert_hook_overlay
+
+        hook_overlay = restrict_expert_hook_overlay(hook_overlay)
     if query and owner._query_preflight_hooks_enabled(
         tenant_hooks,
         agent_config,

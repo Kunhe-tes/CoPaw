@@ -13,6 +13,9 @@ import styles from "./index.module.less";
 export { SUBAGENT_RUNS_REFRESH_EVENT };
 const POLL_INTERVAL_MS = 10_000;
 const EVENT_CONFIRM_REFRESH_DELAY_MS = 400;
+const DISCOVERY_WINDOW_MS = 30_000;
+const REQUEST_TIMEOUT_MS = 10_000;
+const REFRESH_ERROR = "状态刷新失败，正在重试";
 const TERMINAL_STATUSES = new Set<SubAgentRunStatus>([
   "completed",
   "partial",
@@ -85,100 +88,177 @@ export default function SubAgentRunMonitor(props: {
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(() => new Set());
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
   const [hiddenRunIds, setHiddenRunIds] = useState<Set<string> | null>(null);
-  const requestSeqRef = useRef(0);
+  const [refreshError, setRefreshError] = useState(false);
   const resetKeyRef = useRef(resetKey);
   const snapshotRef = useRef<SubAgentRunSnapshot | null>(null);
-  const confirmRefreshTimerRef = useRef<number | null>(null);
+  const stoppingIdsRef = useRef(new Set<string>());
+  const ownerRef = useRef<object | null>(null);
+  const refreshControlRef = useRef({ refresh: () => {}, invalidate: () => {} });
 
-  const refresh = useCallback(async () => {
-    if (!chatId) {
-      setSnapshot(null);
-      return;
-    }
-    const seq = requestSeqRef.current + 1;
-    requestSeqRef.current = seq;
-    try {
-      const next = await chatApi.getSubAgentRuns(chatId);
-      if (requestSeqRef.current === seq) {
-        snapshotRef.current = next;
-        setSnapshot(next);
-      }
-    } catch {
-      if (requestSeqRef.current === seq) {
-        snapshotRef.current = null;
-        setSnapshot(null);
-      }
-    }
-  }, [chatId]);
+  const commitSnapshot = useCallback((next: SubAgentRunSnapshot | null) => {
+    snapshotRef.current = next;
+    setSnapshot(next);
+  }, []);
 
   useEffect(() => {
-    snapshotRef.current = null;
-    setSnapshot(null);
+    const owner = {};
+    ownerRef.current = owner;
+    let controller: AbortController | null = null;
+    let queued = false;
+    let pollTimer: number | undefined;
+    let confirmTimer: number | undefined;
+    let discoveryUntil = 0;
+    let knownRunIds = new Set<string>();
+    const isCurrent = () => ownerRef.current === owner;
+
+    commitSnapshot(null);
     setExpanded(false);
+    stoppingIdsRef.current = new Set();
     setStoppingIds(new Set());
     setRowErrors({});
     setHiddenRunIds(null);
+    setRefreshError(false);
+
+    const invalidate = () => {
+      window.clearTimeout(pollTimer);
+      queued = false;
+      const previous = controller;
+      controller = null;
+      previous?.abort();
+    };
+
+    const refresh = async () => {
+      if (!chatId || !isCurrent()) return;
+      if (controller) {
+        queued = true;
+        return;
+      }
+      window.clearTimeout(pollTimer);
+      const requestController = new AbortController();
+      controller = requestController;
+      const isRequestCurrent = () =>
+        isCurrent() && controller === requestController;
+      const timeout = window.setTimeout(
+        () => requestController.abort(),
+        REQUEST_TIMEOUT_MS,
+      );
+      let removeAbortListener = () => {};
+      const aborted = new Promise<never>((_, reject) => {
+        const onAbort = () =>
+          reject(new Error("SubAgent status request aborted"));
+        requestController.signal.addEventListener("abort", onAbort, {
+          once: true,
+        });
+        removeAbortListener = () =>
+          requestController.signal.removeEventListener("abort", onAbort);
+      });
+      let failed = false;
+      try {
+        const next = await Promise.race([
+          chatApi.getSubAgentRuns(chatId, requestController.signal),
+          aborted,
+        ]);
+        if (!isRequestCurrent()) return;
+        if (next.chat_id !== chatId)
+          throw new Error("SubAgent snapshot chat mismatch");
+        if (next.runs.some((run) => !knownRunIds.has(run.run_id)))
+          discoveryUntil = 0;
+        commitSnapshot(next);
+        setRefreshError(false);
+      } catch {
+        if (!isRequestCurrent()) return;
+        failed = true;
+        setRefreshError(true);
+      } finally {
+        window.clearTimeout(timeout);
+        removeAbortListener();
+        if (isRequestCurrent()) {
+          controller = null;
+          if (queued) {
+            queued = false;
+            void refresh();
+          } else if (
+            failed ||
+            hasNonTerminalRuns(snapshotRef.current?.runs ?? []) ||
+            Date.now() < discoveryUntil
+          ) {
+            pollTimer = window.setTimeout(
+              () => void refresh(),
+              POLL_INTERVAL_MS,
+            );
+          }
+        }
+      }
+    };
+
+    refreshControlRef.current = { refresh: () => void refresh(), invalidate };
+    const handleRefreshEvent = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{ chatId?: string; discover?: boolean }>
+      ).detail;
+      if (detail?.chatId && detail.chatId !== chatId) return;
+      if (detail?.discover !== false) {
+        discoveryUntil = Date.now() + DISCOVERY_WINDOW_MS;
+        knownRunIds = new Set(
+          snapshotRef.current?.runs.map((run) => run.run_id) ?? [],
+        );
+      }
+      void refresh();
+      window.clearTimeout(confirmTimer);
+      confirmTimer = window.setTimeout(
+        () => void refresh(),
+        EVENT_CONFIRM_REFRESH_DELAY_MS,
+      );
+    };
+    document.addEventListener(SUBAGENT_RUNS_REFRESH_EVENT, handleRefreshEvent);
     void refresh();
-  }, [refresh]);
+    return () => {
+      ownerRef.current = null;
+      invalidate();
+      window.clearTimeout(confirmTimer);
+      document.removeEventListener(
+        SUBAGENT_RUNS_REFRESH_EVENT,
+        handleRefreshEvent,
+      );
+    };
+  }, [chatId, commitSnapshot]);
 
   useEffect(() => {
     if (resetKeyRef.current === resetKey) return;
     resetKeyRef.current = resetKey;
-    requestSeqRef.current += 1;
-    setSnapshot(null);
     setExpanded(false);
-    setStoppingIds(new Set());
-    setRowErrors({});
     setHiddenRunIds(
-      new Set(snapshotRef.current?.runs.map((run) => run.run_id) ?? []),
+      (previous) =>
+        new Set([
+          ...(previous ?? []),
+          ...(snapshotRef.current?.runs
+            .filter((run) => TERMINAL_STATUSES.has(run.status))
+            .map((run) => run.run_id) ?? []),
+        ]),
     );
+    refreshControlRef.current.refresh();
   }, [resetKey]);
 
   const visibleRuns = useMemo(
     () =>
-      snapshot?.runs.filter((run) => isVisibleAfterReset(run, hiddenRunIds)) ??
-      [],
-    [hiddenRunIds, snapshot],
-  );
-
-  useEffect(() => {
-    if (!hasNonTerminalRuns(visibleRuns)) return undefined;
-    const timer = window.setInterval(() => {
-      void refresh();
-    }, POLL_INTERVAL_MS);
-    return () => window.clearInterval(timer);
-  }, [refresh, visibleRuns]);
-
-  useEffect(() => {
-    const handler = () => {
-      void refresh();
-      if (confirmRefreshTimerRef.current !== null) {
-        window.clearTimeout(confirmRefreshTimerRef.current);
-      }
-      confirmRefreshTimerRef.current = window.setTimeout(() => {
-        confirmRefreshTimerRef.current = null;
-        void refresh();
-      }, EVENT_CONFIRM_REFRESH_DELAY_MS);
-    };
-    document.addEventListener(SUBAGENT_RUNS_REFRESH_EVENT, handler);
-    return () =>
-      document.removeEventListener(SUBAGENT_RUNS_REFRESH_EVENT, handler);
-  }, [refresh]);
-
-  useEffect(
-    () => () => {
-      if (confirmRefreshTimerRef.current !== null) {
-        window.clearTimeout(confirmRefreshTimerRef.current);
-        confirmRefreshTimerRef.current = null;
-      }
-    },
-    [chatId],
+      snapshot?.chat_id === chatId
+        ? snapshot.runs.filter((run) => isVisibleAfterReset(run, hiddenRunIds))
+        : [],
+    [chatId, hiddenRunIds, snapshot],
   );
 
   const handleStop = useCallback(
     async (run: SubAgentRunSnapshotItem) => {
-      if (!chatId || run.status !== "running") return;
-      setStoppingIds((previous) => new Set(previous).add(run.run_id));
+      if (
+        !chatId ||
+        run.status !== "running" ||
+        stoppingIdsRef.current.has(run.run_id)
+      )
+        return;
+      const owner = ownerRef.current;
+      const isCurrent = () => owner !== null && ownerRef.current === owner;
+      stoppingIdsRef.current.add(run.run_id);
+      setStoppingIds(new Set(stoppingIdsRef.current));
       setRowErrors((previous) => {
         const next = { ...previous };
         delete next[run.run_id];
@@ -186,38 +266,54 @@ export default function SubAgentRunMonitor(props: {
       });
       try {
         const result = await chatApi.cancelSubAgentRun(chatId, run.run_id);
-        setSnapshot((previous) => {
-          if (!previous) return previous;
-          return {
+        if (!isCurrent()) return;
+        refreshControlRef.current.invalidate();
+        const previous = snapshotRef.current;
+        if (previous) {
+          commitSnapshot({
             ...previous,
             runs: previous.runs.map((item) =>
               item.run_id === result.run.run_id ? result.run : item,
             ),
-          };
-        });
-        void refresh();
+          });
+        }
+        refreshControlRef.current.refresh();
       } catch {
+        if (!isCurrent()) return;
         setRowErrors((previous) => ({
           ...previous,
           [run.run_id]: "停止请求失败",
         }));
         message.error("停止请求失败");
-        void refresh();
+        refreshControlRef.current.refresh();
       } finally {
-        setStoppingIds((previous) => {
-          const next = new Set(previous);
-          next.delete(run.run_id);
-          return next;
-        });
+        if (isCurrent()) {
+          stoppingIdsRef.current.delete(run.run_id);
+          setStoppingIds(new Set(stoppingIdsRef.current));
+        }
       }
     },
-    [chatId, message, refresh],
+    [chatId, commitSnapshot, message],
   );
 
-  if (!snapshot || visibleRuns.length === 0) return null;
+  if (!chatId) return null;
+  if (visibleRuns.length === 0) {
+    return refreshError ? (
+      <div className={styles.anchor}>
+        <p className={styles.refreshError} role="status">
+          {REFRESH_ERROR}
+        </p>
+      </div>
+    ) : null;
+  }
 
   return (
     <div className={styles.anchor}>
+      {refreshError ? (
+        <p className={styles.refreshError} role="status">
+          {REFRESH_ERROR}
+        </p>
+      ) : null}
       {expanded ? (
         <section className={styles.panel} aria-label="助手运行状态">
           <button

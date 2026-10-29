@@ -1,9 +1,11 @@
+# -*- coding: utf-8 -*-
 """招乎回调路由审批卡片处理的回归测试。"""
 
 from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from starlette.requests import Request
@@ -36,6 +38,11 @@ async def test_custom_card_approval_uses_addition_scope(
         "_submit_decision",
         _submit_decision,
     )
+    monkeypatch.setattr(
+        zhaohu_router,
+        "_query_user_info",
+        AsyncMock(return_value={"sapId": "tenant-a"}),
+    )
 
     request = Request(
         {
@@ -56,7 +63,7 @@ async def test_custom_card_approval_uses_addition_scope(
                     "request_id": "approval-1",
                     "type": "approve",
                     "agentId": "agent-a",
-                    "tenant_id": "tenant-a",
+                    "tenant_id": "untrusted-tenant",
                     "source_id": "source-a",
                 },
             },
@@ -119,6 +126,11 @@ async def test_custom_card_approval_binds_addition_scope_for_lookup(
         _get_agent_for_request,
     )
     monkeypatch.setattr(
+        zhaohu_router,
+        "_query_user_info",
+        AsyncMock(return_value={"sapId": "tenant-a"}),
+    )
+    monkeypatch.setattr(
         approvals_router,
         "get_approval_service",
         lambda: service,
@@ -148,7 +160,7 @@ async def test_custom_card_approval_binds_addition_scope_for_lookup(
                     "request_id": pending.request_id,
                     "type": "approve",
                     "agentId": "agent-a",
-                    "tenant_id": "tenant-a",
+                    "tenant_id": "untrusted-tenant",
                     "source_id": "source-a",
                 },
             },

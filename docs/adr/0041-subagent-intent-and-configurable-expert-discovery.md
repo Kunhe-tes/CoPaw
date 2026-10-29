@@ -1,0 +1,5 @@
+# SubAgent intent and configurable expert discovery
+
+A Main Agent may receive delegation tools from a fixed keyword in actual current user input or structured enablement, while temporary definitions remain run-scoped and expert authoring remains management-only. A default-off Source setting additionally exposes enabled experts owned by the current Profile; Skill-owned definitions retain their own lifecycle. Explicit expert selection remains an independent, exclusive invocation path. This replaces only ADR 0028’s restriction that experts can never be discovered by Main Agent routing, preserving its frozen private dependencies and publication/distribution boundaries.
+
+Management of retained runs is restricted to the owning Chat/session and can remain available without granting new-start permission. Goal delegation intent persists with the Goal across automatic turns and recovery, while expert visibility is reevaluated for later turns. This keeps long-running work recoverable without treating Profile-wide runs or model-generated continuation text as delegation authority.

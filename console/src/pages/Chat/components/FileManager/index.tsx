@@ -172,6 +172,7 @@ export default function FileManager({
   const detailRef = useRef<FileDetailHandle>(null);
   const loadingPageKeys = useRef<Set<string>>(new Set());
   const navigationVersionRef = useRef(0);
+  const previewVersionRef = useRef(0);
   const [open, setOpen] = useState(false);
   const [root, setRoot] = useState<FileManagerRoot>("working");
   const [columns, setColumns] = useState<Columns>([null, null, null]);
@@ -287,6 +288,8 @@ export default function FileManager({
 
   const loadInitial = useCallback(
     async (targetRoot: FileManagerRoot) => {
+      previewVersionRef.current += 1;
+      setDetailLoading(false);
       setLoadingColumns([true, true, true]);
       setColumnErrors([null, null, null]);
       setDetail(null);
@@ -370,6 +373,7 @@ export default function FileManager({
 
   const readEntry = useCallback(
     async (entry: FileManagerItem) => {
+      const version = ++previewVersionRef.current;
       revokeBinaryPreview();
       if (entry.kind !== "file" || !entry.capabilities.read) {
         setPreview(null);
@@ -399,18 +403,20 @@ export default function FileManager({
             root,
             path: entry.path,
           });
+          if (version !== previewVersionRef.current) return;
           setBinaryPreviewUrl(URL.createObjectURL(blob));
           setPreview(null);
         } else {
-          setPreview(
-            await fileManagerApi.readFile({ root, path: entry.path }),
-          );
+          const result = await fileManagerApi.readFile({ root, path: entry.path });
+          if (version !== previewVersionRef.current) return;
+          setPreview(result);
         }
       } catch (error) {
+        if (version !== previewVersionRef.current) return;
         setPreview(null);
         setDetailError(requestError(error));
       } finally {
-        setDetailLoading(false);
+        if (version === previewVersionRef.current) setDetailLoading(false);
       }
     },
     [fileManagerApi, revokeBinaryPreview, root],
@@ -419,6 +425,8 @@ export default function FileManager({
   const selectEntry = useCallback(
     async (index: 0 | 1 | 2, entry: FileManagerItem) => {
       const perform = async () => {
+        previewVersionRef.current += 1;
+        setDetailLoading(false);
         setDetail(null);
         setPreview(null);
         revokeBinaryPreview();
@@ -476,7 +484,6 @@ export default function FileManager({
           );
         }
         setDetail(entry);
-        await readEntry(entry);
       };
       executeOrGuard(() => {
         void perform();
@@ -486,7 +493,6 @@ export default function FileManager({
       columns,
       executeOrGuard,
       loadDirectory,
-      readEntry,
       revokeBinaryPreview,
       root,
       setColumnError,
@@ -650,6 +656,8 @@ export default function FileManager({
 
   const anchorPath = useCallback(
     async (path: string) => {
+      previewVersionRef.current += 1;
+      setDetailLoading(false);
       if (!path) {
         await loadInitial(root);
         return;
@@ -1082,6 +1090,7 @@ export default function FileManager({
                     />
                   ) : (
                     <FileDetail
+                      key={`${root}:${detail?.path || ""}`}
                       ref={detailRef}
                       entry={detail}
                       preview={preview}
@@ -1090,6 +1099,7 @@ export default function FileManager({
                       error={detailError}
                       editable={root !== "conversation" && root !== "recycle"}
                       onDownload={() => void doDownload()}
+                      onPreview={() => { if (detail) void readEntry(detail); }}
                       onEditStateChange={setDirty}
                       onSave={saveText}
                       onArchive={() => mutate("archive")}

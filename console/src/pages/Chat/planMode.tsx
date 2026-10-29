@@ -1,7 +1,8 @@
 import React from "react";
 import { Switch, Tooltip } from "antd";
 import type { IAgentScopeRuntimeWebUIInputData } from "@/components/agentscope-chat";
-import { CloseCircleFilled, OrderedListOutlined } from "@ant-design/icons";
+import { CloseCircleFilled } from "@ant-design/icons";
+import { Lightbulb } from "lucide-react";
 import { ComposerQuickMenuItem } from "@/components/agentscope-chat/ComposerQuickMenu";
 import styles from "./index.module.less";
 
@@ -76,8 +77,15 @@ export function buildPlanModeMeta(
   meta: Record<string, unknown> | null | undefined,
   enabled: boolean,
 ): Record<string, unknown> {
+  const writableMeta = Object.fromEntries(
+    Object.entries(meta || {}).filter(
+      ([key]) =>
+        key !== "goal_draft_subagent_delegation_enabled" &&
+        key !== "expert_main_binding",
+    ),
+  );
   return {
-    ...(meta || {}),
+    ...writableMeta,
     plan_mode_enabled: enabled,
   };
 }
@@ -235,7 +243,11 @@ export function PlanModeMenuItem({
   const switchLabel = ariaLabel || label;
   const control = (
     <ComposerQuickMenuItem
-      icon={showIcon ? <OrderedListOutlined /> : undefined}
+      icon={
+        showIcon ? (
+          <Lightbulb size={18} strokeWidth={1.5} aria-hidden />
+        ) : undefined
+      }
       interactive
       label={label}
       extra={
@@ -259,6 +271,7 @@ export function ActivePlanModeButton({
   label,
   displayLabel,
   showIcon = true,
+  icon = <Lightbulb size={18} strokeWidth={1.5} aria-hidden />,
   onDisable,
 }: {
   enabled: boolean;
@@ -266,6 +279,7 @@ export function ActivePlanModeButton({
   label: string;
   displayLabel?: string;
   showIcon?: boolean;
+  icon?: React.ReactNode;
   onDisable: () => void;
 }) {
   const [isRendered, setIsRendered] = React.useState(enabled);
@@ -317,9 +331,7 @@ export function ActivePlanModeButton({
       disabled={disabled || isExiting}
       onClick={onDisable}
     >
-      {showIcon && (
-        <OrderedListOutlined className={styles.planModeActiveIcon} />
-      )}
+      {showIcon && <span className={styles.planModeActiveIcon}>{icon}</span>}
       <CloseCircleFilled className={styles.planModeCloseIcon} />
       <span>{displayLabel || label}</span>
     </button>

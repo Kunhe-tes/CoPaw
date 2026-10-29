@@ -30,6 +30,11 @@ import {
   resolveMessageTimestamp,
 } from "../messageMeta";
 import { toDisplayUrl } from "../utils";
+import { readStopAppendMetadata, stopAppendBubbleId } from "../stopAppend";
+import {
+  mergeHistoryResponses,
+  normalizeHistoryMessages,
+} from "./historyAssembly";
 import { applyPreferredSessionSelection } from "./preferredSession";
 import { shouldNotifySessionSelected } from "./sessionRaceGuard";
 import { filterStaleTaskSessions } from "./taskSessions";
@@ -314,18 +319,36 @@ const toOutputMessage = (msg: Message): OutputMessage => ({
 });
 
 function isStandaloneOutputMessage(message: Message | OutputMessage): boolean {
+  return (
+    Boolean(readStopAppendMetadata(message)) || isCronTaskOutputMessage(message)
+  );
+}
+
+function getMessageMetadata(
+  message: Message | OutputMessage,
+): Record<string, unknown> | null {
   const metadata =
     message.metadata && typeof message.metadata === "object"
       ? (message.metadata as Record<string, unknown>)
       : null;
-  return Boolean(metadata?.cron_task);
+  if (!metadata) return null;
+  const nested = metadata.metadata;
+  return nested && typeof nested === "object"
+    ? { ...metadata, ...(nested as Record<string, unknown>) }
+    : metadata;
+}
+
+function getTaskRunId(message: Message | OutputMessage): string | null {
+  const value = getMessageMetadata(message)?.task_run_id;
+  return typeof value === "string" && value ? value : null;
+}
+
+function isCronTaskOutputMessage(message: Message | OutputMessage): boolean {
+  return Boolean(getMessageMetadata(message)?.cron_task);
 }
 
 function getTaskRunMetadata(message: Message): TaskRunMetadata | null {
-  const metadata =
-    message.metadata && typeof message.metadata === "object"
-      ? (message.metadata as Record<string, unknown>)
-      : null;
+  const metadata = getMessageMetadata(message);
   if (!metadata) return null;
 
   const runId = metadata.task_run_id;
@@ -406,7 +429,7 @@ function getLatestTaskSessionResultKey(messages: Message[]): string | null {
       return;
     }
 
-    if (isStandaloneOutputMessage(message)) {
+    if (isCronTaskOutputMessage(message)) {
       const candidate = {
         latestScore: score,
         runIndex: index,
@@ -432,14 +455,13 @@ function getLatestTaskSessionResultKey(messages: Message[]): string | null {
 function hasTaskSessionResultMessages(messages: Message[]): boolean {
   return messages.some(
     (message) =>
-      getTaskRunMetadata(message) !== null ||
-      isStandaloneOutputMessage(message),
+      getTaskRunMetadata(message) !== null || isCronTaskOutputMessage(message),
   );
 }
 
 function isTaskSessionResultMessage(message: Message): boolean {
   return (
-    getTaskRunMetadata(message) !== null || isStandaloneOutputMessage(message)
+    getTaskRunMetadata(message) !== null || isCronTaskOutputMessage(message)
   );
 }
 
@@ -575,6 +597,10 @@ const buildResponseCard = (
     content: normalizeOutputMessageContent(msg.content),
   }));
   const stableId = stableResponseId(normalizedMessages);
+  const appendMarker =
+    normalizedMessages.length === 1
+      ? readStopAppendMetadata(normalizedMessages[0])
+      : null;
 
   const cardTraceId = normalizedMessages.reduce<string | null>((found, msg) => {
     if (found) return found;
@@ -637,13 +663,17 @@ const buildResponseCard = (
     });
   }
 
-  cards.push({
-    code: CARD_RESPONSE_FEEDBACK,
-    data: cards[0].data,
-  });
+  if (!appendMarker) {
+    cards.push({
+      code: CARD_RESPONSE_FEEDBACK,
+      data: cards[0].data,
+    });
+  }
 
   return {
-    id: `history-response-${stableId}`,
+    id: appendMarker
+      ? stopAppendBubbleId(appendMarker)
+      : `history-response-${stableId}`,
     role: ROLE_ASSISTANT,
     cards,
     msgStatus: "finished",
@@ -651,6 +681,9 @@ const buildResponseCard = (
 };
 
 function stableResponseId(messages: OutputMessage[]): string {
+  const appendMarker =
+    messages.length === 1 ? readStopAppendMetadata(messages[0]) : null;
+  if (appendMarker) return appendMarker.message_id;
   const persistedIds = messages
     .map((message) => message.id)
     .filter((id): id is string => typeof id === "string" && id.length > 0);
@@ -666,8 +699,9 @@ function stableResponseId(messages: OutputMessage[]): string {
  *   into a single AgentScopeRuntimeResponseCard with all output messages.
  */
 export const convertMessages = (
-  messages: Message[],
+  rawMessages: Message[],
 ): IAgentScopeRuntimeWebUIMessage[] => {
+  const messages = normalizeHistoryMessages(rawMessages);
   const result: IAgentScopeRuntimeWebUIMessage[] = [];
   const submittedPlanReviews = collectSubmittedPlanReviews(messages);
   let i = 0;
@@ -677,20 +711,42 @@ export const convertMessages = (
       result.push(buildUserCard(messages[i++]));
     } else {
       if (isStandaloneOutputMessage(messages[i])) {
-        result.push(
-          buildResponseCard(
-            [toOutputMessage(messages[i++])],
-            submittedPlanReviews,
-          ),
+        const card = buildResponseCard(
+          [toOutputMessage(messages[i++])],
+          submittedPlanReviews,
         );
+        const existingIndex = result.findIndex(
+          (message) => message.id === card.id,
+        );
+        if (existingIndex >= 0) result[existingIndex] = card;
+        else result.push(card);
         continue;
       }
 
       const outputMsgs: OutputMessage[] = [];
+      const firstTaskRunId = getTaskRunId(messages[i]);
+      let turnId = getMessageMetadata(messages[i])?.turn_id;
       while (i < messages.length && messages[i].role !== ROLE_USER) {
         if (isStandaloneOutputMessage(messages[i])) {
           break;
         }
+        if (
+          outputMsgs.length > 0 &&
+          getTaskRunId(messages[i]) !== firstTaskRunId
+        ) {
+          break;
+        }
+        const nextTurnId = getMessageMetadata(messages[i])?.turn_id;
+        if (
+          typeof turnId === "string" &&
+          turnId &&
+          typeof nextTurnId === "string" &&
+          nextTurnId &&
+          turnId !== nextTurnId
+        ) {
+          break;
+        }
+        if (typeof nextTurnId === "string" && nextTurnId) turnId = nextTurnId;
         outputMsgs.push(toOutputMessage(messages[i++]));
       }
       if (outputMsgs.length) {
@@ -737,9 +793,10 @@ function withArchiveBoundaries(
 
 /** Convert one archived page while keeping each divider after its batch. */
 export function convertArchivedPage(
-  messages: Message[],
+  rawMessages: Message[],
   boundaries: ChatCompactionBoundary[],
 ): IAgentScopeRuntimeWebUIMessage[] {
+  const messages = normalizeHistoryMessages(rawMessages);
   const boundariesByLastMessageId = new Map<string, ChatCompactionBoundary[]>();
   boundaries.forEach((boundary) => {
     const current = boundariesByLastMessageId.get(boundary.last_message_id);
@@ -764,7 +821,9 @@ export function convertArchivedPage(
     segmentStart = index + 1;
   });
   result.push(...convertMessages(messages.slice(segmentStart)));
-  return result;
+  return mergeHistoryResponses(
+    result.map((message) => ({ ...message, history: true })),
+  );
 }
 
 function buildTaskRunCard(
@@ -873,7 +932,7 @@ function convertMessagesForSession(
   let index = 0;
 
   while (index < messages.length) {
-    if (isStandaloneOutputMessage(messages[index])) {
+    if (isCronTaskOutputMessage(messages[index])) {
       result.push(
         ...buildStandaloneTaskRunCard(
           messages[index],

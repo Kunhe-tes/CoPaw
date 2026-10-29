@@ -240,6 +240,7 @@ function createGoalProposalMessage(): IAgentScopeRuntimeWebUIMessage<unknown> {
         data: {
           card_type: "goal_proposal",
           objective: "Ship Goal Runtime",
+          enable_subagents: true,
           completion_criteria: [
             {
               requirement: "Runtime works",
@@ -280,7 +281,10 @@ describe("Plan interaction cards", () => {
 
     await waitFor(() =>
       expect(onConfirmGoalProposal).toHaveBeenCalledWith(
-        expect.objectContaining({ objective: "Edited Goal" }),
+        expect.objectContaining({
+          objective: "Edited Goal",
+          enable_subagents: true,
+        }),
       ),
     );
     await waitFor(() => expect(events.handler).toHaveBeenCalled());

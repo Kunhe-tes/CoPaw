@@ -240,8 +240,8 @@ async def distribute_expert(
         request.method,
         request.url.path,
         item_id=item_id,
-        target_tenant_ids=req.target_tenant_ids,
-        overwrite=req.overwrite,
+        target_type=req.target_type,
+        target_values=req.target_values,
     )
 
     try:

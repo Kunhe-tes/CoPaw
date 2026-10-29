@@ -5,6 +5,7 @@ import json
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 import asyncio
 
@@ -20,6 +21,7 @@ from swe.agents.hook_runtime.models import (
     HookEventName,
     HookHandlerResult,
     HookMatcherGroupConfig,
+    HookPermissionDecision,
     HookSessionState,
     LoadedSkillHookSource,
     MergedHookResult,
@@ -31,6 +33,8 @@ from swe.agents.tool_guard_mixin import (
     ToolGuardMixin,
 )
 from swe.agents.tool_failure import TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD
+from swe.agents.tool_output_budget_mixin import ToolOutputBudgetMixin
+from swe.config.config import ToolResultCompactConfig
 from swe.security.tool_guard.models import (
     GuardFinding,
     GuardSeverity,
@@ -81,7 +85,7 @@ class _FakeAgent(ToolGuardMixin, _BaseAgent):
     name = "Friday"
 
     def __init__(self, tmp_path: Path):
-        self._request_context = {
+        self._request_context: dict[str, Any] = {
             "session_id": "session-1",
             "user_id": "user-1",
             "channel": "console",
@@ -464,6 +468,7 @@ async def test_tool_guard_pending_extra_carries_goal_id_only_in_goal_mode(
         ToolGuardResult(tool_name="execute_shell_command", params={}),
     )
 
+    assert approval_service.create_pending_kwargs is not None
     assert (
         approval_service.create_pending_kwargs["extra"]["goal_id"] == "goal-1"
     )
@@ -1238,6 +1243,143 @@ async def test_approved_pre_tool_hook_ask_replay_executes_once(
 
     assert result == {"content": {"cmd": "echo original"}}
     agent._acting_with_approval.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_selected_expert_hook_approval_resumes_only_original_wait(
+    tmp_path,
+) -> None:
+    from agentscope.tool import Toolkit
+
+    from swe.agents.tools.subagent_background import (
+        create_background_subagent_tools,
+    )
+    from swe.app.runner.runner import (
+        AgentRunner,
+        _approved_tool_call_from_record,
+    )
+    from swe.app.subagents import (
+        DelegationSpec,
+        PerRunSubAgentRunStore,
+        PermissionPolicy,
+        SubAgentDefinition,
+    )
+    from swe.config.config import AgentProfileConfig
+
+    store = PerRunSubAgentRunStore(tmp_path / "runs")
+    record = await store.create(
+        DelegationSpec(
+            parent_thread_id="session-1",
+            parent_chat_id="chat-1",
+            name="researcher",
+            objective="Inspect",
+        ),
+        SubAgentDefinition(
+            name="researcher",
+            description="Test",
+            instruction="Inspect",
+            source="run_scoped",
+            owner_scope="run:tenant-1:agent-1",
+        ),
+        PermissionPolicy.readonly(),
+    )
+    await store.cancel(record.run_id)
+    agent = _FakeAgent(tmp_path)
+    agent._request_context.update(
+        {
+            "tenant_id": "tenant-1",
+            "chat_id": "chat-1",
+            "selected_expert_id": "expert-1",
+            "selected_expert_execution": True,
+            "selected_expert_run_id": record.run_id,
+            "_selected_expert_wait_authorized": True,
+        },
+    )
+    approval_service = _RecordingApprovalService()
+    agent._tool_guard_approval_service = approval_service
+    agent._notify_approval_pending = AsyncMock()
+    hook_result = MergedHookResult(
+        decision=HookDecision.ASK,
+        permission_decisions=[
+            HookPermissionDecision(
+                handler_id="hook-a",
+                decision=HookDecision.ASK,
+                reason="review wait",
+            ),
+        ],
+    )
+    agent._emit_tool_hook = AsyncMock(return_value=hook_result)
+    wait_call = agent._selected_expert_wait_tool_call()
+    await agent._acting(wait_call)
+    assert approval_service.create_pending_kwargs is not None
+    pending_kwargs = approval_service.create_pending_kwargs
+    assert pending_kwargs is not None
+    approved = _approved_tool_call_from_record(
+        SimpleNamespace(
+            request_id="approval-1",
+            **pending_kwargs,
+        ),
+    )
+
+    class BudgetedAgent(_FakeAgent, ToolOutputBudgetMixin, _BaseAgent):
+        # Put the output budget between ToolGuardMixin and the base executor.
+        finish_function_name = "finish"
+
+    resumed = BudgetedAgent(tmp_path)
+    resumed._agent_config = SimpleNamespace(
+        running=SimpleNamespace(
+            tool_result_compact=ToolResultCompactConfig(),
+        ),
+    )
+    resumed._request_context.update(
+        {
+            "tenant_id": "tenant-1",
+            "chat_id": "chat-1",
+            "_subagent_run_store_dir": str(tmp_path / "runs"),
+        },
+    )
+    runner = AgentRunner(agent_id="agent-1", workspace_dir=tmp_path)
+    runner.tenant_id = "tenant-1"
+    runner._apply_selected_expert_context(
+        request_context=resumed._request_context,
+        selected_expert_id="expert-1",
+        chat=SimpleNamespace(id="chat-1"),
+        objective="/approve",
+        approved_tool_call=approved,
+    )
+    supervisor = SimpleNamespace(
+        start=AsyncMock(),
+        reap_run=AsyncMock(),
+        cancel=AsyncMock(),
+    )
+    tools = create_background_subagent_tools(
+        supervisor=supervisor,
+        parent_agent_config=AgentProfileConfig(id="agent-1", name="Main"),
+        workspace_dir=tmp_path,
+        request_context=resumed._request_context,
+        selected_expert_id="expert-1",
+    )
+    executed = []
+
+    async def wait_selected_expert():
+        executed.append("wait_selected_expert")
+        return await tools["wait_selected_expert"]()
+
+    resumed.toolkit = Toolkit()
+    resumed.toolkit.register_tool_function(wait_selected_expert)
+    resumed._emit_tool_hook = AsyncMock(return_value=hook_result)
+    resumed._acting_with_approval = AsyncMock()
+    message = await resumed._reasoning()
+    await resumed._acting(message.get_content_blocks("tool_use")[0])
+    assert await resumed._reason_about_replay_done() is None
+    assert executed == ["wait_selected_expert"]
+    assert resumed._request_context["selected_expert_run_id"] == record.run_id
+    assert resumed._request_context["selected_expert_execution"] is False
+    assert not resumed._request_context.get(
+        "_selected_expert_wait_authorized",
+    )
+    resumed._acting_with_approval.assert_not_awaited()
+    supervisor.start.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2339,3 +2481,159 @@ async def test_guard_decision_failure_denies_instead_of_executing_tool(
     assert result == {"denied": True}
     agent._acting_hook_denied.assert_awaited_once()
     agent._run_guarded_tool_call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool_name",
+    ["execute_shell_command", "start_background_process"],
+)
+@pytest.mark.parametrize("role", ["main", "subagent"])
+async def test_platform_installation_denial_precedes_guard_and_execution(
+    tmp_path,
+    tool_name,
+    role,
+):
+    agent = _FakeAgent(tmp_path)
+    agent._request_context["agent_role"] = role
+    agent._emit_tool_hook = AsyncMock(return_value=MergedHookResult())
+    agent._decide_guard_action = AsyncMock()
+    agent._run_guarded_tool_call = AsyncMock()
+    agent._acting_with_approval = AsyncMock()
+
+    result = await agent._acting(
+        {
+            "id": "platform-denied",
+            "name": tool_name,
+            "input": {"command": "pip install requests"},
+        },
+    )
+
+    assert result is None
+    assert "平台策略禁止" in str(agent.printed[0].content)
+    assert "shell_policy_denied" in str(agent.printed[0].content)
+    assert agent.printed[0].metadata[
+        TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD
+    ] == {
+        "platform-denied": "blocked",
+    }
+    agent._emit_tool_hook.assert_not_awaited()
+    agent._decide_guard_action.assert_not_awaited()
+    agent._run_guarded_tool_call.assert_not_awaited()
+    agent._acting_with_approval.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_platform_denial_checks_rewritten_input_before_hook_ask(
+    tmp_path,
+):
+    agent = _FakeAgent(tmp_path)
+    agent._emit_tool_hook = AsyncMock(
+        return_value=MergedHookResult(
+            decision=HookDecision.ASK,
+            updated_input={"command": "pip install requests"},
+        ),
+    )
+    agent._acting_with_approval = AsyncMock(return_value={"pending": True})
+    agent._run_guarded_tool_call = AsyncMock()
+
+    result = await agent._acting(
+        {
+            "id": "rewrite-denied",
+            "name": "execute_shell_command",
+            "input": {"command": "echo hello"},
+        },
+    )
+
+    assert result is None
+    assert "shell_policy_denied" in str(agent.printed[0].content)
+    agent._acting_with_approval.assert_not_awaited()
+    agent._run_guarded_tool_call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_platform_denial_allows_later_tool_call_in_same_turn(tmp_path):
+    agent = _FakeAgent(tmp_path)
+    agent._emit_tool_hook = AsyncMock(return_value=MergedHookResult())
+    denied = await agent._acting(
+        {
+            "id": "denied-install",
+            "name": "execute_shell_command",
+            "input": {"command": "pip install requests"},
+        },
+    )
+    allowed = await agent._acting(
+        {
+            "id": "allowed-query",
+            "name": "execute_shell_command",
+            "input": {"command": "pip show requests"},
+        },
+    )
+    assert denied is None
+    assert allowed == {"content": {"command": "pip show requests"}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("guard_enabled", [False, True])
+async def test_source_shell_override_and_preapproval_cannot_bypass_policy(
+    tmp_path,
+    monkeypatch,
+    guard_enabled,
+):
+    from swe.agents import source_tools
+
+    agent = _TerminalStopReplyLoopAgent(tmp_path)
+    agent._ensure_tool_guard = lambda: None
+    agent._tool_guard_engine = SimpleNamespace(
+        enabled=guard_enabled,
+        is_denied=lambda _name: False,
+        is_guarded=lambda _name: True,
+    )
+    agent._emit_tool_hook = AsyncMock(return_value=MergedHookResult())
+    agent._consume_preapproval = AsyncMock(return_value=True)
+    worker = AsyncMock(return_value=[{"type": "text", "text": "replacement"}])
+    monkeypatch.setattr(source_tools, "_run_source_tool", worker)
+    version = SimpleNamespace(
+        name="execute_shell_command",
+        description="Source override",
+    )
+    replacement = source_tools.build_source_tool_function(
+        version,
+        source_tools.SourceToolRuntime(None, None, tmp_path),
+    )
+    agent.toolkit.register_tool_function(
+        replacement,
+        json_schema={
+            "type": "function",
+            "function": {
+                "name": version.name,
+                "description": version.description,
+                "parameters": {
+                    "type": "object",
+                    "required": ["command"],
+                    "properties": {"command": {"type": "string"}},
+                },
+            },
+        },
+    )
+
+    await agent._acting(
+        {
+            "id": "source-denied",
+            "name": "execute_shell_command",
+            "input": {"command": "pip install requests"},
+        },
+    )
+    worker.assert_not_awaited()
+    agent._consume_preapproval.assert_not_awaited()
+    assert "shell_policy_denied" in str(agent.printed[0].content)
+
+    await agent._acting(
+        {
+            "id": "source-allowed",
+            "name": "execute_shell_command",
+            "input": {"command": "pip show requests"},
+        },
+    )
+    worker.assert_awaited_once()
+    assert worker.await_args.args[2] == {"command": "pip show requests"}

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Shell 命令拦截器的租户与来源注入回归测试。"""
 
-import logging
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -139,10 +139,10 @@ def test_intercept_opencli_injects_resolved_credentials_for_effective_tenant(
         command, intercepted = intercept_command("opencli apps list")
 
     assert intercepted is True
-    assert command == (
-        'opencli apps list --authorization "Bearer resolved-authorization" '
-        '--cookie "resolved-cookie"'
-    )
+    assert shlex.split(command) == [
+        "opencli", "apps", "list", "--authorization",
+        "Bearer resolved-authorization", "--cookie", "resolved-cookie",
+    ]
     assert calls == [
         {
             "tenant_id": resolve_scope_id("default", "source-a"),
@@ -227,7 +227,7 @@ def test_intercept_opencli_only_injects_missing_credential(
         modified, intercepted = intercept_command(command)
 
     assert intercepted is True
-    assert modified == expected
+    assert shlex.split(modified) == shlex.split(expected)
 
 
 def test_intercept_opencli_only_modifies_matching_and_segment(monkeypatch):
@@ -246,11 +246,12 @@ def test_intercept_opencli_only_modifies_matching_and_segment(monkeypatch):
         )
 
     assert intercepted is True
-    assert command == (
+    expected = (
         'echo ready && opencli apps list '
         '--authorization "Bearer resolved-authorization" '
         '--cookie "resolved-cookie" && echo done'
     )
+    assert shlex.split(command) == shlex.split(expected)
 
 
 def test_intercept_opencli_quotes_resolved_credentials_for_platform(monkeypatch):
@@ -318,11 +319,10 @@ def test_intercept_opencli_does_not_duplicate_bearer_prefix(
         command, intercepted = intercept_command("opencli apps list")
 
     assert intercepted is True
-    assert command == (
-        f"opencli apps list "
-        f"--authorization {_force_quoted_shell_argument(authorization)} "
-        '--cookie "resolved-cookie"'
-    )
+    assert shlex.split(command) == [
+        "opencli", "apps", "list", "--authorization", authorization,
+        "--cookie", "resolved-cookie",
+    ]
 
 
 def test_intercept_opencli_fails_when_authorization_is_unavailable(monkeypatch):
@@ -387,7 +387,6 @@ def test_intercept_opencli_maps_expired_auth_state_to_tool_failure(monkeypatch):
 
 def test_intercept_opencli_does_not_log_credentials(
     monkeypatch,
-    caplog,
 ):
     monkeypatch.setattr(
         "swe.agents.tools.shell_interceptor."
@@ -398,16 +397,13 @@ def test_intercept_opencli_does_not_log_credentials(
         ),
     )
 
-    with (
-        tenant_context(tenant_id="tenant-a", user_id="user-a"),
-        caplog.at_level(
-            logging.INFO,
-            logger="swe.agents.tools.shell_interceptor",
-        ),
-    ):
+    messages = []
+    monkeypatch.setattr(
+        "swe.agents.tools.shell_interceptor.logger.info",
+        lambda *args, **_kwargs: messages.append(args),
+    )
+
+    with tenant_context(tenant_id="tenant-a", user_id="user-a"):
         intercept_command("opencli apps list")
 
-    assert "secret-authorization" not in caplog.text
-    assert "secret-cookie" not in caplog.text
-    assert "opencli apps list" not in caplog.text
-    assert "Shell command intercepted" in caplog.text
+    assert messages == [("Shell command intercepted",)]

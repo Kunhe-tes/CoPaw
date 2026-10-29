@@ -99,7 +99,7 @@ async def test_start_subagent_returns_blocked_without_run_file(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_wait_subagent_returns_compact_snapshot(tmp_path):
+async def test_wait_subagent_returns_compact_snapshot(tmp_path, monkeypatch):
     supervisor = SimpleNamespace()
     supervisor.wait = _AsyncReturn(
         SimpleNamespace(
@@ -120,6 +120,7 @@ async def test_wait_subagent_returns_compact_snapshot(tmp_path):
             timed_out=True,
         ),
     )
+    _mock_owned_wait_records(monkeypatch, supervisor.wait.value)
     tools = create_background_subagent_tools(
         supervisor=supervisor,
         parent_agent_config=_agent_config(tmp_path),
@@ -127,6 +128,7 @@ async def test_wait_subagent_returns_compact_snapshot(tmp_path):
         request_context={
             "tenant_id": "tenant-1",
             "agent_id": "agent-1",
+            "session_id": "session-1",
             "_subagent_definition_store_dir": str(tmp_path / "definitions"),
         },
     )
@@ -139,7 +141,10 @@ async def test_wait_subagent_returns_compact_snapshot(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_wait_subagent_returns_parent_facing_partial_result(tmp_path):
+async def test_wait_subagent_returns_parent_facing_partial_result(
+    tmp_path,
+    monkeypatch,
+):
     supervisor = SimpleNamespace()
     supervisor.wait = _AsyncReturn(
         SimpleNamespace(
@@ -180,6 +185,7 @@ async def test_wait_subagent_returns_parent_facing_partial_result(tmp_path):
             timed_out=False,
         ),
     )
+    _mock_owned_wait_records(monkeypatch, supervisor.wait.value)
     tools = create_background_subagent_tools(
         supervisor=supervisor,
         parent_agent_config=_agent_config(tmp_path),
@@ -187,6 +193,7 @@ async def test_wait_subagent_returns_parent_facing_partial_result(tmp_path):
         request_context={
             "tenant_id": "tenant-1",
             "agent_id": "agent-1",
+            "session_id": "session-1",
             "_subagent_definition_store_dir": str(tmp_path / "definitions"),
         },
     )
@@ -230,6 +237,7 @@ def test_compact_result_omits_non_finalization_error_code() -> None:
 @pytest.mark.asyncio
 async def test_wait_subagent_returns_error_summary_for_failed_no_result_run(
     tmp_path,
+    monkeypatch,
 ):
     supervisor = SimpleNamespace()
     supervisor.wait = _AsyncReturn(
@@ -256,6 +264,7 @@ async def test_wait_subagent_returns_error_summary_for_failed_no_result_run(
             timed_out=False,
         ),
     )
+    _mock_owned_wait_records(monkeypatch, supervisor.wait.value)
     tools = create_background_subagent_tools(
         supervisor=supervisor,
         parent_agent_config=_agent_config(tmp_path),
@@ -263,6 +272,7 @@ async def test_wait_subagent_returns_error_summary_for_failed_no_result_run(
         request_context={
             "tenant_id": "tenant-1",
             "agent_id": "agent-1",
+            "session_id": "session-1",
             "_subagent_definition_store_dir": str(tmp_path / "definitions"),
         },
     )
@@ -300,6 +310,7 @@ async def test_wait_subagent_does_not_duplicate_error_code_in_summary(
     popen_factory = _FakePopenFactory()
     supervisor = BackgroundSubAgentSupervisor(
         max_running_per_scope=1,
+        registry=AgentRegistry([builtin_definition_provider()]),
         popen_factory=popen_factory,
     )
     run_store_dir = tmp_path / "subagent_runs"
@@ -310,7 +321,12 @@ async def test_wait_subagent_does_not_duplicate_error_code_in_summary(
     )
     started = await supervisor.start(
         scope=scope,
-        spec=DelegationSpec(name="plan-researcher", objective="Inspect"),
+        spec=DelegationSpec(
+            name="plan-researcher",
+            objective="Inspect",
+            parent_thread_id="session-1",
+            parent_chat_id="chat-1",
+        ),
         parent_agent_config=_agent_config(tmp_path),
         workspace_dir=tmp_path,
     )
@@ -324,6 +340,8 @@ async def test_wait_subagent_does_not_duplicate_error_code_in_summary(
         request_context={
             "tenant_id": "tenant-1",
             "agent_id": "agent-1",
+            "session_id": "session-1",
+            "chat_id": "chat-1",
             "_subagent_run_store_dir": str(run_store_dir),
         },
     )
@@ -368,15 +386,17 @@ async def test_start_subagent_serializes_real_run_record(tmp_path):
     )
     supervisor = SimpleNamespace()
     supervisor.start = _AsyncReturn(record)
+    request_context = {
+        "tenant_id": "tenant-1",
+        "agent_id": "agent-1",
+        "selected_expert_execution": True,
+        "_subagent_definition_store_dir": str(tmp_path / "definitions"),
+    }
     tools = create_background_subagent_tools(
         supervisor=supervisor,
         parent_agent_config=_agent_config(tmp_path),
         workspace_dir=tmp_path,
-        request_context={
-            "tenant_id": "tenant-1",
-            "agent_id": "agent-1",
-            "_subagent_definition_store_dir": str(tmp_path / "definitions"),
-        },
+        request_context=request_context,
     )
 
     response = await tools["start_subagent"](
@@ -387,6 +407,7 @@ async def test_start_subagent_serializes_real_run_record(tmp_path):
     payload = json.loads(response.content[0]["text"])
 
     assert payload["run_id"] == record.run_id
+    assert request_context["selected_expert_run_id"] == record.run_id
     assert payload["accepted"] is True
     assert payload["nickname"] == "研究员"
     assert "definition_match" not in payload
@@ -776,6 +797,22 @@ async def test_start_subagent_uses_matched_definition(tmp_path):
         captured.update(kwargs)
         return BackgroundSubAgentStartBlocked(limit=1)
 
+    repository = AgentOwnedDefinitionRepository(
+        tmp_path / "agents",
+        owner_scope="tenant-1/agent-1",
+    )
+    package = repository.create(
+        {
+            "name": "risk-reviewer",
+            "description": "Review risks.",
+            "instruction": "Inspect the plan for risks.",
+            "enabled": True,
+        },
+    )
+    repository.enable(
+        package.definition_id,
+        expected_revision=package.revision,
+    )
     supervisor = SimpleNamespace(start=_start)
     tools = create_background_subagent_tools(
         supervisor=supervisor,
@@ -786,6 +823,7 @@ async def test_start_subagent_uses_matched_definition(tmp_path):
             "agent_id": "agent-1",
             "_subagent_definition_store_dir": str(tmp_path / "definitions"),
         },
+        expert_discovery_enabled=True,
     )
 
     response = await tools["start_subagent"](
@@ -797,7 +835,7 @@ async def test_start_subagent_uses_matched_definition(tmp_path):
 
     assert payload["status"] == "blocked"
     assert captured["definition"].name == "risk-reviewer"
-    assert captured["definition"].source == "builtin"
+    assert captured["definition"].source == "agent_owned"
     assert captured["definition"].instruction != (
         "This should not override the matched definition."
     )
@@ -838,7 +876,12 @@ async def test_get_subagent_includes_manageable_and_stderr_tail(tmp_path):
     )
     store = PerRunSubAgentRunStore(run_store_dir)
     record = await store.create(
-        DelegationSpec(name="plan-researcher", objective="Inspect"),
+        DelegationSpec(
+            name="plan-researcher",
+            objective="Inspect",
+            parent_thread_id="session-1",
+            parent_chat_id="chat-1",
+        ),
         definition,
         PermissionPolicy.readonly(),
     )
@@ -861,6 +904,8 @@ async def test_get_subagent_includes_manageable_and_stderr_tail(tmp_path):
         request_context={
             "tenant_id": "tenant-1",
             "agent_id": "agent-1",
+            "session_id": "session-1",
+            "chat_id": "chat-1",
             "_subagent_run_store_dir": str(run_store_dir),
         },
     )
@@ -886,7 +931,12 @@ async def test_get_subagent_exposes_launch_diagnostics_only_in_details(
     )
     store = PerRunSubAgentRunStore(run_store_dir)
     record = await store.create(
-        DelegationSpec(name="plan-researcher", objective="Inspect"),
+        DelegationSpec(
+            name="plan-researcher",
+            objective="Inspect",
+            parent_thread_id="session-1",
+            parent_chat_id="chat-1",
+        ),
         definition,
         PermissionPolicy.readonly(),
         launch_diagnostics={
@@ -904,6 +954,8 @@ async def test_get_subagent_exposes_launch_diagnostics_only_in_details(
         request_context={
             "tenant_id": "tenant-1",
             "agent_id": "agent-1",
+            "session_id": "session-1",
+            "chat_id": "chat-1",
             "_subagent_run_store_dir": str(run_store_dir),
         },
     )
@@ -930,7 +982,12 @@ async def test_get_subagent_defaults_to_parent_facing_partial_projection(
     )
     store = PerRunSubAgentRunStore(tmp_path / "runs")
     record = await store.create(
-        DelegationSpec(name="plan-researcher", objective="Inspect"),
+        DelegationSpec(
+            name="plan-researcher",
+            objective="Inspect",
+            parent_thread_id="session-1",
+            parent_chat_id="chat-1",
+        ),
         definition,
         PermissionPolicy.readonly(),
     )
@@ -954,6 +1011,8 @@ async def test_get_subagent_defaults_to_parent_facing_partial_projection(
         request_context={
             "tenant_id": "tenant-1",
             "agent_id": "agent-1",
+            "session_id": "session-1",
+            "chat_id": "chat-1",
             "_subagent_run_store_dir": str(tmp_path / "runs"),
         },
     )
@@ -977,7 +1036,12 @@ async def test_get_subagent_returns_error_summary_for_failed_no_result_run(
     )
     store = PerRunSubAgentRunStore(tmp_path / "runs")
     record = await store.create(
-        DelegationSpec(name="plan-researcher", objective="Inspect"),
+        DelegationSpec(
+            name="plan-researcher",
+            objective="Inspect",
+            parent_thread_id="session-1",
+            parent_chat_id="chat-1",
+        ),
         definition,
         PermissionPolicy.readonly(),
     )
@@ -992,6 +1056,8 @@ async def test_get_subagent_returns_error_summary_for_failed_no_result_run(
         request_context={
             "tenant_id": "tenant-1",
             "agent_id": "agent-1",
+            "session_id": "session-1",
+            "chat_id": "chat-1",
             "_subagent_run_store_dir": str(tmp_path / "runs"),
         },
     )
@@ -1004,6 +1070,36 @@ async def test_get_subagent_returns_error_summary_for_failed_no_result_run(
         "summary": "runtime_error: worker failed to start",
     }
     assert "errors" not in payload
+
+
+def _mock_owned_wait_records(monkeypatch, snapshot):
+    """Keep serializer fixtures at the authorized-record boundary."""
+    from swe.app.subagents.models import BackgroundSubAgentRunRecord
+
+    records = [
+        BackgroundSubAgentRunRecord(
+            run_id=record.run_id,
+            status=record.status,
+            spec=DelegationSpec(
+                name=record.spec.name,
+                objective=record.spec.objective,
+                parent_thread_id="session-1",
+            ),
+            definition_name=record.spec.name,
+            definition_version="1",
+            definition_source="run_scoped",
+            owner_scope="run:test",
+            effective_policy=PermissionPolicy.readonly(),
+            nickname=getattr(record, "nickname", None),
+            result=record.result,
+            errors=[vars(error) for error in record.errors],
+        )
+        for record in [*snapshot.active_runs, *snapshot.terminal_runs]
+    ]
+    monkeypatch.setattr(
+        "swe.agents.tools.subagent_background.read_chat_run_records",
+        lambda *_args: records,
+    )
 
 
 class _AsyncReturn:
