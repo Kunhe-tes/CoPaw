@@ -70,3 +70,21 @@ ADR 0042 和 `2026-10-27-expert-as-main-execution-design.md` 要求绑定立即�
 确定性回归在首次查询读到空结果后提交另一请求的草稿，再使专家不可用或关闭功能开关，覆盖两个时间窗口，不依赖 sleep 或随机调度。
 
 本轮相关后端回归共 173 项通过。
+
+## 选择专家后的界面重新加载（草稿别名）
+
+草稿绑定成功后，前端记录 local session ID → Chat UUID 并替换 URL。即使二者代表同一会话，`ChatSessionInitializer` 在列表已经包含服务端 Chat 时仍会调用 `setCurrentSessionId`，触发会话加载和输入区重建。仅在目标不在列表时跳过数字草稿不能覆盖此路径。
+
+普通可编辑会话中，若当前 ID 已明确映射到路由解析后的 Chat，保留当前会话状态；真正切换到其他 Chat 及 content-only 深链接仍按原流程加载。新增回归用例覆盖“本地草稿活跃 + 后端记录已在列表 + 路由换为 UUID”。不应取消专家绑定持久化或取消 URL 同步来掩盖重载。
+
+消息宽度排查同时发现：响应卡片中的无宽度包装 div 是纵向 flex 气泡的直接子项，`align-items: flex-start` 使它按长表格的固有宽度展开，内部 Markdown 的 `max-width: 100%` 无法约束外层。应为气泡、内容列及直接卡片子项设置收缩/最大宽度边界，工具卡片采用 border-box 并在代码内容区保留滚动。不要只对页面设置 overflow hidden，否则右侧内容无法访问。
+
+本地真实组件浏览器探针：390px 视口修复前 document.scrollWidth=6298，修复后为390；360、390、768、1280、1440、1920 六种宽度均无页面横向溢出，6290px 的表格与14356px 的代码在内部滚动。探针不连接生产会话；未验证实际 Chromium 108 或现场端到端流程。
+
+### 完整响应卡片遗漏路径的补充修复
+
+上一轮单气泡探针没有包含真实 `RuntimeResponseCard`，因此不能据此判定完整会话无溢出。真实路径为 Bubble → RuntimeResponseCard → `messageBlockStart`（align-items: flex-start）→ 带 data-history-anchor-id 的响应包装 div → Markdown/工具卡片。只约束 Bubble 的直接子项，不能约束 messageBlockStart 内部另一个 flex 子项；其仍按表格的固有宽度展开。
+
+完整组件探针采用真实 RuntimeResponseCard、AgentScopeRuntimeWebUI、消息列表、全局 layout.css、swe 主题及240px侧边栏，加载模拟会话数据，不访问远端。保留上一轮修复时，1280px视口的列表 clientWidth=992、scrollWidth=5574；内部消息包装层宽5558px。补充约束消息块直接子项后，长表格在内部滚动。另将列表 width:100% 的 padding 和审批卡片 border 纳入 border-box，并去掉列表/输入区的300px最小宽度，避免窄容器额外溢出。
+
+修复后320、360、390、768、1280、1440、1920px七种视口的列表 scrollWidth 均等于 clientWidth；表格与展开的审批代码分别保留5558px和14356px内部内容，scrollLeft=100可读到右侧内容。验收必须检查消息列表自身的 scrollWidth/clientWidth，不能只检查 document（页面可能将溢出裁切）。远端内网测试环境尚未访问，不能据本地结果声称已部署生效。
