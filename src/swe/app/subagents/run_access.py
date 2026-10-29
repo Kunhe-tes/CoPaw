@@ -24,6 +24,8 @@ def read_chat_run_record(
     run_store_dir: Path,
     request_context: Mapping[str, Any],
     run_id: str,
+    *,
+    strict: bool = False,
 ) -> BackgroundSubAgentRunRecord | None:
     """Read and authorize a record before invoking supervisor side effects."""
     if not run_id or Path(run_id).name != run_id:
@@ -32,8 +34,14 @@ def read_chat_run_record(
         record = BackgroundSubAgentRunRecord.model_validate_json(
             (run_store_dir / f"{run_id}.json").read_text(encoding="utf-8"),
         )
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return None
+    except (OSError, ValueError):
+        if strict:
+            raise
+        return None
+    if strict and record.run_id != run_id:
+        raise ValueError("run record identity mismatch")
     return record if record_belongs_to_chat(record, request_context) else None
 
 

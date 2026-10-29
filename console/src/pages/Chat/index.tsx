@@ -26,13 +26,13 @@ import {
   useState,
 } from "react";
 import { flushSync } from "react-dom";
+import { Target, UserRound } from "lucide-react";
 import { Button, Modal, Result, Switch } from "antd";
 import { useAppMessage } from "../../hooks/useAppMessage";
 import {
   ControlOutlined,
   ExclamationCircleOutlined,
   SettingOutlined,
-  TeamOutlined,
 } from "@ant-design/icons";
 import { SparkCopyLine } from "@agentscope-ai/icons";
 import { useTranslation } from "react-i18next";
@@ -653,7 +653,7 @@ function ActiveGoalModeControl({
       enabled={enabled}
       disabled={Boolean(inputState.disabled)}
       label="目标"
-      showIcon={false}
+      icon={<Target size={18} strokeWidth={1.5} aria-hidden />}
       onDisable={onDisable}
     />
   );
@@ -677,7 +677,7 @@ function ActiveExpertControl({
       enabled={Boolean(expert)}
       disabled={disabled || Boolean(inputState.disabled)}
       label={expert ? resolveExpertLabel(expert) : "专家"}
-      showIcon={false}
+      icon={<UserRound size={18} strokeWidth={1.5} aria-hidden />}
       onDisable={onDisable}
     />
   );
@@ -806,8 +806,20 @@ function ChatPageContent() {
     pendingContextReferencesRef.current = [];
   }, [activeSessionId, chatId]);
 
+  const expertSelectionScopeRef = useRef({
+    agent: selectedAgent,
+    aliases: new Set([chatId || activeSessionId || ""]),
+  });
   useEffect(() => {
-    setSelectedExpertId(null);
+    const scope = expertSelectionScopeRef.current;
+    const identity = chatId || activeSessionId || "";
+    if (scope.agent !== selectedAgent || !scope.aliases.has(identity)) {
+      setSelectedExpertId(null);
+      expertSelectionScopeRef.current = {
+        agent: selectedAgent,
+        aliases: new Set([identity]),
+      };
+    }
   }, [selectedAgent, activeSessionId, chatId]);
 
   useEffect(() => {
@@ -975,6 +987,8 @@ function ChatPageContent() {
     const annotationSessionMigrations = annotationSessionMigrationRef.current;
     sessionApi.onSessionIdResolved = (tempId, realId) => {
       if (!isChatActiveRef.current) return;
+      const expertScope = expertSelectionScopeRef.current;
+      if (expertScope.aliases.has(tempId)) expertScope.aliases.add(realId);
       migrateHtmlAnnotationBundle(tempId, realId);
       const annotationMigration = annotationSessionMigrations.get(tempId);
       if (annotationMigration) {
@@ -1076,6 +1090,9 @@ function ChatPageContent() {
 
     sessionApi.onSessionCreated = (sessionId) => {
       if (!isChatActiveRef.current) return;
+      // Session creation gives the current draft a new identity, not a new expert selection.
+      const expertScope = expertSelectionScopeRef.current;
+      if (expertScope.aliases.delete("")) expertScope.aliases.add(sessionId);
       const pendingAnnotation = pendingHtmlAnnotationBundleRef.current;
       if (isAnnotationForNewChat(pendingAnnotation)) {
         annotationSessionMigrations.set(sessionId, {
@@ -1181,10 +1198,8 @@ function ChatPageContent() {
     },
     [message],
   );
-  const {
-    perform: performManagedTask,
-    update: updateManagedTask,
-  } = useManagedTaskActions(taskScopeKey, refreshJobs, notifyManagedTask);
+  const { perform: performManagedTask, update: updateManagedTask } =
+    useManagedTaskActions(taskScopeKey, refreshJobs, notifyManagedTask);
   const notifyReadFailure = useCallback(
     (text: string) => {
       message.warning(text);
@@ -2202,6 +2217,7 @@ function ChatPageContent() {
       chat_id?: string | null;
     }): Promise<Response> => {
       const bindingOwner = getExpertBindingSnapshot();
+      const expertSelectionScope = expertSelectionScopeRef.current;
       const draft = pendingExpertDraftRef.current;
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
@@ -2279,9 +2295,18 @@ function ChatPageContent() {
             : pendingContextReferencesRef.current,
         scenario_preset_id: pendingScenarioPresetIdRef.current || undefined,
         file_url_network: resolveCurrentFileUrlNetwork(),
-        selected_expert_id: expertMainEnabled
-          ? undefined
-          : selectedExpertId || undefined,
+        selected_expert_id:
+          expertMainEnabled ||
+          goalModeEnabled ||
+          (biz_params?.mode ?? getPlanModeForRequest(planModeEnabled)) ===
+            "plan"
+            ? undefined
+            : (Object.prototype.hasOwnProperty.call(
+                biz_params ?? {},
+                "selected_expert_id",
+              )
+                ? biz_params?.selected_expert_id
+                : selectedExpertId) || undefined,
         expert_binding_revision:
           biz_params?.expert_binding_revision ??
           bindingOwner.view?.revision ??
@@ -2342,7 +2367,6 @@ function ChatPageContent() {
 
       const timeoutSignal = createTimedAbortSignal(data.signal);
       if (!expertMainEnabled) {
-        setSelectedExpertId(null);
         setSubAgentMonitorResetKey((value) => value + 1);
       }
       try {
@@ -2391,6 +2415,14 @@ function ChatPageContent() {
         }
         if (pendingExpertDraftRef.current === draft)
           pendingExpertDraftRef.current = null;
+        if (
+          response.ok &&
+          !expertMainEnabled &&
+          expertSelectionScope === expertSelectionScopeRef.current &&
+          /^\s*\/(?:new|clear|reset)(?:\s|$)/i.test(userText)
+        ) {
+          setSelectedExpertId(null);
+        }
         if (
           response.ok &&
           draft?.owner === bindingOwner &&
@@ -2637,6 +2669,7 @@ function ChatPageContent() {
         biz_params: {
           ...data.biz_params,
           expert_binding_revision: snapshot.view?.revision ?? 0,
+          selected_expert_id: expertMainEnabled ? null : selectedExpertId,
         },
       };
       let annotationPrepared =
@@ -2773,7 +2806,7 @@ function ChatPageContent() {
         ? [
             <ComposerQuickMenuSubmenu
               key="expert"
-              icon={<TeamOutlined />}
+              icon={<UserRound size={18} strokeWidth={1.5} aria-hidden />}
               label="专家"
               disabled={
                 composerDisabled ||

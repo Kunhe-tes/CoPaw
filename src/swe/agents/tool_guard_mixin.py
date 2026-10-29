@@ -42,6 +42,10 @@ from .tool_failure import (
     attach_tool_governance_message_metadata,
     build_failed_tool_result_block,
 )
+from .utils.selected_expert_summary import (
+    ExpertEvidenceBudgetError,
+    prepare_selected_expert_summary,
+)
 from ..security.tool_guard.models import TOOL_GUARD_DENIED_MARK
 from ..security.shell_installation_policy import (
     SHELL_TOOL_NAMES,
@@ -151,7 +155,8 @@ _APPROVAL_KIND_HOOK_PRE_TOOL_USE = "hook_pre_tool_use"
 _PENDING_TOOL_SKILL_ATTRIBUTIONS_KEY = "_pending_tool_skill_attributions"
 _SELECTED_EXPERT_EXECUTION_KEY = "selected_expert_execution"
 _SELECTED_EXPERT_RUN_ID_KEY = "selected_expert_run_id"
-_SELECTED_EXPERT_WAIT_TIMEOUT_MS = 3000
+_SELECTED_EXPERT_REPLAY_KEY = "selected_expert_replay"
+_SELECTED_EXPERT_SUMMARY_MARK = "selected_expert_summary_evidence"
 _GOAL_ENVIRONMENT_WRITE_TOOLS = frozenset({"write_file", "edit_file"})
 _GOAL_MUTATING_SHELL_TOKENS = frozenset(
     {
@@ -417,6 +422,18 @@ class ToolGuardMixin:
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
             ):
+                if (
+                    tool_name == "wait_selected_expert"
+                    and getattr(
+                        self,
+                        "_tool_guard_forced_replay_active",
+                        False,
+                    )
+                    and self._request_context.get("selected_expert_execution")
+                ):
+                    self._selected_expert_control_response = None
+                    self._selected_expert_summary_evidence = None
+                    return await super()._acting(tool_call)  # type: ignore[misc]
                 if self._tool_has_specific_timeout(tool_name):
                     return await super()._acting(tool_call)  # type: ignore[misc]
 
@@ -2203,6 +2220,11 @@ class ToolGuardMixin:
         }
         if operation_group is not None:
             extra["operation_group"] = operation_group
+        selected_expert_replay = self._selected_expert_replay_metadata(
+            tool_call,
+        )
+        if selected_expert_replay:
+            extra[_SELECTED_EXPERT_REPLAY_KEY] = selected_expert_replay
         extra["agent_id"] = self._request_context.get("agent_id")
         extra["tenant_id"] = self._request_context.get("tenant_id")
         extra["source_id"] = self._request_context.get("source_id")
@@ -2232,6 +2254,33 @@ class ToolGuardMixin:
             if siblings:
                 extra["sibling_tool_calls"] = siblings
         return extra
+
+    def _selected_expert_replay_metadata(
+        self,
+        tool_call: dict[str, Any],
+    ) -> dict[str, str] | None:
+        context = self._request_context
+        if (
+            tool_call.get("name") != "wait_selected_expert"
+            or not context.get(_SELECTED_EXPERT_EXECUTION_KEY)
+            or not context.get("_selected_expert_wait_authorized")
+        ):
+            return None
+        run_id = str(context.get(_SELECTED_EXPERT_RUN_ID_KEY) or "").strip()
+        selected_expert_id = str(
+            context.get("selected_expert_id") or "",
+        ).strip()
+        if not run_id or not selected_expert_id:
+            return None
+        return {
+            "phase": "wait_selected_expert",
+            "run_id": run_id,
+            "selected_expert_id": selected_expert_id,
+            "tenant_id": str(context.get("tenant_id") or "default"),
+            "agent_id": str(context.get("agent_id") or "default"),
+            "session_id": str(context.get("session_id") or ""),
+            "chat_id": str(context.get("chat_id") or ""),
+        }
 
     @staticmethod
     def _approval_thinking_blocks(original_msg: Any) -> list[dict[str, Any]]:
@@ -2449,7 +2498,59 @@ class ToolGuardMixin:
                     PLAN_INTERACTION_SUMMARIZING_SHORT_CIRCUIT_METADATA_KEY: True,
                 },
             )
-        return await super()._summarizing()  # type: ignore[misc]
+        evidence = getattr(self, "_selected_expert_summary_evidence", None)
+        if not evidence or evidence.get("run_id") != getattr(
+            self,
+            "_request_context",
+            {},
+        ).get(_SELECTED_EXPERT_RUN_ID_KEY):
+            return await super()._summarizing()  # type: ignore[misc]
+        try:
+            try:
+                message = await prepare_selected_expert_summary(self, evidence)
+            except ExpertEvidenceBudgetError:
+                return await self._emit_assistant_msg(
+                    "The selected expert finished, but its evidence could not "
+                    "be summarized within the model context budget. The full "
+                    "result remains in the tool-result artifact; findings "
+                    "have not been fully summarized.",
+                )
+            # Archive-attached add() can insert before its awaited write fails.
+            await self.memory.add(message, marks=_SELECTED_EXPERT_SUMMARY_MARK)
+            return await super()._summarizing()  # type: ignore[misc]
+        finally:
+            await self.memory.delete_by_mark(_SELECTED_EXPERT_SUMMARY_MARK)
+
+    async def _selected_expert_before_summary(self) -> Msg | None:
+        """Finish a pending selected-expert control step before summarizing."""
+        if not getattr(self, "_request_context", {}).get(
+            _SELECTED_EXPERT_EXECUTION_KEY,
+        ):
+            return None
+        pending_error = str(
+            self._request_context.pop("selected_expert_execution_error", "")
+            or "",
+        ).strip()
+        if pending_error:
+            return await self._emit_assistant_msg(pending_error)
+        follow_up = await self._reason_about_replay_done()
+        if follow_up is not None:
+            calls = follow_up.get_content_blocks("tool_use")
+            if not calls:
+                return follow_up
+            await self._acting(calls[0])
+            follow_up = await self._reason_about_replay_done()
+            if follow_up is not None:
+                return follow_up
+        if self._request_context.get(_SELECTED_EXPERT_EXECUTION_KEY):
+            if self._last_tool_response_is_denied():
+                return await self._emit_waiting_for_approval()
+            self._request_context[_SELECTED_EXPERT_EXECUTION_KEY] = False
+            return await self._emit_assistant_msg(
+                "The selected expert's status could not be confirmed. "
+                "It may still be running; it was not replaced by the Main Agent.",
+            )
+        return None
 
     async def _reason_about_replay_done(self) -> Msg | None:
         """Emit replay continuation or completion message.
@@ -2496,12 +2597,26 @@ class ToolGuardMixin:
         run_id = str(response.get("run_id") or "").strip()
         if not response.get("accepted") or not run_id:
             context[_SELECTED_EXPERT_EXECUTION_KEY] = False
+            reasons = {
+                "background_subagent_concurrency_limit": (
+                    " Expert capacity is currently full; try again later."
+                ),
+                "selected_expert_not_available": (
+                    " The selected expert is unavailable."
+                ),
+                "selected_expert_name_mismatch": (
+                    " The selected expert is unavailable."
+                ),
+                "invalid_request": " The expert request was invalid.",
+            }
             context["selected_expert_execution_error"] = (
                 "The selected expert could not be started. "
                 "It was not replaced by the Main Agent."
+                + reasons.get(str(response.get("reason") or ""), "")
             )
             return None
         context[_SELECTED_EXPERT_RUN_ID_KEY] = run_id
+        context["_selected_expert_wait_authorized"] = True
         return self._selected_expert_wait_tool_call()
 
     def _selected_expert_get_follow_up(
@@ -2544,12 +2659,28 @@ class ToolGuardMixin:
         if not context.get(_SELECTED_EXPERT_EXECUTION_KEY):
             return None
         if await self._selected_expert_turn_is_stopping(context):
+            context.pop("_selected_expert_wait_authorized", None)
             context[_SELECTED_EXPERT_EXECUTION_KEY] = False
             return None
         tool_name = str(replay_info.get("tool_name") or "")
         response = self._selected_expert_tool_response(replay_info)
         if tool_name == "start_subagent":
             return self._selected_expert_start_follow_up(context, response)
+        if tool_name == "wait_selected_expert":
+            self._selected_expert_control_response = None
+            self._selected_expert_summary_evidence = None
+            context.pop("_selected_expert_wait_authorized", None)
+            context[_SELECTED_EXPERT_EXECUTION_KEY] = False
+            if response.get("run_id") != context.get(
+                _SELECTED_EXPERT_RUN_ID_KEY,
+            ) or not self._selected_expert_record_is_terminal(response):
+                context["selected_expert_execution_error"] = (
+                    "The selected expert's status could not be confirmed. "
+                    "It may still be running; it was not replaced by the Main Agent."
+                )
+            else:
+                self._selected_expert_summary_evidence = response
+            return None
         if tool_name == "get_subagent":
             return self._selected_expert_get_follow_up(context, response)
         if tool_name != "wait_subagent":
@@ -2569,15 +2700,50 @@ class ToolGuardMixin:
             str(context.get("msgid") or ""),
         )
 
+    def _capture_tool_control_response(
+        self,
+        tool_call: dict[str, Any],
+        output: Any,
+    ) -> None:
+        """Keep trusted selected-expert control data outside display memory."""
+        if (
+            tool_call.get("name") == "wait_selected_expert"
+            and getattr(self, "_tool_guard_forced_replay_active", False)
+            and self._request_context.get(_SELECTED_EXPERT_EXECUTION_KEY)
+        ):
+            self._selected_expert_control_response = (
+                str(tool_call.get("id") or ""),
+                output,
+            )
+
     def _selected_expert_tool_response(
         self,
         replay_info: dict[str, Any],
     ) -> dict[str, Any]:
         """Read the current forced-call result without trusting model text."""
+        tool_call_id = str(replay_info.get("tool_call_id") or "")
+        cached = getattr(self, "_selected_expert_control_response", None)
+        if (
+            replay_info.get("tool_name") == "wait_selected_expert"
+            and cached is not None
+            and cached[0] == tool_call_id
+        ):
+            return self._parse_selected_expert_tool_response(cached[1])
         response = self._extract_current_tool_response(
-            str(replay_info.get("tool_call_id") or ""),
+            tool_call_id,
             include_structured_failure=True,
         )
+        return self._parse_selected_expert_tool_response(response)
+
+    def _parse_selected_expert_tool_response(
+        self,
+        response: Any,
+    ) -> dict[str, Any]:
+        """Decode the trusted tool response before any display compaction."""
+        if isinstance(response, list) and len(response) == 1:
+            block = self._tool_result_block_to_dict(response[0])
+            if block and block.get("type") == "text":
+                response = block.get("text")
         if isinstance(response, str):
             try:
                 response = _json.loads(response)
@@ -2622,8 +2788,8 @@ class ToolGuardMixin:
     def _selected_expert_wait_tool_call() -> dict[str, Any]:
         return {
             "id": f"selected-expert-wait-{_uuid.uuid4().hex[:12]}",
-            "name": "wait_subagent",
-            "input": {"timeout_ms": _SELECTED_EXPERT_WAIT_TIMEOUT_MS},
+            "name": "wait_selected_expert",
+            "input": {},
         }
 
     @staticmethod

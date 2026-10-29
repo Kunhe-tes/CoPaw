@@ -10,6 +10,8 @@ import { forwardRef, useImperativeHandle, useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatContentOnlyProvider } from "@/components/agentscope-chat/ChatContentOnlyContext";
 import MessageList from ".";
+import * as sessionApiModule from "@/pages/Chat/sessionApi";
+import { resolveHistoryAnchorId } from "@/pages/Chat/sessionApi/historyAssembly";
 
 const mocks = vi.hoisted(() => ({
   messagesContext: {},
@@ -17,14 +19,15 @@ const mocks = vi.hoisted(() => ({
   messages: [] as Array<{
     id: string;
     history?: boolean;
-    msgStatus?: "generating" | "finished";
-    role?: "assistant" | "user";
-    cards?: Array<{ code: string; data: unknown }>;
+    msgStatus?: "generating" | "finished" | "error" | "interrupted";
+    role?: "assistant" | "user" | "system";
+    cards?: Array<{ code: string; data?: unknown }>;
   }>,
   setMessages: vi.fn(),
   isSessionLoading: false,
   sessionNotFound: false,
   currentSessionId: "chat-1",
+  anchorId: "online-message",
   anchorTop: 100,
   scrollHeight: 1000,
   animationFrame: undefined as FrameRequestCallback | undefined,
@@ -153,18 +156,16 @@ vi.mock("@/components/agentscope-chat", () => ({
                     configurable: true,
                     value: () => ({
                       bottom:
-                        (item.id === "online-message"
-                          ? mocks.anchorTop
-                          : -100) + 48,
+                        (item.id === mocks.anchorId ? mocks.anchorTop : -100) +
+                        48,
                       height: 48,
                       left: 0,
                       right: 400,
                       toJSON: () => ({}),
-                      top:
-                        item.id === "online-message" ? mocks.anchorTop : -100,
+                      top: item.id === mocks.anchorId ? mocks.anchorTop : -100,
                       width: 400,
                       x: 0,
-                      y: item.id === "online-message" ? mocks.anchorTop : -100,
+                      y: item.id === mocks.anchorId ? mocks.anchorTop : -100,
                     }),
                   });
                 }}
@@ -187,6 +188,7 @@ vi.mock("@/api/modules/chat", () => ({
   chatApi: {
     getChatHistory: apiMocks.getChatHistory,
   },
+  sessionApi: {},
 }));
 
 vi.mock("@/pages/Chat/sessionApi", () => ({
@@ -319,6 +321,7 @@ describe("MessageList content-only composition", () => {
     mocks.isSessionLoading = false;
     mocks.sessionNotFound = false;
     mocks.currentSessionId = "chat-1";
+    mocks.anchorId = "online-message";
     mocks.anchorTop = 100;
     mocks.scrollHeight = 1000;
     mocks.animationFrame = undefined;
@@ -335,10 +338,452 @@ describe("MessageList content-only composition", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
     vi.unstubAllGlobals();
     cleanup();
   });
+
+  it("retains same-source fragments and pairs one response across archive pages", async () => {
+    const actual = await vi.importActual<
+      typeof import("@/pages/Chat/sessionApi")
+    >("@/pages/Chat/sessionApi");
+    vi.spyOn(sessionApiModule, "convertArchivedPage").mockImplementation(
+      actual.convertArchivedPage,
+    );
+    const runtime = (type: string, callId: string) => ({
+      id: "legacy-source",
+      role: "assistant",
+      type,
+      metadata: { original_id: "legacy-source" },
+      content: [
+        {
+          type: "data",
+          data: { call_id: callId, arguments: "{}", output: "ok" },
+        },
+      ],
+    });
+    mocks.messages = actual
+      .convertMessages([
+        {
+          id: "result-a",
+          role: "system",
+          type: "plugin_call_output",
+          content: [{ type: "data", data: { call_id: "a", output: "ok" } }],
+        },
+      ])
+      .map((message) => ({ ...message, history: true }));
+    const responseId = mocks.messages[0].id;
+    apiMocks.getChatHistory
+      .mockResolvedValueOnce({
+        messages: [runtime("plugin_call", "a"), runtime("plugin_call", "b")],
+        boundaries: [],
+        has_more: true,
+        next_cursor: "older",
+      })
+      .mockResolvedValueOnce({
+        messages: [{ id: "question", role: "user", content: "question" }],
+        boundaries: [],
+        has_more: false,
+        next_cursor: null,
+      });
+    render(<MessageList onSubmit={vi.fn()} />);
+    const list = screen.getByTestId("bubble-list");
+    list.scrollTop = -380;
+    fireEvent.scroll(list);
+    await waitFor(() =>
+      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(1),
+    );
+    await waitFor(() => expect(mocks.messages).toHaveLength(1));
+    expect(mocks.messages[0].id).toBe(responseId);
+    expect(
+      (mocks.messages[0].cards?.[0].data as { output: unknown[] }).output,
+    ).toHaveLength(3);
+    await flushHistoryLayout();
+    await waitFor(() =>
+      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(mocks.messages.map((message) => message.role)).toEqual([
+        "user",
+        "assistant",
+      ]),
+    );
+    expect(
+      (mocks.messages[1].cards?.[0].data as { output: unknown[] }).output,
+    ).toHaveLength(3);
+  });
+
+  it.each([2, 3])(
+    "keeps newly loaded response fragments across %s archive pages",
+    async (pageCount) => {
+      const actual = await vi.importActual<
+        typeof import("@/pages/Chat/sessionApi")
+      >("@/pages/Chat/sessionApi");
+      vi.spyOn(sessionApiModule, "convertArchivedPage").mockImplementation(
+        actual.convertArchivedPage,
+      );
+      mocks.messages = actual.convertArchivedPage(
+        [{ id: "latest-question", role: "user", content: "latest" }],
+        [],
+      );
+      for (let page = 0; page < pageCount; page += 1) {
+        const lastPage = page === pageCount - 1;
+        apiMocks.getChatHistory.mockResolvedValueOnce({
+          messages: [
+            ...(lastPage
+              ? [{ id: "question", role: "user", content: "question" }]
+              : []),
+            {
+              id: "fragment-" + (pageCount - page),
+              role: "assistant",
+              content: "part " + page,
+            },
+          ],
+          boundaries: [],
+          has_more: !lastPage,
+          next_cursor: lastPage ? null : "page-" + page,
+        });
+      }
+      const rendered = render(<MessageList onSubmit={vi.fn()} />);
+      const list = screen.getByTestId("bubble-list");
+      const responseId = actual.convertArchivedPage(
+        [{ id: "fragment-" + pageCount, role: "assistant", content: "part 0" }],
+        [],
+      )[0].id;
+      list.scrollTop = -380;
+      fireEvent.scroll(list);
+      for (let page = 0; page < pageCount; page += 1) {
+        await waitFor(() =>
+          expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(page + 1),
+        );
+        const response = mocks.messages.find(
+          (message) => message.role === "assistant",
+        )!;
+        expect(response.id).toBe(responseId);
+        const loadedResponse = actual.convertArchivedPage(
+          [
+            {
+              id: "fragment-" + (pageCount - page),
+              role: "assistant",
+              content: "part " + page,
+            },
+          ],
+          [],
+        )[0];
+        expect(
+          resolveHistoryAnchorId(
+            mocks.messages as Parameters<typeof resolveHistoryAnchorId>[0],
+            "process:" + loadedResponse.cards![0].data.id,
+          ),
+        ).toBe("process:" + (response.cards![0].data as { id: string }).id);
+        expect(
+          (
+            response.cards![0].data as { output: Array<{ id: string }> }
+          ).output.map((item) => item.id),
+        ).toEqual(
+          Array.from(
+            { length: page + 1 },
+            (_, index) => "fragment-" + (pageCount - page + index),
+          ),
+        );
+        if (page < pageCount - 1) {
+          rendered.rerender(<MessageList onSubmit={vi.fn()} />);
+          await flushHistoryLayout();
+        }
+      }
+      expect(mocks.messages.map((message) => message.role)).toEqual([
+        "user",
+        "assistant",
+        "user",
+      ]);
+      expect(apiMocks.getChatHistory).toHaveBeenLastCalledWith(
+        "chat-real-1",
+        "page-" + (pageCount - 2),
+        20,
+      );
+    },
+  );
+
+  it("keeps an online response after its user when an archive page repeats only the response", async () => {
+    const actual = await vi.importActual<
+      typeof import("@/pages/Chat/sessionApi")
+    >("@/pages/Chat/sessionApi");
+    vi.spyOn(sessionApiModule, "convertArchivedPage").mockImplementation(
+      actual.convertArchivedPage,
+    );
+    const response = { id: "answer", role: "assistant", content: "answer" };
+    mocks.messages = actual.convertArchivedPage(
+      [{ id: "question", role: "user", content: "question" }, response],
+      [],
+    );
+    const originalIds = mocks.messages.map((message) => message.id);
+    apiMocks.getChatHistory.mockResolvedValueOnce({
+      messages: [response],
+      boundaries: [],
+      has_more: true,
+      next_cursor: "question-page",
+    });
+    apiMocks.getChatHistory.mockResolvedValueOnce({
+      messages: [{ id: "question", role: "user", content: "question" }],
+      boundaries: [],
+      has_more: false,
+      next_cursor: null,
+    });
+    const rendered = render(<MessageList onSubmit={vi.fn()} />);
+    const list = screen.getByTestId("bubble-list");
+    list.scrollTop = -380;
+    fireEvent.scroll(list);
+    await waitFor(() =>
+      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(1),
+    );
+    expect(mocks.messages.map((message) => message.id)).toEqual(originalIds);
+    expect(
+      (mocks.messages[1].cards![0].data as { output: unknown[] }).output,
+    ).toHaveLength(1);
+    rendered.rerender(<MessageList onSubmit={vi.fn()} />);
+    await flushHistoryLayout();
+    await waitFor(() =>
+      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(2),
+    );
+    expect(mocks.messages.map((message) => message.id)).toEqual(originalIds);
+    expect(apiMocks.getChatHistory).toHaveBeenLastCalledWith(
+      "chat-real-1",
+      "question-page",
+      20,
+    );
+  });
+
+  it.each([false, true])(
+    "preserves online response precedence before a shared later user (archive prefix: %s)",
+    async (withPrefix) => {
+      const actual = await vi.importActual<
+        typeof import("@/pages/Chat/sessionApi")
+      >("@/pages/Chat/sessionApi");
+      vi.spyOn(sessionApiModule, "convertArchivedPage").mockImplementation(
+        actual.convertArchivedPage,
+      );
+      const laterUser = { id: "q2", role: "user", content: "next" };
+      mocks.messages = actual.convertArchivedPage(
+        [
+          { id: "q1", role: "user", content: "question" },
+          { id: "a1", role: "assistant", content: "first" },
+          { id: "a2", role: "assistant", content: "online latest" },
+          laterUser,
+        ],
+        [],
+      );
+      const online = mocks.messages[1];
+      const archive = [
+        ...(withPrefix
+          ? [{ id: "a0", role: "assistant", content: "archived prefix" }]
+          : []),
+        { id: "a2", role: "assistant", content: "archive stale" },
+        laterUser,
+      ];
+      const archivedResponse = actual.convertArchivedPage(archive, [])[0];
+      apiMocks.getChatHistory.mockResolvedValueOnce({
+        messages: archive,
+        boundaries: [],
+        has_more: false,
+        next_cursor: null,
+      });
+      render(<MessageList onSubmit={vi.fn()} />);
+      const list = screen.getByTestId("bubble-list");
+      list.scrollTop = -380;
+      fireEvent.scroll(list);
+      await waitFor(() =>
+        expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(1),
+      );
+      const response = mocks.messages[1];
+      expect
+        .soft(mocks.messages.map((message) => message.id))
+        .toEqual(["q1", online.id, "q2"]);
+      const data = response.cards![0].data as {
+        id: string;
+        output: Array<{ id: string; content: unknown }>;
+      };
+      expect.soft(data.id).toBe((online.cards![0].data as { id: string }).id);
+      expect
+        .soft(data.output.find((message) => message.id === "a2")?.content)
+        .toEqual(
+          (online.cards![0].data as typeof data).output.find(
+            (message) => message.id === "a2",
+          )?.content,
+        );
+      expect(data.output.map((message) => message.id)).toEqual(
+        withPrefix ? ["a1", "a0", "a2"] : ["a1", "a2"],
+      );
+      expect(
+        resolveHistoryAnchorId(
+          mocks.messages as Parameters<typeof resolveHistoryAnchorId>[0],
+          "process:" + archivedResponse.cards![0].data.id,
+        ),
+      ).toBe("process:" + data.id);
+    },
+  );
+
+  it("reconciles archive overlap with the online response after its user", async () => {
+    const actual = await vi.importActual<
+      typeof import("@/pages/Chat/sessionApi")
+    >("@/pages/Chat/sessionApi");
+    vi.spyOn(sessionApiModule, "convertArchivedPage").mockImplementation(
+      actual.convertArchivedPage,
+    );
+    const user = { id: "question", role: "user", content: "question" };
+    const first = { id: "answer-1", role: "assistant", content: "first" };
+    mocks.messages = actual
+      .convertMessages([
+        user,
+        first,
+        { id: "answer-2", role: "assistant", content: "second" },
+      ])
+      .map((message) => ({ ...message, history: true }));
+    apiMocks.getChatHistory.mockResolvedValueOnce({
+      messages: [user, first],
+      boundaries: [],
+      has_more: false,
+      next_cursor: null,
+    });
+    render(<MessageList onSubmit={vi.fn()} />);
+    const list = screen.getByTestId("bubble-list");
+    list.scrollTop = -380;
+    fireEvent.scroll(list);
+    await waitFor(() =>
+      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(1),
+    );
+    expect(mocks.messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+    ]);
+    expect(
+      (mocks.messages[1].cards![0].data as { output: unknown[] }).output,
+    ).toHaveLength(2);
+  });
+
+  it.each(["before-event", "after-event", "in-flight", "after-snapshot"])(
+    "preserves same-turn archive fragments and cursor when loaded %s",
+    async (timing) => {
+      vi.useFakeTimers();
+      const actual = await vi.importActual<
+        typeof import("@/pages/Chat/sessionApi")
+      >("@/pages/Chat/sessionApi");
+      vi.spyOn(sessionApiModule, "convertArchivedPage").mockImplementation(
+        actual.convertArchivedPage,
+      );
+      const current = actual
+        .convertMessages([
+          {
+            id: "result",
+            role: "system",
+            type: "plugin_call_output",
+            content: [{ type: "data", data: { call_id: "a", output: "ok" } }],
+          },
+          { id: "answer", role: "assistant", content: "answer" },
+        ])
+        .map((message) => ({ ...message, history: true }));
+      mocks.messages = current;
+      const page = {
+        messages: [
+          { id: "older-user", role: "user", content: "question" },
+          {
+            id: "call",
+            role: "assistant",
+            type: "plugin_call",
+            content: [
+              { type: "data", data: { call_id: "a", arguments: "{}" } },
+            ],
+          },
+        ],
+        boundaries: [],
+        has_more: true,
+        next_cursor: "after-first-page",
+      };
+      let resolvePage!: (value: typeof page) => void;
+      if (timing === "after-snapshot") {
+        apiMocks.getChatHistory.mockReturnValueOnce(
+          new Promise((resolve) => {
+            resolvePage = resolve;
+          }),
+        );
+      }
+      apiMocks.getChatHistory.mockResolvedValue(page);
+      const snapshot = { generating: false, messages: current };
+      let resolveSnapshot!: (value: typeof snapshot) => void;
+      if (timing === "in-flight") {
+        apiMocks.getSession.mockReturnValueOnce(
+          new Promise((resolve) => {
+            resolveSnapshot = resolve;
+          }),
+        );
+      }
+      apiMocks.getSession.mockResolvedValue(snapshot);
+      const view = () => <MessageList onSubmit={vi.fn()} />;
+      const rendered = render(view());
+      const loadArchive = async () => {
+        const list = screen.getByTestId("bubble-list");
+        list.scrollTop = -380;
+        fireEvent.scroll(list);
+        await act(async () => {
+          await Promise.resolve();
+        });
+        rendered.rerender(view());
+      };
+      if (timing === "before-event") await loadArchive();
+      document.dispatchEvent(
+        new CustomEvent("conversation_compacted", {
+          detail: { chat_id: "chat-real-1" },
+        }),
+      );
+      if (timing === "in-flight") {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(50);
+        });
+      }
+      if (timing !== "before-event") await loadArchive();
+      if (timing === "in-flight") resolveSnapshot(snapshot);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500);
+      });
+      if (timing === "after-snapshot") {
+        await act(async () => {
+          resolvePage(page);
+          await Promise.resolve();
+        });
+        rendered.rerender(view());
+      }
+      expect(apiMocks.getSession).toHaveBeenCalled();
+      expect(mocks.messages.map((message) => message.role)).toEqual([
+        "user",
+        "assistant",
+      ]);
+      expect(
+        (
+          mocks.messages[1].cards![0].data as { output: Array<{ id: string }> }
+        ).output.map((item) => item.id),
+      ).toEqual(["call", "result", "answer"]);
+      const calls = apiMocks.getSession.mock.calls.length;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(apiMocks.getSession).toHaveBeenCalledTimes(calls);
+      rendered.rerender(view());
+      await flushHistoryLayout();
+      const list = screen.getByTestId("bubble-list");
+      list.scrollTop = -200;
+      fireEvent.scroll(list);
+      list.scrollTop = -380;
+      fireEvent.scroll(list);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(apiMocks.getChatHistory).toHaveBeenLastCalledWith(
+        "chat-real-1",
+        timing === "before-event" ? null : "after-first-page",
+        20,
+      );
+    },
+  );
 
   it.each([false, true])(
     "automatically confirms the start of a short conversation (content-only: %s)",
@@ -373,6 +818,39 @@ describe("MessageList content-only composition", () => {
       expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(1);
     },
   );
+
+  it("waits for the switched session and its list before checking history", async () => {
+    mocks.messages = [{ id: "old", history: true }];
+    mocks.scrollHeight = 300;
+    apiMocks.getChatHistory.mockResolvedValue({
+      messages: [],
+      boundaries: [],
+      has_more: false,
+      next_cursor: null,
+    });
+    const rendered = render(<MessageList onSubmit={vi.fn()} />);
+    await waitFor(() =>
+      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(1),
+    );
+    apiMocks.getChatHistory.mockClear();
+
+    mocks.currentSessionId = "chat-2";
+    rendered.rerender(<MessageList onSubmit={vi.fn()} />);
+    expect(apiMocks.getChatHistory).not.toHaveBeenCalled();
+    mocks.isSessionLoading = true;
+    rendered.rerender(<MessageList onSubmit={vi.fn()} />);
+    expect(apiMocks.getChatHistory).not.toHaveBeenCalled();
+    mocks.messages = [{ id: "new", history: true }];
+    mocks.isSessionLoading = false;
+    rendered.rerender(<MessageList onSubmit={vi.fn()} />);
+    await waitFor(() =>
+      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(1),
+    );
+    expect(screen.getByTestId("bubble-list")).toHaveAttribute(
+      "data-item-ids",
+      "new",
+    );
+  });
 
   it("bounds initial short-list paging even when empty pages keep advancing", async () => {
     mocks.messages = [{ id: "online-message", history: true }];
@@ -740,6 +1218,95 @@ describe("MessageList content-only composition", () => {
     ]);
   });
 
+  it("preserves the visible content within a response when earlier history is inserted", async () => {
+    mocks.messages = [{ id: "online-message", history: true }];
+    apiMocks.getChatHistory.mockResolvedValue({
+      messages: [{ id: "archived-message" }],
+      boundaries: [],
+      has_more: true,
+      next_cursor: "next-page",
+    });
+    const rendered = render(<MessageList onSubmit={vi.fn()} />);
+    const list = screen.getByTestId("bubble-list");
+    const content = document.createElement("div");
+    content.dataset.historyAnchorId = "visible-runtime-message";
+    let contentTop = 120;
+    content.getBoundingClientRect = () => ({
+      top: contentTop,
+      bottom: contentTop + 48,
+      height: 48,
+      width: 400,
+      x: 0,
+      y: contentTop,
+      left: 0,
+      right: 400,
+      toJSON: () => ({}),
+    });
+    document.getElementById("online-message")!.appendChild(content);
+    list.scrollTop = -380;
+    fireEvent.scroll(list);
+    await waitFor(() => expect(mocks.messages).toHaveLength(2));
+    mocks.anchorTop = 240;
+    contentTop = 160;
+    rendered.rerender(<MessageList onSubmit={vi.fn()} />);
+    await flushHistoryFrame();
+    expect(list.scrollTop).toBe(-340);
+  });
+
+  it("restores a merged process descendant instead of the response bubble", async () => {
+    const actual = await vi.importActual<
+      typeof import("@/pages/Chat/sessionApi")
+    >("@/pages/Chat/sessionApi");
+    vi.spyOn(sessionApiModule, "convertArchivedPage").mockImplementation(
+      actual.convertArchivedPage,
+    );
+    const response = (id: string) =>
+      actual.convertArchivedPage(
+        [{ id: `runtime-${id}`, role: "assistant", content: id }],
+        [],
+      )[0];
+    const older = response("online-message");
+    const newer = response("newer-response");
+    mocks.anchorId = older.id;
+    mocks.messages = [older, newer];
+    apiMocks.getChatHistory.mockResolvedValue({
+      messages: [{ id: "archive", role: "assistant", content: "earlier" }],
+      boundaries: [],
+      has_more: false,
+      next_cursor: null,
+    });
+    const rendered = render(<MessageList onSubmit={vi.fn()} />);
+    const list = screen.getByTestId("bubble-list");
+    const rect = (top: number) => ({
+      top,
+      bottom: top + 48,
+      height: 48,
+      width: 400,
+      x: 0,
+      y: top,
+      left: 0,
+      right: 400,
+      toJSON: () => ({}),
+    });
+    const olderElement = document.getElementById(older.id)!;
+    const oldProcess = document.createElement("div");
+    oldProcess.dataset.historyAnchorId = `process:${older.cards![0].data.id}`;
+    oldProcess.getBoundingClientRect = () => rect(120);
+    olderElement.appendChild(oldProcess);
+    list.scrollTop = -380;
+    fireEvent.scroll(list);
+    await waitFor(() => expect(mocks.messages).toHaveLength(1));
+
+    mocks.anchorTop = 240;
+    const process = document.createElement("div");
+    process.dataset.historyAnchorId = `process:${newer.cards![0].data.id}`;
+    process.getBoundingClientRect = () => rect(160);
+    document.getElementById(newer.id)!.appendChild(process);
+    rendered.rerender(<MessageList onSubmit={vi.fn()} />);
+    await flushHistoryFrame();
+    expect(list.scrollTop).toBe(-340);
+  });
+
   it("restores the visible anchor after a post-commit history layout shift", async () => {
     mocks.messages = [{ id: "online-message", history: true }];
     let resolveHistory!: (page: {
@@ -1089,6 +1656,157 @@ describe("MessageList content-only composition", () => {
     await waitFor(() => {
       expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(2);
     });
+  });
+
+  it("keeps loaded archive messages when a compaction snapshot is accepted", async () => {
+    vi.useFakeTimers();
+    mocks.messages = [
+      {
+        id: "current-request",
+        role: "user",
+        cards: [{ code: "Request", data: { input: "current question" } }],
+      },
+      {
+        id: "current-response",
+        role: "assistant",
+        msgStatus: "generating",
+        cards: [{ code: "Response", data: { output: ["answer"] } }],
+      },
+    ];
+    apiMocks.getChatHistory.mockResolvedValueOnce({
+      messages: [{ id: "older-user", role: "user", content: "older question" }],
+      boundaries: [],
+      has_more: true,
+      next_cursor: "after-first-page",
+    });
+    apiMocks.getSession.mockResolvedValue({
+      generating: false,
+      messages: [
+        {
+          id: "current-request",
+          role: "user",
+          cards: [{ code: "Request", data: { input: "current question" } }],
+        },
+        {
+          id: "current-response",
+          role: "assistant",
+          msgStatus: "finished",
+          cards: [{ code: "Response", data: { output: ["answer"] } }],
+        },
+        {
+          id: "conversation-compaction-boundary-1",
+          cards: [
+            {
+              code: "ConversationCompactionBoundary",
+              data: { id: "boundary-1" },
+            },
+          ],
+        },
+      ],
+    });
+
+    const rendered = render(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+    document.dispatchEvent(
+      new CustomEvent("conversation_compacted", {
+        detail: {
+          chat_id: "chat-real-1",
+          boundary: { id: "boundary-1" },
+        },
+      }),
+    );
+
+    const bubbleList = screen.getByTestId("bubble-list");
+    bubbleList.scrollTop = -380;
+    fireEvent.scroll(bubbleList);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mocks.messages.some((message) => message.id === "older-user")).toBe(
+      true,
+    );
+    mocks.messages = mocks.messages.map((message) =>
+      message.id === "current-response"
+        ? { ...message, msgStatus: "finished" }
+        : message,
+    );
+    rendered.rerender(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    expect(apiMocks.getSession).toHaveBeenCalledTimes(1);
+    expect(mocks.messages.some((message) => message.id === "older-user")).toBe(
+      true,
+    );
+  });
+
+  it("keeps previously loaded archives before newly published pages after compaction", async () => {
+    vi.useFakeTimers();
+    mocks.messages = [
+      {
+        id: "current-request",
+        role: "user",
+        cards: [{ code: "Request", data: { input: "current" } }],
+      },
+    ];
+    const snapshot = { generating: false, messages: mocks.messages };
+    apiMocks.getSession.mockResolvedValue(snapshot);
+    apiMocks.getChatHistory
+      .mockResolvedValueOnce({
+        messages: [{ id: "old-user", role: "user" }],
+        boundaries: [],
+        has_more: true,
+        next_cursor: "old-page",
+      })
+      .mockResolvedValueOnce({
+        messages: [{ id: "newly-archived-user", role: "user" }],
+        boundaries: [],
+        has_more: false,
+        next_cursor: null,
+      });
+    const view = () => <MessageList onSubmit={vi.fn()} />;
+    const rendered = render(view());
+    const list = screen.getByTestId("bubble-list");
+    list.scrollTop = -380;
+    fireEvent.scroll(list);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    rendered.rerender(view());
+    document.dispatchEvent(
+      new CustomEvent("conversation_compacted", {
+        detail: { chat_id: "chat-real-1" },
+      }),
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await flushHistoryLayout();
+    list.scrollTop = -200;
+    fireEvent.scroll(list);
+    list.scrollTop = -380;
+    fireEvent.scroll(list);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    rendered.rerender(view());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(2);
+    expect(mocks.messages.map((message) => message.id)).toEqual([
+      "old-user",
+      "newly-archived-user",
+      "current-request",
+    ]);
   });
 
   it("does not replace a finished local turn when the compaction snapshot omits its tail", async () => {

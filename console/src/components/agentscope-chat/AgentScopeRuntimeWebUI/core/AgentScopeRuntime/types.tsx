@@ -30,6 +30,7 @@ export enum AgentScopeRuntimeMessageType {
   MCP_CALL_OUTPUT = "mcp_call_output",
   HEARTBEAT = "heartbeat",
   ERROR = "error",
+  CONVERSATION_COMPACTION_BOUNDARY = "conversation_compaction_boundary",
 }
 
 export enum AgentScopeRuntimeContentType {
