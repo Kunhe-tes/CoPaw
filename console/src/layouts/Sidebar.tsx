@@ -12,9 +12,7 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useAppMessage } from "../hooks/useAppMessage";
-// ==================== 选择智能体 (Kun He) - 已注释 ====================
 // import AgentSelector from "../components/AgentSelector";
-// ==================== 选择智能体结束 (Kun He) - 已注释 ====================
 import {
   SparkChatTabFill,
   SparkWifiLine,
@@ -89,6 +87,12 @@ export default function Sidebar({
   const canManageCurrentSourceConfig = isSuperManager || manager;
   const sourceId = useIframeStore((state) => state.source);
   const isRMassistSource = sourceId === "RMASSIST";
+  const space = useIframeStore((state) => state.space);
+  const bbkId = useIframeStore((state) => state.bbk);
+  const isRMassistSpace = space === "RM_ASSISTANCE";
+  // 运营看板、质量工程看板、批调度监控：space 不为 RMASSIST，或 space 为 RMASSIST 且 bbkId 为 '100'
+  const showAnalyticsDashboards =
+    !isRMassistSpace || (isRMassistSpace && bbkId === "100");
   const canUseSystemCheck = isSuperManager || manager;
 
   // ── Effects ──────────────────────────────────────────────────────────────
@@ -97,7 +101,7 @@ export default function Sidebar({
     authApi
       .getStatus()
       .then((res) => setAuthEnabled(res.enabled))
-      .catch(() => {});
+      .catch(() => { });
   }, []);
 
   // ── Handlers ──────────────────────────────────────────────────────────────
@@ -243,13 +247,13 @@ export default function Sidebar({
     },
     ...(canManageCurrentSourceConfig
       ? [
-          {
-            key: "scenario-presets-management",
-            icon: <Settings size={18} />,
-            path: "/scenario-presets-management",
-            label: "场景预设管理",
-          },
-        ]
+        {
+          key: "scenario-presets-management",
+          icon: <Settings size={18} />,
+          path: "/scenario-presets-management",
+          label: "场景预设管理",
+        },
+      ]
       : []),
     {
       key: "environments",
@@ -265,37 +269,37 @@ export default function Sidebar({
     },
     ...(isRMassistSource
       ? [
-          {
-            key: "skill-config",
-            icon: <SlidersHorizontal size={18} />,
-            path: "/skill-config",
-            label: t("nav.skillConfig", "Skill 配置"),
-          },
-        ]
+        {
+          key: "skill-config",
+          icon: <SlidersHorizontal size={18} />,
+          path: "/skill-config",
+          label: t("nav.skillConfig", "Skill 配置"),
+        },
+      ]
       : []),
     ...(canManageCurrentSourceConfig
       ? [
-          {
-            key: "system-config-page",
-            icon: <SparkModifyLine size={18} />,
-            path: "/system-config-page",
-            label: t("nav.currentSourceConfig", {
-              defaultValue: "系统特性配置",
-            }),
-          },
-        ]
+        {
+          key: "system-config-page",
+          icon: <SparkModifyLine size={18} />,
+          path: "/system-config-page",
+          label: t("nav.currentSourceConfig", {
+            defaultValue: "系统特性配置",
+          }),
+        },
+      ]
       : []),
     ...(canUseSystemCheck
       ? [
-          {
-            key: "system-check",
-            icon: <SearchCheck size={18} />,
-            path: "/system-check",
-            label: t("nav.systemCheck", {
-              defaultValue: "系统自检",
-            }),
-          },
-        ]
+        {
+          key: "system-check",
+          icon: <SearchCheck size={18} />,
+          path: "/system-check",
+          label: t("nav.systemCheck", {
+            defaultValue: "系统自检",
+          }),
+        },
+      ]
       : []),
     // 洞察中心
     {
@@ -304,33 +308,43 @@ export default function Sidebar({
       path: "/analytics/business-overview",
       label: t("nav.analyticsBusinessOverview", "运营看板"),
     },
-    {
-      key: "analytics-claw-data-overview",
-      icon: <SparkBarChartLine size={18} />,
-      path: "/analytics/claw-data-overview",
-      label: t("nav.analyticsClawDataOverview", "claw数据看板"),
-    },
-    ...(canManageCurrentSourceConfig
+    ...(canManageCurrentSourceConfig && showAnalyticsDashboards
       ? [
-          {
-            key: "analytics-continuous-governance",
-            icon: <SparkRefreshLine size={18} />,
-            path: "/analytics/continuous-governance",
-            label: t("nav.analyticsContinuousGovernance", "质量工程看板"),
-          },
-          {
-            key: "monitor-cron-batch-dispatch",
-            icon: <SparkRefreshLine size={18} />,
-            path: "/monitor/cron-batch-dispatch",
-            label: t("nav.monitorCronBatchDispatch", "批调度监控"),
-          },
-          {
-            key: "monitor-cron-batch-dispatch-new",
-            icon: <SparkRefreshLine size={18} />,
-            path: "/monitor/cron-batch-dispatch-new",
-            label: t("nav.monitorCronBatchDispatchNew", "批调度看板（新）"),
-          },
-        ]
+        {
+          key: "analytics-continuous-governance",
+          icon: <SparkRefreshLine size={18} />,
+          path: "/analytics/continuous-governance",
+          label: t("nav.analyticsContinuousGovernance", "质量工程看板"),
+        },
+        {
+          key: "monitor-cron-batch-dispatch",
+          icon: <SparkRefreshLine size={18} />,
+          path: "/monitor/cron-batch-dispatch",
+          label: t("nav.monitorCronBatchDispatch", "批调度监控"),
+        },
+        {
+          key: "monitor-cron-batch-dispatch-new",
+          icon: <SparkRefreshLine size={18} />,
+          path: "/monitor/cron-batch-dispatch-new",
+          label: t("nav.monitorCronBatchDispatchNew", "批调度看板（新）"),
+        },
+      ]
+      : []),
+    ...(isRMassistSpace
+      ? [
+        {
+          key: "analytics-claw-data-overview",
+          icon: <SparkBarChartLine size={18} />,
+          path: "/analytics/claw-data-overview",
+          label: t("nav.analyticsClawDataOverview", "Claw数据看板"),
+        },
+        {
+          key: "analytics-claw-skill-data-overview",
+          icon: <SparkBarChartLine size={18} />,
+          path: "/analytics/claw-skill-data-overview",
+          label: t("nav.analyticsClawSkillDataOverview", "Claw技能运行看板"),
+        },
+      ]
       : []),
     {
       key: "analytics-messages",
@@ -338,29 +352,33 @@ export default function Sidebar({
       path: "/analytics/messages",
       label: t("nav.analyticsMessages", "Messages"),
     },
-    {
-      key: "monitor-task-center",
-      icon: <SparkSearchLine size={18} />,
-      path: "/monitor/tasks",
-      label: t("nav.monitorTaskCenter", "异步任务中心"),
-    },
+    ...(showAnalyticsDashboards
+      ? [
+        {
+          key: "monitor-task-center",
+          icon: <SparkSearchLine size={18} />,
+          path: "/monitor/tasks",
+          label: t("nav.monitorTaskCenter", "异步任务中心"),
+        },
+      ]
+      : []),
     // {
-    //   key: "analytics-users",
-    //   icon: <SparkUserGroupLine size={18} />,
-    //   path: "/analytics/users",
-    //   label: t("nav.analyticsUsers", "Users"),
+    //   key: "analytics-users",
+    //   icon: <SparkUserGroupLine size={18} />,
+    //   path: "/analytics/users",
+    //   label: t("nav.analyticsUsers", "Users"),
     // },
     // {
-    //   key: "analytics-sessions",
-    //   icon: <SparkMessageLine size={18} />,
-    //   path: "/analytics/sessions",
-    //   label: t("nav.analyticsSessions", "Sessions"),
+    //   key: "analytics-sessions",
+    //   icon: <SparkMessageLine size={18} />,
+    //   path: "/analytics/sessions",
+    //   label: t("nav.analyticsSessions", "Sessions"),
     // },
     // {
-    //   key: "analytics-traces",
-    //   icon: <SparkFileTxtLine size={18} />,
-    //   path: "/analytics/traces",
-    //   label: t("nav.analyticsTraces", "Traces"),
+    //   key: "analytics-traces",
+    //   icon: <SparkFileTxtLine size={18} />,
+    //   path: "/analytics/traces",
+    //   label: t("nav.analyticsTraces", "Traces"),
     // },
     {
       key: "continuous-iteration",
@@ -476,12 +494,12 @@ export default function Sidebar({
         },
         ...(canManageCurrentSourceConfig
           ? [
-              {
-                key: "scenario-presets-management",
-                label: collapsed ? null : "场景预设管理",
-                icon: <Settings size={16} />,
-              },
-            ]
+            {
+              key: "scenario-presets-management",
+              label: collapsed ? null : "场景预设管理",
+              icon: <Settings size={16} />,
+            },
+          ]
           : []),
         {
           key: "environments",
@@ -495,38 +513,38 @@ export default function Sidebar({
         },
         ...(isRMassistSource
           ? [
-              {
-                key: "skill-config",
-                label: collapsed ? null : t("nav.skillConfig", "Skill 配置"),
-                icon: <SlidersHorizontal size={16} />,
-              },
-            ]
+            {
+              key: "skill-config",
+              label: collapsed ? null : t("nav.skillConfig", "Skill 配置"),
+              icon: <SlidersHorizontal size={16} />,
+            },
+          ]
           : []),
         ...(canManageCurrentSourceConfig
           ? [
-              {
-                key: "system-config-page",
-                label: collapsed
-                  ? null
-                  : t("nav.currentSourceConfig", {
-                      defaultValue: "系统特性配置",
-                    }),
-                icon: <SparkModifyLine size={16} />,
-              },
-            ]
+            {
+              key: "system-config-page",
+              label: collapsed
+                ? null
+                : t("nav.currentSourceConfig", {
+                  defaultValue: "系统特性配置",
+                }),
+              icon: <SparkModifyLine size={16} />,
+            },
+          ]
           : []),
         ...(canUseSystemCheck
           ? [
-              {
-                key: "system-check",
-                label: collapsed
-                  ? null
-                  : t("nav.systemCheck", {
-                      defaultValue: "系统自检",
-                    }),
-                icon: <SearchCheck size={16} />,
-              },
-            ]
+            {
+              key: "system-check",
+              label: collapsed
+                ? null
+                : t("nav.systemCheck", {
+                  defaultValue: "系统自检",
+                }),
+              icon: <SearchCheck size={16} />,
+            },
+          ]
           : []),
       ],
     },
@@ -536,69 +554,90 @@ export default function Sidebar({
       label: collapsed ? null : t("nav.insightCenter"),
       icon: <ChartColumn size={16} />,
       children: [
-        !hideChat && {
-          key: "analytics-business-overview",
-          label: collapsed
-            ? null
-            : t("nav.analyticsBusinessOverview", "运营看板"),
-          icon: <SparkBarChartLine size={16} />,
-        },
-        {
-          key: "analytics-claw-data-overview",
-          label: collapsed
-            ? null
-            : t("nav.analyticsClawDataOverview", "claw数据看板"),
-          icon: <SparkBarChartLine size={16} />,
-        },
-        ...(canManageCurrentSourceConfig
+        ...(!hideChat
           ? [
-              {
-                key: "analytics-continuous-governance",
-                label: collapsed
-                  ? null
-                  : t("nav.analyticsContinuousGovernance", "质量工程看板"),
-                icon: <SparkRefreshLine size={16} />,
-              },
-              {
-                key: "monitor-cron-batch-dispatch",
-                label: collapsed
-                  ? null
-                  : t("nav.monitorCronBatchDispatch", "批调度监控"),
-                icon: <SparkRefreshLine size={16} />,
-              },
-              {
-                key: "monitor-cron-batch-dispatch-new",
-                label: collapsed
-                  ? null
-                  : t("nav.monitorCronBatchDispatchNew", "批调度看板（新）"),
-                icon: <SparkRefreshLine size={16} />,
-              },
-            ]
+            {
+              key: "analytics-business-overview",
+              label: collapsed
+                ? null
+                : t("nav.analyticsBusinessOverview", "运营看板"),
+              icon: <SparkBarChartLine size={16} />,
+            },
+          ]
+          : []),
+        ...(canManageCurrentSourceConfig && showAnalyticsDashboards
+          ? [
+            {
+              key: "analytics-continuous-governance",
+              label: collapsed
+                ? null
+                : t("nav.analyticsContinuousGovernance", "质量工程看板"),
+              icon: <SparkRefreshLine size={16} />,
+            },
+            {
+              key: "monitor-cron-batch-dispatch",
+              label: collapsed
+                ? null
+                : t("nav.monitorCronBatchDispatch", "批调度监控"),
+              icon: <SparkRefreshLine size={16} />,
+            },
+            {
+              key: "monitor-cron-batch-dispatch-new",
+              label: collapsed
+                ? null
+                : t("nav.monitorCronBatchDispatchNew", "批调度看板（新）"),
+              icon: <SparkRefreshLine size={16} />,
+            },
+          ]
+          : []),
+        ...(isRMassistSpace
+          ? [
+            {
+              key: "analytics-claw-data-overview",
+              label: collapsed
+                ? null
+                : t("nav.analyticsClawDataOverview", "Claw数据看板"),
+              icon: <SparkBarChartLine size={16} />,
+            },
+            {
+              key: "analytics-claw-skill-data-overview",
+              label: collapsed
+                ? null
+                : t("nav.analyticsClawSkillDataOverview", "Claw技能运行看板"),
+              icon: <SparkBarChartLine size={16} />,
+            },
+          ]
           : []),
         {
           key: "analytics-messages",
           label: collapsed ? null : t("nav.analyticsMessages", "Messages"),
           icon: <SparkSearchLine size={16} />,
         },
-        {
-          key: "monitor-task-center",
-          label: collapsed ? null : t("nav.monitorTaskCenter", "异步任务中心"),
-          icon: <SparkSearchLine size={16} />,
-        },
+        ...(showAnalyticsDashboards
+          ? [
+            {
+              key: "monitor-task-center",
+              label: collapsed
+                ? null
+                : t("nav.monitorTaskCenter", "异步任务中心"),
+              icon: <SparkSearchLine size={16} />,
+            },
+          ]
+          : []),
         // {
-        //   key: "analytics-users",
-        //   label: collapsed ? null : t("nav.analyticsUsers", "Users"),
-        //   icon: <SparkUserGroupLine size={16} />,
+        //   key: "analytics-users",
+        //   label: collapsed ? null : t("nav.analyticsUsers", "Users"),
+        //   icon: <SparkUserGroupLine size={16} />,
         // },
         // {
-        //   key: "analytics-sessions",
-        //   label: collapsed ? null : t("nav.analyticsSessions", "Sessions"),
-        //   icon: <SparkMessageLine size={16} />,
+        //   key: "analytics-sessions",
+        //   label: collapsed ? null : t("nav.analyticsSessions", "Sessions"),
+        //   icon: <SparkMessageLine size={16} />,
         // },
         // {
-        //   key: "analytics-traces",
-        //   label: collapsed ? null : t("nav.analyticsTraces", "Traces"),
-        //   icon: <SparkFileTxtLine size={16} />,
+        //   key: "analytics-traces",
+        //   label: collapsed ? null : t("nav.analyticsTraces", "Traces"),
+        //   icon: <SparkFileTxtLine size={16} />,
         // },
       ],
     },
@@ -619,9 +658,8 @@ export default function Sidebar({
 
   const renderExpandIcon = ({ isOpen }: { isOpen?: boolean }) => (
     <ChevronDown
-      className={`${styles.submenuArrowIcon} ${
-        isOpen ? styles.submenuArrowIconOpen : ""
-      }`}
+      className={`${styles.submenuArrowIcon} ${isOpen ? styles.submenuArrowIconOpen : ""
+        }`}
       size={14}
       strokeWidth={2.2}
     />
@@ -632,17 +670,13 @@ export default function Sidebar({
   return (
     <Sider
       width={collapsed ? 72 : 240}
-      className={`${styles.sider}${
-        collapsed ? ` ${styles.siderCollapsed}` : ""
-      }${isDark ? ` ${styles.siderDark}` : ""}${
-        withoutHeader ? ` ${styles.siderWithoutHeader}` : ""
-      }`}
+      className={`${styles.sider}${collapsed ? ` ${styles.siderCollapsed}` : ""
+        }${isDark ? ` ${styles.siderDark}` : ""}${withoutHeader ? ` ${styles.siderWithoutHeader}` : ""
+        }`}
     >
-      {/* ==================== 选择智能体 (Kun He) - 已注释 ==================== */}
       {/* <div className={styles.agentSelectorContainer}>
-        <AgentSelector collapsed={collapsed} />
-      </div> */}
-      {/* ==================== 选择智能体结束 (Kun He) - 已注释 ==================== */}
+        <AgentSelector collapsed={collapsed} />
+      </div> */}
       {collapsed ? (
         <nav className={styles.collapsedNav}>
           {collapsedNavItems.map((item) => {
@@ -658,9 +692,8 @@ export default function Sidebar({
                 }}
               >
                 <button
-                  className={`${styles.collapsedNavItem} ${
-                    isActive ? styles.collapsedNavItemActive : ""
-                  }`}
+                  className={`${styles.collapsedNavItem} ${isActive ? styles.collapsedNavItemActive : ""
+                    }`}
                   onClick={() => navigate(item.path)}
                 >
                   {item.icon}
@@ -696,9 +729,8 @@ export default function Sidebar({
               setAccountModalOpen(true);
             }}
             block
-            className={`${styles.authBtn} ${
-              collapsed ? styles.authBtnCollapsed : ""
-            }`}
+            className={`${styles.authBtn} ${collapsed ? styles.authBtnCollapsed : ""
+              }`}
           >
             {!collapsed && t("account.title")}
           </Button>
@@ -710,9 +742,8 @@ export default function Sidebar({
               window.location.href = "/login";
             }}
             block
-            className={`${styles.authBtn} ${
-              collapsed ? styles.authBtnCollapsed : ""
-            }`}
+            className={`${styles.authBtn} ${collapsed ? styles.authBtnCollapsed : ""
+              }`}
           >
             {!collapsed && t("login.logout")}
           </Button>
