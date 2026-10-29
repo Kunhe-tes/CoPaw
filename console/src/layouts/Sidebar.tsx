@@ -346,12 +346,16 @@ export default function Sidebar({
         },
       ]
       : []),
-    {
-      key: "analytics-messages",
-      icon: <SparkSearchLine size={18} />,
-      path: "/analytics/messages",
-      label: t("nav.analyticsMessages", "Messages"),
-    },
+    ...(!hideChat
+      ? [
+        {
+          key: "analytics-messages",
+          icon: <SparkSearchLine size={18} />,
+          path: "/analytics/messages",
+          label: t("nav.analyticsMessages", "Messages"),
+        },
+      ]
+      : []),
     ...(showAnalyticsDashboards
       ? [
         {
@@ -608,11 +612,15 @@ export default function Sidebar({
             },
           ]
           : []),
-        {
-          key: "analytics-messages",
-          label: collapsed ? null : t("nav.analyticsMessages", "Messages"),
-          icon: <SparkSearchLine size={16} />,
-        },
+        ...(!hideChat
+          ? [
+            {
+              key: "analytics-messages",
+              label: collapsed ? null : t("nav.analyticsMessages", "Messages"),
+              icon: <SparkSearchLine size={16} />,
+            },
+          ]
+          : []),
         ...(showAnalyticsDashboards
           ? [
             {
