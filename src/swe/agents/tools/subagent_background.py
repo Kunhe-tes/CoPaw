@@ -269,6 +269,15 @@ async def _link_goal_subagent_run(
     )
 
 
+def _effective_subagent_skills(context, definition):
+    if (
+        definition.skill_owned is not None
+        or definition.agent_owned is not None
+    ):
+        return list(context.effective_skill_names or [])
+    return []
+
+
 def _create_start_subagent_tool(
     context: _BackgroundSubagentToolContext,
     directory: str,
@@ -357,13 +366,9 @@ def _create_start_subagent_tool(
                 definition=definition,
                 start_request=start_request,
                 definition_match=definition_match,
-                effective_skill_names=(
-                    list(context.effective_skill_names or [])
-                    if (
-                        definition.skill_owned is not None
-                        or definition.agent_owned is not None
-                    )
-                    else []
+                effective_skill_names=_effective_subagent_skills(
+                    context,
+                    definition,
                 ),
                 skill_snapshot_signatures=context.skill_snapshot_signatures,
                 skill_snapshot_dirs=context.skill_snapshot_dirs,
@@ -463,7 +468,11 @@ def _create_selected_expert_wait_tool(
                             context,
                             run_id,
                         )
-                    _log_selected_expert_unconfirmed(context, run_id, category)
+                    _log_selected_expert_unconfirmed(
+                        context,
+                        run_id,
+                        category,
+                    )
                     return _json_response({"status": "unavailable"})
                 if record is not None:
                     assert deadline is not None
@@ -472,17 +481,10 @@ def _create_selected_expert_wait_tool(
                         run_id,
                         deadline,
                     )
-                if category is not None:
-                    failures += 1
-                    if failures >= _SELECTED_EXPERT_RETRY_LIMIT:
-                        _log_selected_expert_unconfirmed(
-                            context,
-                            run_id,
-                            category,
-                        )
-                        return _json_response({"status": "unavailable"})
-                else:
-                    failures = 0
+                failures = _selected_expert_failure_count(failures, category)
+                if failures >= _SELECTED_EXPERT_RETRY_LIMIT:
+                    _log_selected_expert_unconfirmed(context, run_id, category)
+                    return _json_response({"status": "unavailable"})
                 delay = _SELECTED_EXPERT_POLL_SECONDS
                 if deadline is not None:
                     delay = min(delay, max(deadline - time.monotonic(), 0))
@@ -493,6 +495,10 @@ def _create_selected_expert_wait_tool(
             raise
 
     return wait_selected_expert
+
+
+def _selected_expert_failure_count(failures, category):
+    return failures + 1 if category is not None else 0
 
 
 async def _poll_selected_expert_record(
