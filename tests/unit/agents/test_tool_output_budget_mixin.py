@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock
 from swe.agents.tool_output_budget_mixin import ToolOutputBudgetMixin
 from swe.agents.tool_guard_mixin import ToolGuardMixin
 from swe.agents.react_agent import SWEAgent
+from swe.agents.utils.swe_token_counter import get_swe_token_counter
 from swe.app.channels.console.channel import ConsoleChannel
 from swe.app.runner.sse_replay import ReplayStream
 from swe.app.source_system_config.models import (
@@ -198,14 +199,17 @@ async def test_tool_free_summary_receives_complete_selected_expert_evidence(
     payload = {
         "run_id": "expert-run-1",
         "status": status,
-        "result": {"summary": "x" * 12000 + conclusion + "y" * 12000},
+        "result": {"summary": "x" * 24000 + conclusion + "y" * 24000},
     }
     prompts = []
 
     async def model(prompt):
         prompts.append(deepcopy(prompt))
         assert (
-            len(json.dumps([msg.content for msg in prompt]).encode()) <= 8000
+            await get_swe_token_counter(agent._agent_config).count(
+                messages=[msg.to_dict() for msg in prompt],
+            )
+            <= 8000
         )
         final_call = "You have failed to generate response" in str(
             prompt[-1].content,
@@ -249,6 +253,9 @@ async def test_tool_free_summary_receives_complete_selected_expert_evidence(
             self._agent_config = SimpleNamespace(
                 running=SimpleNamespace(
                     max_input_length=8000,
+                    context_compact=SimpleNamespace(
+                        token_count_estimate_divisor=4,
+                    ),
                     tool_result_compact=ToolResultCompactConfig(
                         recent_max_bytes=1000,
                     ),
