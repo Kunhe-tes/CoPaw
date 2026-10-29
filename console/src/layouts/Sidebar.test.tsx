@@ -8,6 +8,7 @@ const iframeState = vi.hoisted(() => ({
   manager: false,
   hideChat: false,
   source: "RMASSIST" as string | null,
+  space: null as string | null,
 }));
 
 vi.mock(
@@ -51,6 +52,7 @@ vi.mock("../stores/iframeStore", () => ({
 afterEach(() => {
   cleanup();
   iframeState.source = "RMASSIST";
+  iframeState.space = null;
 });
 
 describe("Sidebar skill config visibility", () => {
@@ -84,6 +86,7 @@ function LocationProbe() {
 describe("Sidebar Claw report navigation", () => {
   it("places the Claw dashboard after operations and navigates to its route", () => {
     iframeState.source = "OTHER";
+    iframeState.space = "RM_ASSISTANCE";
     render(
       <MemoryRouter>
         <Sidebar selectedKey="analytics-business-overview" />
@@ -92,7 +95,7 @@ describe("Sidebar Claw report navigation", () => {
     );
 
     const operations = screen.getByText("运营看板");
-    const claw = screen.getByText("Claw技能运行看板");
+    const claw = screen.getByText("Claw数据看板");
     expect(
       operations.compareDocumentPosition(claw) &
         Node.DOCUMENT_POSITION_FOLLOWING,
@@ -102,6 +105,18 @@ describe("Sidebar Claw report navigation", () => {
     expect(screen.getByTestId("location")).toHaveTextContent(
       "/analytics/claw-data-overview",
     );
-    expect(screen.getAllByText("Claw技能运行看板")).toHaveLength(1);
+    expect(screen.getAllByText("Claw数据看板")).toHaveLength(1);
+    expect(screen.getByText("Claw技能运行看板")).toBeInTheDocument();
+  });
+
+  it("hides the Claw dashboards outside the RM_ASSISTANCE space", () => {
+    render(
+      <MemoryRouter>
+        <Sidebar selectedKey="analytics-business-overview" />
+      </MemoryRouter>,
+    );
+
+    expect(screen.queryByText("Claw数据看板")).not.toBeInTheDocument();
+    expect(screen.queryByText("Claw技能运行看板")).not.toBeInTheDocument();
   });
 });
