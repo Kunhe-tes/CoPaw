@@ -140,10 +140,53 @@ class _SelectedExpertAgent(ToolGuardMixin, _AgentScopeLikeAgent):
         return None
 
 
+def _interrupt_evidence_archive(agent, tmp_path, monkeypatch, model_outcome):
+    from uuid import uuid4
+    from swe.agents.memory.conversation_archive import (
+        attach_conversation_archive,
+    )
+
+    attach_conversation_archive(
+        agent.memory,
+        tmp_path / "dialog",
+        str(uuid4()),
+    )
+    original_append = (
+        agent.memory.conversation_archive_store.append_checkpoint_facts
+    )
+
+    async def interrupted_append(*args, **kwargs):
+        if any(
+            "selected_expert_summary_evidence" in marks
+            for _msg, marks in agent.memory.content
+        ):
+            if model_outcome == "insert_cancel":
+                raise asyncio.CancelledError()
+            raise OSError("archive write failed")
+        return await original_append(*args, **kwargs)
+
+    monkeypatch.setattr(
+        agent.memory.conversation_archive_store,
+        "append_checkpoint_facts",
+        interrupted_append,
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("max_iters", [1, 2])
 @pytest.mark.parametrize("status", ["completed", "partial"])
-@pytest.mark.parametrize("model_outcome", ["reply", "error", "cancel"])
+@pytest.mark.parametrize(
+    "model_outcome",
+    [
+        "reply",
+        "error",
+        "cancel",
+        "insert_error",
+        "insert_cancel",
+        "reduction_error",
+        "reduction_cancel",
+    ],
+)
 async def test_tool_free_summary_receives_complete_selected_expert_evidence(
     tmp_path,
     monkeypatch,
@@ -155,15 +198,23 @@ async def test_tool_free_summary_receives_complete_selected_expert_evidence(
     payload = {
         "run_id": "expert-run-1",
         "status": status,
-        "result": {"summary": "x" * 600000 + conclusion + "y" * 600000},
+        "result": {"summary": "x" * 12000 + conclusion + "y" * 12000},
     }
     prompts = []
 
     async def model(prompt):
         prompts.append(deepcopy(prompt))
-        if model_outcome == "error":
+        assert (
+            len(json.dumps([msg.content for msg in prompt]).encode()) <= 8000
+        )
+        final_call = "You have failed to generate response" in str(
+            prompt[-1].content,
+        )
+        failing = model_outcome == "error" and final_call
+        cancelling = model_outcome == "cancel" and final_call
+        if failing or model_outcome == "reduction_error":
             raise RuntimeError("summary rejected")
-        if model_outcome == "cancel":
+        if cancelling or model_outcome == "reduction_cancel":
             raise asyncio.CancelledError()
         text = json.dumps([msg.content for msg in prompt])
         answer = (
@@ -197,6 +248,7 @@ async def test_tool_free_summary_receives_complete_selected_expert_evidence(
             self._workspace_dir = tmp_path
             self._agent_config = SimpleNamespace(
                 running=SimpleNamespace(
+                    max_input_length=8000,
                     tool_result_compact=ToolResultCompactConfig(
                         recent_max_bytes=1000,
                     ),
@@ -212,16 +264,15 @@ async def test_tool_free_summary_receives_complete_selected_expert_evidence(
             return await ToolGuardMixin._reasoning(self, tool_choice)
 
         async def _acting(self, tool_call):
-            call = tool_call
             await self._run_tool_call_with_hard_timeout_impl(
-                call,
-                call["name"],
-                call["input"],
+                tool_call,
+                tool_call["name"],
+                tool_call["input"],
             )
             self._complete_forced_tool_replay(
-                call,
-                call["name"],
-                call["input"],
+                tool_call,
+                tool_call["name"],
+                tool_call["input"],
             )
 
     agent = Agent()
@@ -234,6 +285,13 @@ async def test_tool_free_summary_receives_complete_selected_expert_evidence(
 
     agent.toolkit.register_tool_function(start_subagent)
     agent.toolkit.register_tool_function(wait_selected_expert)
+    if model_outcome.startswith("insert_"):
+        _interrupt_evidence_archive(
+            agent,
+            tmp_path,
+            monkeypatch,
+            model_outcome,
+        )
     monkeypatch.setattr(
         "swe.agents.react_agent.get_active_model_supports_multimodal",
         lambda: True,
@@ -246,17 +304,19 @@ async def test_tool_free_summary_receives_complete_selected_expert_evidence(
         answer = await reply
         assert conclusion in answer.get_text_content()
     else:
-        error = (
-            RuntimeError
-            if model_outcome == "error"
-            else asyncio.CancelledError
-        )
+        error = {
+            "error": RuntimeError,
+            "cancel": asyncio.CancelledError,
+            "insert_error": OSError,
+            "insert_cancel": asyncio.CancelledError,
+            "reduction_error": RuntimeError,
+            "reduction_cancel": asyncio.CancelledError,
+        }[model_outcome]
         with pytest.raises(error):
             await reply
-    assert len(prompts) == 1
-    assert payload["result"]["summary"] in json.dumps(
-        [msg.content for msg in prompts[0]],
-    )
+    if model_outcome == "reply":
+        assert len(prompts) > 1
+        assert conclusion in json.dumps([msg.content for msg in prompts[-1]])
     assert agent._request_context["selected_expert_execution"] is False
     assert agent._selected_expert_summary_evidence is None
     memories = await agent.memory.get_memory()
