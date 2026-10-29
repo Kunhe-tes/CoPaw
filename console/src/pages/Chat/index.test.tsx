@@ -6,6 +6,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ChatPage from "./index";
@@ -734,6 +735,7 @@ describe("ChatPage plan mode wiring", () => {
   });
 
   it("keeps a manual expert visible through new-chat creation, resolution, and repeated submissions", async () => {
+    mocks.inputDisabled = false;
     mocks.currentSessionId = "";
     mocks.pathname = "/chat";
     mocks.sessions = [];
@@ -824,13 +826,11 @@ describe("ChatPage plan mode wiring", () => {
     await waitFor(() =>
       expect(mocks.expertSelectorProps?.selectedExpertId).toBe("expert-1"),
     );
-    await act(async () => {
-      await (
-        mocks.expertSelectorProps?.onChange as (
-          id: string | null,
-        ) => Promise<void>
-      )(null);
-    });
+    fireEvent.click(
+      within(screen.getByTestId("chat-sender-prefix")).getByRole("button", {
+        name: "研究专家",
+      }),
+    );
     await waitFor(() =>
       expect(mocks.expertSelectorProps?.selectedExpertId).toBe(null),
     );
@@ -938,6 +938,7 @@ describe("ChatPage plan mode wiring", () => {
   );
 
   it("restores persistent binding and submits its revision without clearing selection", async () => {
+    mocks.inputDisabled = false;
     mocks.getExpertBinding.mockResolvedValue({
       revision: 3,
       expert_id: "expert-1",
@@ -975,6 +976,28 @@ describe("ChatPage plan mode wiring", () => {
     expect(body.expert_binding_revision).toBe(3);
     expect(body.selected_expert_id).toBeUndefined();
     expect(mocks.expertSelectorProps?.selectedExpertId).toBe("expert-1");
+    mocks.updateExpertBinding.mockResolvedValue({
+      revision: 4,
+      expert_id: null,
+      enabled: true,
+      available: true,
+      expert_name: null,
+      reason: null,
+    });
+    fireEvent.click(
+      within(screen.getByTestId("chat-sender-prefix")).getByRole("button", {
+        name: "绑定专家",
+      }),
+    );
+    await waitFor(() =>
+      expect(mocks.updateExpertBinding).toHaveBeenCalledWith("chat-1", {
+        expected_revision: 3,
+        expert_id: null,
+      }),
+    );
+    await waitFor(() =>
+      expect(mocks.expertSelectorProps?.selectedExpertId).toBe(null),
+    );
   });
 
   it.each(["/new", "/clear", "/reset"])(
