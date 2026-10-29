@@ -3290,6 +3290,31 @@ class AgentRunner(Runner):
         if task is not None and not task.done():
             task.cancel()
 
+    async def _persist_active_outcome(
+        self,
+        session_execution: Any,
+        outcome: TurnOutcome,
+        terminal_status: str,
+    ) -> bool:
+        if session_execution is None or not getattr(
+            session_execution,
+            "is_active",
+            True,
+        ):
+            return False
+        from .session_lifecycle import mark_terminal_turn_state
+
+        hydrate = getattr(session_execution, "hydrate_turn", None)
+        if hydrate is not None:
+            await hydrate(outcome.identity.msgid)
+        mark_terminal_turn_state(
+            session_execution.state,
+            outcome.identity.msgid,
+            terminal_status,
+        )
+        await session_execution.commit_state(session_execution.state)
+        return True
+
     async def persist_outcome(self, outcome: TurnOutcome) -> None:
         """Persist a terminal answer-turn outcome in the owning session."""
         runtime, session_execution = self._answer_turn_runtimes.get(
@@ -3318,20 +3343,11 @@ class AgentRunner(Runner):
                 outcome.identity.msgid,
             )
 
-        if session_execution is not None and getattr(
+        if await self._persist_active_outcome(
             session_execution,
-            "is_active",
-            True,
+            outcome,
+            terminal_status,
         ):
-            hydrate = getattr(session_execution, "hydrate_turn", None)
-            if hydrate is not None:
-                await hydrate(outcome.identity.msgid)
-            mark_terminal_turn_state(
-                session_execution.state,
-                outcome.identity.msgid,
-                terminal_status,
-            )
-            await session_execution.commit_state(session_execution.state)
             return
 
         session_id = str(

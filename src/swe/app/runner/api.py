@@ -823,6 +823,30 @@ async def _cached_history_state(
     return state
 
 
+async def _history_memory_messages(
+    chat_spec: ChatSpec,
+    state: dict,
+) -> list[ChatMessage]:
+    memory_state = state.get("agent", {}).get("memory", {})
+    if not memory_state:
+        return []
+    task_runs = state.get(TASK_RUNS_STATE_KEY)
+    if (
+        (chat_spec.meta or {}).get("session_kind") == "task"
+        and isinstance(task_runs, list)
+        and task_runs
+    ):
+        return await _annotate_task_run_messages(
+            memory_state,
+            task_runs,
+            session_id=chat_spec.session_id,
+        )
+    return await _messages_from_memory_state(
+        memory_state,
+        session_id=chat_spec.session_id,
+    )
+
+
 async def _build_chat_history(
     chat_spec: ChatSpec,
     *,
@@ -878,24 +902,7 @@ async def _build_chat_history(
             status=status,
             archive=archive,
         )
-    memory_state = state.get("agent", {}).get("memory", {})
-    messages: list[ChatMessage] = []
-    if memory_state:
-        if (
-            (chat_spec.meta or {}).get("session_kind") == "task"
-            and isinstance(state.get(TASK_RUNS_STATE_KEY), list)
-            and state.get(TASK_RUNS_STATE_KEY)
-        ):
-            messages = await _annotate_task_run_messages(
-                memory_state,
-                state[TASK_RUNS_STATE_KEY],
-                session_id=chat_spec.session_id,
-            )
-        else:
-            messages = await _messages_from_memory_state(
-                memory_state,
-                session_id=chat_spec.session_id,
-            )
+    messages = await _history_memory_messages(chat_spec, state)
     messages.extend(task_messages)
     messages.extend(model_call_failed_messages)
     known_ids = {

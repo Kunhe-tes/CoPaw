@@ -318,6 +318,14 @@ async def stream_retryable_query_error(
     )
 
 
+async def _rebuild_system_prompt(agent: Any) -> None:
+    rebuild_prompt = getattr(agent, "rebuild_sys_prompt_async", None)
+    if callable(rebuild_prompt):
+        await rebuild_prompt()
+    else:
+        agent.rebuild_sys_prompt()
+
+
 async def stream_single_query_attempt(
     owner: QueryAttemptOwner,
     *,
@@ -397,15 +405,7 @@ async def stream_single_query_attempt(
         skill_freshness_refresh = await owner._refresh_session_skill_freshness(
             runtime=runtime,
         )
-        rebuild_prompt = getattr(
-            runtime.agent,
-            "rebuild_sys_prompt_async",
-            None,
-        )
-        if callable(rebuild_prompt):
-            await rebuild_prompt()
-        else:
-            runtime.agent.rebuild_sys_prompt()
+        await _rebuild_system_prompt(runtime.agent)
         plan = await owner._build_turn_plan(
             runtime=runtime,
             request=attempt_input.request,
