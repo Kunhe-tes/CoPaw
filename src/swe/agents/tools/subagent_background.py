@@ -416,17 +416,8 @@ def _create_selected_expert_wait_tool(
 ) -> Callable[..., Any]:
     async def wait_selected_expert() -> ToolResponse:
         """Wait for the selected expert run belonging to this request."""
-        if not context.request_context.pop(
-            "_selected_expert_wait_authorized",
-            False,
-        ):
-            return _json_response({"status": "unavailable"})
-        run_id = str(
-            context.request_context.get("selected_expert_run_id") or "",
-        ).strip()
-        if not run_id or not context.request_context.get(
-            "selected_expert_execution",
-        ):
+        run_id = _selected_expert_wait_run_id(context)
+        if not run_id:
             return _json_response({"status": "unavailable"})
         authorized = False
         failures = 0
@@ -487,6 +478,24 @@ def _create_selected_expert_wait_tool(
             raise
 
     return wait_selected_expert
+
+
+def _selected_expert_wait_run_id(
+    context: _BackgroundSubagentToolContext,
+) -> str:
+    if not context.request_context.pop(
+        "_selected_expert_wait_authorized",
+        False,
+    ):
+        return ""
+    run_id = str(
+        context.request_context.get("selected_expert_run_id") or "",
+    ).strip()
+    if not run_id or not context.request_context.get(
+        "selected_expert_execution",
+    ):
+        return ""
+    return run_id
 
 
 def _selected_expert_failure_count(failures, category):
