@@ -463,17 +463,12 @@ def _create_selected_expert_wait_tool(
                 if category == "deadline" or (
                     deadline is not None and time.monotonic() >= deadline
                 ):
-                    if authorized:
-                        return await _selected_expert_deadline_response(
-                            context,
-                            run_id,
-                        )
-                    _log_selected_expert_unconfirmed(
+                    return await _selected_expert_deadline_response(
                         context,
                         run_id,
                         category,
+                        authorized=authorized,
                     )
-                    return _json_response({"status": "unavailable"})
                 if record is not None:
                     assert deadline is not None
                     category = await _reap_selected_expert_run(
@@ -558,7 +553,16 @@ async def _reap_selected_expert_run(context, run_id, deadline):
         return type(exc).__name__
 
 
-async def _selected_expert_deadline_response(context, run_id):
+async def _selected_expert_deadline_response(
+    context,
+    run_id,
+    category,
+    *,
+    authorized,
+):
+    if not authorized:
+        _log_selected_expert_unconfirmed(context, run_id, category)
+        return _json_response({"status": "unavailable"})
     terminal = await _cancel_selected_expert(context, run_id)
     return _json_response(
         (
