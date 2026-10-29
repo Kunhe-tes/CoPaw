@@ -324,6 +324,97 @@ def test_initial_creation_retry_recovers_after_expert_becomes_unavailable(
     assert len(asyncio.run(repo.list_chats())) == 2
 
 
+@pytest.mark.parametrize("failure", ["unavailable", "disabled"])
+def test_initial_creation_recovers_commit_between_lookup_and_validation(
+    binding_api,
+    monkeypatch,
+    failure,
+):
+    from swe.app.runner import api, expert_binding
+    from swe.app.runner.manager import ChatManager
+
+    client, repo = binding_api
+    original_lookup = ChatManager.get_chat_by_session
+    lookup_count = 0
+
+    async def lookup_then_commit(manager, session_id, channel, user_id):
+        nonlocal lookup_count
+        observed = await original_lookup(manager, session_id, channel, user_id)
+        lookup_count += 1
+        if lookup_count == 1:
+            assert observed is None
+            await repo.upsert_chat(
+                ChatSpec(
+                    id="concurrently-committed-draft",
+                    session_id=session_id,
+                    channel=channel,
+                    user_id=user_id,
+                    meta={
+                        "source_id": "source-a",
+                        "agent_id": "profile-a",
+                        "expert_main_binding": {
+                            "revision": 1,
+                            "expert_id": "a",
+                        },
+                    },
+                ),
+            )
+            if failure == "unavailable":
+                monkeypatch.setattr(
+                    api,
+                    "resolve_bound_expert",
+                    lambda *args: None,
+                )
+                monkeypatch.setattr(
+                    expert_binding,
+                    "resolve_bound_expert",
+                    lambda *args: None,
+                )
+            else:
+
+                async def disabled(_request):
+                    return False
+
+                monkeypatch.setattr(
+                    api,
+                    "expert_main_enabled_for_request",
+                    disabled,
+                )
+        return observed
+
+    monkeypatch.setattr(ChatManager, "get_chat_by_session", lookup_then_commit)
+    response = client.post(
+        "/chats",
+        json={
+            "session_id": "overlapping-draft",
+            "user_id": "alice",
+            "initial_expert_id": "a",
+        },
+    )
+
+    assert response.status_code == (200 if failure == "unavailable" else 409)
+    payload = (
+        response.json()
+        if failure == "unavailable"
+        else response.json()["detail"]
+    )
+    assert (
+        payload["id" if failure == "unavailable" else "chat_id"]
+        == "concurrently-committed-draft"
+    )
+    assert payload["expert_binding"]["expert_id"] == (
+        "a" if failure == "unavailable" else None
+    )
+    assert payload["expert_binding"]["enabled"] is (failure == "unavailable")
+    assert payload["expert_binding"]["revision"] == (
+        1 if failure == "unavailable" else 2
+    )
+    if failure == "unavailable":
+        assert payload["expert_binding"]["available"] is False
+    assert lookup_count == 2
+    assert len(asyncio.run(repo.list_chats())) == 2
+
+
 def test_initial_creation_retry_returns_404_when_disabled_chat_is_deleted(
     binding_api,
     monkeypatch,

@@ -1294,12 +1294,28 @@ async def create_chat(
                 existing,
                 request.initial_expert_id,
             )
-        binding = await _initialize_expert_binding(
-            request_context,
-            workspace,
-            spec,
-            request.initial_expert_id,
-        )
+        try:
+            binding = await _initialize_expert_binding(
+                request_context,
+                workspace,
+                spec,
+                request.initial_expert_id,
+            )
+        except HTTPException:
+            # Another attempt may have committed after the first lookup.
+            existing = await mgr.get_chat_by_session(
+                request.session_id,
+                channel=request.channel,
+                user_id=request.user_id,
+            )
+            if existing is None:
+                raise
+            return await _recover_initial_expert_chat(
+                request_context,
+                workspace,
+                existing,
+                request.initial_expert_id,
+            )
         created, inserted = await mgr.create_chat_if_absent_by_session(spec)
         if not inserted:
             return await _recover_initial_expert_chat(
