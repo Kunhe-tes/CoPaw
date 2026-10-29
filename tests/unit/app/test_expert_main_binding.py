@@ -278,6 +278,104 @@ def test_initial_expert_creation_retry_does_not_duplicate_or_overwrite(
     assert len(asyncio.run(repo.list_chats())) == 2
 
 
+@pytest.mark.parametrize("current_expert", ["a", "b"])
+def test_initial_creation_retry_recovers_after_expert_becomes_unavailable(
+    binding_api,
+    monkeypatch,
+    current_expert,
+):
+    from swe.app.runner import api, expert_binding
+
+    client, repo = binding_api
+    body = {
+        "session_id": "lost-response-draft",
+        "user_id": "alice",
+        "initial_expert_id": "a",
+    }
+    created = client.post("/chats", json=body).json()
+    if current_expert == "b":
+        response = client.put(
+            f"/chats/{created['id']}/expert-binding",
+            json={"expected_revision": 1, "expert_id": "b"},
+        )
+        assert response.status_code == 200
+    monkeypatch.setattr(api, "resolve_bound_expert", lambda *args: None)
+    monkeypatch.setattr(
+        expert_binding,
+        "resolve_bound_expert",
+        lambda *args: None,
+    )
+
+    retried = client.post("/chats", json=body)
+
+    assert retried.status_code == (200 if current_expert == "a" else 409)
+    payload = (
+        retried.json() if current_expert == "a" else retried.json()["detail"]
+    )
+    assert (
+        payload["id" if current_expert == "a" else "chat_id"] == created["id"]
+    )
+    assert payload["expert_binding"]["expert_id"] == current_expert
+    assert payload["expert_binding"]["revision"] == (
+        1 if current_expert == "a" else 2
+    )
+    assert payload["expert_binding"]["available"] is False
+    assert payload["expert_binding"]["reason"] == "expert_unavailable"
+    assert len(asyncio.run(repo.list_chats())) == 2
+
+
+def test_initial_creation_retry_returns_404_when_disabled_chat_is_deleted(
+    binding_api,
+    monkeypatch,
+):
+    client, repo = binding_api
+    body = {
+        "session_id": "deleted-draft",
+        "user_id": "alice",
+        "initial_expert_id": "a",
+    }
+    assert client.post("/chats", json=body).status_code == 200
+    release = repo.release_current_expert_binding
+
+    async def delete_before_release(chat_id):
+        await repo.delete_chats([chat_id])
+        return await release(chat_id)
+
+    monkeypatch.setattr(
+        repo,
+        "release_current_expert_binding",
+        delete_before_release,
+    )
+    response = client.post("/chats", json=body, headers={"enabled": "false"})
+    assert response.status_code == 404
+    assert len(asyncio.run(repo.list_chats())) == 1
+
+
+@pytest.mark.parametrize("headers", [{"source": "other"}, {"agent": "other"}])
+def test_initial_creation_retry_authorizes_before_resolving_experts(
+    binding_api,
+    monkeypatch,
+    headers,
+):
+    from swe.app.runner import api
+
+    client, repo = binding_api
+    body = {
+        "session_id": "private-draft",
+        "user_id": "alice",
+        "initial_expert_id": "a",
+    }
+    assert client.post("/chats", json=body).status_code == 200
+
+    def must_not_resolve(*args):
+        raise AssertionError("unauthorized retry must not resolve experts")
+
+    monkeypatch.setattr(api, "resolve_bound_expert", must_not_resolve)
+    response = client.post("/chats", json=body, headers=headers)
+    assert response.status_code == 404
+    assert len(asyncio.run(repo.list_chats())) == 2
+
+
 @pytest.mark.parametrize(
     "case,status",
     [("disabled", 409), ("invalid", 409), ("plan", 400), ("blank", 422)],

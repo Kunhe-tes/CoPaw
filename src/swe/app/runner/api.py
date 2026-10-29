@@ -1215,6 +1215,29 @@ async def _initialize_expert_binding(request, workspace, spec, expert_id):
     )
 
 
+async def _recover_initial_expert_chat(request, workspace, chat, expert_id):
+    """Recover a committed draft without revalidating its original selection."""
+    _authorize_chat(request, chat, workspace)
+    enabled = await expert_main_enabled_for_request(request)
+    try:
+        chat = await reconcile_binding(workspace, chat, enabled=enabled)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Chat not found") from exc
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    binding = await binding_view(workspace, chat, enabled=enabled)
+    if binding.expert_id != expert_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "expert_binding_changed",
+                "chat_id": chat.id,
+                "expert_binding": binding.model_dump(),
+            },
+        )
+    return ChatCreateResponse(**chat.model_dump(), expert_binding=binding)
+
+
 @router.post("", response_model=ChatCreateResponse)
 async def create_chat(
     request_context: Request,
@@ -1259,6 +1282,18 @@ async def create_chat(
     )
     binding = None
     if request.initial_expert_id is not None:
+        existing = await mgr.get_chat_by_session(
+            request.session_id,
+            channel=request.channel,
+            user_id=request.user_id,
+        )
+        if existing is not None:
+            return await _recover_initial_expert_chat(
+                request_context,
+                workspace,
+                existing,
+                request.initial_expert_id,
+            )
         binding = await _initialize_expert_binding(
             request_context,
             workspace,
@@ -1267,17 +1302,12 @@ async def create_chat(
         )
         created, inserted = await mgr.create_chat_if_absent_by_session(spec)
         if not inserted:
-            _authorize_chat(request_context, created, workspace)
-            binding = await binding_view(workspace, created, enabled=True)
-            if binding.expert_id != request.initial_expert_id:
-                raise HTTPException(
-                    status_code=409,
-                    detail={
-                        "code": "expert_binding_changed",
-                        "chat_id": created.id,
-                        "expert_binding": binding.model_dump(),
-                    },
-                )
+            return await _recover_initial_expert_chat(
+                request_context,
+                workspace,
+                created,
+                request.initial_expert_id,
+            )
     else:
         created = await mgr.create_chat(spec)
     return ChatCreateResponse(**created.model_dump(), expert_binding=binding)
