@@ -409,6 +409,7 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 
 ### 财富工作台多渠道 iframe 消息入口
 
+- 同一父页面标签页内，同源 CoPaw iframe 会共用 `sessionStorage["swe-iframe-context"]`。排查菜单 A 的 USER_DATA 参数残留到菜单 B 时，先检查 B 是否走 `origin=Y`：`main.tsx` 必须在注册消息监听器前调用 `resetIframeContextForEntry()`，通过 `clearContext()` 重置内存及持久化字段，再应用当前 URL/Cookie 身份与来源；即使用户相同或身份 Cookie 缺失，也不能沿用旧消息中的权限、自定义请求头、显示开关及来源。不能在等待外部 token 后的 `handleUrlOriginParam()` 中再次清理，否则会误删本次页面已收到的新消息；来源继续遵守 URL > 本次消息 > origin 默认值的优先级。清理只发生在入口初始化，内部路由导航保留当前上下文。回归入口：`console/src/utils/iframeMessage.test.ts`。
 - 父应用 iframe 地址为 `/wealth/board` 或 `/wealth/create`（部署在 `/console` 下时加此前缀），不带 `origin=Y`。父应用在每次 iframe `load` 后发送 `USER_DATA`，使用子页面的明确 origin 作为 `targetOrigin`；不新增 READY 握手。
 - 消息 `data.source` 必须为非空渠道字符串（本次为 `RCZT`，后续渠道直接传自身标识，无需修改子页面），`sapId`（兼容 `userId`）传非空字符串以保留前导零；传入 `userName`、`bbkId`（兼容 `bbkOrgId`）、`positionId` 以及业务需要的 `orgCode`、`subBranchId`、`orgLvl`、`sysId`。岗位缺失或未识别仍按原权限矩阵显示暂无访问权限。
 - `hideLogo: true`（兼容字符串 `"true"`）隐藏头部、播报与侧栏，内部导航持续生效，不补 URL 参数。身份和布局由消息提供；接口鉴权仍使用现有登录 Cookie，消息传参并不替代登录态。
