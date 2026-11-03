@@ -21,6 +21,7 @@
 | [database-pool-disposal.md](database-pool-disposal.md) | MySQL 故障连接强制关闭、健康空闲关闭、容量隔离及反复修复的测试盲区 |
 | [event-loop-worker-boundaries.md](event-loop-worker-boundaries.md) | 五项事件循环热点的 worker 入口、取消与并发规则、回归及性能测量边界 |
 | [managed-execution-model-identity.md](managed-execution-model-identity.md) | 新版批调度的任务 ID、默认模型解析与实际模型落库 |
+| [新版批调度看板查询缓慢](location-paths.md#新版批调度看板查询缓慢) | 大清单重复解析、单次聚合、MySQL 执行计划及规模验证 |
 | [external-job-list.md](external-job-list.md) | 外部 jobs 列表的无初始化接口、原接口契约及任务绑定的只读边界 |
 | [hook-distribution-activation.md](hook-distribution-activation.md) | Hook 分发成功但目标未启用的根因、复现证据与事务内启用方案 |
 | [location-paths.md](location-paths.md) | 按问题类型给出代码、配置与命令入口，包含财富任务动态指标与经营分组 |

@@ -44,6 +44,8 @@ class CallbackDatabase(ModeDatabase):
         """)
 
     async def fetch_all(self, query, params=None):
+        # SQLite 没有原生 JSON 类型；仅替换类型转换，仍执行真实关联和聚合。
+        query = query.replace("CAST(c.members_json AS JSON)", "c.members_json")
         query = re.sub(
             r"TIMESTAMPDIFF\(\s*SECOND\s*,",
             "TIMESTAMPDIFF('SECOND',",

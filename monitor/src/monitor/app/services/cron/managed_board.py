@@ -150,28 +150,20 @@ class ManagedBoardQuery:
         where, params = sql.batch_where(source, start, end, query)
         bound = (*params, status, status) if status else params
         rows = await self.db.fetch_all(
-            sql.batch_list_query(where, bool(status)),
+            sql.list_query(where, bool(status)),
             (*bound, page_size, (page - 1) * page_size),
         )
+        # 全局统计左联分页；即使当前页为空，仍返回一行统计。
         stats = rows[0]
         if stats["unavailable_batches"]:
             raise ManagedBoardUnavailable("cron_batch_relation_incomplete")
         return {
             "items": [
-                batch_item(row)
-                for row in rows
-                if row["receipt_id"] is not None
+                batch_item(row) for row in rows if row["batch_id"] is not None
             ],
             "total": int(stats["total_batches"]),
             "stats": {
-                name: int(stats[name] or 0)
-                for name in (
-                    "total_batches",
-                    "total_members",
-                    "done_members",
-                    "failed_members",
-                    "running_batches",
-                )
+                name: int(stats[name] or 0) for name in sql.STATS_FIELDS
             },
             "page": page,
             "page_size": page_size,

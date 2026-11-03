@@ -85,7 +85,7 @@ class QueryDatabase:
     async def fetch_all(self, query, params=None):
         if self.broken:
             raise RuntimeError("database unavailable: private credentials")
-        if not query.lstrip().upper().startswith("SELECT "):
+        if not query.lstrip().upper().startswith(("SELECT ", "WITH ")):
             self.writes += 1
         return [
             dict(row)

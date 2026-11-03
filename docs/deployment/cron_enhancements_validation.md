@@ -175,11 +175,11 @@ SWE 和 Scheduler 都升级后再开放年份及日期功能。旧五段接口�
 
 ### Monitor 批次列表查询回归
 
-`GET /api/monitor/cron/managed-dispatch/batches` 的路径、参数和响应字段不变；全局统计与分页复用同一条 SQL 中的分组事实 CTE，不拆统计接口，不增加缓存或汇总表。批次详情仍使用原查询。
+`GET /api/monitor/cron/managed-dispatch/batches` 的路径、参数和响应字段不变；先将候选回执清单物化为原生 JSON，再让全局统计与分页复用一次聚合。批次详情也复用该清单物化逻辑。不拆统计接口，不增加缓存、汇总表或业务 DDL。
 
-- 在实际 MySQL 8 环境用 `EXPLAIN FORMAT=JSON` 核对 `batch_facts` 的分组物化和复用，比较实际查询耗时；SQLite 回归只能验证 SQL 结果和不再发起两次聚合，不能代替行内性能验收。
+- 在实际 MySQL 8 环境用 `EXPLAIN ANALYZE` / optimizer trace 核对 `board_receipts` 的原生 JSON 物化及 `board_aggregates` 的复用，比较完整查询耗时；SQLite 回归只验证 SQL 结果，不能代替行内性能验收。不能只用 EXPLAIN 最后分页节点耗时代表完整查询。
 - 按今天、近 7 天、状态筛选和关键词分别核对 items、total、stats；翻到空页仍应保留全局统计。成员关系异常仍按原语义报告不可用，不伪造正常或完成状态。
-- 本次只消除确定存在的重复聚合，成员 JSON 校验及关联仍保留；不能承诺单凭本次改写就解决连接池等待或所有 15 秒超时。通知领取孤立记录不在本次修复范围。
+- 本轮在单次聚合基础上增加 `CAST(... AS JSON)` 与 `NO_MERGE`，避免大清单逐成员反复解析，并缩小聚合输出；不使用 JSON_TABLE。完整身份、清单和重试指针校验仍保留。成员仍需遍历，不能承诺消除连接池等待或所有 15 秒超时。历史及本轮规模验证见对应性能计划；通知领取孤立记录不在本次修复范围。
 
 ### 调度与追踪观察
 

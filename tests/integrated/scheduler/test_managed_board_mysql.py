@@ -40,7 +40,14 @@ async def failed_mysql_batch(pair):
         PlatformClient(),
     ).create(
         caller,
-        {**create_payload("board-mysql"), "dispatch_state": "batch_enabled"},
+        {
+            **create_payload(
+                "board-mysql",
+                task_type="text",
+                text="board fixture",
+            ),
+            "dispatch_state": "batch_enabled",
+        },
     )
     binding = await db.fetch_one(
         "SELECT batch_external_job_id FROM swe_cron_job_states WHERE tenant_id=%s AND job_id=%s",
