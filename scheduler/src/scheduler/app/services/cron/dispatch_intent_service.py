@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from scheduler.app.database import get_db_connection
 from .batch_priority import priority_key, priority_snapshot
-from .capacity_claim import available_capacity, write_capacity
+from .capacity_claim import legacy_available_capacity, write_capacity
 from .batch_operations import refresh_batch_counts
 from .dispatch_gate import (
     lock_batch_control,
@@ -33,8 +33,7 @@ EXECUTION_SCAN_LIMIT = 200
 SUBTASK_EXECUTION_FAILED = "子任务执行失败"
 SUBTASK_STATUS_TIMEOUT = "获取子任务状态超时"
 CRON_AUTH_EXPIRED_ERROR = (
-    "cron auth user_info is expired; "
-    "please refresh cron auth configuration"
+    "cron auth user_info is expired; " "please refresh cron auth configuration"
 )
 CRON_AUTH_EXPIRED_FAILURE_MESSAGE = f"鉴权过期: {CRON_AUTH_EXPIRED_ERROR}"
 DISPATCH_OUTCOME_UNKNOWN = "dispatch outcome unknown past stale timeout"
@@ -253,7 +252,8 @@ def _build_execution_row(
     now: datetime,
     policy: Mapping[str, Any],
     definitions_by_key: Mapping[
-        tuple[str, str, str], Mapping[str, Any]
+        tuple[str, str, str],
+        Mapping[str, Any],
     ],
     heat_by_job_id: Mapping[str, Decimal],
 ) -> dict[str, Any] | None:
@@ -292,7 +292,12 @@ class CronDispatchIntentService:
     """Durable queue service for cron dispatch intents."""
 
     async def create_batch_with_intents(
-        self, *, batch, jobs, due_at, scheduled_fire_at
+        self,
+        *,
+        batch,
+        jobs,
+        due_at,
+        scheduled_fire_at,
     ):
         db = get_db_connection()
         identity = tuple(
@@ -305,23 +310,25 @@ class CronDispatchIntentService:
             jobs=jobs,
             due_at=due_at,
             priority_policy=batch["callback_metadata"].get(
-                "batch_dispatch_priority", {}
+                "batch_dispatch_priority",
+                {},
             ),
         )
         batch = {
             **batch,
             "scheduled_fire_at": _to_beijing_naive(scheduled_fire_at),
             "callback_received_at": _to_beijing_naive(
-                batch["callback_received_at"]
+                batch["callback_received_at"],
             ),
         }
         offset = max(
             0,
             int(
                 parse_meta(parent.get("meta")).get(
-                    "batch_dispatch_offset_minutes", 0
+                    "batch_dispatch_offset_minutes",
+                    0,
                 )
-                or 0
+                or 0,
             ),
         )
         return await admit_batch(
@@ -334,7 +341,10 @@ class CronDispatchIntentService:
 
     async def prepare_handoff(self, row, worker_id, now_utc):
         result = await prepare_handoff(
-            get_db_connection(), row, worker_id, _to_beijing_naive(now_utc)
+            get_db_connection(),
+            row,
+            worker_id,
+            _to_beijing_naive(now_utc),
         )
         if result in {"skipped", "paused"}:
             batch_id = (
@@ -343,13 +353,17 @@ class CronDispatchIntentService:
                 else row.batch_id
             )
             await self.update_batch_counts(
-                batch_id=batch_id, updated_at=now_utc
+                batch_id=batch_id,
+                updated_at=now_utc,
             )
         return result
 
     async def settle_callback_skip(self, row, worker_id, now_utc):
         changed = await settle_callback_skip(
-            get_db_connection(), row, worker_id, _to_beijing_naive(now_utc)
+            get_db_connection(),
+            row,
+            worker_id,
+            _to_beijing_naive(now_utc),
         )
         if changed:
             batch_id = (
@@ -358,7 +372,8 @@ class CronDispatchIntentService:
                 else row.batch_id
             )
             await self.update_batch_counts(
-                batch_id=batch_id, updated_at=now_utc
+                batch_id=batch_id,
+                updated_at=now_utc,
             )
         return changed
 
@@ -537,7 +552,8 @@ class CronDispatchIntentService:
             for d in definitions
         }
         parent = next(
-            (j for j in jobs if j.get("job_id") == parent_job_id), {}
+            (j for j in jobs if j.get("job_id") == parent_job_id),
+            {},
         )
         parent_definition = definitions_by_key.get(
             (
@@ -1096,7 +1112,7 @@ class CronDispatchIntentService:
                         )
                         limit = min(
                             limit,
-                            await available_capacity(
+                            await legacy_available_capacity(
                                 cur,
                                 scope,
                                 lock_owner,
@@ -1115,8 +1131,8 @@ class CronDispatchIntentService:
                                             "model_id",
                                         ),
                                         scope,
-                                    )
-                                )
+                                    ),
+                                ),
                             )
                         )
                         if limit <= 0:
@@ -1272,7 +1288,10 @@ class CronDispatchIntentService:
             return []
         batch_source = str(_row_value(batch_rows[0], 0, "source_id") or "")
         control = await lock_batch_control(
-            cur, candidate_batch_id, batch_source, skip_locked=True
+            cur,
+            candidate_batch_id,
+            batch_source,
+            skip_locked=True,
         )
         if control is None or control["paused"]:
             return []
