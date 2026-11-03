@@ -142,6 +142,35 @@ def aggregate_query(where):
     return f"SELECT a.*, {STATE} AS status FROM ({BATCH_SELECT} WHERE {where} GROUP BY c.receipt_id) a"
 
 
+def batch_list_query(where, filtered):
+    """带分组的事实 CTE 供统计和分页共用，避免两次关联全范围成员。"""
+    state_filter = "WHERE status=%s" if filtered else ""
+    stats_filter = (
+        "WHERE status=%s OR status='unavailable'" if filtered else ""
+    )
+    return f"""
+        WITH batch_facts AS (
+            {BATCH_SELECT} WHERE {where} GROUP BY c.receipt_id
+        ), batch_states AS (
+            SELECT batch_facts.*, {STATE} AS status FROM batch_facts
+        ), batch_stats AS (
+            SELECT COUNT(*) AS total_batches,
+                SUM(member_count) AS total_members,
+                SUM(done_count) AS done_members,
+                SUM(failed_count) AS failed_members,
+                SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) AS running_batches,
+                SUM(CASE WHEN status='unavailable' THEN 1 ELSE 0 END) AS unavailable_batches
+            FROM batch_states {stats_filter}
+        ), batch_page AS (
+            SELECT * FROM batch_states {state_filter}
+            ORDER BY logical_fire_at DESC,batch_id DESC LIMIT %s OFFSET %s
+        )
+        SELECT batch_stats.*,batch_page.*
+        FROM batch_stats LEFT JOIN batch_page ON 1=1
+        ORDER BY batch_page.logical_fire_at DESC,batch_page.batch_id DESC
+    """
+
+
 def event_selection(source, batch_id):
     """按批索引和执行索引取并集，避免 OR/相关子查询扫描来源的全部历史事件。"""
     direct = f"SELECT event_id FROM {EVENTS} WHERE source_id=%s AND source_id COLLATE utf8mb4_bin=%s AND batch_id=%s"

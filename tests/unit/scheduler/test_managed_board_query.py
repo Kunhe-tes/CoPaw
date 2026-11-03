@@ -12,6 +12,39 @@ from tests.unit.scheduler.test_managed_batch_retry import (
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", [None, "failed", "completed"])
+@pytest.mark.parametrize("page", [1, 2])
+async def test_list_aggregates_once_and_preserves_filtered_totals(
+    callback_setup,
+    status,
+    page,
+):
+    from monitor.app.services.cron.managed_board import ManagedBoardQuery
+
+    db = callback_setup[0]
+    await failed_batch(callback_setup)
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    result = await ManagedBoardQuery(db).batches(
+        "bank",
+        status=status,
+        page=page,
+        page_size=1,
+    )
+    aggregates = [q for q in statements if "GROUP BY c.receipt_id" in q]
+    assert len(aggregates) == 1
+    assert aggregates[0].count("GROUP BY c.receipt_id") == 1
+    expected = 0 if status == "completed" else 1
+    assert result["total"] == expected
+    assert result["stats"]["total_members"] == expected
+    assert result["stats"]["failed_members"] == expected
+    assert len(result["items"]) == (expected if page == 1 else 0)
+    assert result["page"] == page
+    assert result["page_size"] == 1
+    assert not (await ManagedBoardQuery(db).batches("other"))["items"]
+
+
+@pytest.mark.asyncio
 async def test_board_counts_current_member_without_growing_after_retry(
     callback_setup,
 ):

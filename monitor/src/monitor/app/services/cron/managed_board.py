@@ -148,31 +148,30 @@ class ManagedBoardQuery:
     ):
         await self._ready()
         where, params = sql.batch_where(source, start, end, query)
-        grouped = sql.aggregate_query(where)
-        state_filter = "WHERE status=%s" if status else ""
-        stats_filter = (
-            "WHERE status=%s OR status='unavailable'" if status else ""
-        )
-        bound = (*params, status) if status else params
-        stats = await self.db.fetch_one(
-            "SELECT COUNT(*) AS total_batches, SUM(member_count) AS total_members, SUM(done_count) AS done_members, SUM(failed_count) AS failed_members, "
-            "SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) AS running_batches, SUM(CASE WHEN status='unavailable' THEN 1 ELSE 0 END) AS unavailable_batches "
-            f"FROM ({grouped}) b {stats_filter}",
-            bound,
-        )
-        if stats["unavailable_batches"]:
-            raise ManagedBoardUnavailable("cron_batch_relation_incomplete")
+        bound = (*params, status, status) if status else params
         rows = await self.db.fetch_all(
-            f"SELECT * FROM ({grouped}) b {state_filter} ORDER BY logical_fire_at DESC,batch_id DESC LIMIT %s OFFSET %s",
+            sql.batch_list_query(where, bool(status)),
             (*bound, page_size, (page - 1) * page_size),
         )
+        stats = rows[0]
+        if stats["unavailable_batches"]:
+            raise ManagedBoardUnavailable("cron_batch_relation_incomplete")
         return {
-            "items": [batch_item(row) for row in rows],
+            "items": [
+                batch_item(row)
+                for row in rows
+                if row["receipt_id"] is not None
+            ],
             "total": int(stats["total_batches"]),
             "stats": {
-                name: int(value or 0)
-                for name, value in stats.items()
-                if name != "unavailable_batches"
+                name: int(stats[name] or 0)
+                for name in (
+                    "total_batches",
+                    "total_members",
+                    "done_members",
+                    "failed_members",
+                    "running_batches",
+                )
             },
             "page": page,
             "page_size": page_size,
