@@ -46,13 +46,14 @@ export function buildManagedCronSubmitPayload(
   values: ManagedCronFormValues,
   original?: DatedJob | null,
 ) {
-  const payload: ManagedCronSpec = buildCronJobSubmitPayload(values);
+  const { runDates, ...baseValues } = values;
+  const payload: ManagedCronSpec = buildCronJobSubmitPayload(baseValues);
   payload.run_date_range = original?.meta?.broadcast_source_job_id
     ? original.run_date_range ?? null
-    : values.runDates
+    : runDates
     ? {
-        start_date: values.runDates[0].format("YYYY-MM-DD"),
-        end_date: values.runDates[1].format("YYYY-MM-DD"),
+        start_date: runDates[0].format("YYYY-MM-DD"),
+        end_date: runDates[1].format("YYYY-MM-DD"),
       }
     : null;
   if (
