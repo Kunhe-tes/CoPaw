@@ -14,7 +14,7 @@ except ImportError:  # pragma: no cover - non-Unix import guard
     resource = None  # type: ignore[assignment]
 
 from swe.config.context import get_current_effective_tenant_id
-from swe.config.utils import load_config
+from swe.config.config import ProcessLimitsConfig
 
 logger = logging.getLogger(__name__)
 
@@ -103,10 +103,9 @@ class CurrentProcessLimitPolicy:
 def resolve_current_process_limit_policy(
     scope: ProcessLimitScope,
 ) -> CurrentProcessLimitPolicy:
-    """Resolve global process limits while retaining the current tenant identity."""
+    """Resolve built-in process limits while retaining the current tenant identity."""
     tenant_id = get_current_effective_tenant_id()
-    config = load_config()
-    process_limits = config.security.process_limits
+    process_limits = ProcessLimitsConfig()
     scope_enabled = (
         process_limits.shell if scope == "shell" else process_limits.mcp_stdio
     )
