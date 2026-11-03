@@ -3,10 +3,16 @@
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
+
+from ..source_system_config.runtime import (
+    bind_source_system_config,
+    resolve_cron_unread_auto_pause_config,
+)
 
 from .managed_api import _identity
 from .managed_execution import ManagedExecutionService
@@ -84,6 +90,43 @@ def _matching_identity(row, key):
         tuple(row[name] for name in KEYS) == key
         and tuple(row[f"definition_{name}"] for name in KEYS) == key
     )
+
+
+@asynccontextmanager
+async def _source_config_scope(request, key):
+    """内部路由跳过来源中间件，按已鉴权的来源显式绑定独立快照。"""
+    try:
+        resolver = getattr(
+            request.app.state,
+            "source_system_config_service",
+            None,
+        )
+        if resolver is None:
+            raise RuntimeError("cron_source_config_service_missing")
+        config = (await resolver.resolve_config(key[1])).model_copy(deep=True)
+        if config.source_id != key[1]:
+            raise ValueError("cron_source_config_scope_conflict")
+        policy = resolve_cron_unread_auto_pause_config(config)
+    except Exception as exc:
+        logger.error(
+            "新版定时任务来源配置加载失败 source_id=%s job_id=%s error_type=%s",
+            key[1],
+            key[3],
+            type(exc).__name__,
+        )
+        raise HTTPException(503, "cron_source_config_unavailable") from exc
+    logger.info(
+        "新版定时任务已绑定来源配置 source_id=%s job_id=%s version=%s config_stale=%s "
+        "unread_auto_pause_enabled=%s unread_auto_pause_threshold=%s",
+        key[1],
+        key[3],
+        config.version,
+        config.stale,
+        policy.enabled,
+        policy.threshold,
+    )
+    with bind_source_system_config(config):
+        yield
 
 
 async def get_execution_service(request):
@@ -180,8 +223,10 @@ async def execute_managed_job(request: Request, body: ExecuteRequest):
             row["status"],
         )
         if row["status"] == "accepted":
-            service = await get_execution_service(request)
-            _launch(request.app, service, row, key, dict(request.headers))
+            async with _source_config_scope(request, key):
+                service = await get_execution_service(request)
+                # create_task 继承配置上下文，HTTP 结束后的执行及结果提交仍有效。
+                _launch(request.app, service, row, key, dict(request.headers))
         return JSONResponse(status_code=202, content=_receipt(row))
     except HTTPException:
         raise
@@ -210,11 +255,12 @@ async def recover_managed_result(
     """
     db, key, row = await _authorized_execution(request, body)
     try:
-        service = await get_execution_service(request)
-        recovered = await service.recover(body.execution_id, key)
-        if not recovered:
-            await ExecutionWriter(db).expire(body.execution_id, key)
-        current = await ExecutionWriter(db).get(body.execution_id, key)
+        async with _source_config_scope(request, key):
+            service = await get_execution_service(request)
+            recovered = await service.recover(body.execution_id, key)
+            if not recovered:
+                await ExecutionWriter(db).expire(body.execution_id, key)
+            current = await ExecutionWriter(db).get(body.execution_id, key)
         logger.info(
             "执行结果恢复核对结束 execution_id=%s status=%s recovered=%s",
             row["execution_id"],
