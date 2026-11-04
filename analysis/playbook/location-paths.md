@@ -1,5 +1,14 @@
 # 定位路径
 
+## 新任务工作日与通知
+
+- 执行开关是 `schedule.run_on_non_workday`（缺省 false）；完成招呼通知开关是来源 `cron_notifications.skip_weekend_zhaohu_enabled`（缺省 false）。允许假日执行不等于必须在假日通知，两者不能互相代替。
+- 日期/年份/日历组合从 `scheduler/.../calendar_schedule.py`、`managed/calendar_views.py`、`managed/external_query.py` 查起；外部查询缓存键必须包含日期区间。SWE 的 `managed_models.py` 也要接受同样的新版年份与 W/LW，不能只修 Scheduler 后在 prepare 再报 422。
+- 新通知从 `managed_execution_api._source_config_scope` 的来源快照传到后台，再在 `ExecutionWriter.complete` 事务外查询原定通知日。`managed_history.notification_fields` 写 pending/not_required；Monitor 子任务汇总不重置该字段，领取必须仍为 pending。
+- 排查先区分手动执行（豁免）、来源开关关闭、任务根本未执行、日历 fallback，以及已有 pending 积压记录。发送 worker 不按实际发送日重新过滤，不能把工作日旧通知在周末发送误判为本轮判定失效。
+- 系统任务使用独立 `system.platform.system_platform_cron`，保留原五段平台规则，不走用户 W/LW 每日候选；不能将共享年份解析的放宽误传给不携带年字段的系统转换器。
+- 最新范围和预发检查见 `docs/deployment/cron_workday_system_port_20261104.md`；组合回归见 `test_managed_workday_year_dates.py` 和 `test_managed_notification_calendar_context.py`。
+
 ## 新版批调度看板查询缓慢
 
 - 入口：`GET /api/monitor/cron/managed-dispatch/batches`。列表及详情共用 `monitor/src/monitor/app/services/cron/managed_board_sql.py`；响应装配位于 `managed_board.py`。先区分 Pending/504 和明确 503，后者还需检查成员关系完整性，不能伪装为空批次。
