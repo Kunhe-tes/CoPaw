@@ -265,6 +265,46 @@ class TestSpanOperations:
     """Tests for span CRUD operations."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("operation", ["create", "batch", "update"])
+    @pytest.mark.parametrize(
+        "error",
+        ["short error", "错误🙂" * 2000, "x" * 4096, "x" * 4097, None],
+        ids=["short", "unicode", "at-limit", "over-limit", "none"],
+    )
+    async def test_span_error_has_bounded_utf8_storage(
+        self,
+        config,
+        mock_db,
+        operation,
+        error,
+    ):
+        store = TraceStore(config, mock_db)
+        span = Span(
+            span_id="span-1",
+            trace_id="trace-1",
+            source_id="source",
+            name="test",
+            event_type=EventType.LLM_INPUT,
+            start_time=datetime.now(),
+            error=error,
+        )
+        if operation == "batch":
+            await store.batch_create_spans([span])
+            stored = mock_db.prepared_rows[0][20]
+        else:
+            await getattr(store, f"{operation}_span")(span)
+            params = mock_db.execute.call_args.args[1]
+            stored = params[20 if operation == "create" else 5]
+
+        if error is None or len(error.encode("utf-8")) <= 4096:
+            assert stored == error
+        else:
+            assert len(stored.encode("utf-8")) <= 4096
+            assert stored.endswith("...")
+            assert error.startswith(stored[:-3])
+        assert span.error == error
+
+    @pytest.mark.asyncio
     async def test_create_span(self, config, mock_db):
         """Test creating a span."""
         store = TraceStore(config, mock_db)
