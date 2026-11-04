@@ -56,6 +56,7 @@ export function ManagedJobEditor({
   onChanged,
 }: Props) {
   const [form] = Form.useForm<ManagedCronFormValues>();
+
   const models = useExecutionModelOptions(true);
   const [skills, setSkills] = useState<SkillSelectOption[]>([]);
   const [loading, setLoading] = useState(true);
@@ -154,6 +155,7 @@ export function ManagedJobEditor({
                 id: "由系统自动分配",
                 schedule: {
                   ...DEFAULT_FORM_VALUES.schedule,
+                  run_on_non_workday: false,
                   timezone: timezone.timezone || "UTC",
                 },
                 dispatch: {
@@ -183,6 +185,7 @@ export function ManagedJobEditor({
     lock.current = true;
     setLocalSaving(true);
     setError(null);
+
     try {
       const spec = buildManagedCronSubmitPayload(values, snapshot);
       const dates = spec.run_date_range;
@@ -290,6 +293,7 @@ export function ManagedJobEditor({
                   tenantDefaultModelLabel={models.tenantDefaultLabel}
                   skillOptions={skills}
                   skillOptionsLoading={loading}
+                  managedCalendar
                   idDisabled
                   enabledDisabled={Boolean(job)}
                 />
