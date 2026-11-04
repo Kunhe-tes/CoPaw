@@ -356,23 +356,27 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 
 ### 财富规划分发目标
 
-- 前端入口：`console/src/pages/WealthWorkbench/distributeTargets.ts`，使用统一 request POST `/zt/wealth/wmadm/getUserPostionByBrn`（人员，`USER_POSITION_PATH`）与 `/zt/wealth/wmadm/branchTreeInfo`（支行，`BRANCH_TREE_PATH`），最终路径为 `{API base}/api/zt/wealth/wmadm/*`，不再调用 `/api/user-info/*/by-branch`。复用统一鉴权、上下文请求头和 401 刷新逻辑；60 秒超时取消请求，人员失败返回空列表，支行失败返回 null 以保留重试。
-- 部署侧需将上述两个 `{API base}/api/zt/wealth/wmadm/*` 路径转发到对应环境的网关，并按原后端 `SWE_USER_POSITION_HEADER_KEY/VALUE` 配置附加网关凭证，保留请求 Cookie；凭证不能放进前端包。原 Python 代理保留兼容。
-- 地址配置：`src/swe/config/envs/dev.json` 和 `prd.json` 中的 `SWE_USER_POSITION_API_URL`，分别使用 `wmcomsrvgatewayxc.paasst.cmbchina.cn` 和 `platform-gateway.paasoa.cmbchina.cn`；由 `SWE_ENV` 选择，环境变量可覆盖默认值；这些配置仍用于 Python 兼容代理，前端直连需在部署 Nginx 中同步对应环境的目标地址。
-- 入参来自 `iframeStore`：`bbkOrgId ← bbk (vbbk)`、`mmOrgCode ← orgCode (vorgcode)`、`mmOrgLvl ← Number(orgLvl) (vorglvl)`。缺少机构参数时不会查询。
-- 两个新接口统一返回 `{code,message,data,success}`，仅校验 `code="200"`，不依赖 `success`；`data` 是非空数组时读取机构或人员列表，空数组或非数组按无数据处理。业务码非 `200` 按查询失败处理，支行保留重试。旧 Python 代理的 `code=success` 及裸机构数组不适用于新接口；目标 ID 使用 `sapID`（保留前导零），姓名为 `userName`，机构名称优先 `subBranchName`，其次 `branchName`。按上游返回名单展示，不再查询本地租户或按分行号二次过滤，也不额外过滤岗位。
-- 行长沿用登录支行的 `orgCode/orgLvl` 查询；分行中台先直连上述 `BranchTreeInfoService`，入参为 `mmOrgCode=bbk`、`mmOrgLvl=Number(iframeStore.orgLvl)`（cookie `vorglvl`）、`sysId=iframeStore.sysId`（cookie `sysid`），缺少必要上下文或机构级别无效时不查询，每次选择机构后继续用该条目的 `mOrgCode/mOrgLvl` 查询 `BranchTreeInfoService`；每选择一级立即用当前条目的 `mOrgCode/mOrgLvl` 查询人员，同时独立查询下级机构；有下级就展开下一列，但可停留在当前级选择人员。返回空数组才确认末级，不依赖 `leaf` 字段判定末级。
-- 两个前端分发接口请求体统一使用 `mmOrgCode/mmOrgLvl`；选择机构后仍取返回条目的 `mOrgCode/mOrgLvl`，只转换请求字段名，值及类型保持不变，`bbkOrgId/sysId` 保持原样。
-- 支行上游 `BranchTreeInfoService` 地址由 `SWE_BRANCH_TREE_API_URL` 在 dev/prd 中配置，分别使用 `wmcomsrvgatewayxc.paasst.cmbchina.cn` 和 `wmcomsrvgatewayxc.paas.cmbchina.cn`，复用人员接口的 header 凭证配置。
-- 中台可跨支行累计选择人员；当前候选列表与全选操作仅针对当前支行，已选人员信息保留用于发布及移除。快速切换支行时过期响应不更新当前列表。
-
-- 直连请求不再使用统一请求层的 `x-header-cookie`；浏览器自动携带同源 Cookie，机构参数仍从 iframeStore 取得。Python 兼容代理继续优先读取 `x-header-cookie`，其次读取请求 Cookie。回归入口：`distributeTargets.test.ts`、`TargetPicker.branches.test.tsx`、`TargetPicker.edit.test.tsx`。
-- 中台支行级联选择器支持前端模糊搜索，对已加载的机构按支行名称或机构编码进行包含匹配，忽略英文大小写和搜索词首尾空格；搜索不额外请求支行接口，也不改变跨支行累计选择。
-
-- 级联查询失败时显示重试，不当作末级，也不阻塞当前级人员查询和选择；切换机构清空当前候选人员并使旧请求失效，立即查询新选机构的人员，但保留跨支行累计的人员选择。子支行按需加载并缓存，搜索范围仅包含已经加载的机构。
-- 业务例外：`mOrgCode=121516` 在任意层级直接视为末级，跳过下级支行查询，用该条目的 `mOrgCode/mOrgLvl` 查询人员。
-- 分发支行前端过滤：`distributeTargets.ts::fetchDistributeBranches` 在首次加载与各级下属机构查询结果中，排除 `mOrgName` 包含“停用”“私人银行”“信贷部”任一关键词的机构；规则集中在 `EXCLUDED_BRANCH_NAME_KEYWORDS`，回归见 `distributeTargets.test.ts`。
-- 修改规划的人员回显：`api.ts::mapPlan` 保留计划返回的 `targets.sap_id/name`；`store.ts::editPlan` 恢复 ID 与姓名缓存，并重置当前支行候选状态。后续人员加载保留编辑计划的历史目标信息；历史目标无姓名时回显 ID。计划未保存机构路径，修改页的级联路径需重新选择，但已选人员无需重新勾选。
+- 角色分流入口：`components/TargetPicker.tsx`。支行行长沿用原有平铺卡片和 `distributeTargets.ts::fetchDistributeTargets`，POST `/zt/wealth/wmadm/getUserPostionByBrn`，参数取登录机构 `orgCode/orgLvl`。本次机构树改造仅适用于分行中台。
+- 中台勾选机构时同步切换人员视图，连续勾选展示最后一个机构，缓存命中直接展示；点击名称仅查看，不改变选择。取消全选或待选保留当前视图及搜索，待选取消后如仍需查看该机构则继续查询，但返回结果不重新选中。勾选切换机构会清空原人员搜索，并移除尚未发送且不再需要的旧纯查看请求，仍遵循同一批量队列。
+- 零人机构的明确选择通过 `DistributionSession.emptyInstitutions` 保存，与人员 ID 分开；统一用 `isInstitutionSelected` 判定勾选状态。成功空名单勾选后显示“全部 0 人”，纯查看不选中，取消待选后的空响应不恢复勾选；取消、移除、清空及表单重建清理相应状态。发布只发送实际人员，不增加虚假目标；新上级名单使该机构变为非空时，清理零人标记且不隐式选中新增人员。
+- 中台界面：`components/MiddleTargetPicker.tsx` 和同名 Less；左侧完整机构树不显示人数，右侧紧凑人员卡片，下方按机构汇总，父级覆盖子级时合并卡片。卡片最多每行五列，按容器宽度减少列数；人员区域使用 `@tanstack/react-virtual` 按行虚拟滚动，搜索和全选基于完整名单。方向键、Home/End 可在虚拟卡片之间移动焦点；边界位置不登记延迟聚焦，离开列表或搜索名单变化时清空待聚焦，防止搜索输入被卡片抢走焦点。
+- 机构栏宽度在 `MiddleTargetPicker.module.less::.orgPane` 调整：桌面 300px，760px 及以下 220px，540px 及以下纵向占满宽度。人员列数由 `useCardColumns` 根据右侧实际容器宽度计算，不必为左侧加宽另写固定列数；布局验收需同时检查普通工作台和 `hideMenu=true&hideLogo=true` 嵌入页面。
+- 人员卡片的 Tab 入口：原焦点卡片仍在渲染范围内时保留原入口；滚动卸载该卡片后，使用实际可见行的首张卡片作为唯一入口，不使用顶部缓冲行、不主动移动焦点。排查滚动后无法用键盘选择人员时，检查可见区域是否存在 `tabIndex=0` 的卡片，并验证 Tab、方向键、空格选择及返回顶部后的入口恢复。回归入口为 `MiddleTargetPicker.keyboard.test.tsx`，实际虚拟滚动还需浏览器验证。
+- 新接口适配：`distribution/api.ts`，统一 request POST `/zt/wealth/wmadm/bbkTree`（完整树）和 `/zt/wealth/wmadm/orgSaps`（人员），最终路径为 `{API base}/api/zt/wealth/wmadm/*`；复用统一鉴权、上下文请求头、401 刷新和 60 秒取消超时。前端不提供服务凭证，不再调用 Python `/api/user-info/*/by-branch` 代理。
+- 机构请求：`mmOrgCode=当前业务分行编码`、`mmOrgName=BBK_ID_MAP 对应名称`、`mmOrgLvl=Number(orgLvl)`、`sysId=登录上下文 sysId`。仓库分行映射仅为示例，部署环境需要完整映射。普通模式沿用登录上下文机构级别，运维模式根级别传数字 30，编码和名称均使用所选目标分行。
+- 机构成功响应 `code="200"`，`data` 是根机构对象，以 `children` 递归展开；`mOrgLvl` 兼容数字与数字字符串。校验返回根编码与请求分行一致，末级依据 `children`，不依赖 `leaf`，中台不再使用 `121516` 例外或按“停用/私人银行/信贷部”名称过滤，由后端过滤可选机构。
+- 人员请求：`{orgList:[{bbkOrgId,mmOrgCode,mmOrgLvl}]}`；`distribution/api.ts` 将每个未缓存的查询范围展开为本级和全部后代，并按机构编码去重，不能只传父机构。`bbkOrgId` 为当前业务分行，其他字段取各节点自身；分行根查询包含整棵树，父级查询包含完整子树，均为一次 POST、完整联合名单、无分页。`code="200"` 表示整批成功，任一机构失败则整批失败；非数组响应不能冒充空名单。
+- 人员字段：`sapID` 保留前导零，`userName` 为姓名，`subBranchName` 优先于 `branchName`；`branchID` 为分行，实际机构优先取 `subBranchID`，无支行编码的分行本级人员使用 `branchID`。不额外按岗位或本地租户过滤，发布仍使用既有人员 targets 入参，最终去重由后端负责。
+- 机构预加载与缓存：工作台 `index.tsx` 的 `useInstitutionPreload` 在身份就绪且角色为中台时异步加载，机构缓存可跨计划复用；缓存标识包含 `contextVersion`，即使同一批更新发生 A→B→A，也会重新加载，不会因为最终分行编码相同而复用旧树。新建计划只变更表单代次，不改变此缓存标识。运维模式必须先选分行；切分行、身份或上下文变化立即清空旧树、人员缓存、选择与在途请求回写权限；切回原分行也重新查询，不能显示旧结果兜底。
+- 人员队列与缓存：`distribution/session.ts` 每份新建/编辑计划独立维护。已有完整上级缓存时通过 `distribution/tree.ts` 的机构索引筛出下级，不能反向把下级缓存当作完整上级。成功空名单也缓存，失败不缓存；切换计划销毁队列和人员缓存，但保留同身份分行的机构树。
+- 人员查询成功不能重放已完成的全选意图：`pendingSelections` 只跟踪尚未完成的选择，纯查看结果仅更新缓存和已选人员信息，不扩大发布名单。上级完整名单成功返回后，先清除其本级与下级旧缓存，再写入新名单；下级按需从新上级缓存重新派生，避免“分行已查到新员工、支行全选仍漏人”。
+- 批量合并：500 毫秒固定窗口，后续点击不延长；同一时间只发一个人员请求，新增查询排队。下一批的排队时间计入窗口，前一请求结束后已满 500 毫秒则直接发送；发送前移除被完整范围缓存覆盖或已取消的需求，合并父子重叠范围后仍由接口层展开完整子树，`orgList` 包含所有相应节点而非只有祖先。
+- 父子勾选联动覆盖零人子树：完整名单成功后按最新选择意图标记所有空后代；加载期间对子级取消会排除该子树，响应不补回。取消零人子级也使祖先半选，补全父级可从缓存恢复，纯查看新名单不隐式全选。全选状态同时检查人员和零人后代，汇总在人数相同但机构未全选时显示“部分选择”。
+- 机构汇总只记录实际完成的选择，等待或失败的全选不合并已有支行卡片；取消待选保留原分组，逐人或按搜索结果清空机构后清理对应分组。未匹配历史人员独立展示，不维持已清空机构的分组记录。
+- 选择和失败：未选或半选点击补全，全选点击清空；全选失败后的半选点击重新排队查询，保留原有已选人员。等待或加载期间再次点击取消待选，保留已有选择，取消待选不会被旧响应重新勾上。某批失败不阻塞后续批次，失败机构支持手动重试或取消待选操作，保留已有选择。`distributionBlocked` 同时约束创建页发布按钮和 store 发布入口：等待、查询中及未解决的全选失败都阻止发布，单纯查看失败不永久阻止发布。
+- 编辑回显：保留历史人员及机构编码；完整名单尚未加载前显示“已选 N 人”和半选，查询后再判断全部/部分。不在当前机构树的历史人员归入“未匹配机构”，只能由用户明确移除，不能自动丢弃。
+- 旧的 `branchTreeInfo`、`fetchDistributeBranches` 及 Python 代理仅保留兼容，不用于新中台组件。部署网关需将两个新路径转发到原机构人员服务，服务端凭证和 Cookie 处理沿用既有部署约定。
+- 回归入口：`distribution/api.test.ts`、`distribution/session.test.ts`、`TargetPicker.branches.test.tsx`、`TargetPicker.edit.test.tsx`、`Create/draftLifecycle.test.tsx`、`operations.switching.test.tsx` 和 `store.test.ts`。完整设计约定见 [分发目标选择器设计](../../docs/superpowers/specs/2026-11-03-wealth-distribution-target-picker-design.md)。
 
 ## 财富任务列表后台刷新显示
 

@@ -123,6 +123,7 @@ interface WealthState {
   /** 分发目标用户池（仅行长/中台加载） */
   targets: DistributeTarget[];
   targetsLoaded: boolean;
+  distributionBlocked: boolean;
   /** 中台当前浏览的支行；targets 保留跨支行人员信息用于发布。 */
   targetBranch: DistributeBranch | null;
   branchTargetSapIds: string[];
@@ -382,6 +383,7 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
   editingId: null,
   targets: [],
   targetsLoaded: false,
+  distributionBlocked: false,
   targetBranch: null,
   branchTargetSapIds: [],
   targetSapIds: [],
@@ -563,6 +565,7 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
     const requestSeq = ++targetRequestSeq;
     set({
       targetsLoaded: false,
+      distributionBlocked: false,
       targetBranch: branch ?? null,
       branchTargetSapIds: [],
     });
@@ -771,6 +774,7 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
       targetSapIds: [],
       targets: [],
       targetsLoaded: false,
+      distributionBlocked: false,
       targetBranch: null,
       branchTargetSapIds: [],
       dialog: null,
@@ -800,6 +804,7 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
       targetSapIds,
       targets,
       targetsLoaded: false,
+      distributionBlocked: false,
       targetBranch: null,
       branchTargetSapIds: [],
     });
@@ -807,6 +812,10 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
 
   publishPlan: async () => {
     const state = get();
+    if (state.accountId === "middle" && state.distributionBlocked) {
+      get().toast("请等待人员查询完成，或重试、取消失败的待选机构");
+      return false;
+    }
     if (
       isOperationsMode() &&
       state.editingId &&
