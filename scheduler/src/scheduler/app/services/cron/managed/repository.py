@@ -186,6 +186,23 @@ class ManagedCronRepository:
         *,
         parent_id: str | None = None,
     ) -> dict:
+        result = await self.page_rows(caller, options, parent_id=parent_id)
+        result["items"] = await render_rows(
+            result["items"],
+            caller.actor_id,
+            self.calendar,
+            self.clock(),
+            child_item if parent_id is not None else list_item,
+        )
+        return result
+
+    async def page_rows(
+        self,
+        caller: CallerIdentity,
+        options: QueryOptions,
+        *,
+        parent_id: str | None = None,
+    ) -> dict:
         limit = options.limit
         if not 1 <= limit <= 200:
             raise ValueError("invalid_cron_page_limit")
@@ -223,15 +240,8 @@ class ManagedCronRepository:
         rows = await self._rows(clauses, tuple(params), limit=limit + 1)
         more = len(rows) > limit
         rows = rows[:limit]
-        mapper = child_item if parent else list_item
         result = {
-            "items": await render_rows(
-                rows,
-                caller.actor_id,
-                self.calendar,
-                self.clock(),
-                mapper,
-            ),
+            "items": rows,
             "next_cursor": _encode_cursor(rows[-1], context) if more else None,
         }
         if parent:
