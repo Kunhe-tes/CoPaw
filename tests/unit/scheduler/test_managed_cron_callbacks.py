@@ -68,7 +68,12 @@ def callback_setup():
     db.conn.close()
 
 
-async def create_source(callback_setup, mode="ordinary"):
+async def create_source(
+    callback_setup,
+    mode="ordinary",
+    *,
+    allow_non_workday=False,
+):
     _, caller, service = callback_setup
     return await service.create(
         caller,
@@ -79,7 +84,11 @@ async def create_source(callback_setup, mode="ordinary"):
                 "name": "report",
                 "task_type": "text",
                 "text": "body",
-                "schedule": {"cron": "0 9 * * *", "timezone": "Asia/Shanghai"},
+                "schedule": {
+                    "cron": "0 9 * * *",
+                    "timezone": "Asia/Shanghai",
+                    "run_on_non_workday": allow_non_workday,
+                },
             },
         },
     )
@@ -454,7 +463,11 @@ async def test_broadcast_timer_update_accepts_known_binding_before_sync_finishes
     )
 
     db, caller, management = callback_setup
-    created = await create_source(callback_setup, "batch_enabled")
+    created = await create_source(
+        callback_setup,
+        "batch_enabled",
+        allow_non_workday=True,
+    )
     store = BroadcastStore(db)
     task = await store.submit(caller, created["job_id"], payload())
     now = datetime(2026, 10, 15, 23, tzinfo=timezone.utc)
