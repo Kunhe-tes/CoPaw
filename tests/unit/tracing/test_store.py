@@ -89,6 +89,41 @@ class TestTraceOperations:
     """Tests for trace CRUD operations."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("operation", ["create", "update"])
+    @pytest.mark.parametrize(
+        "error",
+        [None, "short error", "x" * 4096, "x" * 4097, "错误🙂" * 2000],
+        ids=["none", "short", "at-limit", "over-limit", "unicode"],
+    )
+    async def test_trace_error_has_bounded_utf8_storage(
+        self,
+        config,
+        mock_db,
+        operation,
+        error,
+    ):
+        store = TraceStore(config, mock_db)
+        trace = Trace(
+            trace_id="trace-1",
+            source_id="source",
+            user_id="user",
+            session_id="session",
+            channel="console",
+            start_time=datetime.now(),
+            error=error,
+        )
+        await getattr(store, f"{operation}_trace")(trace)
+        params = mock_db.execute.call_args.args[1]
+        stored = params[17 if operation == "create" else 9]
+        if error is None or len(error.encode("utf-8")) <= 4096:
+            assert stored == error
+        else:
+            assert len(stored.encode("utf-8")) <= 4096
+            assert stored.endswith("...")
+            assert error.startswith(stored[:-3])
+        assert trace.error == error
+
+    @pytest.mark.asyncio
     async def test_create_trace(self, config, mock_db):
         """Test creating a trace."""
         store = TraceStore(config, mock_db)
