@@ -98,7 +98,7 @@ def _definition(row):
     return spec
 
 
-def _meta(row, spec, decision):
+def _meta(row, spec, decision, task):
     meta = dict(spec.get("meta") or {})
     columns = {
         "task_chat_id": "task_chat_id",
@@ -107,7 +107,6 @@ def _meta(row, spec, decision):
         "task_last_scheduled_preview": "latest_scheduled_preview",
         "task_last_scheduled_run_at": "last_scheduled_run_at",
         "task_unread_execution_count": "unread_execution_count",
-        "pause_reason": "pause_reason",
         "auto_paused_at": "auto_paused_at",
         "external_job_id": "ordinary_external_job_id",
         "batch_dispatch_external_job_id": "batch_external_job_id",
@@ -132,15 +131,16 @@ def _meta(row, spec, decision):
         ),
         task_last_scheduled_preview=row["state_latest_scheduled_preview"]
         or "",
-        pause_reason=row["state_pause_reason"]
-        or ("manual" if not row["enabled"] else None),
+        pause_reason=task["pause_reason"],
     )
     return meta
 
 
 def _item(row, raw, decision, viewer):
     spec = deepcopy(raw)
-    spec["meta"] = _meta(row, spec, decision)
+    # 兼容字段复用有效任务状态，避免漏掉日期限制或改变暂停优先级。
+    task = task_view(row, viewer)
+    spec["meta"] = _meta(row, spec, decision, task)
     state = {
         field: row["state_" + field]
         for field in (
@@ -164,7 +164,6 @@ def _item(row, raw, decision, viewer):
         next_run_at=next(iter(decision["next_run_times"]), None),
         external_job_id=row["state_ordinary_external_job_id"],
     )
-    task = task_view(row, viewer)
     task["visible_in_my_tasks"] = bool(
         viewer and row["creator_user_id"] == viewer,
     )

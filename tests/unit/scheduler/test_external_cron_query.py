@@ -79,6 +79,62 @@ async def test_default_agent_is_selected_without_swe_or_viewer(query_api):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "dates,enabled,stored_reason,expected",
+    [
+        (("2000-01-01", "2000-01-02"), True, None, "date_expired"),
+        (("2099-01-01", "2099-01-02"), True, None, "date_before_start"),
+        ((None, None), True, None, None),
+        ((None, None), False, None, "manual"),
+        ((None, None), True, "manual", "manual"),
+        (("2000-01-01", "2000-01-02"), False, None, "manual"),
+        (
+            ("2000-01-01", "2000-01-02"),
+            True,
+            "auto_unread_threshold",
+            "auto_unread_threshold",
+        ),
+        (
+            ("2000-01-01", "2000-01-02"),
+            False,
+            "auto_unread_threshold",
+            "auto_unread_threshold",
+        ),
+    ],
+)
+async def test_compat_pause_reason_matches_effective_task_state_without_writes(
+    query_api,
+    dates,
+    enabled,
+    stored_reason,
+    expected,
+):
+    client, db = query_api
+    db.add("pause-case", enabled=enabled, pause_reason=stored_reason)
+    spec = json.loads(
+        db.conn.execute("SELECT spec_json FROM swe_cron_jobs_v2").fetchone()[
+            0
+        ],
+    )
+    spec["run_date_range"] = (
+        {"start_date": dates[0], "end_date": dates[1]} if dates[0] else None
+    )
+    db.conn.execute(
+        "UPDATE swe_cron_jobs_v2 SET run_start_date=?,run_end_date=?,spec_json=?",
+        (*dates, json.dumps(spec)),
+    )
+    before = list(db.conn.iterdump())
+    response = await client.get(URL, headers=HEADERS)
+    assert response.status_code == 200
+    item = response.json()[0]
+    assert item["task"]["pause_reason"] == expected
+    assert item["meta"]["pause_reason"] == expected
+    assert item["task"]["is_paused"] is (expected is not None)
+    assert item["enabled"] is enabled
+    assert list(db.conn.iterdump()) == before
+
+
+@pytest.mark.asyncio
 async def test_explicit_agent_and_optional_viewer_do_not_replace_tenant(
     query_api,
 ):
