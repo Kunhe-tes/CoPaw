@@ -188,6 +188,12 @@ async def test_http_calendar_response_and_date_parameter(
     import httpx
     from scheduler.app.services.cron import workday_calendar as module
 
+    monkeypatch.setattr(
+        module,
+        "build_workday_headers",
+        lambda: {"apisign": "test-only"},
+    )
+
     original = httpx.AsyncClient
     requested = []
 

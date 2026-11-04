@@ -12,6 +12,7 @@ from uuid import uuid4
 import httpx
 
 from scheduler.app.database import get_db_connection
+from .workday_api_auth import WorkdayAuthError, build_workday_headers
 
 logger = logging.getLogger(__name__)
 API_CACHE_SECONDS = 86400
@@ -100,8 +101,22 @@ def get_workday_api_url() -> str:
 
 async def _fetch_workday(day):
     template = get_workday_api_url()
-    async with httpx.AsyncClient(timeout=API_TIMEOUT_SECONDS) as client:
-        response = await client.get(template.format(date=day.isoformat()))
+    try:
+        headers = await asyncio.to_thread(build_workday_headers)
+    except WorkdayAuthError as error:
+        logger.warning(
+            "Workday API authentication unavailable: code=%s",
+            error.code,
+        )
+        raise
+    async with httpx.AsyncClient(
+        timeout=API_TIMEOUT_SECONDS,
+        follow_redirects=False,
+    ) as client:
+        response = await client.get(
+            template.format(date=day.isoformat()),
+            headers=headers,
+        )
         response.raise_for_status()
         value = json.loads(response.text)
     # 布尔值或任意对象不属于日历协议约定的整数0/1。

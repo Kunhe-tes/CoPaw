@@ -88,7 +88,7 @@
 | `swe_cron_system_jobs` | `scripts/sql/cron_system_tasks.sql` |
 | `swe_cron_system_executions` | `scripts/sql/cron_system_tasks.sql` |
 
-核对既有服务互访配置 `SWE_SCHEDULER_API_URL`、`SCHEDULER_SWE_API_BASE_URL` 和平台注册配置；新增的 `SCHEDULER_WORKDAY_API_URL` 模板包含 `{date}`。dev/prd 文件提供默认模板，但必须确认是目标环境真正可达的日历地址；默认值不代表行内生产连通性已验收。不增加必配内部 Token。
+核对既有服务互访配置 `SWE_SCHEDULER_API_URL`、`SCHEDULER_SWE_API_BASE_URL` 和平台注册配置；新增的 `SCHEDULER_WORKDAY_API_URL` 模板包含 `{date}`。dev/prd 文件提供默认模板，但必须确认是目标环境真正可达的日历地址；默认值不代表行内生产连通性已验收。不增加必配内部 Token。外部工作日接口另需行内 SM3withSM2 鉴权配置和 SDK，见 [工作日接口鉴权部署说明](cron_workday_api_auth.md)。
 
 系统任务上线需停用旧心跳、梦境、清理和归档平台定时器，再核对新绑定。旧系统回调返回 410；旧用户任务回调不切换。新系统任务通过工作区启动或保存配置按需登记，不全量扫描补建。系统任务保持原五段平台排程，不套用用户实际工作日日历；原 W/LW 字段保留平台语义，系统接口不接受末尾年份，避免静默丢年。
 
