@@ -35,12 +35,24 @@ async def test_archive_runs_source_maintenance_without_initializing_agent():
 
 
 @pytest.mark.asyncio
-async def test_managed_dream_excludes_archive_and_keeps_correct_scope():
+async def test_managed_dream_excludes_archive_and_keeps_correct_scope(
+    monkeypatch,
+):
     from swe.config.context import encode_scope_id
+    from swe.app.crons.system_runtime import SystemTaskRuntime
 
     cron = SimpleNamespace(run_dream=AsyncMock(), run_heartbeat=AsyncMock())
+    monkeypatch.setattr(SystemTaskRuntime, "run_dream", cron.run_dream)
+    monkeypatch.setattr(SystemTaskRuntime, "run_heartbeat", cron.run_heartbeat)
     manager = SimpleNamespace(
-        get_agent=AsyncMock(return_value=SimpleNamespace(cron_manager=cron)),
+        get_agent=AsyncMock(
+            return_value=SimpleNamespace(
+                runner=object(),
+                channel_manager=None,
+                agent_id="default",
+                tenant_id=encode_scope_id("alice", "bank"),
+            ),
+        ),
     )
     app = SimpleNamespace(state=SimpleNamespace(multi_agent_manager=manager))
     action = await SystemBusinessActions(app).prepare(

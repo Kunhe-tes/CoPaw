@@ -255,35 +255,22 @@ class SourceSystemTaskScheduler:
                 self._agent_id,
                 tenant_id=runtime_tenant_id,
             )
-            cron_manager = getattr(workspace, "cron_manager", None)
-            if cron_manager is None:
-                raise RuntimeError("CronManager not found")
-            scope_result = await cron_manager.run_task_session_cleanup()
-            if managed_cleanup is not None:
-                try:
-                    managed = await managed_cleanup(
-                        workspace,
-                        tenant_id,
-                        row_source_id,
-                    )
-                except Exception:
-                    self._merge_scope_cleanup_result(
-                        summary,
-                        tenant_id,
-                        runtime_tenant_id,
-                        scope_result,
-                    )
-                    raise
-                scope_result = self._combined_cleanup_result(
-                    scope_result,
-                    managed,
-                )
+            scope_result, cleanup_error = await self._cleanup_scope_business(
+                workspace,
+                tenant_id,
+                row_source_id,
+                managed_cleanup,
+            )
+            if cleanup_error is not None and managed_cleanup is None:
+                raise cleanup_error
             self._merge_scope_cleanup_result(
                 summary,
                 tenant_id,
                 runtime_tenant_id,
                 scope_result,
             )
+            if cleanup_error is not None:
+                raise cleanup_error
         except Exception as exc:  # noqa: BLE001
             summary["scopes_failed"] += 1
             summary["errors"].append(
@@ -293,6 +280,41 @@ class SourceSystemTaskScheduler:
                     "error": str(exc),
                 },
             )
+
+    @staticmethod
+    async def _cleanup_scope_business(
+        workspace,
+        tenant_id,
+        source_id,
+        managed_cleanup,
+    ):
+        """保留旧清理行为，但旧分支失败不能阻止数据库任务的会话维护。"""
+        legacy, error = {}, None
+        try:
+            cron = getattr(workspace, "cron_manager", None)
+            if cron is not None:
+                legacy = await cron.run_task_session_cleanup()
+            else:
+                from ..crons.legacy_session_cleanup import (
+                    cleanup_legacy_workspace_sessions,
+                )
+
+                legacy = await cleanup_legacy_workspace_sessions(workspace)
+        except Exception as exc:  # noqa: BLE001
+            error = exc
+        if managed_cleanup is None:
+            return legacy, error
+        try:
+            managed = await managed_cleanup(workspace, tenant_id, source_id)
+        except Exception as exc:  # noqa: BLE001
+            return legacy, error or exc
+        return (
+            SourceSystemTaskScheduler._combined_cleanup_result(
+                legacy,
+                managed,
+            ),
+            error,
+        )
 
     @staticmethod
     def _combined_cleanup_result(legacy, managed):
