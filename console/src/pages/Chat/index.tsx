@@ -1093,8 +1093,9 @@ function ChatPageContent() {
       }
     };
 
-    sessionApi.onSessionCreated = (sessionId) => {
+    sessionApi.onSessionCreated = (sessionId, fromSubmit) => {
       if (!isChatActiveRef.current) return;
+      const draft = draftIdentityRef.current;
       // Session creation gives the current draft a new identity, not a new expert selection.
       const expertScope = expertSelectionScopeRef.current;
       if (expertScope.aliases.delete("")) expertScope.aliases.add(sessionId);
@@ -1114,6 +1115,11 @@ function ChatPageContent() {
       // Clear URL when creating new session, wait for realId resolution to update
       lastSessionIdRef.current = null;
       navigateRef.current("/chat", { replace: true });
+      if (fromSubmit && draft.attachToNextSession && draft.chatId) {
+        draft.attachToNextSession = false;
+        sessionApi.attachDraftChat(sessionId, draft.id, draft.chatId);
+        sessionApi.onSessionIdResolved?.(sessionId, draft.chatId);
+      }
     };
 
     return () => {
@@ -1260,7 +1266,7 @@ function ChatPageContent() {
       return routeChatId;
     }
 
-    const fallbackSessionId = activeSessionId || window.currentSessionId || "";
+    const fallbackSessionId = activeSessionId || "";
     return sessionApi.getChatIdForSession(fallbackSessionId);
   }, [chatId, activeSessionId]);
   const feedbackSessionId = useMemo(() => {
@@ -1276,7 +1282,6 @@ function ChatPageContent() {
       activeSession?.sessionId ||
       activeSession?.session_id ||
       sessionApi.getLogicalSessionId(activeSessionId || "") ||
-      window.currentSessionId ||
       chatId ||
       null
     );
@@ -1327,9 +1332,19 @@ function ChatPageContent() {
     getUserId(),
     activePlanModeScopeKey,
   ]);
-  const draftIdentityRef = useRef({ scope: draftIdentityScope, id: "" });
+  const draftIdentityRef = useRef({
+    scope: draftIdentityScope,
+    id: "",
+    chatId: "",
+    attachToNextSession: false,
+  });
   if (draftIdentityRef.current.scope !== draftIdentityScope) {
-    draftIdentityRef.current = { scope: draftIdentityScope, id: "" };
+    draftIdentityRef.current = {
+      scope: draftIdentityScope,
+      id: "",
+      chatId: "",
+      attachToNextSession: false,
+    };
   }
   const getDraftSessionId = useCallback(() => {
     if (!draftIdentityRef.current.id)
@@ -1344,6 +1359,7 @@ function ChatPageContent() {
   const activePlanModeSessionRef = useRef<PlanModeSession | null>(null);
   const activePlanModeScopeKeyRef = useRef(activePlanModeScopeKey);
   const pendingPlanModePersistScopesRef = useRef(new Set<string>());
+  const savingPlanModeScopesRef = useRef(new Set<string>());
   const resolvedPlanModePersistScopesRef = useRef(new Map<string, string>());
   const planModeLocalStateForActiveScope =
     planModeLocalState.scopeKey === "" &&
@@ -1435,11 +1451,7 @@ function ChatPageContent() {
   );
 
   const activePlanRevisionScopeKey =
-    activePlanModeSession?.id ||
-    chatId ||
-    activeSessionId ||
-    window.currentSessionId ||
-    "";
+    activePlanModeSession?.id || chatId || activeSessionId || "";
 
   useEffect(() => {
     setPendingPlanRevision(null);
@@ -1450,18 +1462,14 @@ function ChatPageContent() {
       session: PlanModeSession | null,
       meta: Record<string, unknown>,
     ): Promise<string | null> => {
-      const candidateSessionId =
-        chatId ||
-        session?.id ||
-        activeSessionId ||
-        window.currentSessionId ||
-        "";
+      const candidateSessionId = chatId || session?.id || activeSessionId || "";
       const existingChatId =
         (chatId ? sessionApi.getChatIdForSession(chatId) : null) ||
         (chatId && !/^\d+$/.test(chatId) ? chatId : null) ||
         sessionApi.getChatIdForSession(candidateSessionId) ||
         session?.realId ||
-        (session?.id && !/^\d+$/.test(session.id) ? session.id : null);
+        (session?.id && !/^\d+$/.test(session.id) ? session.id : null) ||
+        (!candidateSessionId ? draftIdentityRef.current.chatId : null);
 
       if (existingChatId) {
         return existingChatId;
@@ -1473,6 +1481,7 @@ function ChatPageContent() {
         sessionApi.getLogicalSessionId(candidateSessionId) ||
         candidateSessionId ||
         getDraftSessionId();
+      const draftIdentity = draftIdentityRef.current;
       const created = await chatApi.createChat({
         session_id: logicalSessionId,
         user_id: getUserId(session?.userId),
@@ -1480,6 +1489,9 @@ function ChatPageContent() {
         name: session?.name || "新会话",
         meta,
       });
+      if (!candidateSessionId && draftIdentityRef.current === draftIdentity) {
+        draftIdentity.chatId = created.id;
+      }
       await sessionApi.getSessionList();
       return created.id;
     },
@@ -1645,10 +1657,25 @@ function ChatPageContent() {
           { refreshList: false },
         );
         setSessions(next);
-        if (owner !== getExpertBindingSnapshot()) return;
+        const currentOwner = getExpertBindingSnapshot();
+        if (
+          owner !== currentOwner &&
+          !(
+            currentOwner.chatId === target &&
+            (activePlanModeScopeKeyRef.current === scope ||
+              sessionApi.getChatIdForSession(scope) === target)
+          )
+        )
+          return;
         applyExpertBindingView(view.expert_binding);
         setSelectedExpertId(null);
-        setMultiAgentState({ scope, enabled });
+        setMultiAgentState({
+          scope: activePlanModeScopeKeyRef.current,
+          enabled,
+        });
+        if (!scope && isChatActiveRef.current) {
+          navigate(`/chat/${target}`, { replace: true });
+        }
         if (enabled && hadExpert)
           messageRef.current.info("已解除专家选择，当前模式使用默认 Agent");
         if (!enabled) {
@@ -1687,6 +1714,7 @@ function ChatPageContent() {
       multiAgentSaving,
       ensurePlanModeChatId,
       applyExpertBindingView,
+      navigate,
       selectedExpertId,
       setSessions,
       syncExpertBindingConflict,
@@ -1746,6 +1774,11 @@ function ChatPageContent() {
       const hadBinding = Boolean(snapshot.view?.expert_id);
       const previousSelectedExpertId = selectedExpertId;
       const scopeKey = activePlanModeScopeKeyRef.current;
+      if (savingPlanModeScopesRef.current.has(scopeKey)) {
+        throw new Error("计划模式正在保存，请稍后重试");
+      }
+      savingPlanModeScopesRef.current.add(scopeKey);
+      const draftIdentity = draftIdentityRef.current;
       const retainBlankScope =
         enabled && scopeKey === "" && !activePlanModeMetadataEnabled;
       pendingPlanModePersistScopesRef.current.add(scopeKey);
@@ -1784,6 +1817,13 @@ function ChatPageContent() {
           },
         });
         persistSucceeded = true;
+        if (
+          !scopeKey &&
+          draftIdentityRef.current === draftIdentity &&
+          draftIdentity.chatId
+        ) {
+          draftIdentity.attachToNextSession = true;
+        }
         if (enabled && snapshot === getExpertBindingSnapshot()) {
           setSelectedExpertId(null);
           setGoalModeEnabled(false);
@@ -1798,6 +1838,7 @@ function ChatPageContent() {
         }
         throw error;
       } finally {
+        savingPlanModeScopesRef.current.delete(scopeKey);
         const resolvedScopeKey =
           resolvedPlanModePersistScopesRef.current.get(scopeKey);
         if (!(persistSucceeded && retainBlankScope)) {
@@ -2864,6 +2905,12 @@ function ChatPageContent() {
       IAgentScopeRuntimeWebUISenderOptions["beforeSubmit"]
     > = async (data) => {
       if (isComposingRef.current) return false;
+      if (
+        savingPlanModeScopesRef.current.has(activePlanModeScopeKeyRef.current)
+      ) {
+        messageRef.current.warning("计划模式正在保存，请稍后重试");
+        return false;
+      }
       const snapshot = getExpertBindingSnapshot();
       if (snapshot.loading && !(await refreshExpertBinding())) return false;
       if (snapshot.saving || (snapshot.chatId && !snapshot.view)) {
@@ -2989,18 +3036,6 @@ function ChatPageContent() {
         label={t("chat.quickMenu.mode", "模式")}
         disabled={composerDisabled}
       >
-        <PlanModeMenuItem
-          key="plan-mode"
-          ariaLabel={t("chat.planMode.label", "计划模式")}
-          enabled={planModeEnabled}
-          disabled={composerDisabled}
-          label={t("chat.planMode.shortLabel", "计划")}
-          showIcon={false}
-          tooltip={t("chat.planMode.tooltip", "计划模式使用只读工具先产出计划")}
-          onChange={(enabled) => {
-            void persistPlanMode(enabled);
-          }}
-        />
         <ComposerQuickMenuItem
           key="multi-agent-mode"
           interactive
@@ -3014,6 +3049,18 @@ function ChatPageContent() {
               onChange={(enabled) => void changeMultiAgentMode(enabled)}
             />
           }
+        />
+        <PlanModeMenuItem
+          key="plan-mode"
+          ariaLabel={t("chat.planMode.label", "计划模式")}
+          enabled={planModeEnabled}
+          disabled={composerDisabled}
+          label={t("chat.planMode.shortLabel", "计划")}
+          showIcon={false}
+          tooltip={t("chat.planMode.tooltip", "计划模式使用只读工具先产出计划")}
+          onChange={(enabled) => {
+            void persistPlanMode(enabled);
+          }}
         />
         <ComposerQuickMenuItem
           key="goal-mode"
