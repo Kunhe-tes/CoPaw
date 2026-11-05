@@ -1,5 +1,19 @@
 # 定位路径
 
+## 只暂停当前执行批次
+
+- 看板详情的“暂停本批／恢复本批”通过批次级接口修改回执的 `batch_paused`，不会修改任务启停或批入口模式。
+- 部署前手工执行 `scripts/sql/cron_managed_batch_pause.sql` 新增默认 0 的字段；应用只检查结构，不自动 ALTER 业务表。
+- 派发前和自动／人工／每日业务重试前检查同一暂停标记；已交接、已受理及运行中的执行继续收尾和上报。恢复后保留原队列与次数继续执行。
+- 领取按真实批成员关联检查，兼容普通入口先受理、后续被批次复用的执行；暂停候选在分页前排除，避免挡住其他批次。
+
+## 批调度子任务错误类型与模型反馈
+
+- 执行历史 `swe_cron_executions.error_type` 保留原始值；子任务 `async_status=error` 且原值包含大小写敏感的 `Prompt` 时才按模型失败处理。逗号分隔文本和包含该词的 JSON 字符串均命中。
+- 新版统一分类入口为 `scheduler/src/scheduler/app/services/cron/managed/failure_policy.py`，用于自动、每日和人工业务重试及模型池反馈。非模型失败保留业务失败状态，但计入 worker 成功样本。
+- 当前尝试关联的原始错误类型在看板成员及失败预览中显示，空值显示 `-`。
+- 数据库列由外部预先新增；不会自动对已有库执行 ALTER。终态 `async_status` 和 `error_type` 应在一次提交中写入。
+
 ## 新任务工作日与通知
 
 - 执行开关是 `schedule.run_on_non_workday`（缺省 false）；完成招呼通知开关是来源 `cron_notifications.skip_weekend_zhaohu_enabled`（缺省 false）。允许假日执行不等于必须在假日通知，两者不能互相代替。
