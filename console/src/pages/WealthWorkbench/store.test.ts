@@ -794,6 +794,20 @@ describe("WealthWorkbench store", () => {
     expect(useWealthStore.getState().plans[0]?.targetSapIds).toEqual(["rm"]);
   });
 
+  it("中台人员查询未完成或待选失败时，发布入口本身也拒绝提交", async () => {
+    seedDraft();
+    useWealthStore.setState({
+      accountId: "middle",
+      distributionBlocked: true,
+      targetSapIds: ["selected-user"],
+    });
+    mockRequest.mockClear();
+    expect(await useWealthStore.getState().publishPlan()).toBe(false);
+    expect(mockRequest).not.toHaveBeenCalled();
+    expect(useWealthStore.getState().toastText).toContain("请等待人员查询完成");
+    useWealthStore.setState({ distributionBlocked: false });
+  });
+
   it("publishPlan 行长未选分发目标时校验失败", async () => {
     useWealthStore.setState({ accountId: "president" });
     seedDraft();
