@@ -6,6 +6,7 @@ from .date_policy import reason as date_reason
 
 from .definition import BROADCAST_RELATION_META_FIELDS, canonical
 from .storage import insert, update
+from .migration_policy import imported_binding
 
 
 def _request_preview(value):
@@ -50,6 +51,9 @@ async def write_projection(
     deleted=False,
     expect_new=False,
 ):
+    key = (spec["tenant_id"], spec["source_id"], agent_id, spec["id"])
+    if await imported_binding(db, key, state):
+        return
     existing = await db.fetch_one(
         "SELECT * FROM swe_cron_jobs WHERE id = %s FOR UPDATE",
         (spec["id"],),

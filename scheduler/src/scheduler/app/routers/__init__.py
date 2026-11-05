@@ -20,6 +20,7 @@ from .system_cron_execution import router as system_cron_execution_router
 from .system_cron_workspace import router as system_cron_workspace_router
 
 from .managed_cron_management import router as managed_cron_management_router
+from .selected_cron_migration import router as selected_cron_migration_router
 from .managed_cron_controls import router as managed_cron_controls_router
 from .managed_cron_broadcast import router as managed_cron_broadcast_router
 from .managed_cron_dispatch_state import (
@@ -33,6 +34,7 @@ api_router.include_router(batch_run_state_router)
 api_router.include_router(managed_cron_router)
 api_router.include_router(managed_cron_progress_router)
 api_router.include_router(managed_cron_management_router)
+api_router.include_router(selected_cron_migration_router)
 api_router.include_router(managed_cron_controls_router)
 api_router.include_router(managed_cron_broadcast_router)
 api_router.include_router(managed_cron_dispatch_state_router)

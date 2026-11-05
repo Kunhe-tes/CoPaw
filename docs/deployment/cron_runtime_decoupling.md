@@ -1,5 +1,7 @@
 # CronManager 业务解耦（保留旧任务行为）
 
+> 后续实现更新（2026-11-05）：[旧页勾选迁移与聊天页最小兼容](../brainstorms/2026-11-04-cron-selected-migration-requirements.md)已完成本地开发，操作及待行内验收内容见[迁移说明](cron_selected_migration.md)。本文的“聊天页未切换”等说明仍记录此前已提交的业务解耦阶段，不表示当前方案排除聊天兼容。
+
 ## 本轮交付
 
 1. SWE 新任务通知直接使用 `CronNotificationSender`；旧通知仍经 CronManager 读取旧任务并调用同一发送算法。

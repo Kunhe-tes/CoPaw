@@ -117,6 +117,7 @@ def _unfinished_crud_binding(operation, row):
         "create": {"creating", "create_failed"},
         "update": {"updating", "update_failed"},
         "delete": {"deleting", "delete_failed"},
+        "migrate": {"migrating"},
     }.get(operation["action"], ())
     return (
         row.get("state_management_status") in expected
@@ -184,7 +185,7 @@ def _reference_kind(operation, payload, kind):
         return kind == "batch"
     if action == "mode_sync":
         return kind == "ordinary"
-    if action not in {"create", "update"}:
+    if action not in {"create", "update", "migrate"}:
         return False
     expected = (
         "ordinary" if payload.get("dispatch_state") == "ordinary" else "batch"

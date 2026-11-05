@@ -14,6 +14,9 @@ const cronJobApiMocks = vi.hoisted(() => ({
   listCronJobs: vi.fn(),
 }));
 const schedulerMocks = vi.hoisted(() => ({ listAll: vi.fn() }));
+vi.mock("@/api/modules/cronMigration", () => ({
+  cronMigrationApi: { ownership: vi.fn().mockResolvedValue([]) },
+}));
 vi.mock("@/api/modules/schedulerCron", () => ({
   schedulerCronApi: schedulerMocks,
 }));

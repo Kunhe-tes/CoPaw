@@ -255,6 +255,8 @@ async def retry_operation(
     """
     try:
         operation = await service.store.get(caller, job_id, operation_id)
+        if operation["action"] == "migrate":
+            raise ManagementConflict("cron_migration_requires_group_retry")
         if operation["action"] == "batch_delete":
             raise ManagementConflict(
                 "cron_batch_delete_requires_original_request",
