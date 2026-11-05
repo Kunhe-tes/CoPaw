@@ -247,11 +247,6 @@ function InstitutionPicker({ root }: { root: Institution }) {
               <p className={styles.empty}>未找到匹配机构</p>
             )}
           </div>
-          <p className={styles.treeNote}>
-            ☑ 全部选择 ▣ 部分选择 □ 未选
-            <br />
-            机构人数在加载人员后显示
-          </p>
         </aside>
         <div className={styles.peoplePane}>
           <div className={styles.peopleHead}>
@@ -264,25 +259,28 @@ function InstitutionPicker({ root }: { root: Institution }) {
                       .join(" / ")
                   : root.mOrgName}
               </div>
-              <h4>{current ? `${current.mOrgName}人员` : "请选择机构"}</h4>
-              <p>
-                {snapshot.people ? (
-                  <>
-                    共 {snapshot.people.length} 人
-                    {current?.children.length ? "（含下级机构）" : ""} ·{" "}
-                    <strong>
-                      已选{" "}
-                      {
-                        snapshot.people.filter((u) => selectedIds.has(u.sapId))
-                          .length
-                      }{" "}
-                      人
-                    </strong>
-                  </>
-                ) : (
-                  "点击左侧机构名称，查看并选择人员"
-                )}
-              </p>
+              <div className={styles.peopleTitle}>
+                <h4>{current ? `${current.mOrgName}人员` : "请选择机构"}</h4>
+                <p>
+                  {snapshot.people ? (
+                    <>
+                      共 {snapshot.people.length} 人
+                      {current?.children.length ? "（含下级机构）" : ""} ·{" "}
+                      <strong>
+                        已选{" "}
+                        {
+                          snapshot.people.filter((u) =>
+                            selectedIds.has(u.sapId),
+                          ).length
+                        }{" "}
+                        人
+                      </strong>
+                    </>
+                  ) : (
+                    "点击左侧机构名称，查看并选择人员"
+                  )}
+                </p>
+              </div>
             </div>
             {snapshot.people && (
               <button
