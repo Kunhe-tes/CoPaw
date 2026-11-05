@@ -1,7 +1,13 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ReactElement } from "react";
 import Tasks from "./index";
+import {
+  fetchInsuranceTracking,
+  InsuranceApiUnavailableError,
+} from "./InsuranceTracking/api";
+import type { DialogState } from "../store";
 import type { Customer, Plan } from "../types";
 import type { CustomerCounts } from "../api";
 
@@ -46,9 +52,17 @@ vi.mock("../store", () => ({
     selector(state),
 }));
 
+vi.mock("./InsuranceTracking/api", async (original) => ({
+  ...(await original<typeof import("./InsuranceTracking/api")>()),
+  fetchInsuranceTracking: vi.fn(),
+}));
+
 afterEach(cleanup);
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(fetchInsuranceTracking).mockRejectedValue(
+    new InsuranceApiUnavailableError(),
+  );
   state.todayCounts =
     state.pendingCounts =
     state.doneCounts =
@@ -474,3 +488,197 @@ describe("今日任务加载", () => {
     );
   });
 });
+
+it("当天没有保险场景也补充固定保险入口，点击后不按虚构技能查询名单", async () => {
+  render(
+    <MemoryRouter>
+      <Tasks page="today" />
+    </MemoryRouter>,
+  );
+  expect(screen.getByText("保险", { selector: "summary" })).toBeInTheDocument();
+  state.refreshTodayCustomers.mockClear();
+  state.loadTodayCustomers.mockClear();
+  fireEvent.click(screen.getByRole("button", { name: "保险核心跟踪" }));
+  await screen.findByText("保险核心跟踪服务暂未接入");
+  expect(state.refreshTodayCustomers).not.toHaveBeenCalled();
+  expect(state.loadTodayCustomers).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "客户视角" }));
+  expect(
+    screen.queryByRole("button", { name: "保险核心跟踪" }),
+  ).not.toBeInTheDocument();
+});
+
+it("已有保险分类时复用分组，将固定入口放在原场景最上方", () => {
+  state.plans = [
+    {
+      id: "insurance-plan",
+      name: "保险规划",
+      source: "我的关注",
+      desc: "",
+      customers: 0,
+      tasks: 0,
+      rate: 0,
+      status: "已自动下发",
+      publishStatus: "published",
+      period: "自定义",
+      start: "2020-01-01",
+      end: "2030-12-31",
+      items: [
+        {
+          id: "insurance-skill",
+          sceneName: "保险初筛识别",
+          categoryLabel: "保险",
+          categoryCode: "insurance",
+          mcpRelations: [],
+          direction: "",
+          cycle: "自定义",
+          start: "2020-01-01",
+          end: "2030-12-31",
+          schedule: { type: "daily", hour: 9, minute: 0 },
+        },
+      ],
+    },
+  ];
+  render(
+    <MemoryRouter>
+      <Tasks page="today" />
+    </MemoryRouter>,
+  );
+  expect(screen.getAllByText("保险", { selector: "summary" })).toHaveLength(1);
+  const group = screen
+    .getByText("保险", { selector: "summary" })
+    .closest("details")!;
+  expect(
+    [...group.querySelectorAll("button")].map((button) => button.textContent),
+  ).toEqual(["保险核心跟踪", "我的关注保险初筛识别"]);
+  fireEvent.click(screen.getByRole("button", { name: /我的关注保险初筛识别/ }));
+  expect(screen.getByText("当前任务：保险初筛识别")).toBeInTheDocument();
+});
+
+it.each([
+  "https://wealth.example/reportView?resultId=plan-1",
+  "https://wealth.example/reportView",
+  undefined,
+])("保险经营方案复用原预览逻辑，方案地址为 %s", async (link) => {
+  vi.mocked(fetchInsuranceTracking).mockResolvedValue({
+    customers: [
+      {
+        id: "insurance-customer",
+        custUid: "cust-insurance",
+        name: "保险客户",
+        intention: 3,
+        sceneName: "保险初筛识别",
+        link,
+      },
+    ],
+    counts: { customers: 1, highIntention: 1, tracking: 1 },
+  });
+  render(
+    <MemoryRouter>
+      <Tasks page="today" />
+    </MemoryRouter>,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "保险核心跟踪" }));
+  const button = await screen.findByRole("button", { name: "查看经营方案" });
+  fireEvent.click(button);
+  const first = state.openDialog.mock.calls[0][0] as DialogState;
+  if (!link) {
+    expect(first.title).toBe("客户经营方案");
+    expect(
+      (first.body as ReactElement<{ children: string }>).props.children,
+    ).toBe("暂无经营方案");
+    expect(first.plain).not.toBe(true);
+    return;
+  }
+  expect(first.plain).toBe(true);
+  expect(first.buttons).toEqual([{ label: "关闭" }]);
+  const firstPreview = first.body as ReactElement<{
+    url: string;
+    custName: string;
+    title: string;
+  }>;
+  expect(firstPreview.props.custName).toBe("保险客户");
+  expect(firstPreview.props.title).toBe("保险初筛识别");
+  const firstUrl = new URL(firstPreview.props.url);
+  expect(firstUrl.searchParams.get("_t")).toBe("1");
+  expect(firstUrl.searchParams.get("resultId")).toBe(
+    new URL(link).searchParams.get("resultId"),
+  );
+  fireEvent.click(button);
+  const second = state.openDialog.mock.calls[1][0] as DialogState;
+  const secondPreview = second.body as typeof firstPreview;
+  expect(new URL(secondPreview.props.url).searchParams.get("_t")).toBe("2");
+  expect(secondPreview.key).not.toBe(firstPreview.key);
+});
+
+it.each([
+  { category: "保险", traced: 0, label: "加入跟踪", disabled: false },
+  { category: "保险", traced: 1, label: "已加入跟踪", disabled: true },
+  { category: "保险", traced: undefined, label: "加入跟踪", disabled: true },
+  { category: "理财", traced: 0, label: null, disabled: false },
+])(
+  "$category 技能 traced=$traced 的加入跟踪入口状态",
+  ({ category, traced, label, disabled }) => {
+    state.plans = [
+      {
+        id: "plan",
+        name: "经营规划",
+        source: "我的关注",
+        desc: "",
+        customers: 1,
+        tasks: 1,
+        rate: 0,
+        status: "已自动下发",
+        publishStatus: "published",
+        period: "自定义",
+        start: "2020-01-01",
+        end: "2030-12-31",
+        items: [
+          {
+            id: "skill",
+            sceneName: "客户需求识别",
+            categoryLabel: category,
+            categoryCode: category === "保险" ? "insurance" : "finance",
+            mcpRelations: [],
+            direction: "",
+            cycle: "自定义",
+            start: "2020-01-01",
+            end: "2030-12-31",
+            schedule: { type: "daily", hour: 9, minute: 0 },
+          },
+        ],
+      },
+    ];
+    state.customers = [
+      {
+        id: "skill|c1",
+        custUid: "c1",
+        skillId: "skill",
+        name: "林芳",
+        category,
+        task: "客户需求识别",
+        label: "",
+        reason: "",
+        done: false,
+        channel: "",
+        time: "",
+        note: "",
+        traced,
+      },
+    ];
+    render(
+      <MemoryRouter>
+        <Tasks page="today" />
+      </MemoryRouter>,
+    );
+    if (label) {
+      const button = screen.getByRole("button", { name: label });
+      if (disabled) expect(button).toBeDisabled();
+      else expect(button).toBeEnabled();
+    } else {
+      expect(
+        screen.queryByRole("button", { name: "加入跟踪" }),
+      ).not.toBeInTheDocument();
+    }
+  },
+);
