@@ -1,6 +1,9 @@
 import { useCallback, useState } from "react";
 import {
   Alert,
+  Button,
+  Space,
+  message,
   Input,
   Pagination,
   Select,
@@ -93,6 +96,15 @@ const memberColumns: ColumnsType<ManagedBatchMember> = [
     ),
   },
   {
+    title: "error_type",
+    dataIndex: "error_type",
+    width: 130,
+    ellipsis: true,
+    render: (value: string | null | undefined) => (
+      <Tooltip title={value ?? "-"}>{value ?? "-"}</Tooltip>
+    ),
+  },
+  {
     title: "结果 / 错误",
     width: 200,
     render: (_, item) => {
@@ -120,11 +132,13 @@ export default function BatchDetail({
   batch,
   refresh,
   onQueued,
+  onPauseChanged,
 }: {
   source: string;
   actor: string;
   batch: ManagedBatch;
   refresh: number;
+  onPauseChanged?: () => void;
   onQueued: (result: ManagedRetryResult) => void;
 }) {
   const [filters, setFilters] = useState({
@@ -144,6 +158,7 @@ export default function BatchDetail({
     },
     [source, batch.batch_id, filters, refresh],
   );
+  const [pausing, setPausing] = useState(false);
   const detail = useBoardResource(load);
   const data = detail.value;
   const current = data?.batch || batch;
@@ -161,7 +176,34 @@ export default function BatchDetail({
             </span>
           </p>
         </div>
-        {statusTag(data?.batch.status || batch.status)}
+        <Space>
+          {statusTag(data?.batch.status || batch.status)}
+          {current.batch_paused && <span>本批已暂停</span>}
+          <Tooltip title="暂停本批后续派发和重试；已交接的执行继续完成，后续新批次不受影响">
+            <Button
+              aria-label={current.batch_paused ? "恢复本批" : "暂停本批"}
+              loading={pausing}
+              onClick={async () => {
+                setPausing(true);
+                try {
+                  await managedBatchBoard.pause(
+                    source,
+                    batch.batch_id,
+                    !current.batch_paused,
+                  );
+                  setFilters((value) => ({ ...value }));
+                  onPauseChanged?.();
+                } catch {
+                  message.error("批次暂停状态更新失败，请重试");
+                } finally {
+                  setPausing(false);
+                }
+              }}
+            >
+              {current.batch_paused ? "恢复本批" : "暂停本批"}
+            </Button>
+          </Tooltip>
+        </Space>
       </div>
       <div
         className={styles.detailMeta}

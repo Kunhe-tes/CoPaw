@@ -265,6 +265,7 @@ function Board({ source, actor }: { source: string; actor: string }) {
                   </span>
                   <span className={styles.batchProgress}>
                     {statusTag(item.status)}
+                    {item.batch_paused && <Tag color="warning">本批已暂停</Tag>}
                     {item.dispatch_paused &&
                       item.done_count < item.member_count && (
                         <Tag color="warning">批调度入口已暂停</Tag>
@@ -320,6 +321,7 @@ function Board({ source, actor }: { source: string; actor: string }) {
               batch={batch}
               refresh={refresh}
               onQueued={onQueued}
+              onPauseChanged={reload}
             />
           ) : (
             <div className={styles.detailEmpty}>
