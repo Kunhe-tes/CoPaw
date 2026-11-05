@@ -34,6 +34,7 @@ def batch_item(row):
     )
     result = {name: row[name] for name in fields}
     result["dispatch_paused"] = bool(row["dispatch_paused"])
+    result["batch_paused"] = bool(row["batch_paused"])
     # 新协议没有批次级Owner；dispatch_owner是派发令牌，不能暴露。
     result["lock_owner"] = None
     result.update(
@@ -94,6 +95,7 @@ def member_item(row):
             "dispatch_priority": meta.get("dispatch_priority"),
             "viewer_heat_score": meta.get("viewer_heat_score"),
             "error_message": member_error_message(row),
+            "error_type": row.get("history_error_type"),
         },
     )
     return result
@@ -247,7 +249,7 @@ class ManagedBoardQuery:
             tuple(params),
         )
         rows = await self.db.fetch_all(
-            "SELECT r.*,h.error_message AS history_error_message,m.member_id,m.business_attempt,m.member_role,m.dispatch_order AS member_order,d.definition_version AS current_definition_version,s.management_status,s.dispatch_state "
+            "SELECT r.*,h.error_type AS history_error_type,h.error_message AS history_error_message,m.member_id,m.business_attempt,m.member_role,m.dispatch_order AS member_order,d.definition_version AS current_definition_version,s.management_status,s.dispatch_state "
             + sql.MEMBER_FROM
             + "LEFT JOIN swe_cron_executions h ON h.id=r.history_execution_id AND h.tenant_id=r.tenant_id AND h.tenant_id COLLATE utf8mb4_bin=r.tenant_id AND h.job_id=r.job_id AND h.job_id COLLATE utf8mb4_bin=r.job_id "
             + f" WHERE {where} ORDER BY m.dispatch_order,m.member_id LIMIT %s OFFSET %s",

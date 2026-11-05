@@ -14,6 +14,11 @@ from pydantic import BaseModel, Field, field_validator
 
 from scheduler.app.database import get_db_connection
 from .batch_priority import priority_key, priority_snapshot
+from .managed.failure_policy import (
+    MAIN_ERROR_EXCLUSIONS,
+    MODEL_ERROR_TYPE,
+    is_model_failure,
+)
 from .capacity_claim import legacy_available_capacity, write_capacity
 from .batch_operations import refresh_batch_counts
 from .dispatch_gate import (
@@ -49,6 +54,18 @@ _CURRENT_EXECUTION_IDENTITY_SQL = """
     AND e.job_id = swe_cron_dispatch_intents.job_id
     AND e.tenant_id = swe_cron_dispatch_intents.tenant_id
 """
+_MAIN_NON_MODEL_ERROR_SQL = " OR ".join(
+    f"INSTR(LOWER(COALESCE(e.error_message,'')), '{error}')>0"
+    for error in MAIN_ERROR_EXCLUSIONS
+)
+_MODEL_FAILURE_EXECUTION_SQL = f"""EXISTS (
+    SELECT 1 FROM swe_cron_executions e
+    WHERE {_CURRENT_EXECUTION_IDENTITY_SQL}
+      AND ((e.status IN ('error','failed','timeout')
+            AND NOT ({_MAIN_NON_MODEL_ERROR_SQL}))
+           OR (e.async_status='error'
+               AND INSTR(COALESCE(e.error_type,'') COLLATE utf8mb4_bin,'Prompt')>0))
+)"""
 _TERMINAL_EXECUTION_SQL = """
     (
         e.status IN ('error', 'failed', 'cancelled', 'timeout', 'skipped')
@@ -876,7 +893,7 @@ class CronDispatchIntentService:
                    swe_cron_dispatch_intents.source_id,
                    swe_cron_dispatch_intents.attempt_count,
                    e.id AS execution_id, e.status AS agent_status,
-                   e.async_status, e.error_message
+                   e.async_status, e.error_type, e.error_message
             FROM swe_cron_dispatch_intents
             JOIN swe_cron_executions e ON {_CURRENT_EXECUTION_IDENTITY_SQL}
             WHERE swe_cron_dispatch_intents.status IN ('claimed', 'acknowledged', 'dispatched')
@@ -896,6 +913,18 @@ class CronDispatchIntentService:
             seen.add(intent_id)
             status = str(row["agent_status"]).lower()
             error = str(row.get("error_message") or "")
+            model_failed = (
+                status in {"error", "failed", "timeout"}
+                and is_model_failure(
+                    {
+                        "status": "error",
+                        "result_json": json.dumps({"error_detail": error}),
+                    },
+                )
+            ) or (
+                row["async_status"] == "error"
+                and MODEL_ERROR_TYPE in (row.get("error_type") or "")
+            )
             if status == "success" and row["async_status"] == "error":
                 status, error = "error", SUBTASK_EXECUTION_FAILED
             if await self.complete_from_execution(
@@ -905,6 +934,7 @@ class CronDispatchIntentService:
                 completed_at=now_utc,
                 error=error,
                 retry_delay_seconds=retry_delay_seconds,
+                model_failure=model_failed,
                 expected_batch_id=row["batch_id"],
                 expected_job_id=row["job_id"],
                 expected_tenant_id=row["tenant_id"],
@@ -1659,6 +1689,7 @@ class CronDispatchIntentService:
         expected_tenant_id: str = "",
         expected_source_id: str | None = None,
         expected_attempt_count: int | None = None,
+        model_failure: bool = True,
     ) -> bool:
         """Update a dispatched child intent from the final SWE execution row."""
         db = get_db_connection()
@@ -1692,6 +1723,7 @@ class CronDispatchIntentService:
             completed_at=completed_at_value,
             error=error,
             retry_delay_seconds=retry_delay_seconds,
+            model_failure=model_failure,
         )
         updated = await _update_execution_intent_row(
             db,
@@ -1713,6 +1745,7 @@ class CronDispatchIntentService:
                 "execution_id": execution_id,
                 "execution_status": status,
                 "retry": transition.retry,
+                "model_failure": int(model_failure and status != "success"),
             },
         )
         return True
@@ -1751,11 +1784,11 @@ class CronDispatchIntentService:
         completion_row = await db.fetch_one(
             f"""
             SELECT
-                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END)
+                SUM(CASE WHEN status = 'completed' OR (status='failed' AND NOT {_MODEL_FAILURE_EXECUTION_SQL}) THEN 1 ELSE 0 END)
                     AS success_count,
                 SUM(CASE
                     WHEN status = 'failed'
-                     AND COALESCE(error_message, '') <> %s
+                     AND {_MODEL_FAILURE_EXECUTION_SQL}
                     THEN 1 ELSE 0
                 END)
                     AS failure_count
@@ -1764,7 +1797,6 @@ class CronDispatchIntentService:
               {scope_clause}
             """,
             (
-                CRON_AUTH_EXPIRED_FAILURE_MESSAGE,
                 since_value,
                 since_value,
                 *scope_params,
@@ -1776,6 +1808,7 @@ class CronDispatchIntentService:
             FROM swe_cron_dispatch_events e
             LEFT JOIN swe_cron_dispatch_intents i ON e.intent_id = i.id
             WHERE e.event_type = 'retry_scheduled'
+              AND JSON_EXTRACT(e.details,'$.model_failure')=1
               AND e.created_at >= %s
               {event_scope_clause}
             """,
@@ -2365,13 +2398,18 @@ def _build_execution_completion_transition(
     completed_at: datetime,
     error: str,
     retry_delay_seconds: int,
+    model_failure: bool = True,
 ) -> _ExecutionCompletionTransition:
     normalized_status = str(status or "").lower()
     success = normalized_status == "success"
     auth_expired = not success and _is_cron_auth_expired_error(error)
-    terminal_failure = auth_expired or (
-        int(row.get("attempt_count") or 0)
-        >= int(row.get("max_attempts") or DEFAULT_MAX_ATTEMPTS)
+    terminal_failure = (
+        not model_failure
+        or auth_expired
+        or (
+            int(row.get("attempt_count") or 0)
+            >= int(row.get("max_attempts") or DEFAULT_MAX_ATTEMPTS)
+        )
     )
     if success:
         next_status = "completed"

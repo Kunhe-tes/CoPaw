@@ -5,6 +5,8 @@ import json
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from .failure_policy import is_model_failure
+
 MARKER = "daily_failure_retry"
 PROTOCOL = "scheduler_managed_v1"
 NATIVE_BATCH_ATTEMPTS = 3
@@ -75,6 +77,8 @@ def excluded_failure(row, history):
     ).casefold()
     if any(pattern in text for pattern in STOP_ERRORS):
         return "cron_daily_retry_excluded_failure"
+    if not is_model_failure(row, history):
+        return "cron_daily_retry_non_model_failure"
     return None
 
 

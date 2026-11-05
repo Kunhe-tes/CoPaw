@@ -46,7 +46,7 @@ VALID = (
 )
 RECEIPT_SELECT = f"""
 SELECT c.receipt_id,c.batch_id,c.tenant_id,c.source_id,c.agent_id,c.job_id,
-c.logical_fire_at,c.physical_fire_at,c.created_at,
+c.logical_fire_at,c.physical_fire_at,c.created_at,c.batch_paused,
 CAST(c.members_json AS JSON) AS members_json,
 JSON_UNQUOTE(JSON_EXTRACT(p.spec_json,'$.name')) AS job_name,
 CASE WHEN ps.dispatch_state='batch_paused' THEN 1 ELSE 0 END AS dispatch_paused,
@@ -70,6 +70,7 @@ MAX(JSON_TYPE(c.members_json)) AS manifest_type,
 MAX(CASE WHEN m.member_role='parent' THEN r.provider_id END) AS provider_id,
 MAX(CASE WHEN m.member_role='parent' THEN r.model_id END) AS model_id,
 MAX(c.dispatch_paused) AS dispatch_paused,
+MAX(c.batch_paused) AS batch_paused,
 COUNT(m.member_id) AS member_count,
 SUM(CASE WHEN {DONE} THEN 1 ELSE 0 END) AS done_count,
 SUM(CASE WHEN {FAILED} THEN 1 ELSE 0 END) AS failed_count,

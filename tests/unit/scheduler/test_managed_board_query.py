@@ -434,3 +434,31 @@ async def test_async_child_failure_has_readable_message_without_inventing_detail
         detail["members"][0]["settled_error_code"]
         == "cron_async_subtasks_failed"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", ["Prompt", "Business", None])
+async def test_board_and_retry_preview_preserve_raw_error_type(
+    callback_setup,
+    error_type,
+):
+    from monitor.app.services.cron.managed_board import ManagedBoardQuery
+    from scheduler.app.services.cron.managed.batch_retry import (
+        BatchRetryService,
+    )
+
+    db = callback_setup[0]
+    caller, batch = await failed_batch(callback_setup)
+    await db.execute(
+        "UPDATE swe_cron_executions SET error_type=%s",
+        (error_type,),
+    )
+    detail = await ManagedBoardQuery(db).detail(
+        "bank",
+        batch,
+        BoardDetailQuery(),
+    )
+    preview = await BatchRetryService(db).preview(caller, batch)
+    assert detail["members"][0]["error_type"] == error_type
+    assert preview["items"][0]["error_type"] == error_type
+    assert detail["batch"]["status"] == "failed"

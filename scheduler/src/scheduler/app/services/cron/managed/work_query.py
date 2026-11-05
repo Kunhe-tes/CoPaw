@@ -54,6 +54,15 @@ def _base(running, now=None):
     timestamp = moment.replace(tzinfo=None).isoformat(" ")
     params = [timestamp]
     if not running:
+        # Filter paused batches before LIMIT so they cannot block other work.
+        sql += (
+            " AND (r.status='accepted' OR NOT EXISTS ("
+            "SELECT 1 FROM swe_cron_managed_trigger_receipts p "
+            "JOIN swe_cron_managed_batch_members pm ON pm.batch_id=p.batch_id AND pm.source_id=p.source_id "
+            "WHERE pm.current_execution_id=r.execution_id "
+            "AND p.source_id=r.source_id AND p.kind='batch' "
+            "AND p.status='accepted' AND p.batch_paused=1))"
+        )
         sql += (
             f" AND (r.not_before_at<=%s OR r.not_before_at IS NULL OR {INVALIDATED}) "
             f"AND (r.status='accepted' OR {INVALIDATED} OR "

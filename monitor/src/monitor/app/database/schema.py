@@ -145,6 +145,7 @@ CREATE TABLE IF NOT EXISTS swe_cron_executions (
     -- 执行状态
     status          VARCHAR(16) NOT NULL COMMENT '状态: success/error/cancelled/timeout/skipped',
     async_status    VARCHAR(16) DEFAULT NULL COMMENT '异步任务执行状态: success/error',
+    error_type      VARCHAR(64) DEFAULT NULL COMMENT '异步失败原始类型，例如 Prompt',
     need_notification TINYINT(1) DEFAULT 0 COMMENT '是否需要通知: 0-否, 1-是',
     error_message   VARCHAR(2048) DEFAULT '' COMMENT '错误信息',
 
