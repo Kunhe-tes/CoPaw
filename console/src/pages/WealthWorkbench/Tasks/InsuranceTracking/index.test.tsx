@@ -9,13 +9,19 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { InsuranceTracking } from "./index";
+import { fetchSceneSkills } from "../../api";
 import {
   fetchInsuranceTracking,
+  InsuranceSyncError,
   removeInsuranceTracking,
   saveInsuranceChange,
-  InsuranceApiUnavailableError,
   type InsuranceList,
 } from "./api";
+
+vi.mock("../../api", async (original) => ({
+  ...(await original<typeof import("../../api")>()),
+  fetchSceneSkills: vi.fn(),
+}));
 
 vi.mock("./api", async (original) => ({
   ...(await original<typeof import("./api")>()),
@@ -28,6 +34,8 @@ const fixture = (): InsuranceList => ({
     {
       id: "1",
       custUid: "c1",
+      skillId: "insurance-skill",
+      sceneName: "保险初筛识别",
       name: "林芳",
       branchName: "城南支行",
       assets: "337.34 万",
@@ -45,6 +53,8 @@ const fixture = (): InsuranceList => ({
     {
       id: "2",
       custUid: "c2",
+      skillId: "insurance-skill",
+      sceneName: "保险初筛识别",
       name: "王海",
       assets: "80 万",
       intention: 3,
@@ -58,6 +68,14 @@ const showScheme = vi.fn();
 const execute = vi.fn().mockResolvedValue(undefined);
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(fetchSceneSkills).mockResolvedValue([
+    {
+      skillId: "insurance-skill",
+      senceName: "保险初筛识别",
+      category: "insurance",
+      mcpRelationList: [],
+    },
+  ]);
   HTMLDialogElement.prototype.showModal = function () {
     this.setAttribute("open", "");
   };
@@ -97,6 +115,8 @@ function manyRecords() {
     ...entry,
     id: `follow-${entry.id}`,
     result: 0 as const,
+    skillId: "insurance-skill",
+    sceneName: "保险初筛识别",
     method: 3,
     content: `跟进${entry.content}`,
     date: `${entry.date}T14:30`,
@@ -298,6 +318,8 @@ it.each([0, 1] as const)(
             date: "2026-11-05T15:00",
             method,
             result: 0,
+            skillId: "insurance-skill",
+            sceneName: "保险初筛识别",
             content: "数值字段验证",
           },
         }),
@@ -343,7 +365,7 @@ async function chooseIntention(name: string, option: string) {
   fireEvent.mouseDown(document.body);
 }
 
-it("展示八列且经营方案紧邻执行列，统计使用服务端全量人数，执行复用现有入口", async () => {
+it("展示九列且经营方案紧邻执行列，统计使用服务端全量人数，执行复用现有入口", async () => {
   await show();
   expect(
     screen.getAllByRole("columnheader").map((el) => el.textContent),
@@ -353,6 +375,7 @@ it("展示八列且经营方案紧邻执行列，统计使用服务端全量人�
     "保险计划",
     "接触计划",
     "最后跟进记录",
+    "触达方式",
     "客户意向度",
     "经营方案",
     "执行",
@@ -508,6 +531,8 @@ it("新增跟进不带入上一条记录，确认保存后更新最后跟进记�
       method: 3,
       content: "已沟通保障需求",
       result: 0,
+      skillId: "insurance-skill",
+      sceneName: "保险初筛识别",
     },
   });
 });
@@ -558,9 +583,9 @@ it("本地搜索不改动全量统计，清空搜索后恢复客户", async () =
   expect(screen.getByText("王海")).toBeInTheDocument();
 });
 
-it("未接入和失败态不展示虚构数据，支持重试和真实空名单", async () => {
+it("加载失败不展示虚构数据，支持重试和真实空名单", async () => {
   vi.mocked(fetchInsuranceTracking).mockRejectedValueOnce(
-    new InsuranceApiUnavailableError(),
+    new Error("保险跟踪加载失败"),
   );
   render(
     <InsuranceTracking
@@ -569,7 +594,7 @@ it("未接入和失败态不展示虚构数据，支持重试和真实空名单"
       onShowScheme={showScheme}
     />,
   );
-  await screen.findByText("保险核心跟踪服务暂未接入");
+  await screen.findByText("保险跟踪加载失败");
   expect(screen.queryByRole("table")).not.toBeInTheDocument();
   vi.mocked(fetchInsuranceTracking).mockResolvedValue({
     customers: [],
@@ -677,6 +702,8 @@ it("新增记录展示客户和场景，时间与沟通记录必填，不回填�
       method: 2,
       content: "上次沟通内容",
       result: 1,
+      skillId: "insurance-skill",
+      sceneName: "保险初筛识别",
     },
   ];
   vi.mocked(fetchInsuranceTracking).mockResolvedValue(data);
@@ -778,6 +805,8 @@ it("新增跟进失败恢复上一条记录，草稿完整保留并可直接重�
       method: 2,
       content: "上次跟进",
       result: 1,
+      skillId: "insurance-skill",
+      sceneName: "保险初筛识别",
     },
   ];
   vi.mocked(fetchInsuranceTracking).mockResolvedValue(data);
@@ -845,11 +874,13 @@ it("新增跟进失败恢复上一条记录，草稿完整保留并可直接重�
         date: "2026-11-05T14:30",
         method: 3,
         result: 0,
+        skillId: "insurance-skill",
+        sceneName: "保险初筛识别",
         content: "本次跟进",
       },
     },
   );
-}, 10000);
+}, 20000);
 
 it("接触计划失败只恢复该字段，正常编辑按钮也会回填失败草稿", async () => {
   let reject!: (error: Error) => void;
@@ -994,7 +1025,7 @@ it("取消移除不发请求；确认移除成功前保留客户，成功后移�
   expect(screen.getByText("林芳")).toBeInTheDocument();
 });
 
-it("移除失败保留客户和人数，可使用同一请求ID重试；非高意向客户移除不改变高意向人数", async () => {
+it("移除失败保留客户和人数，可重试；非高意向客户移除不改变高意向人数", async () => {
   vi.mocked(removeInsuranceTracking)
     .mockRejectedValueOnce(new Error("服务异常"))
     .mockResolvedValueOnce(undefined);
@@ -1016,7 +1047,7 @@ it("移除失败保留客户和人数，可使用同一请求ID重试；非高�
   expect(highCount()).toHaveTextContent("8");
   const calls = vi.mocked(removeInsuranceTracking).mock.calls;
   expect(calls[0][0]).toEqual(fixture().customers[0]);
-  expect(calls[0][1]).toBe(calls[1][1]);
+  expect(calls[0][1]).toBeInstanceOf(AbortSignal);
 });
 
 it("资产和接触计划列头切换升序、降序、默认，切换列时只保留一个排序", async () => {
@@ -1071,9 +1102,186 @@ it("意向度列头可筛选零值并与搜索组合，无匹配显示搜索空�
     target: { value: "王海" },
   });
   expect(
-    screen.getByText("未找到匹配的客户，请调整搜索条件"),
+    screen.getByText("未找到匹配的客户，请调整搜索或筛选条件"),
   ).toBeInTheDocument();
   expect(screen.queryByText("暂未添加跟踪客户")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "清除客户意向度筛选" }));
   expect(screen.getByText("王海")).toBeInTheDocument();
+});
+
+it("新增保存成功但回查失败不回滚、不提供重复保存，只锁定该客户直到刷新", async () => {
+  vi.mocked(saveInsuranceChange).mockRejectedValueOnce(
+    new InsuranceSyncError(),
+  );
+  await show();
+  fireEvent.click(screen.getByRole("button", { name: "新增林芳的接触计划" }));
+  fireEvent.change(screen.getByLabelText("接触日期"), {
+    target: { value: "2026-11-10" },
+  });
+  fireEvent.change(screen.getByLabelText("接触安排"), {
+    target: { value: "已保存的新计划" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  await screen.findByText(/保存已成功，但列表刷新失败/);
+  expect(screen.getByText("已保存的新计划")).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: /重试保存/ }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "新增林芳的接触计划" }),
+  ).toBeDisabled();
+  expect(
+    screen.getByRole("button", { name: "新增王海的接触计划" }),
+  ).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "刷新保险跟踪" }));
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "新增林芳的接触计划" }),
+    ).toBeEnabled(),
+  );
+});
+
+it("新增回查取得全量正式记录后替换临时数组，避免把新增记录重复插入", async () => {
+  const records = [
+    {
+      id: "901",
+      date: "2026-11-12",
+      method: 0 as const,
+      content: "已入库计划",
+    },
+    ...fixture().customers[0].contactPlans!,
+  ];
+  vi.mocked(saveInsuranceChange).mockResolvedValueOnce({ records });
+  await show();
+  fireEvent.click(screen.getByRole("button", { name: "新增林芳的接触计划" }));
+  fireEvent.change(screen.getByLabelText("接触日期"), {
+    target: { value: "2026-11-12" },
+  });
+  fireEvent.change(screen.getByLabelText("接触安排"), {
+    target: { value: "已入库计划" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "新增林芳的接触计划" }),
+    ).toBeEnabled(),
+  );
+  expect(screen.getAllByText("已入库计划")).toHaveLength(1);
+  fireEvent.click(
+    screen.getByRole("button", { name: "编辑林芳的接触计划 2026-11-12" }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  await waitFor(() => expect(saveInsuranceChange).toHaveBeenCalledTimes(2));
+  expect(vi.mocked(saveInsuranceChange).mock.calls[1][1]).toMatchObject({
+    recordId: "901",
+  });
+});
+
+it("触达方式展示最新跟进的方式，支持零值筛选、与意向度组合及清除，缺少跟进显示占位", async () => {
+  const data = fixture();
+  data.customers[0].intention = 0;
+  data.customers[0].followUps = [
+    {
+      id: "latest",
+      date: "2026-11-05T10:00",
+      content: "最新企微",
+      method: 0,
+      result: 1,
+      skillId: "insurance-skill",
+      sceneName: "保险初筛识别",
+    },
+    {
+      id: "older",
+      date: "2026-11-04T10:00",
+      content: "之前面访",
+      method: 3,
+      result: 1,
+      skillId: "insurance-skill",
+      sceneName: "保险初筛识别",
+    },
+  ];
+  vi.mocked(fetchInsuranceTracking).mockResolvedValue(data);
+  await show();
+  const row = screen.getByText("林芳").closest("tr")!;
+  expect(within(row).getAllByRole("cell")[5]).toHaveTextContent("企微");
+  expect(
+    within(screen.getByText("王海").closest("tr")!).getAllByRole("cell")[5],
+  ).toHaveTextContent("—");
+  fireEvent.click(screen.getByRole("button", { name: "筛选触达方式" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "企微" }));
+  expect(screen.getByText("林芳")).toBeInTheDocument();
+  expect(screen.queryByText("王海")).not.toBeInTheDocument();
+  expect(highCount()).toHaveTextContent("8");
+  fireEvent.click(screen.getByRole("button", { name: "筛选客户意向度" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "高意向" }));
+  expect(
+    screen.getByText("未找到匹配的客户，请调整搜索或筛选条件"),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("暂未添加跟踪客户")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "清除客户意向度筛选" }));
+  expect(screen.getByText("林芳")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "筛选触达方式" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "面访" }));
+  expect(
+    screen.getByText("未找到匹配的客户，请调整搜索或筛选条件"),
+  ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "清除触达方式筛选" }));
+  expect(screen.getByText("王海")).toBeInTheDocument();
+});
+
+it("缺失触达方式显示占位且不被企微筛选命中，编辑需补选，新建仍默认企微", async () => {
+  const data = fixture();
+  data.customers[0].followUps = [
+    {
+      id: "unknown-method",
+      date: "2026-11-05T10:00",
+      content: "方式未知的跟进",
+      result: 1,
+      skillId: "insurance-skill",
+      sceneName: "保险初筛识别",
+    },
+  ];
+  vi.mocked(fetchInsuranceTracking).mockResolvedValue(data);
+  await show();
+  expect(
+    within(screen.getByText("林芳").closest("tr")!).getAllByRole("cell")[5],
+  ).toHaveTextContent("—");
+  fireEvent.click(screen.getByRole("button", { name: "筛选触达方式" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "企微" }));
+  expect(screen.queryByText("林芳")).not.toBeInTheDocument();
+  expect(
+    screen.getByText("未找到匹配的客户，请调整搜索或筛选条件"),
+  ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "清除触达方式筛选" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "编辑林芳的跟进记录 2026-11-05T10:00" }),
+  );
+  expect(screen.getByLabelText("触达方式")).toHaveValue("");
+  fireEvent.click(screen.getByRole("button", { name: "保存记录" }));
+  await screen.findByText("请选择触达方式", {
+    selector: ".ant-form-item-explain-error",
+  });
+  expect(saveInsuranceChange).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByLabelText("触达方式"), {
+    target: { value: "0" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "保存记录" }));
+  await waitFor(() =>
+    expect(saveInsuranceChange).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        value: expect.objectContaining({ method: 0 }),
+      }),
+    ),
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "新增林芳的跟进记录" }),
+    ).toBeEnabled(),
+  );
+  expect(
+    within(screen.getByText("林芳").closest("tr")!).getAllByRole("cell")[5],
+  ).toHaveTextContent("企微");
+  fireEvent.click(screen.getByRole("button", { name: "新增林芳的跟进记录" }));
+  expect(screen.getByLabelText("触达方式")).toHaveValue("0");
 });

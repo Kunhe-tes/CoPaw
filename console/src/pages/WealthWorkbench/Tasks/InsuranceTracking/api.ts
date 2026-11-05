@@ -30,17 +30,31 @@ export const FOLLOW_UP_METHODS = {
   3: "面访",
 } as const;
 export type FollowUpMethod = keyof typeof FOLLOW_UP_METHODS;
+export function followUpMethodLabel(method?: FollowUpMethod): string {
+  return method == null ? "—" : FOLLOW_UP_METHODS[method] ?? "—";
+}
 export type FollowUpResult = keyof typeof FOLLOW_UP_RESULTS;
 export interface FollowUpEntry extends ContactEntry {
   result: FollowUpResult;
+  skillId?: string;
+  sceneName?: string;
 }
-export type ContactRecord = ContactEntry & { id: string };
-export type FollowUpRecord = FollowUpEntry & { id: string };
+export type ContactRecord = Omit<ContactEntry, "method"> & {
+  id: string;
+  method?: FollowUpMethod;
+};
+export type FollowUpRecord = Omit<FollowUpEntry, "result" | "method"> & {
+  id: string;
+  method?: FollowUpMethod;
+  result?: FollowUpResult;
+};
 
-/** 页面视图模型；外部字段名、枚举与分页方式待接口文档确认后在此适配。 */
+/** 页面视图模型，接口 DTO 在本模块内适配。 */
 export interface InsuranceCustomer {
   id: string;
   custUid: string;
+  skillId?: string;
+  sapId?: string;
   name: string;
   branchName?: string;
   sceneName?: string;
@@ -87,38 +101,64 @@ export type InsuranceEditorChange = Exclude<
   { kind: "intention" }
 >;
 
-export class InsuranceApiUnavailableError extends Error {
-  constructor() {
-    super("保险核心跟踪服务暂未接入");
-  }
+const API_PREFIX = "/agent/workspace";
+const ENDPOINTS = {
+  list: "/cust-trace/query",
+  join: "/cust-trace/batch-create",
+  remove: "/cust-trace/batch-delete",
+  update: "/cust-trace/update",
+  addRecord: "/cust-trace/ext/add",
+  updateRecord: "/cust-trace/ext/update",
+} as const;
+
+type WireId = string | number;
+interface TraceExt {
+  id: WireId;
+  touchPlan?: string | null;
+  touchType?: FollowUpMethod | null;
+  touchDate?: string | null;
+  tracePlan?: string | null;
+  traceType?: FollowUpMethod | null;
+  traceTime?: string | null;
+  traceSkillId?: string;
+  traceSkillName?: string;
+  touched?: FollowUpResult;
+}
+interface CustTrace {
+  id: WireId;
+  sapId: string;
+  custUid: string;
+  custBbkOrgId?: string;
+  custName?: string | null;
+  aum?: string | null;
+  skillId: string;
+  skillName?: string | null;
+  bxPlan?: string | null;
+  custIntention?: Intention | null;
+  touched?: FollowUpResult;
+  touchList?: TraceExt[] | null;
+  traceList?: TraceExt[] | null;
+  filename?: string | null;
+}
+interface TraceGroup {
+  sapId: string;
+  custTraceList: CustTrace[];
 }
 
-const API_PREFIX = "/agent/workspace";
-
-// 全部跟踪接口共用上述服务前缀；此处仅配置前缀后的路径，并在本模块转换实际 DTO。
-// 正式文档待补充；join/remove 使用临时约定，其余路径待确认，不回退为本地保存。
-const ENDPOINTS: Record<
-  "list" | "join" | "remove" | InsuranceChange["kind"],
-  string | null
-> = {
-  list: null,
-  insurancePlan: null,
-  contactPlan: null,
-  followUp: null,
-  intention: null,
-  // 临时约定，待正式接口文档替换；复用今日任务网关和公共请求上下文。
-  join: "/insurance-tracking/add",
-  remove: "/insurance-tracking/remove",
-};
+function traceKey(custUid?: string) {
+  return {
+    sapId: getUserId(),
+    // bbkId 始终使用请求侧二级分行，不使用查询返回的一级分行。
+    bbkId: getWorkbenchContext().bbk || DEFAULT_BBK_ID,
+    ...(custUid ? { custUid } : {}),
+  };
+}
 
 async function insuranceRequest<T>(
   operation: keyof typeof ENDPOINTS,
   payload: Record<string, unknown>,
   signal?: AbortSignal,
 ): Promise<T> {
-  const path = ENDPOINTS[operation];
-  if (!path) throw new InsuranceApiUnavailableError();
-  const context = getWorkbenchContext();
   const controller = new AbortController();
   const abort = () => controller.abort();
   if (signal?.aborted) abort();
@@ -129,22 +169,13 @@ async function insuranceRequest<T>(
       code: string | number;
       message?: string;
       data: T;
-    }>(`${API_PREFIX}${path}`, {
+    }>(`${API_PREFIX}${ENDPOINTS[operation]}`, {
       method: "POST",
       signal: controller.signal,
-      body: JSON.stringify({
-        sapId: getUserId(),
-        bbkId: context.bbk || DEFAULT_BBK_ID,
-        ...(context.orgCode ? { subBbkId: context.orgCode } : {}),
-        ...(context.positionId ? { posId: context.positionId } : {}),
-        platformSource: "WP",
-        pageSource: "WP_AGENT_WORKSPACE_TASK_LIST",
-        ...payload,
-      }),
+      body: JSON.stringify(payload),
     });
-    if (String(response?.code) !== "200") {
+    if (String(response?.code) !== "200")
       throw new Error(response?.message || "保险跟踪请求失败，请重试");
-    }
     return response.data;
   } finally {
     clearTimeout(timeout);
@@ -152,99 +183,188 @@ async function insuranceRequest<T>(
   }
 }
 
-export async function fetchInsuranceTracking(
-  signal?: AbortSignal,
-): Promise<InsuranceList> {
-  const data = await insuranceRequest<{
-    customers: (InsuranceCustomer & { filename?: string | null })[];
-    counts: InsuranceList["counts"];
-  }>("list", {}, signal);
-  if (!Array.isArray(data?.customers) || !data.counts) {
-    throw new Error("保险跟踪数据格式异常，请联系管理员");
-  }
+function mapCustomer(row: CustTrace): InsuranceCustomer {
   return {
-    ...data,
-    customers: data.customers.map(({ filename, ...customer }) => ({
-      ...customer,
-      link: filename ?? customer.link,
+    id: String(row.id),
+    custUid: row.custUid,
+    sapId: row.sapId,
+    skillId: row.skillId,
+    name: row.custName ?? "—",
+    bbkOrgId: row.custBbkOrgId,
+    assets: row.aum ?? undefined,
+    sceneName: row.skillName ?? undefined,
+    insurancePlan: row.bxPlan ?? undefined,
+    intention: row.custIntention ?? 0,
+    link: row.filename ?? undefined,
+    contactPlans: (row.touchList ?? []).map((entry) => ({
+      id: String(entry.id),
+      date: entry.touchDate ?? "",
+      method: entry.touchType ?? undefined,
+      content: entry.touchPlan ?? "",
+    })),
+    followUps: (row.traceList ?? []).map((entry) => ({
+      id: String(entry.id),
+      date: (entry.traceTime ?? "").replace(" ", "T"),
+      method: entry.traceType ?? undefined,
+      content: entry.tracePlan ?? "",
+      result: entry.touched ?? row.touched,
+      skillId: entry.traceSkillId,
+      sceneName: entry.traceSkillName,
     })),
   };
 }
 
-/** 临时请求约定：服务端按客户去重创建跟踪记录，requestId 支持失败重试幂等。 */
-export async function joinInsuranceTracking(
-  customer: Pick<Customer, "custUid" | "skillId" | "bbkOrgId">,
-  values: JoinTrackingValues,
-  requestId: string,
+export async function fetchInsuranceTracking(
   signal?: AbortSignal,
-): Promise<void> {
-  await insuranceRequest(
+): Promise<InsuranceList> {
+  const data = await insuranceRequest<TraceGroup[]>(
+    "list",
+    { items: [traceKey()] },
+    signal,
+  );
+  if (
+    !Array.isArray(data) ||
+    data.some((group) => !Array.isArray(group.custTraceList))
+  )
+    throw new Error("保险跟踪数据格式异常，请联系管理员");
+  const customers = data.flatMap((group) =>
+    group.custTraceList.map(mapCustomer),
+  );
+  return {
+    customers,
+    counts: {
+      customers: customers.length,
+      tracking: customers.length,
+      highIntention: customers.filter((row) => row.intention === 3).length,
+    },
+  };
+}
+
+export function customerAssets(customer: Pick<Customer, "dynamicFields">) {
+  return customer.dynamicFields?.find(
+    (field) =>
+      /^(aum|assets|totalAssets)$/i.test(field.name) ||
+      /^(资产|总资产|资产总额|时点AUM)$/i.test(field.label.replace(/\s/g, "")),
+  )?.value;
+}
+
+export async function joinInsuranceTracking(
+  customer: Customer,
+  values: JoinTrackingValues,
+  signal?: AbortSignal,
+): Promise<{ created: boolean }> {
+  const data = await insuranceRequest<{
+    successCount: number;
+    skipCount: number;
+  }>(
     "join",
     {
-      custUid: customer.custUid,
-      skillId: customer.skillId,
-      bbkOrgId: customer.bbkOrgId,
-      ...values,
-      requestId,
+      items: [
+        {
+          ...traceKey(customer.custUid),
+          custBbkOrgId: customer.bbkOrgId,
+          custName: customer.name,
+          aum: customerAssets(customer),
+          skillId: customer.skillId,
+          skillName: customer.task,
+          filename: customer.link,
+          bxPlan: values.insurancePlan,
+          touched: customer.touched === 1 ? 1 : 0,
+          custIntention: values.intention,
+          extList: values.contactPlans.map((plan) => ({
+            type: 0,
+            touchPlan: plan.content,
+            touchType: plan.method,
+            touchDate: plan.date,
+          })),
+        },
+      ],
     },
     signal,
   );
+  if (data?.successCount === 1) return { created: true };
+  if (data?.skipCount === 1) return { created: false };
+  throw new Error("加入跟踪响应缺少处理结果，请刷新后确认");
 }
 
-/** 临时约定：按跟踪记录 ID 移除，成功返回 code=200；重复请求按 requestId 去重。 */
 export async function removeInsuranceTracking(
   customer: InsuranceCustomer,
-  requestId: string,
   signal?: AbortSignal,
 ): Promise<void> {
   await insuranceRequest(
     "remove",
-    {
-      id: customer.id,
-      custUid: customer.custUid,
-      bbkOrgId: customer.bbkOrgId,
-      requestId,
-    },
+    { items: [traceKey(customer.custUid)] },
     signal,
   );
+}
+
+/** 记录保存成功后回查失败不等于保存失败。 */
+export class InsuranceSyncError extends Error {
+  constructor() {
+    super("保存已成功，但列表刷新失败，请刷新列表后继续编辑");
+  }
+}
+export interface SavedRecords {
+  records: (ContactRecord | FollowUpRecord)[];
 }
 
 export async function saveInsuranceChange(
   customer: InsuranceCustomer,
   change: InsuranceChange,
-): Promise<ContactRecord | FollowUpRecord | void> {
-  const record = await insuranceRequest<ContactRecord | FollowUpRecord>(
-    change.kind,
-    {
+): Promise<ContactRecord | FollowUpRecord | SavedRecords | void> {
+  if (change.kind === "insurancePlan" || change.kind === "intention") {
+    await insuranceRequest("update", {
       id: customer.id,
-      custUid: customer.custUid,
-      bbkOrgId: customer.bbkOrgId,
-      value: change.value,
-      ...("requestId" in change
-        ? {
-            recordId: change.recordId,
-            requestId: change.requestId,
-            operation: change.recordId ? "update" : "create",
-          }
-        : {}),
-    },
-  );
-  // 新增需回填服务端 ID；重试使用同一 requestId，由服务端保障幂等。
-  if (change.kind === "contactPlan" || change.kind === "followUp") {
-    if (
-      !record?.id ||
-      !record.date ||
-      typeof record.content !== "string" ||
-      typeof record.method !== "number" ||
-      !(record.method in FOLLOW_UP_METHODS) ||
-      (change.kind === "followUp" &&
-        (!("result" in record) ||
-          typeof record.result !== "number" ||
-          !(record.result in FOLLOW_UP_RESULTS)))
-    ) {
-      throw new Error("保存响应缺少完整记录，请联系管理员");
-    }
-    return record;
+      [change.kind === "insurancePlan" ? "bxPlan" : "custIntention"]:
+        change.value,
+    });
+    return;
+  }
+  const previous =
+    change.kind === "followUp"
+      ? customer.followUps?.find((record) => record.id === change.recordId)
+      : undefined;
+  const fields =
+    change.kind === "contactPlan"
+      ? {
+          type: 0,
+          touchPlan: change.value.content,
+          touchType: change.value.method,
+          touchDate: change.value.date,
+        }
+      : {
+          type: 1,
+          tracePlan: change.value.content,
+          traceType: change.value.method,
+          traceTime: change.value.date
+            .replace("T", " ")
+            .replace(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2})$/, "$1:00"),
+          traceSkillId:
+            change.value.skillId ?? previous?.skillId ?? customer.skillId,
+          traceSkillName:
+            change.value.sceneName ?? previous?.sceneName ?? customer.sceneName,
+          touched: change.value.result,
+        };
+  await insuranceRequest(change.recordId ? "updateRecord" : "addRecord", {
+    ...(change.recordId ? { id: change.recordId } : { traceId: customer.id }),
+    ...fields,
+  });
+  // 跟进编辑会回写主表 touched；重新查询，更新所有从主表回填的触达结果。
+  // 接触计划编辑不影响主表状态，可直接保留本次编辑值。
+  if (change.recordId && change.kind === "contactPlan")
+    return { ...previous, ...change.value, id: change.recordId };
+  try {
+    const list = await fetchInsuranceTracking();
+    const saved = list.customers.find((row) => row.id === customer.id);
+    if (!saved) throw new InsuranceSyncError();
+    return {
+      records:
+        (change.kind === "contactPlan"
+          ? saved.contactPlans
+          : saved.followUps) ?? [],
+    };
+  } catch {
+    throw new InsuranceSyncError();
   }
 }
 

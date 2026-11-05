@@ -1,10 +1,10 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { v4 as uuid } from "uuid";
 import { Form } from "antd";
 import { X } from "lucide-react";
 import {
   joinInsuranceTracking,
+  customerAssets,
   INTENTION_LABELS,
   type JoinTrackingValues,
 } from "./api";
@@ -21,13 +21,12 @@ function JoinConfirmation({
   onClose,
 }: {
   customer: Customer;
-  onAdded: (custUid: string) => void;
+  onAdded: (custUid: string, alreadyTracked?: boolean) => void;
   onClose: () => void;
 }) {
   const [form] = Form.useForm<JoinTrackingValues>();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const requestRef = useRef<AbortController | null>(null);
-  const attemptRef = useRef<{ id: string; payload: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   useLayoutEffect(() => {
@@ -54,17 +53,14 @@ function JoinConfirmation({
         })),
         intention: values.intention,
       };
-      const serialized = JSON.stringify(payload);
-      if (attemptRef.current?.payload !== serialized)
-        attemptRef.current = { id: uuid(), payload: serialized };
-      await joinInsuranceTracking(
+      const result = await joinInsuranceTracking(
         customer,
         payload,
-        attemptRef.current.id,
         controller.signal,
       );
       if (controller.signal.aborted) return;
-      onAdded(customer.custUid);
+      if (result.created) onAdded(customer.custUid);
+      else onAdded(customer.custUid, true);
       onClose();
     } catch (cause) {
       if (!controller.signal.aborted) {
@@ -78,14 +74,7 @@ function JoinConfirmation({
     }
   };
 
-  const assets =
-    customer.dynamicFields?.find(
-      (field) =>
-        /^(aum|assets|totalAssets)$/i.test(field.name) ||
-        /^(资产|总资产|资产总额|时点AUM)$/i.test(
-          field.label.replace(/\s/g, ""),
-        ),
-    )?.value ?? "—";
+  const assets = customerAssets(customer) ?? "—";
   return (
     <dialog
       ref={dialogRef}
@@ -199,7 +188,7 @@ export function JoinTracking({
   onAdded,
 }: {
   customer: Customer;
-  onAdded: (custUid: string) => void;
+  onAdded: (custUid: string, alreadyTracked?: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);

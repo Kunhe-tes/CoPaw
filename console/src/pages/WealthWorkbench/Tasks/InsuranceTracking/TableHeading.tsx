@@ -1,6 +1,5 @@
 import { Dropdown } from "antd";
 import { ArrowDown, ArrowUp, ArrowUpDown, Filter } from "lucide-react";
-import { INTENTION_LABELS, type Intention } from "./api";
 import type { ListSort, SortKey } from "./listOrder";
 import workbenchStyles from "../../index.module.less";
 import styles from "./index.module.less";
@@ -9,14 +8,17 @@ export function TableHeading({
   label,
   sort,
   onSort,
-  intention,
-  onIntention,
+  filter,
 }: {
   label: string;
   sort: ListSort;
   onSort: (key: SortKey) => void;
-  intention: Intention | "all";
-  onIntention: (value: Intention | "all") => void;
+  filter?: {
+    value: number | "all";
+    labels: Readonly<Record<number, string>>;
+    allLabel: string;
+    onChange: (value: number | "all") => void;
+  };
 }) {
   const key =
     label === "资产" ? "assets" : label === "接触计划" ? "contactPlan" : null;
@@ -60,43 +62,43 @@ export function TableHeading({
       </th>
     );
   }
-  if (label !== "客户意向度") return <th scope="col">{label}</th>;
+  if (!filter) return <th scope="col">{label}</th>;
   return (
     <th scope="col">
       <Dropdown
         trigger={["click"]}
         menu={{
           selectable: true,
-          selectedKeys: [String(intention)],
+          selectedKeys: [String(filter.value)],
           items: [
-            { key: "all", label: "全部意向度" },
-            ...Object.entries(INTENTION_LABELS).map(([key, value]) => ({
+            { key: "all", label: filter.allLabel },
+            ...Object.entries(filter.labels).map(([key, value]) => ({
               key,
               label: value,
             })),
           ],
           onClick: ({ key }) =>
-            onIntention(key === "all" ? "all" : (Number(key) as Intention)),
+            filter.onChange(key === "all" ? "all" : Number(key)),
         }}
       >
         <button
           type="button"
           className={`${workbenchStyles.tagFilterTrigger} ${
-            intention !== "all" ? workbenchStyles.filtered : ""
+            filter.value !== "all" ? workbenchStyles.filtered : ""
           }`}
-          aria-label="筛选客户意向度"
+          aria-label={`筛选${label}`}
         >
           {label}
           <Filter size={14} aria-hidden />
         </button>
       </Dropdown>
-      {intention !== "all" && (
+      {filter.value !== "all" && (
         <div className={workbenchStyles.tagFilterApplied}>
-          <span>{INTENTION_LABELS[intention]}</span>
+          <span>{filter.labels[filter.value]}</span>
           <button
             type="button"
-            aria-label="清除客户意向度筛选"
-            onClick={() => onIntention("all")}
+            aria-label={`清除${label}筛选`}
+            onClick={() => filter.onChange("all")}
           >
             ×
           </button>
