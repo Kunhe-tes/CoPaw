@@ -90,6 +90,22 @@ export interface ManagedBatchDetail {
   event_page: number;
   event_page_size: number;
 }
+export type ManagedFailureFilters = {
+  start_time?: string;
+  end_time?: string;
+  status?: string;
+  query?: string;
+};
+export interface ManagedFailureSummary {
+  total: number;
+  queried_at: string;
+  groups: {
+    failure_type: string;
+    label: string;
+    count: number;
+    details: { message: string; count: number }[];
+  }[];
+}
 export interface RetryCandidate {
   member_id: string;
   execution_id: string;
@@ -152,6 +168,8 @@ function call<T>(
 }
 /** 所有权限 Header 仍由统一认证层实时产生；不从批次记录推导角色。 */
 export const managedBatchBoard = {
+  failureSummary: (source: string, filters: ManagedFailureFilters, signal?: AbortSignal) =>
+    call<ManagedFailureSummary>(source, `${MONITOR}/failure-summary`, filters, signal),
   batches: (source: string, filters: Filters, signal?: AbortSignal) =>
     call<ManagedBatchList>(source, `${MONITOR}/batches`, filters, signal),
   detail: (

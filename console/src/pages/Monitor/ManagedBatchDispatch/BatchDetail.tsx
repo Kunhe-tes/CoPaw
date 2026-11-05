@@ -17,7 +17,8 @@ import {
   type ManagedRetryResult,
 } from "../../../api/modules/managedBatchBoard";
 import styles from "../CronBatchDispatch/index.module.less";
-import { labels, statusTag, timeText } from "./format";
+import { labels, statusTag, settledStatusTag, timeText } from "./format";
+import hoverStyles from "./hoverDetails.module.less";
 import { useBoardResource } from "./useBoardResource";
 import FailurePanel from "./FailurePanel";
 import PriorityOrder from "./PriorityOrder";
@@ -64,13 +65,7 @@ const memberColumns: ColumnsType<ManagedBatchMember> = [
     render: (_, item) => (
       <>
         {statusTag(item.status)}
-        <div>
-          {item.settled_status
-            ? `子任务状态：${item.settled_status}`
-            : item.status === "success"
-            ? "等待子任务完成"
-            : "子任务状态未确认"}
-        </div>
+        <div>{settledStatusTag(item.status, item.settled_status)}</div>
       </>
     ),
   },
@@ -322,7 +317,11 @@ export default function BatchDetail({
                             {event.actor_id}
                           </p>
                         </Tooltip>
-                        <em>{JSON.stringify(event.details)}</em>
+                        <Tooltip trigger={["hover", "focus"]} placement="topRight"
+                          overlayStyle={{ maxWidth: "min(640px, calc(100vw - 32px))" }}
+                          title={<pre className={hoverStyles.eventTooltip} aria-label="完整事件详情">{JSON.stringify(event.details, null, 2)}</pre>}>
+                          <em tabIndex={0} aria-label="查看完整事件详情">{JSON.stringify(event.details)}</em>
+                        </Tooltip>
                       </div>
                     ))}
                   </div>

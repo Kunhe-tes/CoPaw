@@ -135,6 +135,27 @@ class ManagedBoardQuery:
             f"SELECT member_id,current_execution_id,business_attempt FROM {sql.MEMBERS} LIMIT 0",
         )
 
+    async def failure_summary(
+        self,
+        source,
+        *,
+        start=None,
+        end=None,
+        status=None,
+        query=None,
+    ):
+        from .managed_board_failures import failure_summary
+
+        await self._ready()
+        return await failure_summary(
+            self.db,
+            source,
+            start,
+            end,
+            status,
+            query,
+        )
+
     async def batches(
         self,
         source,
