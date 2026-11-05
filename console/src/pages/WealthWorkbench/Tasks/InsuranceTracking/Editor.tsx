@@ -17,6 +17,7 @@ import {
   type FollowUpRecord,
 } from "./api";
 import { MAX_TEXT_LENGTH, TEXT_LIMIT_RULE } from "./textLimit";
+import { FollowUpSceneField, type FollowUpScene } from "./FollowUpSceneField";
 
 interface EditorValues {
   date: string;
@@ -24,6 +25,7 @@ interface EditorValues {
   method: FollowUpMethod;
   insurancePlan: string;
   result: FollowUpResult;
+  scene: FollowUpScene;
 }
 
 export function InsuranceEditor({
@@ -53,6 +55,17 @@ export function InsuranceEditor({
   const entry = draft && draft.kind !== "insurancePlan" ? draft.value : record;
   const recordId =
     record?.id ?? (draft && "recordId" in draft ? draft.recordId : undefined);
+  const followUp = record as FollowUpRecord | undefined;
+  const initialScene: FollowUpScene = {
+    skillId:
+      (draft?.kind === "followUp" ? draft.value.skillId : undefined) ??
+      (recordId ? followUp?.skillId : customer.skillId) ??
+      "",
+    sceneName:
+      (draft?.kind === "followUp" ? draft.value.sceneName : undefined) ??
+      (recordId ? followUp?.sceneName : customer.sceneName) ??
+      "",
+  };
   const title = `${kind === "insurancePlan" || recordId ? "编辑" : "新增"}${
     EDIT_LABELS[kind]
   } · ${customer.name}`;
@@ -114,6 +127,7 @@ export function InsuranceEditor({
               ...value,
               method: values.method,
               result: values.result,
+              ...values.scene,
             },
             ...target,
           }
@@ -152,8 +166,9 @@ export function InsuranceEditor({
         noValidate
         initialValues={{
           insurancePlan: initialPlan,
+          scene: initialScene,
           date: entry?.date ?? "",
-          method: entry?.method ?? methods[0].value,
+          method: entry ? entry.method : methods[0].value,
           content: entry?.content ?? "",
           result:
             draft?.kind === "followUp"
@@ -171,17 +186,14 @@ export function InsuranceEditor({
             <>
               <p>完成触达后，请登记沟通情况。</p>
               <div
-                className={workbenchStyles.detailGrid}
+                className={`${workbenchStyles.detailGrid} ${styles.customerInfo}`}
                 aria-label="跟进客户信息"
               >
-                <div>
+                <div className={styles.customerName}>
                   <small>客户姓名</small>
                   <strong>{customer.name}</strong>
                 </div>
-                <div>
-                  <small>经营场景</small>
-                  <span>{customer.sceneName || "保险初筛识别"}</span>
-                </div>
+                <FollowUpSceneField defaultScene={initialScene} />
               </div>
             </>
           )}
@@ -227,7 +239,9 @@ export function InsuranceEditor({
                 name="method"
                 label="触达方式"
                 getValueFromEvent={(event: ChangeEvent<HTMLSelectElement>) =>
-                  Number(event.target.value)
+                  event.target.value === ""
+                    ? undefined
+                    : Number(event.target.value)
                 }
                 rules={[
                   {
@@ -237,6 +251,9 @@ export function InsuranceEditor({
                 ]}
               >
                 <select aria-required="true">
+                  {entry && entry.method == null && (
+                    <option value="">请选择触达方式</option>
+                  )}
                   {methods.map((method) => (
                     <option key={method.value} value={method.value}>
                       {method.label}
@@ -250,11 +267,17 @@ export function InsuranceEditor({
                   name="result"
                   label="触达结果"
                   getValueFromEvent={(event: ChangeEvent<HTMLSelectElement>) =>
-                    Number(event.target.value)
+                    event.target.value === ""
+                      ? undefined
+                      : Number(event.target.value)
                   }
                   rules={[{ required: true, message: "请选择触达结果" }]}
                 >
                   <select aria-required="true">
+                    {entry &&
+                      (!("result" in entry) || entry.result == null) && (
+                        <option value="">请选择触达结果</option>
+                      )}
                     {Object.entries(FOLLOW_UP_RESULTS).map(([value, label]) => (
                       <option key={value} value={value}>
                         {label}

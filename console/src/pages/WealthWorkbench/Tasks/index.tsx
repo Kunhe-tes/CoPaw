@@ -1139,14 +1139,21 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                                       {showJoinTracking && (
                                         <JoinTracking
                                           customer={c}
-                                          onAdded={(custUid) => {
+                                          onAdded={(
+                                            custUid,
+                                            alreadyTracked,
+                                          ) => {
                                             markInsuranceCustomerTraced(
                                               custUid,
                                             );
                                             setInsuranceRefreshKey(
                                               (value) => value + 1,
                                             );
-                                            toast("已加入保险核心跟踪");
+                                            toast(
+                                              alreadyTracked
+                                                ? "该客户已在保险核心跟踪中"
+                                                : "已加入保险核心跟踪",
+                                            );
                                           }}
                                         />
                                       )}

@@ -1,5 +1,4 @@
 import { useId, useLayoutEffect, useRef, useState } from "react";
-import { v4 as uuid } from "uuid";
 import { removeInsuranceTracking, type InsuranceCustomer } from "./api";
 import workbenchStyles from "../../index.module.less";
 import editorStyles from "./Editor.module.less";
@@ -15,7 +14,6 @@ export function RemoveTracking({
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const requestRef = useRef<AbortController | null>(null);
-  const [requestId] = useState(() => uuid());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const titleId = useId();
@@ -35,7 +33,7 @@ export function RemoveTracking({
     setBusy(true);
     setError("");
     try {
-      await removeInsuranceTracking(customer, requestId, controller.signal);
+      await removeInsuranceTracking(customer, controller.signal);
       if (!controller.signal.aborted) onRemoved();
     } catch (cause) {
       if (!controller.signal.aborted)

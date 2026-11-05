@@ -4,7 +4,7 @@ import { ChevronDown, ChevronUp, PencilLine, Plus } from "lucide-react";
 import {
   EDIT_LABELS,
   FOLLOW_UP_RESULTS,
-  FOLLOW_UP_METHODS,
+  followUpMethodLabel,
   type ContactRecord,
   type FollowUpRecord,
   type EditKind,
@@ -55,9 +55,13 @@ function RecordText({
         </Tooltip>
       </div>
       <div className={styles.date}>
-        {entry.date.replace("T", " ")} · {FOLLOW_UP_METHODS[entry.method]}
+        {entry.date.replace("T", " ")} · {followUpMethodLabel(entry.method)}
         {full && "result" in entry
-          ? ` · ${FOLLOW_UP_RESULTS[entry.result]}`
+          ? ` · ${
+              entry.result == null
+                ? "触达结果未知"
+                : FOLLOW_UP_RESULTS[entry.result]
+            }`
           : ""}
       </div>
     </div>

@@ -4,8 +4,11 @@ import { PencilLine, RotateCw, Search } from "lucide-react";
 import {
   fetchInsuranceTracking,
   saveInsuranceChange,
-  InsuranceApiUnavailableError,
+  InsuranceSyncError,
   INTENTION_LABELS,
+  FOLLOW_UP_METHODS,
+  followUpMethodLabel,
+  type FollowUpMethod,
   EDIT_LABELS,
   type ContactRecord,
   type FollowUpRecord,
@@ -72,12 +75,15 @@ export function InsuranceTracking({
   const [data, setData] = useState<InsuranceList>(EMPTY_DATA);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [unavailable, setUnavailable] = useState(false);
+  const [needsRefresh, setNeedsRefresh] = useState<Set<string>>(new Set());
   const [notice, setNotice] = useState("");
   const [retry, setRetry] = useState(0);
   const [failedEdits, setFailedEdits] = useState<FailedEdit[]>([]);
   const [search, setSearch] = useState("");
   const [intentionFilter, setIntentionFilter] = useState<Intention | "all">(
+    "all",
+  );
+  const [methodFilter, setMethodFilter] = useState<FollowUpMethod | "all">(
     "all",
   );
   const [sort, setSort] = useState<ListSort>(null);
@@ -105,17 +111,16 @@ export function InsuranceTracking({
     setLoading(true);
     setError("");
     setNotice("");
-    setUnavailable(false);
     void fetchInsuranceTracking(controller.signal)
       .then((result) => {
         if (!controller.signal.aborted && version === generation.current) {
           setData(result);
+          setNeedsRefresh(new Set());
         }
       })
       .catch((cause) => {
         if (!controller.signal.aborted && version === generation.current) {
           setError(cause instanceof Error ? cause.message : "加载失败，请重试");
-          setUnavailable(cause instanceof InsuranceApiUnavailableError);
         }
       })
       .finally(() => {
@@ -135,7 +140,12 @@ export function InsuranceTracking({
     customer: InsuranceCustomer,
     value: Intention,
   ) => {
-    if (locks.current.has(customer.id) || customer.intention === value) return;
+    if (
+      locks.current.has(customer.id) ||
+      needsRefresh.has(customer.id) ||
+      customer.intention === value
+    )
+      return;
     const delta = Number(value === 3) - Number(customer.intention === 3);
     lock(customer.id, true);
     setNotice("");
@@ -167,7 +177,7 @@ export function InsuranceTracking({
     record?: ContactRecord | FollowUpRecord,
     draft?: InsuranceEditorChange,
   ) => {
-    if (locks.current.has(customer.id)) return;
+    if (locks.current.has(customer.id) || needsRefresh.has(customer.id)) return;
     const row =
       data.customers.find((item) => item.id === customer.id) ?? customer;
     const failed = failedEdits.find(
@@ -184,7 +194,7 @@ export function InsuranceTracking({
     customer: InsuranceCustomer,
     change: InsuranceEditorChange,
   ) => {
-    if (locks.current.has(customer.id)) return;
+    if (locks.current.has(customer.id) || needsRefresh.has(customer.id)) return;
     const row =
       data.customers.find((item) => item.id === customer.id) ?? customer;
     const field = EDIT_FIELDS[change.kind];
@@ -225,6 +235,10 @@ export function InsuranceTracking({
     void saveInsuranceChange(row, change)
       .then((record) => {
         if (!record || change.kind === "insurancePlan") return;
+        if ("records" in record) {
+          apply(record.records);
+          return;
+        }
         setData((current) => ({
           ...current,
           customers: current.customers.map((item) =>
@@ -243,6 +257,11 @@ export function InsuranceTracking({
         }));
       })
       .catch((cause) => {
+        if (cause instanceof InsuranceSyncError) {
+          setNeedsRefresh((items) => new Set([...items, customer.id]));
+          setNotice(`${customer.name}：${cause.message}`);
+          return;
+        }
         apply(previous);
         setFailedEdits((items) => [
           ...clearFailure(items),
@@ -264,6 +283,7 @@ export function InsuranceTracking({
   const filtered = data.customers.filter(
     (row) =>
       (intentionFilter === "all" || row.intention === intentionFilter) &&
+      (methodFilter === "all" || row.followUps?.[0]?.method === methodFilter) &&
       [
         row.name,
         row.branchName,
@@ -421,11 +441,7 @@ export function InsuranceTracking({
       ) : error ? (
         <div className={styles.error} role="alert">
           <strong>{error}</strong>
-          <p>
-            {unavailable
-              ? "服务接入后，可在此查看客户保险计划、安排接触并记录跟进。"
-              : "请检查网络连接后重试。"}
-          </p>
+          <p>请检查网络连接后重试。</p>
           <Button onClick={() => setRetry((value) => value + 1)}>
             重新加载
           </Button>
@@ -460,7 +476,7 @@ export function InsuranceTracking({
               className={`${workbenchStyles.customerTable} ${styles.table}`}
             >
               <colgroup>
-                {[120, 120, 210, 200, 220, 130, 120, 240].map(
+                {[120, 120, 210, 200, 220, 120, 130, 120, 240].map(
                   (width, index) => (
                     <col key={index} style={{ width }} />
                   ),
@@ -474,6 +490,7 @@ export function InsuranceTracking({
                     "保险计划",
                     "接触计划",
                     "最后跟进记录",
+                    "触达方式",
                     "客户意向度",
                     "经营方案",
                     "执行",
@@ -483,8 +500,33 @@ export function InsuranceTracking({
                       label={label}
                       sort={sort}
                       onSort={toggleSort}
-                      intention={intentionFilter}
-                      onIntention={setIntentionFilter}
+                      filter={
+                        label === "客户意向度"
+                          ? {
+                              value: intentionFilter,
+                              labels: INTENTION_LABELS,
+                              allLabel: "全部意向度",
+                              onChange: (value) =>
+                                setIntentionFilter(
+                                  value === "all"
+                                    ? "all"
+                                    : (value as Intention),
+                                ),
+                            }
+                          : label === "触达方式"
+                          ? {
+                              value: methodFilter,
+                              labels: FOLLOW_UP_METHODS,
+                              allLabel: "全部触达方式",
+                              onChange: (value) =>
+                                setMethodFilter(
+                                  value === "all"
+                                    ? "all"
+                                    : (value as FollowUpMethod),
+                                ),
+                            }
+                          : undefined
+                      }
                     />
                   ))}
                 </tr>
@@ -516,7 +558,10 @@ export function InsuranceTracking({
                           <button
                             type="button"
                             className={`${workbenchStyles.btn} ${styles.edit}`}
-                            disabled={pending.has(customer.id)}
+                            disabled={
+                              pending.has(customer.id) ||
+                              needsRefresh.has(customer.id)
+                            }
                             aria-label={`编辑${customer.name}的保险计划`}
                             onClick={() =>
                               openEditor(customer, "insurancePlan")
@@ -532,7 +577,10 @@ export function InsuranceTracking({
                         entries={customer.contactPlans ?? []}
                         kind="contactPlan"
                         customerName={customer.name}
-                        disabled={pending.has(customer.id)}
+                        disabled={
+                          pending.has(customer.id) ||
+                          needsRefresh.has(customer.id)
+                        }
                         onEdit={(record) =>
                           openEditor(customer, "contactPlan", record)
                         }
@@ -544,7 +592,10 @@ export function InsuranceTracking({
                         entries={customer.followUps ?? []}
                         kind="followUp"
                         customerName={customer.name}
-                        disabled={pending.has(customer.id)}
+                        disabled={
+                          pending.has(customer.id) ||
+                          needsRefresh.has(customer.id)
+                        }
                         onEdit={(record) =>
                           openEditor(customer, "followUp", record)
                         }
@@ -552,11 +603,17 @@ export function InsuranceTracking({
                       />
                     </td>
                     <td>
+                      {followUpMethodLabel(customer.followUps?.[0]?.method)}
+                    </td>
+                    <td>
                       <Select
                         aria-label={`${customer.name}的客户意向度`}
                         value={customer.intention}
                         loading={pending.has(customer.id)}
-                        disabled={pending.has(customer.id)}
+                        disabled={
+                          pending.has(customer.id) ||
+                          needsRefresh.has(customer.id)
+                        }
                         className={styles.intention}
                         onChange={(value: Intention) => {
                           void changeIntention(customer, value);
@@ -607,11 +664,19 @@ export function InsuranceTracking({
                         type="button"
                         className={`${workbenchStyles.link} ${styles.remove}`}
                         aria-label={`移除${customer.name}的跟踪`}
-                        disabled={pending.has(customer.id)}
+                        disabled={
+                          pending.has(customer.id) ||
+                          needsRefresh.has(customer.id)
+                        }
                         onClick={() => setRemoving(customer)}
                       >
                         移除跟踪
                       </button>
+                      {needsRefresh.has(customer.id) && (
+                        <span className={styles.saving} role="status">
+                          已保存，请刷新列表后继续编辑
+                        </span>
+                      )}
                       {pending.has(customer.id) && (
                         <span className={styles.saving} role="status">
                           保存中…
@@ -626,7 +691,11 @@ export function InsuranceTracking({
               <Empty
                 className={styles.empty}
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="未找到匹配的客户，请调整搜索条件"
+                description={
+                  intentionFilter !== "all" || methodFilter !== "all"
+                    ? "未找到匹配的客户，请调整搜索或筛选条件"
+                    : "未找到匹配的客户，请调整搜索条件"
+                }
               />
             )}
           </div>

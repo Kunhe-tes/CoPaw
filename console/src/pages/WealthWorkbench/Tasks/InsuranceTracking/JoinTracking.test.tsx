@@ -36,7 +36,7 @@ const originalShowModal = HTMLDialogElement.prototype.showModal;
 const originalClose = HTMLDialogElement.prototype.close;
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.mocked(joinInsuranceTracking).mockResolvedValue(undefined);
+  vi.mocked(joinInsuranceTracking).mockResolvedValue({ created: true });
   HTMLDialogElement.prototype.showModal = function () {
     this.setAttribute("open", "");
   };
@@ -83,7 +83,7 @@ it("等待成功才通知列表更新，在途防重复提交并阻止关闭", a
   vi.mocked(joinInsuranceTracking).mockImplementationOnce(
     () =>
       new Promise((yes) => {
-        resolve = yes;
+        resolve = () => yes({ created: true });
       }),
   );
   const { rerender } = render(
@@ -113,7 +113,7 @@ it("等待成功才通知列表更新，在途防重复提交并阻止关闭", a
   expect(screen.getByRole("button", { name: "已加入跟踪" })).toBeDisabled();
 });
 
-it("失败保留确认弹窗，重试沿用同一请求ID，成功只通知一次", async () => {
+it("失败保留确认弹窗与参数，成功只通知一次", async () => {
   vi.mocked(joinInsuranceTracking).mockRejectedValueOnce(new Error("服务失败"));
   render(<JoinTracking customer={customer} onAdded={onAdded} />);
   fireEvent.click(screen.getByRole("button", { name: "加入跟踪" }));
@@ -127,8 +127,8 @@ it("失败保留确认弹窗，重试沿用同一请求ID，成功只通知一�
   await waitFor(() => expect(onAdded).toHaveBeenCalledTimes(1));
   const calls = vi.mocked(joinInsuranceTracking).mock.calls;
   expect(calls[0][0]).toEqual(customer);
-  expect(calls[0][2]).toBe(calls[1][2]);
-  expect(calls[0][2]).toMatch(/^[\da-f-]{36}$/);
+  expect(calls[0][1]).toEqual(calls[1][1]);
+  expect(calls[0][2]).toBeInstanceOf(AbortSignal);
 });
 
 it("卸载中止请求，迟到成功不污染新页面", async () => {
@@ -136,7 +136,7 @@ it("卸载中止请求，迟到成功不污染新页面", async () => {
   vi.mocked(joinInsuranceTracking).mockImplementationOnce(
     () =>
       new Promise((yes) => {
-        resolve = yes;
+        resolve = () => yes({ created: true });
       }),
   );
   const { unmount } = render(
@@ -148,7 +148,7 @@ it("卸载中止请求，迟到成功不污染新页面", async () => {
   });
   fireEvent.click(screen.getByRole("button", { name: "确认添加" }));
   await waitFor(() => expect(joinInsuranceTracking).toHaveBeenCalledTimes(1));
-  const signal = vi.mocked(joinInsuranceTracking).mock.calls[0][3];
+  const signal = vi.mocked(joinInsuranceTracking).mock.calls[0][2];
   unmount();
   expect(signal?.aborted).toBe(true);
   await act(async () => resolve());
@@ -214,7 +214,6 @@ it("多条接触计划独立增删、校验并以 number 枚举提交，资产�
         contactPlans: [{ date: "2026-11-07", method: 3, content: "第二条" }],
         intention: 3,
       },
-      expect.any(String),
       expect.any(AbortSignal),
     ),
   );
@@ -238,4 +237,16 @@ it("加入弹窗的保险计划和每条接触安排均限制1000字", async () 
     expect(screen.getAllByText("最多只能输入1000字")).toHaveLength(2),
   );
   expect(joinInsuranceTracking).not.toHaveBeenCalled();
+});
+
+it("后端跳过已存在客户时关闭弹窗并告知已在跟踪中", async () => {
+  vi.mocked(joinInsuranceTracking).mockResolvedValueOnce({ created: false });
+  render(<JoinTracking customer={customer} onAdded={onAdded} />);
+  fireEvent.click(screen.getByRole("button", { name: "加入跟踪" }));
+  fireEvent.change(screen.getByLabelText(/保险计划/), {
+    target: { value: "保障计划" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "确认添加" }));
+  await waitFor(() => expect(onAdded).toHaveBeenCalledWith("c1", true));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });

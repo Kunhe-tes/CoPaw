@@ -3,10 +3,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactElement } from "react";
 import Tasks from "./index";
-import {
-  fetchInsuranceTracking,
-  InsuranceApiUnavailableError,
-} from "./InsuranceTracking/api";
+import { fetchInsuranceTracking } from "./InsuranceTracking/api";
 import type { DialogState } from "../store";
 import type { Customer, Plan } from "../types";
 import type { CustomerCounts } from "../api";
@@ -61,7 +58,7 @@ afterEach(cleanup);
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(fetchInsuranceTracking).mockRejectedValue(
-    new InsuranceApiUnavailableError(),
+    new Error("保险跟踪加载失败"),
   );
   state.todayCounts =
     state.pendingCounts =
@@ -499,7 +496,7 @@ it("当天没有保险场景也补充固定保险入口，点击后不按虚构�
   state.refreshTodayCustomers.mockClear();
   state.loadTodayCustomers.mockClear();
   fireEvent.click(screen.getByRole("button", { name: "保险核心跟踪" }));
-  await screen.findByText("保险核心跟踪服务暂未接入");
+  await screen.findByText("保险跟踪加载失败");
   expect(state.refreshTodayCustomers).not.toHaveBeenCalled();
   expect(state.loadTodayCustomers).not.toHaveBeenCalled();
   expect(
