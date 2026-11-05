@@ -3008,18 +3008,6 @@ function ChatPageContent() {
         label={t("chat.quickMenu.mode", "模式")}
         disabled={composerDisabled}
       >
-        <PlanModeMenuItem
-          key="plan-mode"
-          ariaLabel={t("chat.planMode.label", "计划模式")}
-          enabled={planModeEnabled}
-          disabled={composerDisabled}
-          label={t("chat.planMode.shortLabel", "计划")}
-          showIcon={false}
-          tooltip={t("chat.planMode.tooltip", "计划模式使用只读工具先产出计划")}
-          onChange={(enabled) => {
-            void persistPlanMode(enabled);
-          }}
-        />
         <ComposerQuickMenuItem
           key="multi-agent-mode"
           interactive
@@ -3033,6 +3021,18 @@ function ChatPageContent() {
               onChange={(enabled) => void changeMultiAgentMode(enabled)}
             />
           }
+        />
+        <PlanModeMenuItem
+          key="plan-mode"
+          ariaLabel={t("chat.planMode.label", "计划模式")}
+          enabled={planModeEnabled}
+          disabled={composerDisabled}
+          label={t("chat.planMode.shortLabel", "计划")}
+          showIcon={false}
+          tooltip={t("chat.planMode.tooltip", "计划模式使用只读工具先产出计划")}
+          onChange={(enabled) => {
+            void persistPlanMode(enabled);
+          }}
         />
         <ComposerQuickMenuItem
           key="goal-mode"
