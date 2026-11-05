@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Alert, Button, Empty, Input, Select, Skeleton, Tooltip } from "antd";
-import { PencilLine, RotateCw, Search } from "lucide-react";
+import { PencilLine, RotateCw } from "lucide-react";
 import {
   fetchInsuranceTracking,
   saveInsuranceChange,
@@ -335,9 +335,9 @@ export function InsuranceTracking({
         <span>来自保险初筛识别任务的跟踪客户</span>
         <div className={styles.tools}>
           <Input
+            className={workbenchStyles.input}
             aria-label="搜索保险跟踪客户"
             placeholder="搜索客户、计划或跟进记录"
-            prefix={<Search size={15} aria-hidden />}
             value={search}
             disabled={loading || !!error}
             allowClear

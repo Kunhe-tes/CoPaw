@@ -36,17 +36,21 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    width: 340px;
+    width: 312px;
     max-width: 100%;
   }
   .tools > :first-child {
     flex: 1;
     min-width: 0;
-    border-color: var(--line);
-    border-radius: 5px;
+    font: inherit;
   }
   .tools input {
-    color: var(--ink);
+    min-width: 0;
+    max-width: none;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    font: inherit;
   }
   .tableScroll {
     // 共用名单边框和滚动样式，保留横向滚动条的 Chromium 108 回退。
