@@ -122,6 +122,10 @@ import { ChatShareSelectionProvider } from "./chatShareContext";
 import ChatSessionInitializer from "./components/ChatSessionInitializer";
 import SubAgentRunMonitor from "./components/SubAgentRunMonitor";
 import GoalMonitor from "./components/GoalMonitor";
+import {
+  getMultiAgentModeEnabled,
+  withMultiAgentIntent,
+} from "./multiAgentMode";
 import ConversationQuickNav from "@/components/ConversationQuickNav";
 // ==================== 首页改版 (Kun He) ====================
 import WelcomeCenterLayout from "@/components/agentscope-chat/WelcomeCenterLayout";
@@ -1375,6 +1379,15 @@ function ChatPageContent() {
   const [pendingPlanRevision, setPendingPlanRevision] =
     useState<PendingPlanRevision | null>(null);
   const [goalModeEnabled, setGoalModeEnabled] = useState(false);
+  const [multiAgentState, setMultiAgentState] = useState<{
+    scope: string;
+    enabled: boolean;
+  } | null>(null);
+  const [multiAgentSaving, setMultiAgentSaving] = useState(false);
+  const multiAgentEnabled =
+    multiAgentState?.scope === activePlanModeScopeKey
+      ? multiAgentState.enabled
+      : getMultiAgentModeEnabled(activePlanModeSession);
   activePlanModeSessionRef.current = activePlanModeSession;
   activePlanModeScopeKeyRef.current = activePlanModeScopeKey;
 
@@ -1512,7 +1525,14 @@ function ChatPageContent() {
         user_id: getUserId(),
         channel: getChannel(),
         name: session?.name || "新会话",
-        meta: session?.meta || {},
+        meta: Object.fromEntries(
+          Object.entries(session?.meta || {}).filter(
+            ([key]) =>
+              key !== "multi_agent_mode_enabled" &&
+              key !== "expert_main_binding" &&
+              key !== "goal_draft_subagent_delegation_enabled",
+          ),
+        ),
       });
       return created;
     },
@@ -1523,6 +1543,7 @@ function ChatPageContent() {
     getSnapshot: getExpertBindingSnapshot,
     refresh: refreshExpertBinding,
     syncConflict: syncExpertBindingConflict,
+    applyView: applyExpertBindingView,
   } = expertBinding;
   const expertMainEnabled = expertBinding.view?.enabled === true;
   const selectedExpertId = expertMainEnabled
@@ -1543,6 +1564,51 @@ function ChatPageContent() {
       const owner = getExpertBindingSnapshot();
       const result = await changeExpertBinding(expertId);
       if (owner !== getExpertBindingSnapshot()) return false;
+      if (
+        expertId &&
+        (result === "saved" || result === "legacy") &&
+        multiAgentEnabled
+      ) {
+        if (result === "legacy") {
+          const target = await ensurePlanModeChatId(
+            activePlanModeSessionRef.current,
+            {},
+          );
+          if (!target) return false;
+          try {
+            const view = await chatApi.updateMultiAgentMode(
+              target,
+              false,
+              owner.view?.revision ?? 0,
+            );
+            applyExpertBindingView(view.expert_binding);
+          } catch {
+            messageRef.current.error("多智能体模式切换失败，请重试");
+            return false;
+          }
+        }
+        setMultiAgentState({
+          scope: activePlanModeScopeKeyRef.current,
+          enabled: false,
+        });
+        const session = activePlanModeSessionRef.current;
+        if (session?.id) {
+          const next = await sessionApi.updateSession(
+            {
+              id: session.id,
+              meta: {
+                ...(session.meta || {}),
+                multi_agent_mode_enabled: false,
+              },
+            } as Parameters<typeof sessionApi.updateSession>[0] & {
+              meta: Record<string, unknown>;
+            },
+            { refreshList: false },
+          );
+          setSessions(next);
+        }
+        messageRef.current.info("已关闭多智能体模式");
+      }
       if (result === "legacy") setSelectedExpertId(expertId);
       if (result === "saved" || result === "legacy" || result === "conflict") {
         if (result !== "legacy" && !contextUsageChatId && owner.chatId) {
@@ -1562,6 +1628,87 @@ function ChatPageContent() {
       chatId,
       activeSessionId,
       navigate,
+      multiAgentEnabled,
+      ensurePlanModeChatId,
+      applyExpertBindingView,
+      setSessions,
+    ],
+  );
+
+  const changeMultiAgentMode = useCallback(
+    async (enabled: boolean) => {
+      const owner = getExpertBindingSnapshot();
+      const hadExpert = Boolean(owner.view?.expert_id || selectedExpertId);
+      const scope = activePlanModeScopeKeyRef.current;
+      const session = activePlanModeSessionRef.current;
+      if (owner.loading || owner.saving || multiAgentSaving) return;
+      setMultiAgentSaving(true);
+      try {
+        const target = await ensurePlanModeChatId(session, {});
+        if (!target) throw new Error("Missing chat id");
+        const view = await chatApi.updateMultiAgentMode(
+          target,
+          enabled,
+          owner.view?.revision ?? 0,
+        );
+        const next = await sessionApi.updateSession(
+          {
+            id: session?.id || target,
+            meta: {
+              ...(session?.meta || {}),
+              multi_agent_mode_enabled: enabled,
+            },
+          } as Parameters<typeof sessionApi.updateSession>[0] & {
+            meta: Record<string, unknown>;
+          },
+          { refreshList: false },
+        );
+        setSessions(next);
+        if (owner !== getExpertBindingSnapshot()) return;
+        applyExpertBindingView(view.expert_binding);
+        setSelectedExpertId(null);
+        setMultiAgentState({ scope, enabled });
+        if (enabled && hadExpert)
+          messageRef.current.info("已解除专家选择，当前模式使用默认 Agent");
+        if (!enabled) {
+          const goal = await chatApi.getRecentGoal(target).catch(() => null);
+          if (goal?.subagent_delegation_enabled)
+            messageRef.current.info(
+              "当前目标已获得子代理委派授权，关闭开关不会撤销该授权",
+            );
+        }
+      } catch (error) {
+        const detail = (
+          error as {
+            data?: { detail?: { multi_agent_mode_enabled?: boolean } };
+          }
+        )?.data?.detail;
+        if (
+          typeof detail?.multi_agent_mode_enabled === "boolean" &&
+          owner === getExpertBindingSnapshot()
+        ) {
+          syncExpertBindingConflict(
+            (error as { data?: unknown }).data,
+            owner.chatId,
+          );
+          setMultiAgentState({
+            scope,
+            enabled: detail.multi_agent_mode_enabled,
+          });
+        }
+        messageRef.current.error("多智能体模式保存失败，请重试");
+      } finally {
+        setMultiAgentSaving(false);
+      }
+    },
+    [
+      getExpertBindingSnapshot,
+      multiAgentSaving,
+      ensurePlanModeChatId,
+      applyExpertBindingView,
+      selectedExpertId,
+      setSessions,
+      syncExpertBindingConflict,
     ],
   );
 
@@ -1741,6 +1888,14 @@ function ChatPageContent() {
       />
     ),
     [goalModeEnabled, handleGoalModeChange],
+  );
+
+  const activeMultiAgentControl = (
+    <ActivePlanModeControl
+      enabled={multiAgentEnabled}
+      label="多智能体"
+      onDisable={() => void changeMultiAgentMode(false)}
+    />
   );
 
   const selectedExpert = useMemo(() => {
@@ -2400,7 +2555,9 @@ function ChatPageContent() {
               activeGoal.goal_id,
               backendChatId,
               userText,
+              biz_params?.enable_subagents === true,
             );
+            window.dispatchEvent(new Event("goal-authorization-changed"));
             routedAsSteering = true;
           }
         } catch (error) {
@@ -2435,6 +2592,39 @@ function ChatPageContent() {
           body: JSON.stringify(requestBody),
           signal: timeoutSignal.signal,
         });
+
+        if (
+          response.ok &&
+          backendChatId &&
+          /^\s*\/(?:new|clear)(?:\s|$)/i.test(userText)
+        ) {
+          const completedStream = response.clone();
+          void completedStream
+            .text()
+            .then(async () => {
+              const history = await chatApi.getChat(backendChatId);
+              if (bindingOwner !== getExpertBindingSnapshot() || !history.chat)
+                return;
+              const enabled =
+                history.chat.meta?.multi_agent_mode_enabled === true;
+              setMultiAgentState({
+                scope: activePlanModeScopeKeyRef.current,
+                enabled,
+              });
+              const next = await sessionApi.updateSession(
+                {
+                  id: activePlanModeSessionRef.current?.id || backendChatId,
+                  meta: history.chat.meta || {},
+                } as Parameters<typeof sessionApi.updateSession>[0] & {
+                  meta: Record<string, unknown>;
+                },
+                { refreshList: false },
+              );
+              setSessions(next);
+              await refreshExpertBinding();
+            })
+            .catch(() => {});
+        }
 
         if (response.status === 409) {
           const payload = await response
@@ -2517,6 +2707,7 @@ function ChatPageContent() {
       getExpertBindingSnapshot,
       refreshExpertBinding,
       syncExpertBindingConflict,
+      setSessions,
       pendingHtmlAnnotationBundle,
       consumeHtmlAnnotationBundle,
     ],
@@ -2637,7 +2828,11 @@ function ChatPageContent() {
       data: {
         query: "继续已恢复的 Goal",
         fileList: [],
-        biz_params: { mode: "normal", goal_id: goalId },
+        biz_params: {
+          mode: "normal",
+          goal_id: goalId,
+          enable_subagents: false,
+        },
       },
     });
   }, []);
@@ -2690,6 +2885,7 @@ function ChatPageContent() {
     const senderPrefixNodes = Children.toArray([
       activePlanModeControl,
       activeGoalModeControl,
+      activeMultiAgentControl,
       activeExpertControl,
       senderConfig?.prefix,
     ]).filter(Boolean);
@@ -2726,7 +2922,10 @@ function ChatPageContent() {
       const requestData = {
         ...data,
         biz_params: {
-          ...data.biz_params,
+          ...withMultiAgentIntent(
+            data.biz_params || {},
+            data.biz_params?.goal_id ? false : multiAgentEnabled,
+          ),
           expert_binding_revision: snapshot.view?.revision ?? 0,
           selected_expert_id: expertMainEnabled ? null : selectedExpertId,
         },
@@ -2845,6 +3044,20 @@ function ChatPageContent() {
           }}
         />
         <ComposerQuickMenuItem
+          key="multi-agent-mode"
+          interactive
+          label="多智能体"
+          extra={
+            <Switch
+              size="small"
+              checked={multiAgentEnabled}
+              disabled={composerDisabled || bindingBusy || multiAgentSaving}
+              aria-label="多智能体模式"
+              onChange={(enabled) => void changeMultiAgentMode(enabled)}
+            />
+          }
+        />
+        <ComposerQuickMenuItem
           key="goal-mode"
           interactive
           label="目标"
@@ -2870,6 +3083,7 @@ function ChatPageContent() {
               disabled={
                 composerDisabled ||
                 bindingBusy ||
+                multiAgentSaving ||
                 goalModeEnabled ||
                 expertsLoading
               }
@@ -2896,7 +3110,7 @@ function ChatPageContent() {
                   }
                 }}
                 onDisablePlanMode={() => persistPlanMode(false)}
-                disabled={composerDisabled || bindingBusy}
+                disabled={composerDisabled || bindingBusy || multiAgentSaving}
                 inline
               />
             </ComposerQuickMenuSubmenu>,
@@ -2944,7 +3158,7 @@ function ChatPageContent() {
                   ? greeting
                   : "你好，有什么可以帮您？"
               }
-              disabled={bindingBusy}
+              disabled={bindingBusy || multiAgentSaving}
               placeholder={t("chat.inputPlaceholder")}
               beforeSubmit={handleBeforeSubmit}
               restoreDraft={
@@ -2957,6 +3171,7 @@ function ChatPageContent() {
                 <>
                   {activePlanModeControl}
                   {activeGoalModeControl}
+                  {activeMultiAgentControl}
                   {activeExpertControl}
                   {contextUsageIndicator}
                 </>
@@ -2987,7 +3202,8 @@ function ChatPageContent() {
             defaultComposer={cloneElement<IChatInputProps>(defaultComposer, {
               disabled:
                 Boolean((defaultComposer.props as IChatInputProps).disabled) ||
-                bindingBusy,
+                bindingBusy ||
+                multiAgentSaving,
               actions: (defaultActions) => (
                 <div className={styles.composerActions}>
                   {contextUsageIndicator}
@@ -3116,6 +3332,10 @@ function ChatPageContent() {
     expertMainEnabled,
     changeExpert,
     activeGoalModeControl,
+    activeMultiAgentControl,
+    multiAgentEnabled,
+    multiAgentSaving,
+    changeMultiAgentMode,
     activeExpertControl,
     activePlanModeControl,
     brandTheme.avatar,

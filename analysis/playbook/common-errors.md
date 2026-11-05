@@ -1,5 +1,11 @@
 # 常见报错
 
+## Tracing 错误字段过长与会话静默
+
+- `Tracing write failed; retaining batch` 配合 MySQL 1406、`error` 列超长时，失败批次会反复重试；队列达到容量后，新的 span 提交可能等待，进而阻塞模型调用。应按 Pod 和时间核实，不应仅凭 watchdog 日志断定原因。
+- trace 的新增和更新，以及 span 的单条新增、批量新增和更新，在落库前将 error 限制为 4096 UTF-8 字节，包含截断标记。该限制不解决其他永久性写入错误或已运行进程中的旧队列积压。
+- 排查入口：`src/swe/tracing/store.py`、`src/swe/tracing/writer.py`；回归入口：`tests/unit/tracing/test_store.py`。
+
 ## 选择专家后提示无法启动
 
 - **现象**：提示 `The selected expert could not be started`，但这条兜底提示本身不能区分启动拒绝与结果解析失败。

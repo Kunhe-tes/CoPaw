@@ -14,7 +14,7 @@ import pytest
 
 from swe.config.config import Config, MCPClientConfig
 from swe.config.context import encode_scope_id, tenant_context
-from swe.config.utils import save_config
+from swe.config.utils import load_config, save_config
 from swe.envs.store import save_envs
 
 _REACT_AGENT_TOOL_EXPORTS = (
@@ -70,7 +70,12 @@ def _write_scope_env(
 
 
 @pytest.fixture
-def tenant_config_root(tmp_path: Path):
+def tenant_config_root(tmp_path: Path, monkeypatch):
+    # Exercise optional MCP limit paths with an injected policy.
+    monkeypatch.setattr(
+        "swe.security.process_limits.ProcessLimitsConfig",
+        lambda: load_config(tmp_path / "config.json").security.process_limits,
+    )
     with (
         patch("swe.constant.WORKING_DIR", tmp_path),
         patch(
