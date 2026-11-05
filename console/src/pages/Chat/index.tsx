@@ -1093,8 +1093,9 @@ function ChatPageContent() {
       }
     };
 
-    sessionApi.onSessionCreated = (sessionId) => {
+    sessionApi.onSessionCreated = (sessionId, fromSubmit) => {
       if (!isChatActiveRef.current) return;
+      const draft = draftIdentityRef.current;
       // Session creation gives the current draft a new identity, not a new expert selection.
       const expertScope = expertSelectionScopeRef.current;
       if (expertScope.aliases.delete("")) expertScope.aliases.add(sessionId);
@@ -1114,6 +1115,11 @@ function ChatPageContent() {
       // Clear URL when creating new session, wait for realId resolution to update
       lastSessionIdRef.current = null;
       navigateRef.current("/chat", { replace: true });
+      if (fromSubmit && draft.attachToNextSession && draft.chatId) {
+        draft.attachToNextSession = false;
+        sessionApi.attachDraftChat(sessionId, draft.id, draft.chatId);
+        sessionApi.onSessionIdResolved?.(sessionId, draft.chatId);
+      }
     };
 
     return () => {
@@ -1330,12 +1336,14 @@ function ChatPageContent() {
     scope: draftIdentityScope,
     id: "",
     chatId: "",
+    attachToNextSession: false,
   });
   if (draftIdentityRef.current.scope !== draftIdentityScope) {
     draftIdentityRef.current = {
       scope: draftIdentityScope,
       id: "",
       chatId: "",
+      attachToNextSession: false,
     };
   }
   const getDraftSessionId = useCallback(() => {
@@ -1351,6 +1359,7 @@ function ChatPageContent() {
   const activePlanModeSessionRef = useRef<PlanModeSession | null>(null);
   const activePlanModeScopeKeyRef = useRef(activePlanModeScopeKey);
   const pendingPlanModePersistScopesRef = useRef(new Set<string>());
+  const savingPlanModeScopesRef = useRef(new Set<string>());
   const resolvedPlanModePersistScopesRef = useRef(new Map<string, string>());
   const planModeLocalStateForActiveScope =
     planModeLocalState.scopeKey === "" &&
@@ -1765,6 +1774,11 @@ function ChatPageContent() {
       const hadBinding = Boolean(snapshot.view?.expert_id);
       const previousSelectedExpertId = selectedExpertId;
       const scopeKey = activePlanModeScopeKeyRef.current;
+      if (savingPlanModeScopesRef.current.has(scopeKey)) {
+        throw new Error("计划模式正在保存，请稍后重试");
+      }
+      savingPlanModeScopesRef.current.add(scopeKey);
+      const draftIdentity = draftIdentityRef.current;
       const retainBlankScope =
         enabled && scopeKey === "" && !activePlanModeMetadataEnabled;
       pendingPlanModePersistScopesRef.current.add(scopeKey);
@@ -1803,6 +1817,13 @@ function ChatPageContent() {
           },
         });
         persistSucceeded = true;
+        if (
+          !scopeKey &&
+          draftIdentityRef.current === draftIdentity &&
+          draftIdentity.chatId
+        ) {
+          draftIdentity.attachToNextSession = true;
+        }
         if (enabled && snapshot === getExpertBindingSnapshot()) {
           setSelectedExpertId(null);
           setGoalModeEnabled(false);
@@ -1817,6 +1838,7 @@ function ChatPageContent() {
         }
         throw error;
       } finally {
+        savingPlanModeScopesRef.current.delete(scopeKey);
         const resolvedScopeKey =
           resolvedPlanModePersistScopesRef.current.get(scopeKey);
         if (!(persistSucceeded && retainBlankScope)) {
@@ -2883,6 +2905,12 @@ function ChatPageContent() {
       IAgentScopeRuntimeWebUISenderOptions["beforeSubmit"]
     > = async (data) => {
       if (isComposingRef.current) return false;
+      if (
+        savingPlanModeScopesRef.current.has(activePlanModeScopeKeyRef.current)
+      ) {
+        messageRef.current.warning("计划模式正在保存，请稍后重试");
+        return false;
+      }
       const snapshot = getExpertBindingSnapshot();
       if (snapshot.loading && !(await refreshExpertBinding())) return false;
       if (snapshot.saving || (snapshot.chatId && !snapshot.view)) {

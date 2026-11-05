@@ -16,7 +16,8 @@ import type { ExpertBindingView, GoalSnapshot } from "@/api/types/chat";
 
 type MockSessionApi = {
   preferredChatId: string;
-  onSessionCreated: ((sessionId: string) => void) | null;
+  onSessionCreated: ((sessionId: string, fromSubmit?: boolean) => void) | null;
+  attachDraftChat: ReturnType<typeof vi.fn>;
   onSessionIdResolved: ((tempId: string, realId: string) => void) | null;
   onSessionRemoved: ((removedId: string) => void) | null;
   onSessionSelected:
@@ -433,6 +434,7 @@ vi.mock("./sessionApi", () => {
     getRealIdForSession: (sessionId: string) =>
       mocks.getRealIdForSession(sessionId),
     getSessionList: vi.fn(async () => []),
+    attachDraftChat: vi.fn(),
     setLastUserMessage: vi.fn(),
     updateSession: mocks.updateSession,
   };
@@ -772,6 +774,7 @@ describe("ChatPage plan mode wiring", () => {
       mocks.sessionApi.onSessionRemoved = null;
       mocks.sessionApi.onSessionSelected = null;
       mocks.sessionApi.getSessionList.mockClear();
+      mocks.sessionApi.attachDraftChat.mockReset();
     }
   });
 
@@ -2140,6 +2143,149 @@ describe("ChatPage plan mode wiring", () => {
     );
     expect(mocks.updateChat).toHaveBeenCalledWith("chat-real-created", {
       meta: { plan_mode_enabled: true },
+    });
+  });
+
+  it("attaches the blank Plan Mode draft to the first submitted session", async () => {
+    mocks.inputDisabled = false;
+    mocks.pathname = "/chat";
+    mocks.currentSessionId = "";
+    mocks.sessions = [];
+    mocks.getChatIdForSession.mockReturnValue(null);
+    render(<ChatPage />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("switch", { name: "计划模式" }));
+    });
+    const logicalId = mocks.createChat.mock.calls[0][0]?.session_id;
+    expect(mocks.updateChat).toHaveBeenCalledWith(
+      "chat-real-created",
+      expect.objectContaining({ meta: { plan_mode_enabled: true } }),
+    );
+    act(() => {
+      mocks.sessionApi?.onSessionCreated?.("1780458341751000", true);
+    });
+    expect(mocks.sessionApi?.attachDraftChat).toHaveBeenCalledWith(
+      "1780458341751000",
+      logicalId,
+      "chat-real-created",
+    );
+  });
+
+  it("routes a first /plan message to the chat created during preparation", async () => {
+    mocks.inputDisabled = false;
+    mocks.pathname = "/chat";
+    mocks.currentSessionId = "";
+    mocks.sessions = [];
+    mocks.getChatIdForSession.mockReturnValue(null);
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("", { status: 200 }));
+    render(<ChatPage />);
+    let prepared: any;
+    await act(async () => {
+      prepared = await mocks.capturedOptions?.sender?.beforeSubmit({
+        query: "/plan 制定方案",
+        fileList: [],
+      });
+    });
+    const logicalId = mocks.createChat.mock.calls[0][0]?.session_id as string;
+    mocks.sessionApi!.attachDraftChat.mockImplementation(() => {
+      mocks.getChatIdForSession.mockReturnValue("chat-real-created");
+      mocks.getLogicalSessionId.mockReturnValue(logicalId);
+    });
+    act(() => {
+      mocks.sessionApi?.onSessionCreated?.("1780458341751000", true);
+    });
+    await act(async () => {
+      await mocks.capturedOptions?.api.fetch({
+        input: [
+          { role: "user", content: [{ type: "text", text: prepared.query }] },
+        ],
+        session_id: "1780458341751000",
+        biz_params: prepared.biz_params,
+      });
+    });
+    const request = fetchMock.mock.calls.find(
+      ([url]) => url === "/console/chat",
+    );
+    expect(JSON.parse(request?.[1]?.body as string)).toMatchObject({
+      chat_id: "chat-real-created",
+      session_id: logicalId,
+      mode: "plan",
+    });
+  });
+
+  it("does not attach a Plan Mode draft when manually creating another session", async () => {
+    mocks.inputDisabled = false;
+    mocks.pathname = "/chat";
+    mocks.currentSessionId = "";
+    mocks.sessions = [];
+    mocks.getChatIdForSession.mockReturnValue(null);
+    render(<ChatPage />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("switch", { name: "计划模式" }));
+    });
+    act(() => {
+      mocks.sessionApi?.onSessionCreated?.("1780458341751000", false);
+    });
+    expect(mocks.sessionApi?.attachDraftChat).not.toHaveBeenCalled();
+  });
+
+  it("does not attach a draft after switching chats during Plan Mode persistence", async () => {
+    mocks.inputDisabled = false;
+    mocks.pathname = "/chat";
+    mocks.currentSessionId = "";
+    mocks.sessions = [];
+    mocks.getChatIdForSession.mockReturnValue(null);
+    let finishUpdate!: (value: { meta: Record<string, unknown> }) => void;
+    mocks.updateChat.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishUpdate = resolve;
+        }),
+    );
+    const view = render(<ChatPage />);
+    fireEvent.click(screen.getByRole("switch", { name: "计划模式" }));
+    await waitFor(() => expect(mocks.updateChat).toHaveBeenCalled());
+    mocks.pathname = "/chat/other-chat";
+    mocks.currentSessionId = "other-chat";
+    view.rerender(<ChatPage />);
+    await act(async () => {
+      finishUpdate({ meta: { plan_mode_enabled: true } });
+    });
+    act(() => {
+      mocks.sessionApi?.onSessionCreated?.("1780458341751000", true);
+    });
+    expect(mocks.sessionApi?.attachDraftChat).not.toHaveBeenCalled();
+  });
+
+  it("keeps the first message pending while blank Plan Mode is saving", async () => {
+    mocks.inputDisabled = false;
+    mocks.pathname = "/chat";
+    mocks.currentSessionId = "";
+    mocks.sessions = [];
+    mocks.getChatIdForSession.mockReturnValue(null);
+    let finishUpdate!: (value: { meta: Record<string, unknown> }) => void;
+    mocks.updateChat.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishUpdate = resolve;
+        }),
+    );
+    render(<ChatPage />);
+    fireEvent.click(screen.getByRole("switch", { name: "计划模式" }));
+    await waitFor(() => expect(mocks.updateChat).toHaveBeenCalled());
+    await act(async () => {
+      expect(
+        await mocks.capturedOptions?.sender.beforeSubmit({
+          query: "第一条消息",
+          fileList: [],
+        }),
+      ).toBe(false);
+    });
+    await act(async () => {
+      finishUpdate({ meta: { plan_mode_enabled: true } });
     });
   });
 

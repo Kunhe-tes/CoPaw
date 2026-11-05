@@ -5,6 +5,7 @@
 - 检查 `PUT /chats/{chat_id}/multi-agent-mode` 的 `expected_revision` 和 409 响应中的 `expert_binding.revision`。专家绑定与模式切换共享版本号，成功切换会递增版本；旧版本请求会返回 `expert_binding_changed`。
 - 新会话临时 ID 解析为真实 chat ID 时，前端必须将成功响应应用到同一会话的新身份。若首次 PUT 成功但开关未更新、再次点击使用旧版本，检查 `console/src/pages/Chat/index.tsx` 的 `changeMultiAgentMode` 和会话身份映射。
 - 从其他页面进入空白聊天时，`window.currentSessionId` 可能仍是旧会话。模式设置和反馈查询不应使用该全局值作为当前会话；空白草稿应创建并切换到新 chat。
+- 空白聊天开启计划模式会预先创建 chat；首条消息创建临时会话时须绑定该 chat 的 ID 和逻辑 session ID，避免计划状态留在另一个会话。计划模式保存期间应保留待发送内容，等待保存完成后再发送。
 - 回归入口：`console/src/pages/Chat/index.test.tsx` 的新会话模式切换测试，以及 `tests/unit/app/test_multi_agent_mode.py`。
 
 ## Tracing 错误字段过长与会话静默
