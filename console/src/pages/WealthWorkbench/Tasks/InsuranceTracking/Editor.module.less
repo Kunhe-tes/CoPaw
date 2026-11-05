@@ -1,0 +1,59 @@
+.editor {
+  max-height: calc(100vh - 36px);
+  overflow: hidden;
+
+  form {
+    font: inherit;
+    color: inherit;
+  }
+  h2 {
+    margin: 0;
+    padding-right: 28px;
+    overflow-wrap: anywhere;
+  }
+  .field {
+    margin-bottom: 16px;
+    &:last-child {
+      margin-bottom: 0;
+    }
+    label {
+      color: var(--ink);
+      font-weight: 550;
+    }
+  }
+  input,
+  select,
+  textarea {
+    font: inherit;
+    min-width: 0;
+  }
+  input:focus,
+  select:focus,
+  textarea:focus {
+    outline: 2px solid var(--blue);
+    outline-offset: 1px;
+  }
+  button:focus-visible {
+    outline: 2px solid var(--blue);
+    outline-offset: 2px;
+  }
+  .textHint {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 4px;
+    color: var(--text);
+    font-size: 12px;
+    line-height: 20px;
+  }
+  .textOverflow {
+    color: var(--console-management-error, #b94a4f);
+  }
+  .required {
+    color: var(--red);
+  }
+  .note {
+    margin-top: 12px;
+    font-size: 12px;
+  }
+}
