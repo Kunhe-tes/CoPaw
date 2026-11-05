@@ -17,6 +17,7 @@ import {
 } from "./api";
 import { InsuranceEditor } from "./Editor";
 import { RecordCell } from "./RecordCell";
+import { RemoveTracking } from "./RemoveTracking";
 import { Icon } from "../../components/Icon";
 import workbenchStyles from "../../index.module.less";
 import styles from "./index.module.less";
@@ -55,9 +56,11 @@ export function InsuranceTracking({
   onExecute,
   onShowScheme,
   onBusyChange,
+  onViewInsuranceTasks,
 }: {
   refreshKey: number;
   onBusyChange?: (busy: boolean) => void;
+  onViewInsuranceTasks?: () => void;
   onShowScheme: (customer: InsuranceCustomer) => void;
   onExecute: (
     kind: "dial" | "insight",
@@ -73,6 +76,7 @@ export function InsuranceTracking({
   const [failedEdits, setFailedEdits] = useState<FailedEdit[]>([]);
   const [search, setSearch] = useState("");
   const [pending, setPending] = useState<Set<string>>(new Set());
+  const [removing, setRemoving] = useState<InsuranceCustomer | null>(null);
   const locks = useRef(new Set<string>());
   const generation = useRef(0);
   const [editor, setEditor] = useState<{
@@ -83,9 +87,9 @@ export function InsuranceTracking({
   } | null>(null);
 
   useEffect(() => {
-    onBusyChange?.(loading || pending.size > 0 || !!editor);
+    onBusyChange?.(loading || pending.size > 0 || !!editor || !!removing);
     return () => onBusyChange?.(false);
-  }, [loading, pending.size, editor, onBusyChange]);
+  }, [loading, pending.size, editor, removing, onBusyChange]);
 
   useEffect(() => {
     // 正在保存时保留本次编辑，防止刷新响应覆盖乐观更新。
@@ -307,7 +311,7 @@ export function InsuranceTracking({
           <Button
             aria-label="刷新保险跟踪"
             icon={<RotateCw size={15} aria-hidden />}
-            disabled={loading || pending.size > 0 || !!editor}
+            disabled={loading || pending.size > 0 || !!editor || !!removing}
             onClick={() => setRetry((value) => value + 1)}
           />
         </div>
@@ -408,6 +412,24 @@ export function InsuranceTracking({
           <Button onClick={() => setRetry((value) => value + 1)}>
             重新加载
           </Button>
+        </div>
+      ) : !data.customers.length ? (
+        <div className={styles.initialEmpty} role="status">
+          <h3>暂未添加跟踪客户</h3>
+          <p>
+            {onViewInsuranceTasks
+              ? "在保险任务中点击“加入跟踪”，客户将显示在这里。"
+              : "当前暂无保险任务，添加跟踪客户后将在这里展示。"}
+          </p>
+          {onViewInsuranceTasks && (
+            <button
+              type="button"
+              className={`${workbenchStyles.btn} ${workbenchStyles.primary}`}
+              onClick={onViewInsuranceTasks}
+            >
+              查看保险任务
+            </button>
+          )}
         </div>
       ) : (
         <>
@@ -557,6 +579,15 @@ export function InsuranceTracking({
                           客户洞察
                         </button>
                       </div>
+                      <button
+                        type="button"
+                        className={`${workbenchStyles.link} ${styles.remove}`}
+                        aria-label={`移除${customer.name}的跟踪`}
+                        disabled={pending.has(customer.id)}
+                        onClick={() => setRemoving(customer)}
+                      >
+                        移除跟踪
+                      </button>
                       {pending.has(customer.id) && (
                         <span className={styles.saving} role="status">
                           保存中…
@@ -571,11 +602,7 @@ export function InsuranceTracking({
               <Empty
                 className={styles.empty}
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description={
-                  query
-                    ? "未找到匹配的客户，请调整搜索条件"
-                    : "暂无跟踪客户，保险初筛识别后将在此展示"
-                }
+                description="未找到匹配的客户，请调整搜索条件"
               />
             )}
           </div>
@@ -585,6 +612,31 @@ export function InsuranceTracking({
             </span>
           </div>
         </>
+      )}
+      {removing && (
+        <RemoveTracking
+          customer={removing}
+          onClose={() => setRemoving(null)}
+          onRemoved={() => {
+            setData((current) => ({
+              ...current,
+              customers: current.customers.filter(
+                (row) => row.id !== removing.id,
+              ),
+              counts: {
+                customers: current.counts.customers - 1,
+                tracking: current.counts.tracking - 1,
+                highIntention:
+                  current.counts.highIntention -
+                  Number(removing.intention === 3),
+              },
+            }));
+            setFailedEdits((items) =>
+              items.filter((item) => item.customer.id !== removing.id),
+            );
+            setRemoving(null);
+          }}
+        />
       )}
       {editor && (
         <InsuranceEditor

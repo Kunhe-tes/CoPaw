@@ -508,7 +508,7 @@ it("当天没有保险场景也补充固定保险入口，点击后不按虚构�
   ).not.toBeInTheDocument();
 });
 
-it("已有保险分类时复用分组，将固定入口放在原场景最上方", () => {
+it("已有保险分类时复用分组，空态引导跳转保险分类下第一个技能", async () => {
   state.plans = [
     {
       id: "insurance-plan",
@@ -539,6 +539,15 @@ it("已有保险分类时复用分组，将固定入口放在原场景最上方"
       ],
     },
   ];
+  state.plans[0].items.push({
+    ...state.plans[0].items[0],
+    id: "insurance-skill-2",
+    sceneName: "保险需求沟通",
+  });
+  vi.mocked(fetchInsuranceTracking).mockResolvedValue({
+    customers: [],
+    counts: { customers: 0, tracking: 0, highIntention: 0 },
+  });
   render(
     <MemoryRouter>
       <Tasks page="today" />
@@ -550,9 +559,24 @@ it("已有保险分类时复用分组，将固定入口放在原场景最上方"
     .closest("details")!;
   expect(
     [...group.querySelectorAll("button")].map((button) => button.textContent),
-  ).toEqual(["保险核心跟踪", "我的关注保险初筛识别"]);
+  ).toEqual(["保险核心跟踪", "我的关注保险初筛识别", "我的关注保险需求沟通"]);
   fireEvent.click(screen.getByRole("button", { name: /我的关注保险初筛识别/ }));
   expect(screen.getByText("当前任务：保险初筛识别")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /我的关注保险需求沟通/ }));
+  fireEvent.click(screen.getByRole("button", { name: "保险核心跟踪" }));
+  const viewTasks = await screen.findByRole("button", { name: "查看保险任务" });
+  expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  state.loadTodayCustomers.mockClear();
+  fireEvent.click(viewTasks);
+  expect(screen.getByText("当前任务：保险初筛识别")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "保险核心跟踪" })).toHaveAttribute(
+    "aria-pressed",
+    "false",
+  );
+  expect(state.loadTodayCustomers).toHaveBeenCalledWith(
+    "business",
+    "insurance-skill",
+  );
 });
 
 it.each([
@@ -682,3 +706,20 @@ it.each([
     }
   },
 );
+
+it("无保险技能时空态不显示查看保险任务按钮", async () => {
+  vi.mocked(fetchInsuranceTracking).mockResolvedValue({
+    customers: [],
+    counts: { customers: 0, tracking: 0, highIntention: 0 },
+  });
+  render(
+    <MemoryRouter>
+      <Tasks page="today" />
+    </MemoryRouter>,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "保险核心跟踪" }));
+  await screen.findByText("暂未添加跟踪客户");
+  expect(
+    screen.queryByRole("button", { name: "查看保险任务" }),
+  ).not.toBeInTheDocument();
+});

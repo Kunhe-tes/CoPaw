@@ -324,6 +324,9 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   const menuGroups = taskTree.some((group) => group.category === "保险")
     ? taskTree
     : [...taskTree, { category: "保险", nodes: [] }];
+  const firstInsuranceSkill = taskTree.find(
+    (group) => group.category === "保险",
+  )?.nodes[0];
   const selectedNode =
     taskTree
       .flatMap((group) => group.nodes)
@@ -783,6 +786,14 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
               })
             }
             onBusyChange={setInsuranceBusy}
+            onViewInsuranceTasks={
+              firstInsuranceSkill
+                ? () => {
+                    setInsuranceSelected(false);
+                    setSelectedSceneId(firstInsuranceSkill.sceneId);
+                  }
+                : undefined
+            }
           />
         ) : (
           <>
