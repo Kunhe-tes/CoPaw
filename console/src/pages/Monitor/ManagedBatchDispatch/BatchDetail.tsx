@@ -1,6 +1,9 @@
 import { useCallback, useState } from "react";
 import {
   Alert,
+  Button,
+  Space,
+  message,
   Input,
   Pagination,
   Select,
@@ -17,7 +20,8 @@ import {
   type ManagedRetryResult,
 } from "../../../api/modules/managedBatchBoard";
 import styles from "../CronBatchDispatch/index.module.less";
-import { labels, statusTag, timeText } from "./format";
+import { labels, statusTag, settledStatusTag, timeText } from "./format";
+import hoverStyles from "./hoverDetails.module.less";
 import { useBoardResource } from "./useBoardResource";
 import FailurePanel from "./FailurePanel";
 import PriorityOrder from "./PriorityOrder";
@@ -64,13 +68,7 @@ const memberColumns: ColumnsType<ManagedBatchMember> = [
     render: (_, item) => (
       <>
         {statusTag(item.status)}
-        <div>
-          {item.settled_status
-            ? `子任务状态：${item.settled_status}`
-            : item.status === "success"
-            ? "等待子任务完成"
-            : "子任务状态未确认"}
-        </div>
+        <div>{settledStatusTag(item.status, item.settled_status)}</div>
       </>
     ),
   },
@@ -95,6 +93,15 @@ const memberColumns: ColumnsType<ManagedBatchMember> = [
         <span>开始 {timeText(item.started_at)}</span>
         <span>完成 {timeText(item.finished_at)}</span>
       </div>
+    ),
+  },
+  {
+    title: "error_type",
+    dataIndex: "error_type",
+    width: 130,
+    ellipsis: true,
+    render: (value: string | null | undefined) => (
+      <Tooltip title={value ?? "-"}>{value ?? "-"}</Tooltip>
     ),
   },
   {
@@ -125,11 +132,13 @@ export default function BatchDetail({
   batch,
   refresh,
   onQueued,
+  onPauseChanged,
 }: {
   source: string;
   actor: string;
   batch: ManagedBatch;
   refresh: number;
+  onPauseChanged?: () => void;
   onQueued: (result: ManagedRetryResult) => void;
 }) {
   const [filters, setFilters] = useState({
@@ -149,6 +158,7 @@ export default function BatchDetail({
     },
     [source, batch.batch_id, filters, refresh],
   );
+  const [pausing, setPausing] = useState(false);
   const detail = useBoardResource(load);
   const data = detail.value;
   const current = data?.batch || batch;
@@ -166,7 +176,34 @@ export default function BatchDetail({
             </span>
           </p>
         </div>
-        {statusTag(data?.batch.status || batch.status)}
+        <Space>
+          {statusTag(data?.batch.status || batch.status)}
+          {current.batch_paused && <span>本批已暂停</span>}
+          <Tooltip title="暂停本批后续派发和重试；已交接的执行继续完成，后续新批次不受影响">
+            <Button
+              aria-label={current.batch_paused ? "恢复本批" : "暂停本批"}
+              loading={pausing}
+              onClick={async () => {
+                setPausing(true);
+                try {
+                  await managedBatchBoard.pause(
+                    source,
+                    batch.batch_id,
+                    !current.batch_paused,
+                  );
+                  setFilters((value) => ({ ...value }));
+                  onPauseChanged?.();
+                } catch {
+                  message.error("批次暂停状态更新失败，请重试");
+                } finally {
+                  setPausing(false);
+                }
+              }}
+            >
+              {current.batch_paused ? "恢复本批" : "暂停本批"}
+            </Button>
+          </Tooltip>
+        </Space>
       </div>
       <div
         className={styles.detailMeta}
@@ -322,7 +359,11 @@ export default function BatchDetail({
                             {event.actor_id}
                           </p>
                         </Tooltip>
-                        <em>{JSON.stringify(event.details)}</em>
+                        <Tooltip trigger={["hover", "focus"]} placement="topRight"
+                          overlayStyle={{ maxWidth: "min(640px, calc(100vw - 32px))" }}
+                          title={<pre className={hoverStyles.eventTooltip} aria-label="完整事件详情">{JSON.stringify(event.details, null, 2)}</pre>}>
+                          <em tabIndex={0} aria-label="查看完整事件详情">{JSON.stringify(event.details)}</em>
+                        </Tooltip>
                       </div>
                     ))}
                   </div>

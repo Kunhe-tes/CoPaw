@@ -18,7 +18,12 @@ export interface ManagedRunDateRange {
   start_date: string;
   end_date: string;
 }
-export type ManagedCronSpec = Omit<CronJobSpecInput, "id"> & {
+export type ManagedCronSchedule = CronJobSpecInput["schedule"] & {
+  run_on_non_workday?: boolean;
+};
+export type ManagedCronSpec = Omit<CronJobSpecInput, "id" | "schedule"> & {
+  schedule: ManagedCronSchedule;
+
   id?: string;
   tenant_id?: string;
   source_id?: string;
@@ -31,6 +36,8 @@ export type ManagedCronSpec = Omit<CronJobSpecInput, "id"> & {
 
 export interface ManagedJob extends CronJobSpecOutput {
   run_date_range?: ManagedRunDateRange | null;
+  schedule: ManagedCronSchedule;
+
   tenant_id: string;
   source_id: string;
   agent_id: string;

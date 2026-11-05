@@ -312,6 +312,11 @@ export const schedulerCronApi = {
         branch_ids: branches,
       },
     ),
+  childrenPreview: (context: ManagedCronContext, id: string) =>
+    call<ManagedPage<ManagedChild>>(
+      context,
+      `${jobPath(id)}/broadcast/children?include_deleted=false&limit=1`,
+    ),
   childrenAll: (
     context: ManagedCronContext,
     id: string,

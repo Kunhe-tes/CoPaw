@@ -1,5 +1,10 @@
 {
   "SCHEDULER_ENV": "dev",
+  "SCHEDULER_WORKDAY_API_URL": "http://tss-normal-api.paasst.cmbchina.cn/calendar/{date}",
+  "SCHEDULER_WORKDAY_API_APP_ID": "",
+  "SCHEDULER_WORKDAY_API_APP_SECRET": "",
+  "SCHEDULER_WORKDAY_API_PRIVATE_KEY": "",
+  "SCHEDULER_WORKDAY_API_SIGN": "123",
   "SCHEDULER_LOG_LEVEL": "debug",
   "SCHEDULER_OPENAPI_DOCS": "true",
   "SCHEDULER_HOST": "127.0.0.1",

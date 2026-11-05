@@ -16,9 +16,7 @@ import { useManagedCronJobs } from "./useManagedCronJobs";
 import { ManagedJobEditor } from "./ManagedJobEditor";
 import { ManagedBroadcastModal } from "./ManagedBroadcastModal";
 import { ManagedChildrenModal } from "./ManagedChildrenModal";
-import { ManagedModeModal } from "./ManagedModeModal";
 import { ManagedProgressModal } from "./ManagedProgressModal";
-import { ManagedDateRangeModal } from "./ManagedDateRangeModal";
 import { failureMessage, RequestIdentity } from "./helpers";
 import styles from "../CronJobs/index.module.less";
 
@@ -121,7 +119,7 @@ function SchedulerCronWorkspace({ context }: { context: ManagedCronContext }) {
           rowKey={(job) =>
             JSON.stringify([job.tenant_id, job.source_id, job.agent_id, job.id])
           }
-          scroll={{ x: 3645 }}
+          scroll={{ x: 1435 }}
           pagination={{
             defaultPageSize: 10,
             showSizeChanger: true,
@@ -138,6 +136,7 @@ function SchedulerCronWorkspace({ context }: { context: ManagedCronContext }) {
           saving={data.busy}
           onLoaded={data.reconcileJob}
           onClose={close}
+          onChanged={refresh}
           onSave={(job, spec, id) =>
             job ? data.update(job, spec, id) : data.create(spec, id)
           }
@@ -158,22 +157,6 @@ function SchedulerCronWorkspace({ context }: { context: ManagedCronContext }) {
           onChanged={refresh}
           onEdit={(job) => setPanel({ kind: "edit", job })}
           onProgress={(job) => setPanel({ kind: "progress", job })}
-        />
-      )}
-      {panel?.kind === "mode" && (
-        <ManagedModeModal
-          context={target}
-          job={panel.job}
-          onClose={close}
-          onChanged={refresh}
-        />
-      )}
-      {panel?.kind === "dates" && (
-        <ManagedDateRangeModal
-          context={target}
-          job={panel.job}
-          onClose={close}
-          onChanged={refresh}
         />
       )}
       {panel?.kind === "progress" && (
