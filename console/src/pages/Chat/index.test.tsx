@@ -777,6 +777,7 @@ describe("ChatPage plan mode wiring", () => {
 
   afterEach(() => {
     cleanup();
+    (window as Window & { currentSessionId?: string }).currentSessionId = "";
     vi.restoreAllMocks();
   });
 
@@ -1704,6 +1705,51 @@ describe("ChatPage plan mode wiring", () => {
     ).toBeInTheDocument();
   });
 
+  it("does not write multi-agent mode when entering a chat", async () => {
+    mocks.inputDisabled = false;
+    render(<ChatPage />);
+    await waitFor(() => expect(mocks.getExpertBinding).toHaveBeenCalled());
+    await act(async () => Promise.resolve());
+    expect(mocks.updateMultiAgentMode).not.toHaveBeenCalled();
+  });
+
+  it("creates a new chat for multi-agent mode despite a stale global session", async () => {
+    mocks.inputDisabled = false;
+    mocks.pathname = "/chat";
+    mocks.currentSessionId = "";
+    mocks.sessions = [];
+    (window as Window & { currentSessionId?: string }).currentSessionId =
+      "old-chat";
+    render(<ChatPage />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("switch", { name: "多智能体模式" }));
+    });
+
+    expect(mocks.createChat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        session_id: expect.not.stringMatching(/^old-chat$/),
+      }),
+    );
+    expect(mocks.updateMultiAgentMode).toHaveBeenCalledWith(
+      "chat-real-created",
+      true,
+      0,
+    );
+    expect(mocks.navigate).toHaveBeenCalledWith("/chat/chat-real-created", {
+      replace: true,
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("switch", { name: "多智能体模式" }));
+    });
+    expect(mocks.createChat).toHaveBeenCalledTimes(1);
+    expect(mocks.updateMultiAgentMode).toHaveBeenLastCalledWith(
+      "chat-real-created",
+      false,
+      1,
+    );
+  });
+
   it("keeps multi-agent mode off when the server rejects a change", async () => {
     mocks.inputDisabled = false;
     mocks.updateMultiAgentMode.mockRejectedValueOnce(new Error("offline"));
@@ -1752,6 +1798,61 @@ describe("ChatPage plan mode wiring", () => {
     );
     expect(body.enable_subagents).toBe(true);
     expect(body.input[0].content[0].text).toBe("分析");
+  });
+
+  it("keeps a successful multi-agent mode change when a draft resolves to its chat id", async () => {
+    mocks.inputDisabled = false;
+    mocks.currentSessionId = "1780000000000";
+    mocks.pathname = "/chat";
+    mocks.sessions = [
+      {
+        id: "1780000000000",
+        realId: "",
+        sessionId: "1780000000000",
+        name: "新会话",
+        messages: [],
+        meta: { plan_mode_enabled: false },
+      },
+    ];
+    let resolvedChatId: string | null = null;
+    mocks.getChatIdForSession.mockImplementation((sessionId: string) =>
+      sessionId === "1780000000000" ? resolvedChatId : sessionId,
+    );
+    let rerenderChat: (() => void) | undefined;
+    mocks.updateMultiAgentMode.mockImplementation(async () => {
+      resolvedChatId = "chat-real-created";
+      rerenderChat?.();
+      return {
+        enabled: true,
+        expert_binding: {
+          revision: 1,
+          expert_id: null,
+          enabled: false,
+          available: true,
+          expert_name: null,
+          reason: null,
+        },
+      };
+    });
+    const view = render(<ChatPage />);
+    rerenderChat = () => view.rerender(<ChatPage />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("switch", { name: "多智能体模式" }));
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("switch", { name: "多智能体模式" }),
+      ).toHaveAttribute("aria-checked", "true"),
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("switch", { name: "多智能体模式" }));
+    });
+    expect(mocks.updateMultiAgentMode).toHaveBeenLastCalledWith(
+      "chat-real-created",
+      false,
+      1,
+    );
   });
 
   it("passes captured intent to Goal steering", async () => {

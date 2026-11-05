@@ -1260,7 +1260,7 @@ function ChatPageContent() {
       return routeChatId;
     }
 
-    const fallbackSessionId = activeSessionId || window.currentSessionId || "";
+    const fallbackSessionId = activeSessionId || "";
     return sessionApi.getChatIdForSession(fallbackSessionId);
   }, [chatId, activeSessionId]);
   const feedbackSessionId = useMemo(() => {
@@ -1276,7 +1276,6 @@ function ChatPageContent() {
       activeSession?.sessionId ||
       activeSession?.session_id ||
       sessionApi.getLogicalSessionId(activeSessionId || "") ||
-      window.currentSessionId ||
       chatId ||
       null
     );
@@ -1327,9 +1326,17 @@ function ChatPageContent() {
     getUserId(),
     activePlanModeScopeKey,
   ]);
-  const draftIdentityRef = useRef({ scope: draftIdentityScope, id: "" });
+  const draftIdentityRef = useRef({
+    scope: draftIdentityScope,
+    id: "",
+    chatId: "",
+  });
   if (draftIdentityRef.current.scope !== draftIdentityScope) {
-    draftIdentityRef.current = { scope: draftIdentityScope, id: "" };
+    draftIdentityRef.current = {
+      scope: draftIdentityScope,
+      id: "",
+      chatId: "",
+    };
   }
   const getDraftSessionId = useCallback(() => {
     if (!draftIdentityRef.current.id)
@@ -1435,11 +1442,7 @@ function ChatPageContent() {
   );
 
   const activePlanRevisionScopeKey =
-    activePlanModeSession?.id ||
-    chatId ||
-    activeSessionId ||
-    window.currentSessionId ||
-    "";
+    activePlanModeSession?.id || chatId || activeSessionId || "";
 
   useEffect(() => {
     setPendingPlanRevision(null);
@@ -1450,18 +1453,14 @@ function ChatPageContent() {
       session: PlanModeSession | null,
       meta: Record<string, unknown>,
     ): Promise<string | null> => {
-      const candidateSessionId =
-        chatId ||
-        session?.id ||
-        activeSessionId ||
-        window.currentSessionId ||
-        "";
+      const candidateSessionId = chatId || session?.id || activeSessionId || "";
       const existingChatId =
         (chatId ? sessionApi.getChatIdForSession(chatId) : null) ||
         (chatId && !/^\d+$/.test(chatId) ? chatId : null) ||
         sessionApi.getChatIdForSession(candidateSessionId) ||
         session?.realId ||
-        (session?.id && !/^\d+$/.test(session.id) ? session.id : null);
+        (session?.id && !/^\d+$/.test(session.id) ? session.id : null) ||
+        (!candidateSessionId ? draftIdentityRef.current.chatId : null);
 
       if (existingChatId) {
         return existingChatId;
@@ -1473,6 +1472,7 @@ function ChatPageContent() {
         sessionApi.getLogicalSessionId(candidateSessionId) ||
         candidateSessionId ||
         getDraftSessionId();
+      const draftIdentity = draftIdentityRef.current;
       const created = await chatApi.createChat({
         session_id: logicalSessionId,
         user_id: getUserId(session?.userId),
@@ -1480,6 +1480,9 @@ function ChatPageContent() {
         name: session?.name || "新会话",
         meta,
       });
+      if (!candidateSessionId && draftIdentityRef.current === draftIdentity) {
+        draftIdentity.chatId = created.id;
+      }
       await sessionApi.getSessionList();
       return created.id;
     },
@@ -1645,10 +1648,25 @@ function ChatPageContent() {
           { refreshList: false },
         );
         setSessions(next);
-        if (owner !== getExpertBindingSnapshot()) return;
+        const currentOwner = getExpertBindingSnapshot();
+        if (
+          owner !== currentOwner &&
+          !(
+            currentOwner.chatId === target &&
+            (activePlanModeScopeKeyRef.current === scope ||
+              sessionApi.getChatIdForSession(scope) === target)
+          )
+        )
+          return;
         applyExpertBindingView(view.expert_binding);
         setSelectedExpertId(null);
-        setMultiAgentState({ scope, enabled });
+        setMultiAgentState({
+          scope: activePlanModeScopeKeyRef.current,
+          enabled,
+        });
+        if (!scope && isChatActiveRef.current) {
+          navigate(`/chat/${target}`, { replace: true });
+        }
         if (enabled && hadExpert)
           messageRef.current.info("已解除专家选择，当前模式使用默认 Agent");
         if (!enabled) {
@@ -1687,6 +1705,7 @@ function ChatPageContent() {
       multiAgentSaving,
       ensurePlanModeChatId,
       applyExpertBindingView,
+      navigate,
       selectedExpertId,
       setSessions,
       syncExpertBindingConflict,

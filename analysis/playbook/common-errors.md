@@ -1,5 +1,12 @@
 # 常见报错
 
+## 新会话切换多智能体模式后出现 409
+
+- 检查 `PUT /chats/{chat_id}/multi-agent-mode` 的 `expected_revision` 和 409 响应中的 `expert_binding.revision`。专家绑定与模式切换共享版本号，成功切换会递增版本；旧版本请求会返回 `expert_binding_changed`。
+- 新会话临时 ID 解析为真实 chat ID 时，前端必须将成功响应应用到同一会话的新身份。若首次 PUT 成功但开关未更新、再次点击使用旧版本，检查 `console/src/pages/Chat/index.tsx` 的 `changeMultiAgentMode` 和会话身份映射。
+- 从其他页面进入空白聊天时，`window.currentSessionId` 可能仍是旧会话。模式设置和反馈查询不应使用该全局值作为当前会话；空白草稿应创建并切换到新 chat。
+- 回归入口：`console/src/pages/Chat/index.test.tsx` 的新会话模式切换测试，以及 `tests/unit/app/test_multi_agent_mode.py`。
+
 ## Tracing 错误字段过长与会话静默
 
 - `Tracing write failed; retaining batch` 配合 MySQL 1406、`error` 列超长时，失败批次会反复重试；队列达到容量后，新的 span 提交可能等待，进而阻塞模型调用。应按 Pod 和时间核实，不应仅凭 watchdog 日志断定原因。
