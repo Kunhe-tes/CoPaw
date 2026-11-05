@@ -2,7 +2,7 @@
 name: cron
 description: Use when the user requests future scheduled or recurring work, or asks to inspect or manage an existing scheduled task. | 用户要求未来定时、周期执行，或查询和管理已有定时任务时使用。
 metadata:
-  builtin_skill_version: "1.3"
+  builtin_skill_version: "1.4"
   swe:
     emoji: "⏰"
 ---
@@ -102,11 +102,13 @@ swe cron execution <job_id> <execution_id> --agent-id <agent_id>
 30 8 * * 1-5   周一到周五 08:30（仍受日历准入影响）
 */15 * * * *   每十五分钟
 0 9 LW * *     每月最后一个实际工作日 09:00
-0 9 15W * *    每月最接近 15 日的实际工作日 09:00
+0 9 15W * *    每月 15 日（含当天）及之前最近的实际工作日 09:00
 0 9 LW * * 2027  仅 2027 年每月最后一个实际工作日 09:00
 ```
 
 新版任务接受五段，或末尾增加年份的六段；第六段是年份，不是秒。年份可用 `2027`、`2026,2027`、`2026-2029`；不要传秒在最前的六/七段平台表达式。W/LW 不与星期限制组合，工作日以服务端日历为准，异常降级按普通周末规则。
+
+`nW`只向前、不跨月；n号本身是工作日就当天执行，短月从月末开始查找。当月没有符合日期就跳过，例如1号休息时`1W`不会顺延到2号，也不会跨到上月。该规则不补跑已过去的日期；`LW`仍表示当月最后一个实际工作日。
 
 创建省略 `schedule.run_on_non_workday` 时默认 false；需要非工作日也执行时，使用完整 JSON 定义明确设 true。`run_date_range` 是北京时间包含首尾日的区间，不传表示不限；更新名称等字段必须保留现有区间和开关。已有子任务的父任务修改日期须使用 Scheduler 的父组日期接口，不通过普通内容更新绕过限制。
 

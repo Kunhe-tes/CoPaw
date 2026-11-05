@@ -264,7 +264,7 @@ async def test_calendar_preview_uses_beijing_date_and_existing_clock_timezone():
 
 
 @pytest.mark.asyncio
-async def test_nearest_workday_keeps_month_boundary_and_prefers_earlier_tie():
+async def test_previous_workday_keeps_month_boundary_without_forward_shift():
     class Closed:
         async def get_day(self, day):
             return {
@@ -272,7 +272,10 @@ async def test_nearest_workday_keeps_month_boundary_and_prefers_earlier_tie():
                 "source": "api",
             }
 
-    for cron, expected in [("0 9 1W * *", 2), ("0 9 15W * *", 14)]:
+    for cron, expected in [
+        ("0 9 1W 9 * 2026", []),
+        ("0 9 15W 9 * 2026", ["2026-09-14T09:00:00+08:00"]),
+    ]:
         runs = await next_run_times(
             cron,
             "Asia/Shanghai",
@@ -280,12 +283,11 @@ async def test_nearest_workday_keeps_month_boundary_and_prefers_earlier_tie():
             count=1,
             now=datetime.fromisoformat("2026-09-01T00:00:00+08:00"),
         )
-        assert runs[0].month == 9
-        assert runs[0].day == expected
+        assert [run.isoformat() for run in runs] == expected
 
 
 @pytest.mark.asyncio
-async def test_last_workday_and_nearest_workday_include_holidays():
+async def test_last_workday_and_previous_workday_include_holidays():
     now = datetime.fromisoformat("2026-09-01T08:00:00+08:00")
     calendar = HolidayCalendar()
     for cron in ["0 9 LW * *", "0 9 30W * *"]:
@@ -300,7 +302,7 @@ async def test_last_workday_and_nearest_workday_include_holidays():
 
 
 @pytest.mark.asyncio
-async def test_makeup_weekend_can_be_the_nearest_workday():
+async def test_makeup_weekend_can_be_the_anchor_workday():
     runs = await next_run_times(
         "0 9 10W * *",
         "Asia/Shanghai",
@@ -528,7 +530,7 @@ async def test_calendar_api_rejects_invalid_rule_even_without_preview(payload):
 
 
 @pytest.mark.asyncio
-async def test_nearest_workday_31_uses_short_month_end():
+async def test_previous_workday_31_uses_short_month_end():
     """短月的31W以月末为锚点，不跨到下个月。"""
     runs = await next_run_times(
         "0 9 31W * *",

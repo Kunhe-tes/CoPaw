@@ -74,7 +74,7 @@ async def test_known_holiday_is_not_lost_when_cache_write_fails():
         ("0 10 15W * *", "2026-09-14T10:00:00+08:00"),
     ],
 )
-async def test_special_preview_uses_holidays_and_earlier_tie(
+async def test_special_preview_uses_holidays_and_backward_workday(
     expression,
     expected,
 ):

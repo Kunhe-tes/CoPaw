@@ -63,10 +63,8 @@ async def _target_date(year, month, rule, calendar):
         days = range(last, 0, -1)
     else:
         anchor = min(int(rule[:-1]), last)
-        days = sorted(
-            range(1, last + 1),
-            key=lambda day: (abs(day - anchor), day),
-        )
+        # nW包含锚点且只向当月前方查找，无候选时本月不执行。
+        days = range(anchor, 0, -1)
     source = "api"
     for day in days:
         candidate = date(year, month, day)
