@@ -47,7 +47,7 @@ export interface InsuranceCustomer {
   bbkOrgId?: string;
   /** 经营方案完整地址，对齐原名单的 filename 字段。 */
   link?: string;
-  assets?: string;
+  assets?: string | number;
   assetsDescription?: string;
   insurancePlan?: string;
   contactPlans?: ContactRecord[];

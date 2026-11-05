@@ -1,5 +1,24 @@
 .root {
   min-width: 0;
+  .sortTrigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-weight: inherit;
+    cursor: pointer;
+    &:hover {
+      color: var(--blue);
+    }
+  }
+  th[aria-sort="ascending"] .sortTrigger,
+  th[aria-sort="descending"] .sortTrigger {
+    color: var(--blue);
+  }
   button:focus-visible,
   input:focus-visible,
   [tabindex]:focus-visible {

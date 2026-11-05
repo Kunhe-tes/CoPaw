@@ -502,9 +502,14 @@ it("当天没有保险场景也补充固定保险入口，点击后不按虚构�
   await screen.findByText("保险核心跟踪服务暂未接入");
   expect(state.refreshTodayCustomers).not.toHaveBeenCalled();
   expect(state.loadTodayCustomers).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: "客户视角" }));
   expect(
-    screen.queryByRole("button", { name: "保险核心跟踪" }),
+    screen.queryByRole("button", { name: "客户视角" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "经营视角" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "返回今日任务" }),
   ).not.toBeInTheDocument();
 });
 
@@ -565,9 +570,17 @@ it("已有保险分类时复用分组，空态引导跳转保险分类下第一�
   fireEvent.click(screen.getByRole("button", { name: /我的关注保险需求沟通/ }));
   fireEvent.click(screen.getByRole("button", { name: "保险核心跟踪" }));
   const viewTasks = await screen.findByRole("button", { name: "查看保险任务" });
+  expect(
+    screen.queryByRole("button", { name: "客户视角" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "经营视角" }),
+  ).not.toBeInTheDocument();
   expect(screen.queryByRole("table")).not.toBeInTheDocument();
   state.loadTodayCustomers.mockClear();
   fireEvent.click(viewTasks);
+  expect(screen.getByRole("button", { name: "客户视角" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "经营视角" })).toBeInTheDocument();
   expect(screen.getByText("当前任务：保险初筛识别")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "保险核心跟踪" })).toHaveAttribute(
     "aria-pressed",

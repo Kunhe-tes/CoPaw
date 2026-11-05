@@ -1018,3 +1018,62 @@ it("移除失败保留客户和人数，可使用同一请求ID重试；非高�
   expect(calls[0][0]).toEqual(fixture().customers[0]);
   expect(calls[0][1]).toBe(calls[1][1]);
 });
+
+it("资产和接触计划列头切换升序、降序、默认，切换列时只保留一个排序", async () => {
+  const data = fixture();
+  data.customers[0].assets = 337.34;
+  data.customers[1].assets = "80";
+  data.customers[1].contactPlans = [
+    { id: "plan-wang", date: "2026-11-06", method: 0, content: "预约王海" },
+  ];
+  vi.mocked(fetchInsuranceTracking).mockResolvedValue(data);
+  await show();
+  const names = () =>
+    screen
+      .getAllByRole("row")
+      .slice(1)
+      .map((row) => within(row).getAllByRole("cell")[0].textContent);
+  fireEvent.click(screen.getByRole("button", { name: /^资产排序/ }));
+  expect(names()).toEqual(["王海", "林芳"]);
+  expect(screen.getAllByRole("columnheader")[1]).toHaveAttribute(
+    "aria-sort",
+    "ascending",
+  );
+  fireEvent.click(screen.getByRole("button", { name: /^资产排序/ }));
+  expect(names()).toEqual(["林芳", "王海"]);
+  fireEvent.click(screen.getByRole("button", { name: /^资产排序/ }));
+  expect(screen.getAllByRole("columnheader")[1]).toHaveAttribute(
+    "aria-sort",
+    "none",
+  );
+  fireEvent.click(screen.getByRole("button", { name: /^接触计划排序/ }));
+  expect(names()).toEqual(["林芳", "王海"]);
+  fireEvent.click(screen.getByRole("button", { name: /^接触计划排序/ }));
+  expect(names()).toEqual(["王海", "林芳"]);
+  fireEvent.click(screen.getByRole("button", { name: /^资产排序/ }));
+  expect(screen.getAllByRole("columnheader")[3]).toHaveAttribute(
+    "aria-sort",
+    "none",
+  );
+});
+
+it("意向度列头可筛选零值并与搜索组合，无匹配显示搜索空态且可清除筛选", async () => {
+  const data = fixture();
+  data.customers[0].intention = 0;
+  vi.mocked(fetchInsuranceTracking).mockResolvedValue(data);
+  await show();
+  fireEvent.click(screen.getByRole("button", { name: "筛选客户意向度" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "待了解" }));
+  expect(screen.getByText("林芳")).toBeInTheDocument();
+  expect(screen.queryByText("王海")).not.toBeInTheDocument();
+  expect(highCount()).toHaveTextContent("8");
+  fireEvent.change(screen.getByLabelText("搜索保险跟踪客户"), {
+    target: { value: "王海" },
+  });
+  expect(
+    screen.getByText("未找到匹配的客户，请调整搜索条件"),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("暂未添加跟踪客户")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "清除客户意向度筛选" }));
+  expect(screen.getByText("王海")).toBeInTheDocument();
+});

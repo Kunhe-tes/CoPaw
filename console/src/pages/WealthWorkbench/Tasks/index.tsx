@@ -742,28 +742,30 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
         <div className={styles.sectionHead}>
           <h2>{title}</h2>
           {page === "today" ? (
-            <div className={styles.switch} aria-label="任务视角">
-              <button
-                disabled={customersLoading}
-                className={view === "business" ? styles.active : ""}
-                onClick={() => {
-                  setView("business");
-                  setTaskLabel("全部");
-                }}
-              >
-                经营视角
-              </button>
-              <button
-                disabled={customersLoading}
-                className={view === "customer" ? styles.active : ""}
-                onClick={() => {
-                  setView("customer");
-                  setTaskLabel("全部");
-                }}
-              >
-                客户视角
-              </button>
-            </div>
+            !isInsurance && (
+              <div className={styles.switch} aria-label="任务视角">
+                <button
+                  disabled={customersLoading}
+                  className={view === "business" ? styles.active : ""}
+                  onClick={() => {
+                    setView("business");
+                    setTaskLabel("全部");
+                  }}
+                >
+                  经营视角
+                </button>
+                <button
+                  disabled={customersLoading}
+                  className={view === "customer" ? styles.active : ""}
+                  onClick={() => {
+                    setView("customer");
+                    setTaskLabel("全部");
+                  }}
+                >
+                  客户视角
+                </button>
+              </div>
+            )
           ) : (
             <button
               className={`${styles.btn} ${styles.soft} ${styles.sm}`}
