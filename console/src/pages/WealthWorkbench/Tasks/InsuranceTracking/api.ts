@@ -47,7 +47,7 @@ export interface InsuranceCustomer {
   bbkOrgId?: string;
   /** 经营方案完整地址，对齐原名单的 filename 字段。 */
   link?: string;
-  assets?: string;
+  assets?: string | number;
   assetsDescription?: string;
   insurancePlan?: string;
   contactPlans?: ContactRecord[];
@@ -93,10 +93,12 @@ export class InsuranceApiUnavailableError extends Error {
   }
 }
 
-// 正式文档待补充；join 使用临时约定，其余路径待确认，不回退为本地保存。
-// 确认同服务网关地址后填写相对 /api 的路径，并在本模块转换实际 DTO。
+const API_PREFIX = "/agent/workspace";
+
+// 全部跟踪接口共用上述服务前缀；此处仅配置前缀后的路径，并在本模块转换实际 DTO。
+// 正式文档待补充；join/remove 使用临时约定，其余路径待确认，不回退为本地保存。
 const ENDPOINTS: Record<
-  "list" | "join" | InsuranceChange["kind"],
+  "list" | "join" | "remove" | InsuranceChange["kind"],
   string | null
 > = {
   list: null,
@@ -105,7 +107,8 @@ const ENDPOINTS: Record<
   followUp: null,
   intention: null,
   // 临时约定，待正式接口文档替换；复用今日任务网关和公共请求上下文。
-  join: "/agent/workspace/insurance-tracking/add",
+  join: "/insurance-tracking/add",
+  remove: "/insurance-tracking/remove",
 };
 
 async function insuranceRequest<T>(
@@ -126,7 +129,7 @@ async function insuranceRequest<T>(
       code: string | number;
       message?: string;
       data: T;
-    }>(path, {
+    }>(`${API_PREFIX}${path}`, {
       method: "POST",
       signal: controller.signal,
       body: JSON.stringify({
@@ -182,6 +185,24 @@ export async function joinInsuranceTracking(
       skillId: customer.skillId,
       bbkOrgId: customer.bbkOrgId,
       ...values,
+      requestId,
+    },
+    signal,
+  );
+}
+
+/** 临时约定：按跟踪记录 ID 移除，成功返回 code=200；重复请求按 requestId 去重。 */
+export async function removeInsuranceTracking(
+  customer: InsuranceCustomer,
+  requestId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  await insuranceRequest(
+    "remove",
+    {
+      id: customer.id,
+      custUid: customer.custUid,
+      bbkOrgId: customer.bbkOrgId,
       requestId,
     },
     signal,

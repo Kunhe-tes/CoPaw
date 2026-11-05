@@ -8,11 +8,14 @@ import {
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { Sidebar } from "../components/Sidebar";
-import {
-  fetchDistributeBranches,
-  fetchDistributeTargets,
-} from "../distributeTargets";
+import { fetchDistributeTargets } from "../distributeTargets";
 import { useWealthStore } from "../store";
+import { useIframeStore } from "../../../stores/iframeStore";
+import {
+  queryInstitutionTree,
+  queryInstitutionPeople,
+} from "../distribution/api";
+import { resetInstitutionCache } from "../distribution/institutionCache";
 import Create from "./index";
 
 vi.mock("../api", async (importOriginal) => ({
@@ -20,6 +23,11 @@ vi.mock("../api", async (importOriginal) => ({
   fetchScenesByCategory: vi.fn().mockResolvedValue([]),
 }));
 
+vi.mock("../distribution/api", async (original) => ({
+  ...(await original<typeof import("../distribution/api")>()),
+  queryInstitutionTree: vi.fn(),
+  queryInstitutionPeople: vi.fn(),
+}));
 vi.mock("../distributeTargets", () => ({
   fetchDistributeTargets: vi
     .fn()
@@ -30,6 +38,28 @@ vi.mock("../distributeTargets", () => ({
 }));
 
 beforeEach(() => {
+  resetInstitutionCache();
+  useIframeStore
+    .getState()
+    .setContext({ bbk: "110", orgLvl: "30", sysId: "retail" });
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+  vi.mocked(queryInstitutionTree).mockClear();
+  vi.mocked(queryInstitutionTree).mockResolvedValue({
+    mOrgCode: "110",
+    mOrgName: "北京分行",
+    mOrgLvl: 30,
+    children: [
+      { mOrgCode: "121516", mOrgName: "测试支行", mOrgLvl: 70, children: [] },
+    ],
+  });
+  vi.mocked(queryInstitutionPeople).mockResolvedValue([]);
   useWealthStore.setState({
     accountId: "rm",
     plansLoaded: false,
@@ -63,7 +93,10 @@ beforeEach(() => {
     acting: false,
   });
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 function renderWorkbench() {
   return render(
@@ -130,26 +163,16 @@ it("行长在修改页直接新建后重新加载人员并清空搜索条件", a
   expect(useWealthStore.getState().targetsLoaded).toBe(true);
 });
 
-it("中台直接新建后清除旧支行路径并重新查询支行", async () => {
+it("中台新建清除旧机构视图和人员缓存，但复用已预加载的完整机构树", async () => {
   useWealthStore.setState({ accountId: "middle", plansLoaded: true });
-  vi.mocked(fetchDistributeBranches).mockResolvedValue([
-    { mOrgCode: "121516", mOrgName: "测试支行", mOrgLvl: 70, leaf: true },
-  ]);
   renderWorkbench();
-  const select = screen.getByRole("combobox", { name: "选择支行" });
-  await waitFor(() => expect(select).toBeEnabled());
-  fireEvent.mouseDown(select);
-  fireEvent.click(
-    await screen.findByRole("menuitemcheckbox", { name: /测试支行/ }),
-  );
+  fireEvent.click(await screen.findByRole("button", { name: "测试支行" }));
   await waitFor(() =>
     expect(useWealthStore.getState().targetsLoaded).toBe(true),
   );
   expect(screen.getByLabelText("搜索分发目标")).toBeEnabled();
-  vi.mocked(fetchDistributeBranches).mockClear();
   fireEvent.click(screen.getByRole("button", { name: "创建计划" }));
-  await waitFor(() => expect(fetchDistributeBranches).toHaveBeenCalledOnce());
+  expect(queryInstitutionTree).toHaveBeenCalledOnce();
   expect(screen.getByLabelText("搜索分发目标")).toBeDisabled();
-  expect(useWealthStore.getState().targetBranch).toBeNull();
   expect(useWealthStore.getState().targetSapIds).toEqual([]);
 });

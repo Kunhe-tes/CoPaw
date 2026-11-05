@@ -747,6 +747,9 @@ export default function Create() {
   const toast = useWealthStore((s) => s.toast);
   const targetSapIds = useWealthStore((s) => s.targetSapIds);
   const plans = useWealthStore((s) => s.plans);
+  const distributionBlocked = useWealthStore(
+    (s) => s.accountId === "middle" && s.distributionBlocked,
+  );
   const plansLoaded = useWealthStore((s) => s.plansLoaded);
   const navigate = useNavigate();
 
@@ -791,6 +794,10 @@ export default function Create() {
   };
 
   const onPublish = () => {
+    if (distributionBlocked) {
+      toast("请等待人员查询完成，或重试、取消失败的待选机构");
+      return;
+    }
     if (!plansLoaded) {
       toast("正在加载已有规划，请稍候");
       return;
@@ -909,7 +916,7 @@ export default function Create() {
           </button>
           <button
             className={`${styles.btn} ${styles.primary}`}
-            disabled={!plansLoaded}
+            disabled={!plansLoaded || distributionBlocked}
             aria-busy={!plansLoaded}
             onClick={onPublish}
           >
@@ -1234,7 +1241,7 @@ export default function Create() {
         */}
           <button
             className={`${styles.btn} ${styles.primary}`}
-            disabled={!plansLoaded}
+            disabled={!plansLoaded || distributionBlocked}
             aria-busy={!plansLoaded}
             onClick={onPublish}
           >

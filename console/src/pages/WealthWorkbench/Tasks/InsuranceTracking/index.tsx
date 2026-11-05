@@ -17,6 +17,9 @@ import {
 } from "./api";
 import { InsuranceEditor } from "./Editor";
 import { RecordCell } from "./RecordCell";
+import { RemoveTracking } from "./RemoveTracking";
+import { TableHeading } from "./TableHeading";
+import { orderCustomers, type ListSort, type SortKey } from "./listOrder";
 import { Icon } from "../../components/Icon";
 import workbenchStyles from "../../index.module.less";
 import styles from "./index.module.less";
@@ -55,9 +58,11 @@ export function InsuranceTracking({
   onExecute,
   onShowScheme,
   onBusyChange,
+  onViewInsuranceTasks,
 }: {
   refreshKey: number;
   onBusyChange?: (busy: boolean) => void;
+  onViewInsuranceTasks?: () => void;
   onShowScheme: (customer: InsuranceCustomer) => void;
   onExecute: (
     kind: "dial" | "insight",
@@ -72,7 +77,12 @@ export function InsuranceTracking({
   const [retry, setRetry] = useState(0);
   const [failedEdits, setFailedEdits] = useState<FailedEdit[]>([]);
   const [search, setSearch] = useState("");
+  const [intentionFilter, setIntentionFilter] = useState<Intention | "all">(
+    "all",
+  );
+  const [sort, setSort] = useState<ListSort>(null);
   const [pending, setPending] = useState<Set<string>>(new Set());
+  const [removing, setRemoving] = useState<InsuranceCustomer | null>(null);
   const locks = useRef(new Set<string>());
   const generation = useRef(0);
   const [editor, setEditor] = useState<{
@@ -83,9 +93,9 @@ export function InsuranceTracking({
   } | null>(null);
 
   useEffect(() => {
-    onBusyChange?.(loading || pending.size > 0 || !!editor);
+    onBusyChange?.(loading || pending.size > 0 || !!editor || !!removing);
     return () => onBusyChange?.(false);
-  }, [loading, pending.size, editor, onBusyChange]);
+  }, [loading, pending.size, editor, removing, onBusyChange]);
 
   useEffect(() => {
     // 正在保存时保留本次编辑，防止刷新响应覆盖乐观更新。
@@ -251,16 +261,27 @@ export function InsuranceTracking({
   };
 
   const query = search.trim().toLocaleLowerCase();
-  const filtered = data.customers.filter((row) =>
-    [
-      row.name,
-      row.branchName,
-      row.insurancePlan,
-      ...(row.contactPlans ?? []).map((entry) => entry.content),
-      ...(row.followUps ?? []).map((entry) => entry.content),
-    ].some((value) => value?.toLocaleLowerCase().includes(query)),
+  const filtered = data.customers.filter(
+    (row) =>
+      (intentionFilter === "all" || row.intention === intentionFilter) &&
+      [
+        row.name,
+        row.branchName,
+        row.insurancePlan,
+        ...(row.contactPlans ?? []).map((entry) => entry.content),
+        ...(row.followUps ?? []).map((entry) => entry.content),
+      ].some((value) => value?.toLocaleLowerCase().includes(query)),
   );
-  const rows = filtered;
+  const rows = orderCustomers(filtered, sort);
+  const toggleSort = (key: SortKey) => {
+    setSort((current) =>
+      current?.key !== key
+        ? { key, direction: "asc" }
+        : current.direction === "asc"
+        ? { key, direction: "desc" }
+        : null,
+    );
+  };
 
   return (
     <div className={styles.root}>
@@ -307,7 +328,7 @@ export function InsuranceTracking({
           <Button
             aria-label="刷新保险跟踪"
             icon={<RotateCw size={15} aria-hidden />}
-            disabled={loading || pending.size > 0 || !!editor}
+            disabled={loading || pending.size > 0 || !!editor || !!removing}
             onClick={() => setRetry((value) => value + 1)}
           />
         </div>
@@ -409,6 +430,24 @@ export function InsuranceTracking({
             重新加载
           </Button>
         </div>
+      ) : !data.customers.length ? (
+        <div className={styles.initialEmpty} role="status">
+          <h3>暂未添加跟踪客户</h3>
+          <p>
+            {onViewInsuranceTasks
+              ? "在保险任务中点击“加入跟踪”，客户将显示在这里。"
+              : "当前暂无保险任务，添加跟踪客户后将在这里展示。"}
+          </p>
+          {onViewInsuranceTasks && (
+            <button
+              type="button"
+              className={`${workbenchStyles.btn} ${workbenchStyles.primary}`}
+              onClick={onViewInsuranceTasks}
+            >
+              查看保险任务
+            </button>
+          )}
+        </div>
       ) : (
         <>
           <div
@@ -439,9 +478,14 @@ export function InsuranceTracking({
                     "经营方案",
                     "执行",
                   ].map((label) => (
-                    <th key={label} scope="col">
-                      {label}
-                    </th>
+                    <TableHeading
+                      key={label}
+                      label={label}
+                      sort={sort}
+                      onSort={toggleSort}
+                      intention={intentionFilter}
+                      onIntention={setIntentionFilter}
+                    />
                   ))}
                 </tr>
               </thead>
@@ -450,7 +494,9 @@ export function InsuranceTracking({
                   <tr key={customer.id}>
                     <td className={workbenchStyles.name}>{customer.name}</td>
                     <td>
-                      <strong>{customer.assets || "—"}</strong>
+                      <strong>
+                        {customer.assets === "" ? "—" : customer.assets ?? "—"}
+                      </strong>
                       <small>{customer.assetsDescription || ""}</small>
                     </td>
                     <td>
@@ -557,6 +603,15 @@ export function InsuranceTracking({
                           客户洞察
                         </button>
                       </div>
+                      <button
+                        type="button"
+                        className={`${workbenchStyles.link} ${styles.remove}`}
+                        aria-label={`移除${customer.name}的跟踪`}
+                        disabled={pending.has(customer.id)}
+                        onClick={() => setRemoving(customer)}
+                      >
+                        移除跟踪
+                      </button>
                       {pending.has(customer.id) && (
                         <span className={styles.saving} role="status">
                           保存中…
@@ -571,11 +626,7 @@ export function InsuranceTracking({
               <Empty
                 className={styles.empty}
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description={
-                  query
-                    ? "未找到匹配的客户，请调整搜索条件"
-                    : "暂无跟踪客户，保险初筛识别后将在此展示"
-                }
+                description="未找到匹配的客户，请调整搜索条件"
               />
             )}
           </div>
@@ -585,6 +636,31 @@ export function InsuranceTracking({
             </span>
           </div>
         </>
+      )}
+      {removing && (
+        <RemoveTracking
+          customer={removing}
+          onClose={() => setRemoving(null)}
+          onRemoved={() => {
+            setData((current) => ({
+              ...current,
+              customers: current.customers.filter(
+                (row) => row.id !== removing.id,
+              ),
+              counts: {
+                customers: current.counts.customers - 1,
+                tracking: current.counts.tracking - 1,
+                highIntention:
+                  current.counts.highIntention -
+                  Number(removing.intention === 3),
+              },
+            }));
+            setFailedEdits((items) =>
+              items.filter((item) => item.customer.id !== removing.id),
+            );
+            setRemoving(null);
+          }}
+        />
       )}
       {editor && (
         <InsuranceEditor

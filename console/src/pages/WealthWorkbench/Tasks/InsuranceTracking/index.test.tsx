@@ -11,6 +11,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { InsuranceTracking } from "./index";
 import {
   fetchInsuranceTracking,
+  removeInsuranceTracking,
   saveInsuranceChange,
   InsuranceApiUnavailableError,
   type InsuranceList,
@@ -19,6 +20,7 @@ import {
 vi.mock("./api", async (original) => ({
   ...(await original<typeof import("./api")>()),
   fetchInsuranceTracking: vi.fn(),
+  removeInsuranceTracking: vi.fn(),
   saveInsuranceChange: vi.fn(),
 }));
 const fixture = (): InsuranceList => ({
@@ -64,6 +66,7 @@ beforeEach(() => {
   };
   vi.mocked(fetchInsuranceTracking).mockResolvedValue(fixture());
   vi.mocked(saveInsuranceChange).mockResolvedValue(undefined);
+  vi.mocked(removeInsuranceTracking).mockResolvedValue(undefined);
 });
 afterEach(() => {
   cleanup();
@@ -548,6 +551,7 @@ it("本地搜索不改动全量统计，清空搜索后恢复客户", async () =
   expect(
     screen.getByText("未找到匹配的客户，请调整搜索条件"),
   ).toBeInTheDocument();
+  expect(screen.queryByText("暂未添加跟踪客户")).not.toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("搜索保险跟踪客户"), {
     target: { value: "" },
   });
@@ -572,7 +576,14 @@ it("未接入和失败态不展示虚构数据，支持重试和真实空名单"
     counts: { customers: 0, highIntention: 0, tracking: 0 },
   });
   fireEvent.click(screen.getByRole("button", { name: "重新加载" }));
-  await screen.findByText("暂无跟踪客户，保险初筛识别后将在此展示");
+  await screen.findByText("暂未添加跟踪客户");
+  expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "查看保险任务" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.getByText("当前暂无保险任务，添加跟踪客户后将在这里展示。"),
+  ).toBeInTheDocument();
   expect(highCount()).toHaveTextContent("0");
 });
 
@@ -949,4 +960,120 @@ it("历史超长内容不静默截断，必须删减到1000字以内才能提交
   fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
   await within(dialog).findByText("最多只能输入1000字");
   expect(saveInsuranceChange).not.toHaveBeenCalled();
+});
+
+it("取消移除不发请求；确认移除成功前保留客户，成功后移除行和高意向人数", async () => {
+  let resolve!: () => void;
+  vi.mocked(removeInsuranceTracking).mockImplementation(
+    () =>
+      new Promise<void>((yes) => {
+        resolve = yes;
+      }),
+  );
+  await show();
+  fireEvent.click(screen.getByRole("button", { name: "移除王海的跟踪" }));
+  let dialog = screen.getByRole("dialog", { name: "移除跟踪" });
+  expect(dialog).toHaveTextContent("王海");
+  fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+  expect(removeInsuranceTracking).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "移除王海的跟踪" }));
+  dialog = screen.getByRole("dialog", { name: "移除跟踪" });
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认移除" }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "正在移除…" }));
+  expect(removeInsuranceTracking).toHaveBeenCalledTimes(1);
+  expect(within(dialog).getByRole("button", { name: "取消" })).toBeDisabled();
+  expect(screen.getByText("王海")).toBeInTheDocument();
+  expect(highCount()).toHaveTextContent("8");
+  await act(async () => resolve());
+  expect(screen.queryByText("王海")).not.toBeInTheDocument();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(highCount()).toHaveTextContent("7");
+  expect(
+    screen.getByText(/^跟踪客户/, { selector: "span" }).querySelector("b"),
+  ).toHaveTextContent("11");
+  expect(screen.getByText("林芳")).toBeInTheDocument();
+});
+
+it("移除失败保留客户和人数，可使用同一请求ID重试；非高意向客户移除不改变高意向人数", async () => {
+  vi.mocked(removeInsuranceTracking)
+    .mockRejectedValueOnce(new Error("服务异常"))
+    .mockResolvedValueOnce(undefined);
+  await show();
+  fireEvent.click(screen.getByRole("button", { name: "移除林芳的跟踪" }));
+  const dialog = screen.getByRole("dialog", { name: "移除跟踪" });
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认移除" }));
+  await within(dialog).findByRole("alert");
+  expect(screen.getByText("林芳")).toBeInTheDocument();
+  expect(highCount()).toHaveTextContent("8");
+  expect(
+    screen.getByText(/^跟踪客户/, { selector: "span" }).querySelector("b"),
+  ).toHaveTextContent("12");
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认移除" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  expect(screen.queryByText("林芳")).not.toBeInTheDocument();
+  expect(highCount()).toHaveTextContent("8");
+  const calls = vi.mocked(removeInsuranceTracking).mock.calls;
+  expect(calls[0][0]).toEqual(fixture().customers[0]);
+  expect(calls[0][1]).toBe(calls[1][1]);
+});
+
+it("资产和接触计划列头切换升序、降序、默认，切换列时只保留一个排序", async () => {
+  const data = fixture();
+  data.customers[0].assets = 337.34;
+  data.customers[1].assets = "80";
+  data.customers[1].contactPlans = [
+    { id: "plan-wang", date: "2026-11-06", method: 0, content: "预约王海" },
+  ];
+  vi.mocked(fetchInsuranceTracking).mockResolvedValue(data);
+  await show();
+  const names = () =>
+    screen
+      .getAllByRole("row")
+      .slice(1)
+      .map((row) => within(row).getAllByRole("cell")[0].textContent);
+  fireEvent.click(screen.getByRole("button", { name: /^资产排序/ }));
+  expect(names()).toEqual(["王海", "林芳"]);
+  expect(screen.getAllByRole("columnheader")[1]).toHaveAttribute(
+    "aria-sort",
+    "ascending",
+  );
+  fireEvent.click(screen.getByRole("button", { name: /^资产排序/ }));
+  expect(names()).toEqual(["林芳", "王海"]);
+  fireEvent.click(screen.getByRole("button", { name: /^资产排序/ }));
+  expect(screen.getAllByRole("columnheader")[1]).toHaveAttribute(
+    "aria-sort",
+    "none",
+  );
+  fireEvent.click(screen.getByRole("button", { name: /^接触计划排序/ }));
+  expect(names()).toEqual(["林芳", "王海"]);
+  fireEvent.click(screen.getByRole("button", { name: /^接触计划排序/ }));
+  expect(names()).toEqual(["王海", "林芳"]);
+  fireEvent.click(screen.getByRole("button", { name: /^资产排序/ }));
+  expect(screen.getAllByRole("columnheader")[3]).toHaveAttribute(
+    "aria-sort",
+    "none",
+  );
+});
+
+it("意向度列头可筛选零值并与搜索组合，无匹配显示搜索空态且可清除筛选", async () => {
+  const data = fixture();
+  data.customers[0].intention = 0;
+  vi.mocked(fetchInsuranceTracking).mockResolvedValue(data);
+  await show();
+  fireEvent.click(screen.getByRole("button", { name: "筛选客户意向度" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "待了解" }));
+  expect(screen.getByText("林芳")).toBeInTheDocument();
+  expect(screen.queryByText("王海")).not.toBeInTheDocument();
+  expect(highCount()).toHaveTextContent("8");
+  fireEvent.change(screen.getByLabelText("搜索保险跟踪客户"), {
+    target: { value: "王海" },
+  });
+  expect(
+    screen.getByText("未找到匹配的客户，请调整搜索条件"),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("暂未添加跟踪客户")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "清除客户意向度筛选" }));
+  expect(screen.getByText("王海")).toBeInTheDocument();
 });
