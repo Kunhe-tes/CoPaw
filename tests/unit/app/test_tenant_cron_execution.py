@@ -1126,7 +1126,7 @@ def test_execute_exposes_tenant_process_limit_policy_inside_cron_context(
     assert observed == {
         "tenant_id": scope_id,
         "enabled": True,
-        "cpu": 3,
+        "cpu": 90,
     }
 
 

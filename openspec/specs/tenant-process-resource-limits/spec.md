@@ -3,24 +3,20 @@
 ## Purpose
 TBD - created by archiving change tenant-process-resource-limits. Update Purpose after archive.
 ## Requirements
-### Requirement: Global config SHALL define process launch policy for in-scope subprocesses
-The system SHALL resolve process limits from `security.process_limits` in the backend working directory's root `config.json`, independently of the current tenant, and apply the policy only to in-scope subprocess launches. Missing configuration SHALL use model defaults.
+### Requirement: Built-in defaults SHALL define process launch policy
+The system SHALL resolve process limits from the built-in `ProcessLimitsConfig` defaults without reading `security.process_limits` from any `config.json`. Tenant identity remains available for shell concurrency accounting.
 
-#### Scenario: Tenant-scoped request uses global process-limit policy
-- **GIVEN** the global config enables process limits for shell and MCP `stdio` launches
-- **AND** tenant configs contain different process-limit settings
+#### Scenario: Configuration files do not change process limits
+- **GIVEN** global or tenant configuration files contain process-limit settings
 - **WHEN** any tenant-scoped shell or MCP `stdio` launch occurs
-- **THEN** the system SHALL use the global process-limit settings and SHALL NOT read those settings from tenant configs
+- **THEN** the system SHALL ignore those settings and use the built-in defaults
+- **AND** shell CPU time SHALL default to 90 seconds and virtual memory to 34000 MiB
+- **AND** shell enforcement SHALL be enabled and MCP `stdio` enforcement disabled by default
 
-#### Scenario: Disabled process-limit policy preserves current launch behavior
-- **WHEN** a tenant-scoped shell or MCP `stdio` launch occurs and global `security.process_limits.enabled=false`
-- **THEN** the system SHALL launch the subprocess without applying process ceilings
-- **AND** the subprocess SHALL remain subject to existing validation and timeout behavior
-
-#### Scenario: Shell concurrency uses global settings and tenant slots
-- **GIVEN** global shell limits specify `shell_max_concurrent=5`
+#### Scenario: Shell concurrency uses built-in settings and tenant slots
 - **WHEN** a tenant-scoped builtin shell execution starts
-- **THEN** the system SHALL use the global concurrency setting and count the execution against that tenant's local slots
+- **THEN** the system SHALL use the built-in limit of five concurrent executions per tenant and a five-second slot wait
+- **AND** the system SHALL count the execution against that tenant's local slots
 
 ### Requirement: Shell subprocesses SHALL honor configured per-process ceilings
 The system SHALL apply configured per-process CPU time and memory ceilings to tenant-scoped builtin shell subprocess launches on supported Unix platforms.
@@ -76,7 +72,7 @@ The system SHALL terminate remaining processes in the Unix process group created
 - **THEN** the shell tool SHALL terminate the remaining process group before returning failure
 
 ### Requirement: MCP `stdio` subprocesses SHALL honor the same configured ceilings
-The system SHALL apply the same globally configured per-process CPU time and memory ceilings to tenant-scoped MCP `stdio` server subprocess launches, including rebuild paths that reconnect a stdio client from stored metadata.
+The system SHALL apply the same built-in per-process CPU time and memory ceilings when enabled in code to tenant-scoped MCP `stdio` server subprocess launches, including rebuild paths that reconnect a stdio client from stored metadata.
 
 #### Scenario: Initial MCP `stdio` launch uses tenant process limits
 - **GIVEN** tenant process limits are enabled for MCP `stdio` launches
@@ -88,7 +84,7 @@ The system SHALL apply the same globally configured per-process CPU time and mem
 - **GIVEN** a tenant-scoped MCP `stdio` client stores rebuild metadata
 - **AND** tenant process limits are enabled for MCP `stdio` launches
 - **WHEN** the system rebuilds that MCP client from stored metadata
-- **THEN** the rebuilt MCP server subprocess SHALL launch with the same globally configured process-limit policy
+- **THEN** the rebuilt MCP server subprocess SHALL launch with the same built-in process-limit policy
 
 ### Requirement: Process-limit enforcement SHALL preserve current scope boundaries
 The system SHALL apply tenant process limits only to tenant-scoped builtin shell launches and tenant-scoped MCP `stdio` launches in this capability.

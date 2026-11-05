@@ -964,6 +964,13 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         native_payload["meta"]["goal_id"] = goal_id
     if _extract_goal_mode_enabled(request_data):
         native_payload["meta"]["goal_mode_enabled"] = True
+    enabled = (
+        request_data.get("enable_subagents")
+        if isinstance(request_data, dict)
+        else getattr(request_data, "enable_subagents", False)
+    )
+    if enabled is True:
+        native_payload["meta"]["enable_subagents"] = True
     context_references = _extract_context_references(request_data)
     if context_references is not None:
         native_payload["meta"]["context_references"] = context_references

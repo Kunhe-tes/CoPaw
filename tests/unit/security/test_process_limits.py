@@ -14,7 +14,7 @@ from swe.config.context import tenant_context
 from swe.config.utils import save_config
 
 
-def test_process_limit_policy_uses_root_config_for_all_tenants(
+def test_process_limit_policy_ignores_config_files_for_all_tenants(
     tmp_path: Path,
 ) -> None:
     from swe.security.process_limits import (
@@ -50,12 +50,12 @@ def test_process_limit_policy_uses_root_config_for_all_tenants(
                 for scope in ("shell", "mcp_stdio"):
                     policy = resolve_current_process_limit_policy(scope)
                     assert policy.tenant_id == tenant
-                    assert policy.enabled is True
-                    assert policy.cpu_time_limit_seconds == 11
-                    assert policy.memory_max_mb == 512
+                    assert policy.enabled is (scope == "shell")
+                    assert policy.cpu_time_limit_seconds == 90
+                    assert policy.memory_max_mb == 34000
                     if scope == "shell":
-                        assert policy.shell_max_concurrent == 7
-                        assert policy.shell_acquire_timeout_seconds == 1.5
+                        assert policy.shell_max_concurrent == 5
+                        assert policy.shell_acquire_timeout_seconds == 5
 
 
 def _write_tenant_config(
@@ -205,8 +205,8 @@ def test_resolved_policy_builds_unix_preexec_fn(tmp_path: Path) -> None:
             preexec_fn()
 
     assert mock_setrlimit.call_args_list == [
-        call(policy.rlimit_cpu, (3, 3)),
-        call(policy.rlimit_as, (64 * 1024 * 1024, 64 * 1024 * 1024)),
+        call(policy.rlimit_cpu, (90, 90)),
+        call(policy.rlimit_as, (34000 * 1024 * 1024, 34000 * 1024 * 1024)),
     ]
 
 
@@ -242,7 +242,7 @@ def test_shell_policy_skips_memory_rlimit_on_macos(tmp_path: Path) -> None:
             preexec_fn()
 
     assert mock_setrlimit.call_args_list == [
-        call(policy.rlimit_cpu, (3, 3)),
+        call(policy.rlimit_cpu, (90, 90)),
     ]
     assert "memory" in (policy.diagnostic or "").lower()
 

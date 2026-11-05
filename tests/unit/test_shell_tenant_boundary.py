@@ -24,7 +24,7 @@ import pytest
 
 from swe.config.context import encode_scope_id, tenant_context
 from swe.config.config import Config
-from swe.config.utils import save_config
+from swe.config.utils import load_config, save_config
 from swe.envs.store import save_envs
 from swe.agents.tool_failure import ToolExecutionError
 from swe.agents.tools.shell import (
@@ -1132,6 +1132,16 @@ class TestResolveCwd:
 
 class TestExecuteShellCommand:
     """Integration tests for execute_shell_command with tenant boundary."""
+
+    @pytest.fixture(autouse=True)
+    def _inject_test_process_limits(self, mock_working_dir, monkeypatch):
+        # Exercise alternate limit scenarios without changing production defaults.
+        monkeypatch.setattr(
+            "swe.security.process_limits.ProcessLimitsConfig",
+            lambda: load_config(
+                mock_working_dir / "config.json",
+            ).security.process_limits,
+        )
 
     def test_prepare_shell_command_reuses_shell_boundary_context(
         self,

@@ -241,13 +241,33 @@ _Avoid_: task-type labels, caller-authored subagent instruction, automatic deleg
 The delegation entry that makes Background SubAgent tools available when the current user message contains a fixed SubAgent keyword or its request explicitly enables SubAgents, without automatically starting a worker. It applies in ordinary Chat, Plan Mode, and Goal Mode while retaining each mode's permissions, and permits Run-scoped SubAgent Definitions; Explicit Expert Selection remains a separate entry.
 _Avoid_: automatic worker launch, semantic intent classification, persistent expert authoring
 
+**Multi-Agent Mode**:
+A Chat-scoped user choice that persists across messages and reopening the Chat, expressing explicit SubAgent intent for submitted requests until switched off. New and reset Chats start with it off; it can coexist with Plan or Goal Mode, does not itself start a SubAgent, and does not change the applicable delegation permissions.
+_Avoid_: automatic delegation, global preference, one-message intent
+
+**Message-only SubAgent Intent**:
+An explicit SubAgent intent expressed in one user message while **Multi-Agent Mode** is off; it does not turn that Chat choice on for later messages. Any resulting **Goal SubAgent Delegation Intent** follows its own durable scope.
+_Avoid_: automatic mode activation, implicit Chat preference
+
+**Multi-Agent and Expert Selection Exclusivity**:
+The rule that enabling **Multi-Agent Mode** clears an **Explicit Expert Selection** or releases a **Chat Expert Binding**, while selecting an Expert turns off Multi-Agent Mode. A failed switch preserves the previous selection and reports the failure.
+_Avoid_: recursive expert delegation, silently ineffective mode, hidden selected-expert priority
+
+**Multi-Agent Mode Change Boundary**:
+A change to **Multi-Agent Mode** applies to subsequent submitted requests and does not interrupt a request or SubAgent Run already started.
+_Avoid_: implicit cancellation, retroactive execution change
+
 **Expert Autonomous Discovery Switch**:
 A Source-level, default-off choice controlling whether the Main Agent may choose enabled Agent-owned Stored SubAgent Definitions from the current tenant's current Agent Profile after the Explicit SubAgent Intent Gate opens. It does not control Run-scoped or Skill-owned SubAgent Definitions or prevent Explicit Expert Selection.
 _Avoid_: tenant-shared expert registry, cross-Profile expert access, delegation master switch
 
 **Goal SubAgent Delegation Intent**:
-The durable user authorization to delegate within one Goal, established by a real user message containing a fixed SubAgent keyword or an explicitly enabled request. It survives automatic turns and recovery, does not grant access to hidden experts, and does not authorize unrelated Goals or ordinary Chat turns.
+The durable user authorization to delegate within one Goal, established by a real user message containing a fixed SubAgent keyword or an explicitly enabled request. Merely enabling Multi-Agent Mode does not establish it; it survives automatic turns and recovery, does not grant access to hidden experts, and does not authorize unrelated Goals or ordinary Chat turns, and switching off Multi-Agent Mode does not revoke it.
 _Avoid_: model-generated authorization, implicit Goal autonomy, frozen expert visibility
+
+**Goal Delegation Intent Visibility**:
+The user's ability to see an existing **Goal SubAgent Delegation Intent** in the Goal status and to receive an explanation when switching off Multi-Agent Mode cannot revoke it.
+_Avoid_: implied authorization revocation, hidden durable intent
 
 **Chat-owned SubAgent Management**:
 The Main Agent's ability to inspect, wait for, or cancel retained SubAgent Runs belonging to its current Chat and logical session without gaining permission to start new runs. It never grants access to another Chat's runs within the same Agent Profile.

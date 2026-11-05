@@ -4434,7 +4434,9 @@ class AgentRunner(Runner):
 
     @staticmethod
     def _request_allows_subagents(request: AgentRequest) -> bool:
-        enabled = getattr(request, "enable_subagents", False)
+        enabled = getattr(request, "enable_subagents", False) or (
+            getattr(request, "channel_meta", None) or {}
+        ).get("enable_subagents", False)
         if isinstance(enabled, str):
             return enabled.strip().lower() in {"true", "1", "yes"}
         return bool(enabled)
