@@ -138,12 +138,26 @@ export function ComposerQuickMenuSubmenu(props: ComposerQuickMenuSubmenuProps) {
         width: `${Math.min(panelRect.width, availableWidth)}px`,
         left: opensLeft ? "auto" : `calc(100% + ${gap}px)`,
         right: opensLeft ? `calc(100% + ${gap}px)` : "auto",
+        top: `${Math.max(
+          viewportPadding - submenuRect.top,
+          Math.min(
+            0,
+            window.innerHeight -
+              viewportPadding -
+              submenuRect.top -
+              panelRect.height,
+          ),
+        )}px`,
       });
     };
 
     updateSubmenuPosition();
     window.addEventListener("resize", updateSubmenuPosition);
-    return () => window.removeEventListener("resize", updateSubmenuPosition);
+    window.addEventListener("scroll", updateSubmenuPosition, true);
+    return () => {
+      window.removeEventListener("resize", updateSubmenuPosition);
+      window.removeEventListener("scroll", updateSubmenuPosition, true);
+    };
   }, [expanded, panelWidth]);
 
   if (items.length === 0) {
@@ -226,14 +240,16 @@ export function ComposerQuickMenuSubmenu(props: ComposerQuickMenuSubmenuProps) {
             (panelWidth ? { width: panelWidth } : undefined)
           }
         >
-          {items.map((item, index) => (
-            <div
-              key={(React.isValidElement(item) && item.key) || index}
-              className={styles.itemWrap}
-            >
-              {item}
-            </div>
-          ))}
+          <div className={styles.submenuContent}>
+            {items.map((item, index) => (
+              <div
+                key={(React.isValidElement(item) && item.key) || index}
+                className={styles.itemWrap}
+              >
+                {item}
+              </div>
+            ))}
+          </div>
         </div>
       ) : null}
     </div>

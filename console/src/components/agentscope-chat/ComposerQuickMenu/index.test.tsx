@@ -164,6 +164,41 @@ describe("ComposerQuickMenu", () => {
     });
   });
 
+  it("moves a tall submenu into the viewport near the bottom", async () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
+      function (this: HTMLElement) {
+        if (this.classList.contains(styles.submenu)) {
+          return {
+            top: 700,
+            bottom: 740,
+            left: 100,
+            right: 200,
+            width: 100,
+            height: 40,
+          } as DOMRect;
+        }
+        return {
+          top: 700,
+          bottom: 1000,
+          left: 208,
+          right: 448,
+          width: 240,
+          height: 300,
+        } as DOMRect;
+      },
+    );
+    render(
+      <ComposerQuickMenu triggerLabel="快捷操作">
+        <ComposerQuickMenuSubmenu label="专家">
+          <ComposerQuickMenuItem label="专家一号" />
+        </ComposerQuickMenuSubmenu>
+      </ComposerQuickMenu>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "快捷操作" }));
+    fireEvent.click(await screen.findByRole("button", { name: "专家" }));
+    expect(screen.getByRole("menu")).toHaveStyle({ top: "-248px" });
+  });
+
   it("allows externally handled items to render with hover affordance", () => {
     render(<ComposerQuickMenuItem interactive label="上传文件" />);
 
