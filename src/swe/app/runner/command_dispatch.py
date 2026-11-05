@@ -246,6 +246,15 @@ async def _reset_multi_agent_mode(runner, chat_id: str, expected_revision):
         )
 
 
+def _is_expert_conversation(request, runner: AgentRunner) -> bool:
+    return bool(
+        getattr(runner, "_get_expert_main_execution", lambda _: None)(request)
+        or (getattr(request, "channel_meta", None) or {}).get(
+            "_expert_main_reset",
+        ),
+    )
+
+
 async def _run_conversation_command(
     query: str,
     request,
@@ -267,12 +276,7 @@ async def _run_conversation_command(
     memory_state = session_state.get("agent", {}).get("memory", {})
     memory.load_state_dict(memory_state, strict=False)
 
-    expert = bool(
-        getattr(runner, "_get_expert_main_execution", lambda _: None)(request)
-        or (getattr(request, "channel_meta", None) or {}).get(
-            "_expert_main_reset",
-        ),
-    )
+    expert = _is_expert_conversation(request, runner)
     command = query.strip().split(maxsplit=1)[0]
     if expert and command in {
         "/long_term_memory",
@@ -323,6 +327,20 @@ async def _run_conversation_command(
             prefix="**Command Failed**\n\n",
         )
     yield response_msg, True
+    await _persist_conversation_memory(
+        context,
+        runner,
+        memory,
+        session_execution,
+    )
+
+
+async def _persist_conversation_memory(
+    context: _CommandRequestContext,
+    runner: AgentRunner,
+    memory,
+    session_execution,
+) -> None:
     if context.session_id and context.user_id:
         if session_execution is not None:
             state = session_execution.state

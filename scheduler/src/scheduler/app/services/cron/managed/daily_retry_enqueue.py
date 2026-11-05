@@ -87,7 +87,7 @@ async def _receipt(db, member, *, lock=False):
     if order < 0:
         return None
     return await db.fetch_one(
-        f"SELECT receipt_id,batch_id,tenant_id,source_id,agent_id,job_id,kind,status,logical_fire_at,"
+        f"SELECT receipt_id,batch_id,tenant_id,source_id,agent_id,job_id,kind,status,batch_paused,logical_fire_at,"
         f"JSON_EXTRACT(members_json,%s) AS manifest_member FROM {RECEIPTS} WHERE batch_id=%s"
         + (" FOR UPDATE" if lock else ""),
         (f"$[{order}]", member["batch_id"]),
@@ -164,6 +164,8 @@ async def eligible_reason(tx, call, row, current, member, receipt, prepared):
         or json_object(row["dispatch_meta_json"]).get("protocol") != PROTOCOL
     ):
         return "cron_daily_retry_candidate_identity_invalid"
+    if receipt and receipt["batch_paused"]:
+        return "cron_daily_retry_batch_paused"
     reason = definition_reason(current) or terminal_reason(row, call)
     if reason:
         return reason

@@ -1,5 +1,39 @@
 # 定位路径
 
+## 只暂停当前执行批次
+
+- 看板详情的“暂停本批／恢复本批”通过批次级接口修改回执的 `batch_paused`，不会修改任务启停或批入口模式。
+- 部署前手工执行 `scripts/sql/cron_managed_batch_pause.sql` 新增默认 0 的字段；应用只检查结构，不自动 ALTER 业务表。
+- 派发前和自动／人工／每日业务重试前检查同一暂停标记；已交接、已受理及运行中的执行继续收尾和上报。恢复后保留原队列与次数继续执行。
+- 领取按真实批成员关联检查，兼容普通入口先受理、后续被批次复用的执行；暂停候选在分页前排除，避免挡住其他批次。
+
+## 批调度子任务错误类型与模型反馈
+
+- 执行历史 `swe_cron_executions.error_type` 保留原始值；子任务 `async_status=error` 且原值包含大小写敏感的 `Prompt` 时才按模型失败处理。逗号分隔文本和包含该词的 JSON 字符串均命中。
+- 新版统一分类入口为 `scheduler/src/scheduler/app/services/cron/managed/failure_policy.py`，用于自动、每日和人工业务重试及模型池反馈。非模型失败保留业务失败状态，但计入 worker 成功样本。
+- 当前尝试关联的原始错误类型在看板成员及失败预览中显示，空值显示 `-`。
+- 数据库列由外部预先新增；不会自动对已有库执行 ALTER。终态 `async_status` 和 `error_type` 应在一次提交中写入。
+
+## 新任务工作日与通知
+
+- 执行开关是 `schedule.run_on_non_workday`（缺省 false）；完成招呼通知开关是来源 `cron_notifications.skip_weekend_zhaohu_enabled`（缺省 false）。允许假日执行不等于必须在假日通知，两者不能互相代替。
+- 日期/年份/日历组合从 `scheduler/.../calendar_schedule.py`、`managed/calendar_views.py`、`managed/external_query.py` 查起；外部查询缓存键必须包含日期区间。SWE 的 `managed_models.py` 也要接受同样的新版年份与 W/LW，不能只修 Scheduler 后在 prepare 再报 422。
+- 新通知从 `managed_execution_api._source_config_scope` 的来源快照传到后台，再在 `ExecutionWriter.complete` 事务外查询原定通知日。`managed_history.notification_fields` 写 pending/not_required；Monitor 子任务汇总不重置该字段，领取必须仍为 pending。
+- 排查先区分手动执行（豁免）、来源开关关闭、任务根本未执行、日历 fallback，以及已有 pending 积压记录。发送 worker 不按实际发送日重新过滤，不能把工作日旧通知在周末发送误判为本轮判定失效。
+- 系统任务使用独立 `system.platform.system_platform_cron`，保留原五段平台规则，不走用户 W/LW 每日候选；不能将共享年份解析的放宽误传给不携带年字段的系统转换器。
+- 最新范围和预发检查见 `docs/deployment/cron_workday_system_port_20261104.md`；组合回归见 `test_managed_workday_year_dates.py` 和 `test_managed_notification_calendar_context.py`。
+
+## 新版批调度看板查询缓慢
+
+- 入口：`GET /api/monitor/cron/managed-dispatch/batches`。列表及详情共用 `monitor/src/monitor/app/services/cron/managed_board_sql.py`；响应装配位于 `managed_board.py`。先区分 Pending/504 和明确 503，后者还需检查成员关系完整性，不能伪装为空批次。
+- 规模检查按 `logical_fire_at`（UTC）比较批次数、`JSON_LENGTH(members_json)` 及最大批；无时区筛选按北京时间解释。933 成员应能正常读取，大批次只是定位线索。
+- 回执沿用索引 `idx_managed_receipt_board(source_id,kind,status,logical_fire_at,batch_id)`，成员及执行沿用现有主键。本修复不增加业务列或索引。
+- 原 `members_json` 为 LONGTEXT，逐成员提取执行 ID 和四项身份字段、再重复执行统计/列表聚合会放大文本解析成本。现在先筛选回执，以 `CAST(... AS JSON)` 和 `NO_MERGE` 将清单物化为原生 JSON；每批聚合只带预期成员数和类型，统计与分页复用一次聚合。
+- 使用真实 MySQL `EXPLAIN ANALYZE` 和 optimizer trace 核对 `board_receipts`、`board_aggregates` 各物化一次并复用；仅写 CTE 不足以保证。单条列表 EXPLAIN 的统计部分可能提前求值，不能将最终分页节点耗时当作完整查询时间。
+- 保留完整身份与顺序校验、最新重试指针、零成员、空页统计，以及不被状态筛选隐藏的坏关系。依赖仓库既有 MySQL 8.0.21+ 部署前提；SQLite 测试只适配语法，不能证明 MySQL 性能。
+- 主工作区历史基准与本轮迁入分支的验证分别记录在 `docs/superpowers/plans/2026-11-03-managed-batch-board-query-performance.md`；模拟数据的 Monitor 查询方法耗时不等于生产库或 HTTP 网关延迟。
+- 回归入口：`tests/unit/scheduler/test_managed_board_query.py`、`test_managed_board_api.py`，以及 `tests/integrated/scheduler/test_managed_board_mysql.py`、`test_managed_board_scaling_mysql.py`。真实 MySQL 仅接受显式 `CRON_MANAGED_TEST_MYSQL_JSON` 和 `test_cron_managed_*` 测试库，各测试只清理自己的随机租户数据。
+
 ## 定时执行凭据数据库镜像
 
 - src/swe/app/crons/auth_migration*.py：POST /api/internal/cron/auth-migration/tasks，GET 按 task_id 与 after_page 查询。
