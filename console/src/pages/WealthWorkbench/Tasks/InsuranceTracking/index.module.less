@@ -1,0 +1,255 @@
+.root {
+  min-width: 0;
+  button:focus-visible,
+  input:focus-visible,
+  [tabindex]:focus-visible {
+    outline: 2px solid var(--blue);
+    outline-offset: 2px;
+  }
+  .high {
+    color: var(--blue);
+  }
+  .toolbar {
+    flex-wrap: wrap;
+    color: var(--text);
+  }
+  .tools {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 340px;
+    max-width: 100%;
+  }
+  .tools > :first-child {
+    flex: 1;
+    min-width: 0;
+    border-color: var(--line);
+    border-radius: 5px;
+  }
+  .tools input {
+    color: var(--ink);
+  }
+  .tableScroll {
+    // 共用名单边框和滚动样式，保留横向滚动条的 Chromium 108 回退。
+    scrollbar-width: thin;
+    scrollbar-color: #9aa8bb var(--wash);
+    &::-webkit-scrollbar {
+      width: 10px;
+      height: 10px;
+      display: block;
+    }
+    &::-webkit-scrollbar-track {
+      background: var(--wash);
+    }
+    &::-webkit-scrollbar-thumb {
+      background: #9aa8bb;
+      border-radius: 5px;
+      border: 2px solid var(--wash);
+    }
+  }
+  .table {
+    min-width: 1360px;
+    table-layout: fixed;
+    white-space: normal;
+    th {
+      white-space: nowrap;
+    }
+    td {
+      vertical-align: top;
+      overflow-wrap: anywhere;
+    }
+    strong {
+      color: var(--ink);
+      font-weight: 600;
+    }
+    small {
+      display: block;
+      margin-top: 5px;
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 400;
+    }
+    p {
+      margin: 0;
+      white-space: pre-wrap;
+    }
+  }
+  .cell {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    width: 100%;
+    gap: 12px;
+  }
+  .records {
+    width: 100%;
+  }
+  .record + .record {
+    padding-top: 12px;
+    margin-top: 12px;
+    border-top: 1px solid var(--line);
+  }
+  .recordHead,
+  .planCell {
+    display: flex;
+    align-items: flex-start;
+    gap: 4px;
+  }
+  .recordHead > p,
+  .planCell .preview {
+    flex: 1;
+    min-width: 0;
+  }
+  .recordPreview {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+  }
+  .fullContent {
+    overflow-wrap: anywhere;
+  }
+  .recordActions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    width: 100%;
+    gap: 8px;
+  }
+  .browseActions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+  }
+  .add {
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    padding: 0;
+    gap: 4px;
+    font-size: 12px;
+    line-height: 18px;
+    &:hover:enabled {
+      text-decoration: underline;
+    }
+    &:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
+  }
+  .more {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-height: 24px;
+    padding: 0;
+    line-height: 18px;
+    color: var(--text);
+    white-space: nowrap;
+    font-size: 12px;
+    &:hover {
+      color: var(--blue);
+      text-decoration: underline;
+    }
+  }
+  .history {
+    width: min(640px, calc(100vw - 32px));
+  }
+  .historyBody {
+    max-height: min(560px, calc(100vh - 200px));
+    overflow-y: auto;
+  }
+  .preview {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow: hidden;
+  }
+  .date {
+    color: var(--text);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+    margin-top: 4px;
+  }
+  .secondary {
+    color: var(--text);
+  }
+  .edit {
+    flex-shrink: 0;
+    width: 22px;
+    min-height: 26px;
+    padding: 3px;
+    color: var(--blue);
+    border: 1px solid transparent;
+    background: transparent;
+    &:hover:enabled {
+      background: var(--wash);
+    }
+    &:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
+  }
+  .saving {
+    display: block;
+    margin-top: 5px;
+    color: var(--blue);
+    font-size: 12px;
+    font-weight: 400;
+  }
+  .saveFailure {
+    margin-bottom: 8px;
+    padding: 6px 12px;
+  }
+  .failureRow {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    min-width: 0;
+  }
+  .failureText {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 13px;
+    line-height: 24px;
+  }
+  .retryActions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .retryActions button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+  .scheme {
+    white-space: nowrap;
+  }
+  .intention {
+    width: 104px;
+  }
+  .empty {
+    padding: 32px 16px;
+    color: var(--text);
+  }
+  .loading {
+    padding: 24px 16px;
+  }
+  .error {
+    padding: 48px 20px;
+    text-align: center;
+    background: var(--wash);
+    border-radius: 6px;
+    p {
+      margin: 10px auto 20px;
+      color: var(--text);
+      max-width: 60ch;
+    }
+  }
+}

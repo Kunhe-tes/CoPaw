@@ -1248,3 +1248,49 @@ describe("WealthWorkbench store", () => {
     expect(useWealthStore.getState().plans).toEqual([]);
   });
 });
+
+it("加入保险跟踪后同步同客户的保险技能，保留其他客户和产品状态", () => {
+  const original = useWealthStore.getState();
+  const base: Customer = {
+    id: "insurance-1|c1",
+    custUid: "c1",
+    skillId: "insurance-1",
+    name: "林芳",
+    category: "保险",
+    task: "保险技能",
+    label: "",
+    reason: "",
+    done: false,
+    channel: "",
+    time: "",
+    note: "",
+    traced: 0,
+  };
+  const rows = [
+    base,
+    { ...base, id: "insurance-2|c1", skillId: "insurance-2" },
+    { ...base, id: "finance|c1", category: "理财" },
+    { ...base, id: "insurance|c2", custUid: "c2" },
+  ];
+  try {
+    useWealthStore.setState({
+      customers: rows,
+      pendingCustomers: rows,
+      doneCustomers: rows,
+    });
+    useWealthStore.getState().markInsuranceCustomerTraced("c1");
+    for (const result of [
+      useWealthStore.getState().customers,
+      useWealthStore.getState().pendingCustomers,
+      useWealthStore.getState().doneCustomers,
+    ]) {
+      expect(result.map((customer) => customer.traced)).toEqual([1, 1, 0, 0]);
+    }
+  } finally {
+    useWealthStore.setState({
+      customers: original.customers,
+      pendingCustomers: original.pendingCustomers,
+      doneCustomers: original.doneCustomers,
+    });
+  }
+});

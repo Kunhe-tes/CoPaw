@@ -362,6 +362,7 @@ interface NameListItemView {
   strongContactTime?: string | null;
   touchMethod?: string | null;
   touched?: number | null;
+  traced?: number | null;
   fieldList?: NameListFieldValue[];
 }
 
@@ -563,6 +564,7 @@ export async function fetchTodayCustomers(
         category: task.category,
         task: task.sceneName,
         touched: item.touched,
+        traced: item.traced,
         done: item.touched === 1,
         channel: item.touchMethod ?? "",
         time: item.strongContactTime ?? "",
@@ -650,6 +652,7 @@ async function fetchCustomerViewCustomers(
         ? skillNames.join("、")
         : scenes.map((t) => t.sceneName).join("、"),
       touched: item.touched,
+      traced: item.traced,
       done: item.touched == null ? opts.done ?? false : item.touched === 1,
       channel: item.touchMethod ?? "",
       time: item.strongContactTime ?? "",

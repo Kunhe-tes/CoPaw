@@ -140,6 +140,8 @@ export interface Customer {
   skillNames?: string[];
   /** 接口原始接触状态：0 未接触、1 已接触，其余或缺失为未知。 */
   touched?: number | null;
+  /** 保险客户跟踪状态：0 未追踪、1 已追踪；缺失时不允许发起新增。 */
+  traced?: number | null;
   done: boolean;
   channel: string;
   time: string;

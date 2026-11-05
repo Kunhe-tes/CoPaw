@@ -185,6 +185,7 @@ interface WealthState {
   removePlan: (id: string) => Promise<void>;
 
   // —— 全局 UI ——
+  markInsuranceCustomerTraced: (custUid: string) => void;
   openDialog: (dialog: DialogState) => void;
   closeDialog: () => void;
   toast: (text: string) => void;
@@ -893,6 +894,20 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
     }
   },
 
+  markInsuranceCustomerTraced: (custUid) =>
+    set((state) => {
+      const mark = (rows: Customer[]) =>
+        rows.map((customer) =>
+          customer.custUid === custUid && customer.category === "保险"
+            ? { ...customer, traced: 1 }
+            : customer,
+        );
+      return {
+        customers: mark(state.customers),
+        pendingCustomers: mark(state.pendingCustomers),
+        doneCustomers: mark(state.doneCustomers),
+      };
+    }),
   openDialog: (dialog) => set({ dialog }),
   closeDialog: () => set({ dialog: null }),
 
