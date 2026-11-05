@@ -430,7 +430,8 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 
 - 跟进弹窗的客户姓名标签／姓名、经营场景标签／下拉框在同一行按两列等宽分配（扣除列间距后各 50%），垂直居中；加载／失败提示独占信息区下一行，不参与控件对齐，字段校验信息也不推动姓名和场景标签偏移；窄屏改为单列；“经营场景”为必选下拉，通过现有 `fetchSceneSkills("insurance", signal)` 调用 `/agent/workspace/skill-config/list`，按 skillId / senceName 构建保险场景选项；新增默认主记录 skillId/skillName，编辑默认单条 traceSkillId/traceSkillName，失败草稿优先。默认值未匹配时补入选项，异步加载／重试不覆盖用户选择；查询失败可重试，已知默认场景仍可保留提交。保存用户最终选择到 traceSkillId/traceSkillName，不改变主记录锁定的 skillId。
 
-- “最后跟进记录”右侧新增“触达方式”列，展示 `traceList` 最新一条的 `traceType`（0 企微／1 招乎／2 电访／3 面访），无跟进记录或方式缺失显示占位，接口 null／缺失方式不得映射为企微；编辑此类记录须先补选方式，新建表单仍默认企微；列头支持全部或单种方式筛选，只匹配当前展示的最新方式。可与意向度、搜索和排序组合，不改变全量统计；筛选无匹配保留表头及清除入口。
+- “最后跟进记录”右侧为“触达结果”列，直接读取主表 touched（0 待跟进／1 已完成），支持全部／单个结果筛选，可组合意向度、搜索和排序，不从最新跟进方式推断。主表缺失结果显示占位且不匹配具体结果；触达方式仍在记录内容及编辑弹窗中保留。跟进保存乐观更新主表结果，写入失败同步回滚，回查成功同时回填记录与主表 touched。表格最小宽度压缩为 1140px，宽屏尽量完整展示，窄屏保留横向滚动；执行列移除按钮使用标准按钮和红色危险态，鼠标点击无 2px 外框，键盘仍保留 1px 内侧焦点提示。
+- 日期和触达时间复用工作台 Ant Design DatePicker 样式，统一显式中文 placeholder、日历弹层挂到当前原生 dialog 内；初始缺失时默认本地当前日期／当前分钟，加入跟踪时每条新接触计划也默认当天。清空后仍进行必填校验；编辑已有日期不覆盖。时间组件提交本地 `YYYY-MM-DDTHH:mm`，由 API 边界转成带秒字符串，不转 UTC。
 
 - “保险核心跟踪”入口复用 `treeItem.active` 的背景、左侧选中线及内边距，不覆盖普通技能的选中样式；选中该入口时隐藏经营／客户视角切换，切回普通技能后恢复，待触达和已完成页面的返回按钮不变。
 
@@ -454,7 +455,7 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 ## 保险技能清单加入跟踪
 
 - `Customer.traced` 原样接收名单接口的数值状态，在经营视角的保险分类技能中显示加入入口；0 可加入，1 显示禁用的“已加入跟踪”，缺失或未知状态不按 0 处理。其他产品、客户视角和完成清单不增加该操作。
-- `InsuranceTracking/JoinTracking.tsx` 按客户姓名展示加入弹窗，资产从客户指标的资产／AUM 字段读取，缺失显示占位；弹窗挂载到工作台根节点，避免执行列的紧凑按钮样式穿透。
+- `InsuranceTracking/JoinTracking.tsx` 按客户姓名展示加入弹窗，资产从客户指标的资产／AUM 字段读取，缺失显示占位；客户姓名与资产各自标签和值同一行，超长省略并提供完整 title；各表单标题加粗，保险计划隐藏重复的“最多可输入1000字”默认提示但保留计数及超限校验，接触计划无“可按需添加”说明；弹窗挂载到工作台根节点，避免执行列的紧凑按钮样式穿透。
 - `ContactPlansEditor.tsx` 独立维护多条接触计划，使用 Form.List 稳定 key 支持新增、删除与单条校验；每条按序号／删除、日期／触达方式、安排／文本框三层排列，各标签与控件横排，窄屏再换行；安排输入区随内容增高，保持 1000 字校验与计数；“触达方式”统一为 0 企微、1 招乎、2 电访、3 面访。保险计划必填，接触计划可按需添加；已添加的计划日期、方式和安排完整校验，所有文本域最多 1000 字。
 - 加入使用 POST `/agent/workspace/cust-trace/batch-create`，`items` 单条携带 sapId、请求二级 bbkId、custUid、客户归属一级 custBbkOrgId（从原名单 bbkOrgId 直传）、custName、原始 aum、skillId、skillName、原清单经营方案 filename、bxPlan、数值 custIntention、原清单 touched（缺失默认 0），以及 type=0 的 extList（touchPlan/touchType/touchDate）。code=200 后检查 successCount/skipCount；已存在时提示已在跟踪中，不伪造新条目。
 - 仅服务端 code=200 后标记该客户各保险技能的 traced=1，并同步当前／待触达／已完成名单中的保险条目，其他客户和产品不变；保险核心跟踪通过刷新键及再次进入时重新查询真实列表，不在前端伪造新记录或统计。

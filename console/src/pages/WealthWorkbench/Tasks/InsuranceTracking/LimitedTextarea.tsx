@@ -5,8 +5,12 @@ import styles from "./LimitedTextarea.module.less";
 
 export function LimitedTextarea({
   autoSize = false,
+  showLimitHint = true,
   ...props
-}: TextareaHTMLAttributes<HTMLTextAreaElement> & { autoSize?: boolean }) {
+}: TextareaHTMLAttributes<HTMLTextAreaElement> & {
+  autoSize?: boolean;
+  showLimitHint?: boolean;
+}) {
   const ref = useRef<HTMLTextAreaElement>(null);
   useLayoutEffect(() => {
     const element = ref.current;
@@ -40,14 +44,16 @@ export function LimitedTextarea({
         maxLength={MAX_TEXT_LENGTH}
       />
       <div className={styles.hint}>
-        <span role="status">
-          {length > MAX_TEXT_LENGTH
-            ? `内容超出${MAX_TEXT_LENGTH}字上限，请删减`
-            : length === MAX_TEXT_LENGTH
-            ? `已达${MAX_TEXT_LENGTH}字上限`
-            : `最多可输入${MAX_TEXT_LENGTH}字`}
-        </span>
-        <span>
+        {(showLimitHint || length >= MAX_TEXT_LENGTH) && (
+          <span role="status">
+            {length > MAX_TEXT_LENGTH
+              ? `内容超出${MAX_TEXT_LENGTH}字上限，请删减`
+              : length === MAX_TEXT_LENGTH
+              ? `已达${MAX_TEXT_LENGTH}字上限`
+              : `最多可输入${MAX_TEXT_LENGTH}字`}
+          </span>
+        )}
+        <span className={styles.count}>
           {length} / {MAX_TEXT_LENGTH}
         </span>
       </div>

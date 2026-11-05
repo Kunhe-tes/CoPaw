@@ -18,6 +18,27 @@ import {
   type InsuranceList,
 } from "./api";
 
+vi.mock("./TrackingDatePicker", async (importOriginal) => {
+  const original = await importOriginal<
+    typeof import("./TrackingDatePicker")
+  >();
+  return {
+    ...original,
+    TrackingDatePicker: ({
+      value,
+      onChange,
+      withTime,
+      ...props
+    }: Parameters<typeof original.TrackingDatePicker>[0]) => (
+      <input
+        {...props}
+        type={withTime ? "datetime-local" : "date"}
+        value={value ?? ""}
+        onChange={(event) => onChange?.(event.target.value)}
+      />
+    ),
+  };
+});
 vi.mock("../../api", async (original) => ({
   ...(await original<typeof import("../../api")>()),
   fetchSceneSkills: vi.fn(),
@@ -49,6 +70,7 @@ const fixture = (): InsuranceList => ({
         },
       ],
       intention: 2,
+      touched: 0,
     },
     {
       id: "2",
@@ -58,6 +80,7 @@ const fixture = (): InsuranceList => ({
       name: "王海",
       assets: "80 万",
       intention: 3,
+      touched: 1,
     },
   ],
   counts: { customers: 22, highIntention: 8, tracking: 12 },
@@ -375,7 +398,7 @@ it("展示九列且经营方案紧邻执行列，统计使用服务端全量人�
     "保险计划",
     "接触计划",
     "最后跟进记录",
-    "触达方式",
+    "触达结果",
     "客户意向度",
     "经营方案",
     "执行",
@@ -716,7 +739,12 @@ it("新增记录展示客户和场景，时间与沟通记录必填，不回填�
   expect(within(dialog).getByLabelText("跟进客户信息")).toHaveTextContent(
     "家庭保险保障",
   );
-  expect(within(dialog).getByLabelText("触达时间")).toHaveValue("");
+  expect(
+    (within(dialog).getByLabelText("触达时间") as HTMLInputElement).value,
+  ).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
+  fireEvent.change(within(dialog).getByLabelText("触达时间"), {
+    target: { value: "" },
+  });
   expect(within(dialog).getByLabelText(/沟通记录/)).toHaveValue("");
   expect(within(dialog).getByLabelText("触达结果")).toHaveValue("1");
   fireEvent.click(within(dialog).getByRole("button", { name: "保存记录" }));
@@ -1177,39 +1205,31 @@ it("新增回查取得全量正式记录后替换临时数组，避免把新增�
   });
 });
 
-it("触达方式展示最新跟进的方式，支持零值筛选、与意向度组合及清除，缺少跟进显示占位", async () => {
+it("触达结果展示主表touched，支持零值筛选、与意向度组合及清除，不使用最新跟进方式", async () => {
   const data = fixture();
   data.customers[0].intention = 0;
   data.customers[0].followUps = [
     {
-      id: "latest",
+      id: "follow",
       date: "2026-11-05T10:00",
-      content: "最新企微",
-      method: 0,
-      result: 1,
-      skillId: "insurance-skill",
-      sceneName: "保险初筛识别",
-    },
-    {
-      id: "older",
-      date: "2026-11-04T10:00",
-      content: "之前面访",
       method: 3,
       result: 1,
-      skillId: "insurance-skill",
-      sceneName: "保险初筛识别",
+      content: "历史面访",
     },
   ];
   vi.mocked(fetchInsuranceTracking).mockResolvedValue(data);
   await show();
-  const row = screen.getByText("林芳").closest("tr")!;
-  expect(within(row).getAllByRole("cell")[5]).toHaveTextContent("企微");
+  expect(
+    within(screen.getByText("林芳").closest("tr")!).getAllByRole("cell")[5],
+  ).toHaveTextContent("待跟进");
   expect(
     within(screen.getByText("王海").closest("tr")!).getAllByRole("cell")[5],
-  ).toHaveTextContent("—");
-  fireEvent.click(screen.getByRole("button", { name: "筛选触达方式" }));
-  fireEvent.click(await screen.findByRole("menuitem", { name: "企微" }));
-  expect(screen.getByText("林芳")).toBeInTheDocument();
+  ).toHaveTextContent("已完成");
+  expect(
+    screen.queryByRole("button", { name: "筛选触达方式" }),
+  ).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "筛选触达结果" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "待跟进" }));
   expect(screen.queryByText("王海")).not.toBeInTheDocument();
   expect(highCount()).toHaveTextContent("8");
   fireEvent.click(screen.getByRole("button", { name: "筛选客户意向度" }));
@@ -1217,20 +1237,19 @@ it("触达方式展示最新跟进的方式，支持零值筛选、与意向度�
   expect(
     screen.getByText("未找到匹配的客户，请调整搜索或筛选条件"),
   ).toBeInTheDocument();
-  expect(screen.queryByText("暂未添加跟踪客户")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "清除客户意向度筛选" }));
   expect(screen.getByText("林芳")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "筛选触达方式" }));
-  fireEvent.click(await screen.findByRole("menuitem", { name: "面访" }));
-  expect(
-    screen.getByText("未找到匹配的客户，请调整搜索或筛选条件"),
-  ).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "清除触达方式筛选" }));
+  fireEvent.click(screen.getByRole("button", { name: "筛选触达结果" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "已完成" }));
   expect(screen.getByText("王海")).toBeInTheDocument();
+  expect(screen.queryByText("林芳")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "清除触达结果筛选" }));
+  expect(screen.getByText("林芳")).toBeInTheDocument();
 });
 
-it("缺失触达方式显示占位且不被企微筛选命中，编辑需补选，新建仍默认企微", async () => {
+it("缺失触达方式编辑需补选，新建仍默认企微，触达结果独立展示", async () => {
   const data = fixture();
+  data.customers[0].touched = undefined;
   data.customers[0].followUps = [
     {
       id: "unknown-method",
@@ -1246,13 +1265,13 @@ it("缺失触达方式显示占位且不被企微筛选命中，编辑需补选�
   expect(
     within(screen.getByText("林芳").closest("tr")!).getAllByRole("cell")[5],
   ).toHaveTextContent("—");
-  fireEvent.click(screen.getByRole("button", { name: "筛选触达方式" }));
-  fireEvent.click(await screen.findByRole("menuitem", { name: "企微" }));
+  fireEvent.click(screen.getByRole("button", { name: "筛选触达结果" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "待跟进" }));
   expect(screen.queryByText("林芳")).not.toBeInTheDocument();
   expect(
     screen.getByText("未找到匹配的客户，请调整搜索或筛选条件"),
   ).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "清除触达方式筛选" }));
+  fireEvent.click(screen.getByRole("button", { name: "清除触达结果筛选" }));
   fireEvent.click(
     screen.getByRole("button", { name: "编辑林芳的跟进记录 2026-11-05T10:00" }),
   );
@@ -1281,7 +1300,51 @@ it("缺失触达方式显示占位且不被企微筛选命中，编辑需补选�
   );
   expect(
     within(screen.getByText("林芳").closest("tr")!).getAllByRole("cell")[5],
-  ).toHaveTextContent("企微");
+  ).toHaveTextContent("已完成");
   fireEvent.click(screen.getByRole("button", { name: "新增林芳的跟进记录" }));
   expect(screen.getByLabelText("触达方式")).toHaveValue("0");
+});
+
+it("跟进保存时乐观更新触达结果，失败回滚，重试成功同步后端主表结果", async () => {
+  let reject!: (error: Error) => void;
+  vi.mocked(saveInsuranceChange).mockImplementationOnce(
+    () =>
+      new Promise((_, no) => {
+        reject = no;
+      }),
+  );
+  await show();
+  const result = () =>
+    within(screen.getByText("林芳").closest("tr")!).getAllByRole("cell")[5];
+  expect(result()).toHaveTextContent("待跟进");
+  fireEvent.click(screen.getByRole("button", { name: "新增林芳的跟进记录" }));
+  fireEvent.change(screen.getByLabelText(/沟通记录/), {
+    target: { value: "沟通完成" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "保存记录" }));
+  await waitFor(() => expect(result()).toHaveTextContent("已完成"));
+  await act(async () => reject(new Error("保存失败")));
+  expect(result()).toHaveTextContent("待跟进");
+  vi.mocked(saveInsuranceChange).mockResolvedValueOnce({
+    touched: 1,
+    records: [
+      {
+        id: "follow-1",
+        date: "2026-11-05T10:00",
+        method: 0,
+        result: 1,
+        content: "沟通完成",
+      },
+    ],
+  });
+  fireEvent.click(
+    screen.getByRole("button", { name: "重试保存林芳的跟进记录" }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "新增林芳的跟进记录" }),
+    ).toBeEnabled(),
+  );
+  expect(result()).toHaveTextContent("已完成");
+  expect(highCount()).toHaveTextContent("8");
 });

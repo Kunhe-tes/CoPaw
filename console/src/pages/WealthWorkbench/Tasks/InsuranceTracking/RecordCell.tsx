@@ -55,7 +55,9 @@ function RecordText({
         </Tooltip>
       </div>
       <div className={styles.date}>
-        {entry.date.replace("T", " ")} · {followUpMethodLabel(entry.method)}
+        <span>{entry.date.replace("T", " ")}</span>
+        {" · "}
+        <span>{followUpMethodLabel(entry.method)}</span>
         {full && "result" in entry
           ? ` · ${
               entry.result == null

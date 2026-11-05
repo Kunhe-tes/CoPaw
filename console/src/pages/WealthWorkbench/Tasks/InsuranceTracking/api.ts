@@ -67,6 +67,7 @@ export interface InsuranceCustomer {
   contactPlans?: ContactRecord[];
   followUps?: FollowUpRecord[];
   intention: Intention;
+  touched?: FollowUpResult;
 }
 
 export interface InsuranceList {
@@ -195,6 +196,7 @@ function mapCustomer(row: CustTrace): InsuranceCustomer {
     sceneName: row.skillName ?? undefined,
     insurancePlan: row.bxPlan ?? undefined,
     intention: row.custIntention ?? 0,
+    touched: row.touched,
     link: row.filename ?? undefined,
     contactPlans: (row.touchList ?? []).map((entry) => ({
       id: String(entry.id),
@@ -305,6 +307,7 @@ export class InsuranceSyncError extends Error {
   }
 }
 export interface SavedRecords {
+  touched?: FollowUpResult;
   records: (ContactRecord | FollowUpRecord)[];
 }
 
@@ -358,6 +361,7 @@ export async function saveInsuranceChange(
     const saved = list.customers.find((row) => row.id === customer.id);
     if (!saved) throw new InsuranceSyncError();
     return {
+      touched: saved.touched,
       records:
         (change.kind === "contactPlan"
           ? saved.contactPlans

@@ -11,6 +11,28 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { InsuranceEditor } from "./Editor";
 import { fetchSceneSkills } from "../../api";
 import type { InsuranceCustomer } from "./api";
+
+vi.mock("./TrackingDatePicker", async (importOriginal) => {
+  const original = await importOriginal<
+    typeof import("./TrackingDatePicker")
+  >();
+  return {
+    ...original,
+    TrackingDatePicker: ({
+      value,
+      onChange,
+      withTime,
+      ...props
+    }: Parameters<typeof original.TrackingDatePicker>[0]) => (
+      <input
+        {...props}
+        type={withTime ? "datetime-local" : "date"}
+        value={value ?? ""}
+        onChange={(event) => onChange?.(event.target.value)}
+      />
+    ),
+  };
+});
 vi.mock("../../api", async (original) => ({
   ...(await original<typeof import("../../api")>()),
   fetchSceneSkills: vi.fn(),

@@ -84,8 +84,8 @@ export function TableHeading({
         <button
           type="button"
           className={`${workbenchStyles.tagFilterTrigger} ${
-            filter.value !== "all" ? workbenchStyles.filtered : ""
-          }`}
+            styles.filterTrigger
+          } ${filter.value !== "all" ? workbenchStyles.filtered : ""}`}
           aria-label={`筛选${label}`}
         >
           {label}

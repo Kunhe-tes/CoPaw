@@ -1,5 +1,11 @@
 .root {
   min-width: 0;
+  .table .filterTrigger {
+    padding-left: 0;
+    padding-right: 0;
+    justify-content: flex-start;
+    text-align: left;
+  }
   .sortTrigger {
     display: inline-flex;
     align-items: center;
@@ -19,11 +25,14 @@
   th[aria-sort="descending"] .sortTrigger {
     color: var(--blue);
   }
-  button:focus-visible,
   input:focus-visible,
   [tabindex]:focus-visible {
     outline: 2px solid var(--blue);
     outline-offset: 2px;
+  }
+  button:focus-visible {
+    outline: none;
+    box-shadow: inset 0 0 0 1px var(--blue);
   }
   .high {
     color: var(--blue);
@@ -71,11 +80,16 @@
     }
   }
   .table {
-    min-width: 1480px;
+    min-width: 1140px;
     table-layout: fixed;
     white-space: normal;
     th {
+      text-align: left;
       white-space: nowrap;
+    }
+    th,
+    td {
+      padding: 10px 8px;
     }
     td {
       vertical-align: top;
@@ -194,6 +208,10 @@
     font-size: 12px;
     overflow-wrap: anywhere;
     margin-top: 4px;
+    span {
+      display: inline-block;
+      white-space: nowrap;
+    }
   }
   .secondary {
     color: var(--text);
@@ -221,17 +239,16 @@
     font-size: 12px;
     font-weight: 400;
   }
-  .remove {
-    display: inline-block;
-    margin-top: 8px;
-    color: var(--text);
-    font-size: 12px;
-    &:hover:enabled {
+  .executionActions {
+    flex-wrap: wrap;
+    gap: 6px;
+    .remove {
       color: var(--red);
-    }
-    &:disabled {
-      opacity: 0.6;
-      cursor: wait;
+      border-color: #edc7c9;
+      background: #fff5f5;
+      &:hover:enabled {
+        background: #ffeded;
+      }
     }
   }
   .saveFailure {
@@ -268,7 +285,7 @@
     white-space: nowrap;
   }
   .intention {
-    width: 104px;
+    width: 100%;
   }
   .empty {
     padding: 32px 16px;

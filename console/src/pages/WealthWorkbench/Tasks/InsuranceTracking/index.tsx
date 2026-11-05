@@ -6,9 +6,8 @@ import {
   saveInsuranceChange,
   InsuranceSyncError,
   INTENTION_LABELS,
-  FOLLOW_UP_METHODS,
-  followUpMethodLabel,
-  type FollowUpMethod,
+  FOLLOW_UP_RESULTS,
+  type FollowUpResult,
   EDIT_LABELS,
   type ContactRecord,
   type FollowUpRecord,
@@ -83,7 +82,7 @@ export function InsuranceTracking({
   const [intentionFilter, setIntentionFilter] = useState<Intention | "all">(
     "all",
   );
-  const [methodFilter, setMethodFilter] = useState<FollowUpMethod | "all">(
+  const [resultFilter, setResultFilter] = useState<FollowUpResult | "all">(
     "all",
   );
   const [sort, setSort] = useState<ListSort>(null);
@@ -207,11 +206,18 @@ export function InsuranceTracking({
       );
     const apply = (
       value: string | (ContactRecord | FollowUpRecord)[] | undefined,
+      touched?: FollowUpResult,
     ) =>
       setData((current) => ({
         ...current,
         customers: current.customers.map((item) =>
-          item.id === customer.id ? { ...item, [field]: value } : item,
+          item.id === customer.id
+            ? {
+                ...item,
+                [field]: value,
+                ...(change.kind === "followUp" ? { touched } : {}),
+              }
+            : item,
         ),
       }));
     lock(customer.id, true);
@@ -229,14 +235,17 @@ export function InsuranceTracking({
             ).filter((entry) => entry.id !== optimisticId),
             { ...change.value, id: optimisticId },
           ]);
-    apply(optimisticValue);
+    apply(
+      optimisticValue,
+      change.kind === "followUp" ? change.value.result : row.touched,
+    );
     setEditor(null);
     // 只保存本次字段的旧值；失败时不撤回其他客户或其他字段的修改。
     void saveInsuranceChange(row, change)
       .then((record) => {
         if (!record || change.kind === "insurancePlan") return;
         if ("records" in record) {
-          apply(record.records);
+          apply(record.records, record.touched);
           return;
         }
         setData((current) => ({
@@ -245,6 +254,9 @@ export function InsuranceTracking({
             item.id === customer.id
               ? {
                   ...item,
+                  ...(change.kind === "followUp"
+                    ? { touched: change.value.result }
+                    : {}),
                   [field]: sortRecords([
                     ...(
                       (item[field] ?? []) as (ContactRecord | FollowUpRecord)[]
@@ -262,7 +274,7 @@ export function InsuranceTracking({
           setNotice(`${customer.name}：${cause.message}`);
           return;
         }
-        apply(previous);
+        apply(previous, row.touched);
         setFailedEdits((items) => [
           ...clearFailure(items),
           {
@@ -283,7 +295,7 @@ export function InsuranceTracking({
   const filtered = data.customers.filter(
     (row) =>
       (intentionFilter === "all" || row.intention === intentionFilter) &&
-      (methodFilter === "all" || row.followUps?.[0]?.method === methodFilter) &&
+      (resultFilter === "all" || row.touched === resultFilter) &&
       [
         row.name,
         row.branchName,
@@ -476,7 +488,7 @@ export function InsuranceTracking({
               className={`${workbenchStyles.customerTable} ${styles.table}`}
             >
               <colgroup>
-                {[120, 120, 210, 200, 220, 120, 130, 120, 240].map(
+                {[80, 85, 145, 150, 165, 100, 115, 105, 195].map(
                   (width, index) => (
                     <col key={index} style={{ width }} />
                   ),
@@ -490,7 +502,7 @@ export function InsuranceTracking({
                     "保险计划",
                     "接触计划",
                     "最后跟进记录",
-                    "触达方式",
+                    "触达结果",
                     "客户意向度",
                     "经营方案",
                     "执行",
@@ -513,16 +525,16 @@ export function InsuranceTracking({
                                     : (value as Intention),
                                 ),
                             }
-                          : label === "触达方式"
+                          : label === "触达结果"
                           ? {
-                              value: methodFilter,
-                              labels: FOLLOW_UP_METHODS,
-                              allLabel: "全部触达方式",
+                              value: resultFilter,
+                              labels: FOLLOW_UP_RESULTS,
+                              allLabel: "全部触达结果",
                               onChange: (value) =>
-                                setMethodFilter(
+                                setResultFilter(
                                   value === "all"
                                     ? "all"
-                                    : (value as FollowUpMethod),
+                                    : (value as FollowUpResult),
                                 ),
                             }
                           : undefined
@@ -603,7 +615,9 @@ export function InsuranceTracking({
                       />
                     </td>
                     <td>
-                      {followUpMethodLabel(customer.followUps?.[0]?.method)}
+                      {customer.touched == null
+                        ? "—"
+                        : FOLLOW_UP_RESULTS[customer.touched]}
                     </td>
                     <td>
                       <Select
@@ -636,7 +650,9 @@ export function InsuranceTracking({
                       </button>
                     </td>
                     <td>
-                      <div className={workbenchStyles.contactActions}>
+                      <div
+                        className={`${workbenchStyles.contactActions} ${styles.executionActions}`}
+                      >
                         <button
                           type="button"
                           className={`${workbenchStyles.btn} ${workbenchStyles.primary}`}
@@ -659,19 +675,19 @@ export function InsuranceTracking({
                           <Icon name="user" />
                           客户洞察
                         </button>
+                        <button
+                          type="button"
+                          className={`${workbenchStyles.btn} ${workbenchStyles.danger} ${styles.remove}`}
+                          aria-label={`移除${customer.name}的跟踪`}
+                          disabled={
+                            pending.has(customer.id) ||
+                            needsRefresh.has(customer.id)
+                          }
+                          onClick={() => setRemoving(customer)}
+                        >
+                          移除跟踪
+                        </button>
                       </div>
-                      <button
-                        type="button"
-                        className={`${workbenchStyles.link} ${styles.remove}`}
-                        aria-label={`移除${customer.name}的跟踪`}
-                        disabled={
-                          pending.has(customer.id) ||
-                          needsRefresh.has(customer.id)
-                        }
-                        onClick={() => setRemoving(customer)}
-                      >
-                        移除跟踪
-                      </button>
                       {needsRefresh.has(customer.id) && (
                         <span className={styles.saving} role="status">
                           已保存，请刷新列表后继续编辑
@@ -692,7 +708,7 @@ export function InsuranceTracking({
                 className={styles.empty}
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
                 description={
-                  intentionFilter !== "all" || methodFilter !== "all"
+                  intentionFilter !== "all" || resultFilter !== "all"
                     ? "未找到匹配的客户，请调整搜索或筛选条件"
                     : "未找到匹配的客户，请调整搜索条件"
                 }

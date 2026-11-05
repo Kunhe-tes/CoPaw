@@ -1,10 +1,13 @@
 .dialog {
   input:focus-visible,
   select:focus-visible,
-  textarea:focus-visible,
-  button:focus-visible {
+  textarea:focus-visible {
     outline: 2px solid var(--blue);
     outline-offset: 2px;
+  }
+  button:focus-visible {
+    outline: none;
+    box-shadow: inset 0 0 0 1px var(--blue);
   }
 }
 .actions {
@@ -27,6 +30,32 @@
   padding: 0;
   margin: 0;
   min-width: 0;
+  :global(.ant-form-item-label) > label,
+  :global(.swe-form-item-label) > label {
+    font-weight: 600;
+  }
+}
+.dialog .customerInfo {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  .summaryItem {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  small {
+    margin-bottom: 0;
+    flex-shrink: 0;
+    white-space: nowrap;
+    font-weight: 600;
+  }
+  strong {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }
 .title {
   padding-right: 24px;
