@@ -74,7 +74,7 @@ export function RemoveTracking({
         </button>
         <button
           type="button"
-          className={`${workbenchStyles.btn} ${workbenchStyles.primary}`}
+          className={`${workbenchStyles.btn} ${workbenchStyles.danger}`}
           disabled={busy}
           onClick={() => void confirm()}
         >

@@ -16,6 +16,8 @@ import {
   type ContactRecord,
   type FollowUpRecord,
 } from "./api";
+import { TrackingDatePicker } from "./TrackingDatePicker";
+import { trackingNow } from "./trackingDate";
 import { MAX_TEXT_LENGTH, TEXT_LIMIT_RULE } from "./textLimit";
 import { FollowUpSceneField, type FollowUpScene } from "./FollowUpSceneField";
 
@@ -167,7 +169,7 @@ export function InsuranceEditor({
         initialValues={{
           insurancePlan: initialPlan,
           scene: initialScene,
-          date: entry?.date ?? "",
+          date: entry?.date || trackingNow(isFollowUp),
           method: entry ? entry.method : methods[0].value,
           content: entry?.content ?? "",
           result:
@@ -228,9 +230,8 @@ export function InsuranceEditor({
                   },
                 ]}
               >
-                <input
-                  className={workbenchStyles.input}
-                  type={isFollowUp ? "datetime-local" : "date"}
+                <TrackingDatePicker
+                  withTime={isFollowUp}
                   aria-required="true"
                 />
               </Form.Item>

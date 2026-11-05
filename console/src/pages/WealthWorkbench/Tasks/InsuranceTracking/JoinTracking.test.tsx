@@ -12,6 +12,27 @@ import { JoinTracking } from "./JoinTracking";
 import { joinInsuranceTracking } from "./api";
 import type { Customer } from "../../types";
 
+vi.mock("./TrackingDatePicker", async (importOriginal) => {
+  const original = await importOriginal<
+    typeof import("./TrackingDatePicker")
+  >();
+  return {
+    ...original,
+    TrackingDatePicker: ({
+      value,
+      onChange,
+      withTime,
+      ...props
+    }: Parameters<typeof original.TrackingDatePicker>[0]) => (
+      <input
+        {...props}
+        type={withTime ? "datetime-local" : "date"}
+        value={value ?? ""}
+        onChange={(event) => onChange?.(event.target.value)}
+      />
+    ),
+  };
+});
 vi.mock("./api", async (original) => ({
   ...(await original<typeof import("./api")>()),
   joinInsuranceTracking: vi.fn(),
@@ -197,6 +218,12 @@ it("多条接触计划独立增删、校验并以 number 枚举提交，资产�
   expect(within(plan).getByLabelText("接触安排")).toHaveValue(" 第二条 ");
   expect(within(plan).getByLabelText("触达方式")).toHaveValue("3");
   fireEvent.click(screen.getByRole("button", { name: "新增接触计划" }));
+  fireEvent.change(
+    screen
+      .getByRole("group", { name: "接触计划2" })
+      .querySelector("input[type=date]")!,
+    { target: { value: "" } },
+  );
   fireEvent.click(screen.getByRole("button", { name: "确认添加" }));
   await screen.findByText("请选择接触日期");
   await screen.findByText("请输入接触安排");
@@ -249,4 +276,20 @@ it("后端跳过已存在客户时关闭弹窗并告知已在跟踪中", async (
   fireEvent.click(screen.getByRole("button", { name: "确认添加" }));
   await waitFor(() => expect(onAdded).toHaveBeenCalledWith("c1", true));
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+it("加入弹窗去掉冗余文案，保险计划仅保留计数及上限状态，姓名和资产保留全文title", () => {
+  render(<JoinTracking customer={customer} onAdded={onAdded} />);
+  fireEvent.click(screen.getByRole("button", { name: "加入跟踪" }));
+  expect(screen.queryByText("可按需添加接触计划。")).not.toBeInTheDocument();
+  const plan = screen.getByLabelText(/保险计划/);
+  expect(
+    within(plan.parentElement!).queryByText("最多可输入1000字"),
+  ).not.toBeInTheDocument();
+  expect(within(plan.parentElement!).getByText("0 / 1000")).toBeInTheDocument();
+  expect(
+    screen.getByText(customer.name, { selector: "strong" }),
+  ).toHaveAttribute("title", customer.name);
+  fireEvent.change(plan, { target: { value: "保".repeat(1000) } });
+  expect(screen.getByText("已达1000字上限")).toBeInTheDocument();
 });

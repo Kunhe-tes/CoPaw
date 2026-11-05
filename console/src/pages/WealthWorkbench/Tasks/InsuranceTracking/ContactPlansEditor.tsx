@@ -2,6 +2,8 @@ import type { ChangeEvent } from "react";
 import { Form } from "antd";
 import { Plus, Trash2 } from "lucide-react";
 import { FOLLOW_UP_METHODS } from "./api";
+import { TrackingDatePicker } from "./TrackingDatePicker";
+import { trackingNow } from "./trackingDate";
 import { LimitedTextarea } from "./LimitedTextarea";
 import { TEXT_LIMIT_RULE } from "./textLimit";
 import workbenchStyles from "../../index.module.less";
@@ -14,9 +16,6 @@ export function ContactPlansEditor({ disabled }: { disabled: boolean }) {
       {(fields, { add, remove }) => (
         <section aria-label="接触计划编辑" className={styles.root}>
           <h3>接触计划</h3>
-          {!fields.length && (
-            <p className={styles.empty}>可按需添加接触计划。</p>
-          )}
           {fields.map((field, index) => (
             <div
               key={field.key}
@@ -47,9 +46,8 @@ export function ContactPlansEditor({ disabled }: { disabled: boolean }) {
                   label="接触日期"
                   rules={[{ required: true, message: "请选择接触日期" }]}
                 >
-                  <input
-                    type="date"
-                    className={workbenchStyles.input}
+                  <TrackingDatePicker
+                    disabled={disabled}
                     aria-required="true"
                   />
                 </Form.Item>
@@ -103,7 +101,7 @@ export function ContactPlansEditor({ disabled }: { disabled: boolean }) {
             type="button"
             className={`${workbenchStyles.link} ${styles.add}`}
             disabled={disabled}
-            onClick={() => add({ date: "", method: 0, content: "" })}
+            onClick={() => add({ date: trackingNow(), method: 0, content: "" })}
           >
             <Plus size={14} aria-hidden />
             新增接触计划

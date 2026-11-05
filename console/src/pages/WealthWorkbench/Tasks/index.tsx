@@ -574,9 +574,10 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
     try {
       const u = new URL(c.link);
       u.searchParams.set("_t", String(seq));
+      u.searchParams.set("headBbk", String(true));
       previewUrl = u.toString();
     } catch {
-      previewUrl = `${c.link}${c.link.includes("?") ? "&" : "?"}_t=${seq}`;
+      previewUrl = `${c.link}${c.link.includes("?") ? "&" : "?"}_t=${seq}&headBbk=true`;
     }
     // 经营方案以 iframe 铺满整个弹窗：不渲染标题头部、正文无内边距、
     // iframe 无边框。plain 弹窗通过弹窗类专用宽度铺满可用区域。

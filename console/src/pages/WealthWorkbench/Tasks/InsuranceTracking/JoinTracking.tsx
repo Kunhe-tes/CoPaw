@@ -110,14 +110,16 @@ function JoinConfirmation({
         </div>
         <div className={workbenchStyles.dialogBody}>
           <p>确认将该客户纳入保险核心跟踪，请填写跟踪计划。</p>
-          <div className={workbenchStyles.detailGrid}>
-            <div>
+          <div
+            className={`${workbenchStyles.detailGrid} ${styles.customerInfo}`}
+          >
+            <div className={styles.summaryItem}>
               <small>客户姓名</small>
-              <strong>{customer.name}</strong>
+              <strong title={customer.name}>{customer.name}</strong>
             </div>
-            <div>
+            <div className={styles.summaryItem}>
               <small>资产</small>
-              <strong>{assets}</strong>
+              <strong title={String(assets)}>{assets}</strong>
             </div>
           </div>
           <fieldset disabled={busy} className={styles.fields}>
@@ -134,6 +136,7 @@ function JoinConfirmation({
               ]}
             >
               <LimitedTextarea
+                showLimitHint={false}
                 rows={3}
                 placeholder="填写客户保险需求与保障安排"
                 aria-required="true"
