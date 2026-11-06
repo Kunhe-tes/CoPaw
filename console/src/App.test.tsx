@@ -3,7 +3,16 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 
-const loads = vi.hoisted(() => ({ console: vi.fn(), wealth: vi.fn() }));
+const loads = vi.hoisted(() => ({
+  console: vi.fn(),
+  wealth: vi.fn(),
+  report: vi.fn(),
+}));
+
+vi.mock("./ReportViewEntry", () => {
+  loads.report();
+  return { default: () => <div>经营方案预览</div> };
+});
 
 vi.mock("./ConsoleRoutes", () => {
   loads.console();
@@ -43,6 +52,18 @@ describe("platform loading boundary", () => {
 
     expect(await screen.findByText("智拓工作台")).toBeInTheDocument();
     expect(loads.wealth).toHaveBeenCalledTimes(1);
+    expect(loads.console).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "/reportView?templateId=1&resultId=report-1",
+    "/console/reportView?hideMenu=true&needReportHtml=Y",
+  ])("opens %s without importing Console pages", async (path) => {
+    window.history.replaceState(null, "", path);
+    render(<App />);
+
+    expect(await screen.findByText("经营方案预览")).toBeInTheDocument();
+    expect(loads.report).toHaveBeenCalledTimes(1);
     expect(loads.console).not.toHaveBeenCalled();
   });
 

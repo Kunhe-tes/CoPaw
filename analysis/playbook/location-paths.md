@@ -610,8 +610,8 @@ NODE_OPTIONS=--max-old-space-size=8192 npm run build
 ### 边界与定位
 
 智拓对应 `/wealth/*`，也支持 `/console/wealth/*`。`console/src/App.tsx`
-只在路由匹配后加载财富工作台或 `ConsoleRoutes`。聊天、管理后台、登录、
-会话分享及 `DynamicRenderProvider` 放在 `console/src/ConsoleRoutes.tsx`，
+只在路由匹配后加载财富工作台、独立报告入口或 `ConsoleRoutes`。聊天、管理后台、登录、
+会话分享及其 `DynamicRenderProvider` 放在 `console/src/ConsoleRoutes.tsx`，
 避免智拓入口静态引用聊天模板引擎、Markdown、Mermaid 和分析图表依赖。
 公共主题、Ant Design、路由和身份初始化仍属于共享依赖。
 
@@ -646,3 +646,26 @@ Chromium 148 的上述两个 iframe 路径均只请求公共入口、财富入�
 及运行时配置脚本，无页面异常和横向溢出。改动文件格式检查通过；ESLint 仍报告
 App 原有的 `bailianTheme as any`（本次未新增）。额外运行的 54 文件财富工作台
 全量测试超过两分钟仍未产生完成结果，已中止，不能计为全量通过。
+
+### 经营方案独立入口
+
+`/reportView`（含 `/console/reportView`）由 App 懒加载
+`console/src/ReportViewEntry.tsx`，不再经过 ConsoleRoutes 或 MainLayout。
+鉴权逻辑原样抽到 `console/src/access/AuthGuard.tsx` 供两类入口复用；
+报告入口自行挂载模板 Provider 并调用 `initialize({ skipPreload: true })`。
+`main.tsx` 的身份初始化、iframe 监听以及报告目录内部业务代码保持原样。
+
+本次保留 FilePreviewModal 的静态引用，因此报告仍携带其 Markdown 和部分共享聊天依赖，
+不能把“不加载 ConsoleRoutes”理解成“完全不加载任何聊天目录代码”。
+Vite 构建的公共入口与报告静态依赖合计约 4.18 MB / gzip 1.28 MB，
+模块清单确认不包含 MainLayout；这不是通过完整 TypeScript 校验的发布产物。
+同步报告代码现有的 4 个类型错误仍阻塞标准构建，本次未修改这些业务文件。
+入口隔离、鉴权、模板初始化及既有 iframe 等 6 个相关测试文件共 71 项测试通过。
+Chromium 148 本地生产预览使用模拟静态报告接口和父窗口消息，两个报告路径均展示成功，
+并收到 REPORT_HTML、REPORT_READY、REPORT_URL；未请求 ConsoleRoutes，未见页面异常或
+横向溢出。真实动态报告、实际父平台与 Chromium 108 尚未验收。
+
+后续按调用方要求对 SnapHtmlPreview 仅补充 Props 类型（包含 ref、docHtml、title、
+onLoad、rawRecordData、resultId），保留函数体与现有运行逻辑。该类型声明不等于
+React 18 的 ref 转发，也未修复重复页面、自引用或编辑器实现；不要把类型检查通过
+当作编辑功能已恢复。模板 Provider 缺少的两个按名称访问方法由后续同步补齐。

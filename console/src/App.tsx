@@ -22,6 +22,7 @@ import "./styles/form-override.css";
 import "./styles/console-theme.css";
 
 const WealthWorkbench = lazy(() => import("./pages/WealthWorkbench"));
+const ReportViewEntry = lazy(() => import("./ReportViewEntry"));
 const ConsoleRoutes = lazy(() => import("./ConsoleRoutes"));
 
 const GlobalStyle = createGlobalStyle`
@@ -71,6 +72,7 @@ function AppInner() {
           <Suspense fallback={<div role="status">加载中…</div>}>
             <Routes>
               <Route path="/wealth/*" element={<WealthWorkbench />} />
+              <Route path="/reportView" element={<ReportViewEntry />} />
               <Route path="/*" element={<ConsoleRoutes />} />
             </Routes>
           </Suspense>
