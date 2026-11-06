@@ -1,3 +1,32 @@
+vi.mock("./TrackingSelect", () => ({
+  TrackingSelect: ({
+    options = [],
+    value,
+    onChange,
+    ...props
+  }: Omit<React.SelectHTMLAttributes<HTMLSelectElement>, "onChange"> & {
+    options?: { value: string | number; label: React.ReactNode }[];
+    onChange?: (value?: string | number) => void;
+  }) => (
+    <select
+      {...props}
+      value={value ?? ""}
+      onChange={(event) =>
+        onChange?.(
+          options.find((option) => String(option.value) === event.target.value)
+            ?.value,
+        )
+      }
+    >
+      {value == null || value === "" ? <option value="" /> : null}
+      {options.map((option) => (
+        <option key={option.value} value={option.value}>
+          {option.label}
+        </option>
+      ))}
+    </select>
+  ),
+}));
 import {
   act,
   cleanup,
@@ -148,23 +177,40 @@ function manyRecords() {
   return data;
 }
 
-it("两列默认各一条，独立展开最近三条，全部记录可完整阅读并编辑单条", async () => {
+function actionButton(name: string | RegExp): HTMLElement {
+  const label = String(name);
+  if (
+    label.includes("编辑林芳的接触计划") ||
+    label.includes("编辑林芳的跟进记录")
+  ) {
+    const history = screen.queryByRole("dialog");
+    if (!history)
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: label.includes("跟进记录")
+            ? "查看林芳的全部跟进记录"
+            : "查看林芳的全部接触计划",
+        }),
+      );
+    return within(screen.getByRole("dialog")).getAllByRole("button", {
+      name,
+    })[0];
+  }
+  return screen.getByRole("button", { name });
+}
+function click(element: Element) {
+  fireEvent.click(element);
+}
+
+it("两列默认各一条，详情中全部记录可完整阅读并编辑单条", async () => {
   const data = manyRecords();
   await show();
   expect(screen.getByText("接触计划1")).toBeInTheDocument();
   expect(screen.queryByText("接触计划2")).not.toBeInTheDocument();
-  fireEvent.click(
-    screen.getByRole("button", { name: "展开更多林芳的接触计划" }),
-  );
-  expect(screen.getByText("接触计划3")).toBeInTheDocument();
-  expect(screen.queryByText("接触计划4")).not.toBeInTheDocument();
-  expect(screen.queryByText("跟进接触计划2")).not.toBeInTheDocument();
-  fireEvent.click(
-    screen.getByRole("button", { name: "查看林芳的全部接触计划" }),
-  );
+  click(actionButton("查看林芳的全部接触计划"));
   let dialog = screen.getByRole("dialog");
   expect(within(dialog).getByText("接触计划50")).toBeInTheDocument();
-  fireEvent.click(
+  click(
     within(dialog).getByRole("button", {
       name: `编辑林芳的接触计划 ${data.customers[0].contactPlans![40].date}`,
     }),
@@ -174,8 +220,7 @@ it("两列默认各一条，独立展开最近三条，全部记录可完整阅�
   expect(within(dialog).getByLabelText("接触日期")).toHaveValue(
     data.customers[0].contactPlans![40].date,
   );
-  fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
-  fireEvent.click(screen.getByRole("button", { name: "收起林芳的接触计划" }));
+  click(within(dialog).getByRole("button", { name: "取消" }));
   expect(screen.queryByText("接触计划2")).not.toBeInTheDocument();
 }, 20000);
 
@@ -191,13 +236,9 @@ it("编辑旧跟进按记录ID保存，乐观重排，回填服务端数据且�
       }),
   );
   await show();
-  fireEvent.click(
-    screen.getByRole("button", { name: "展开更多林芳的跟进记录" }),
-  );
-  fireEvent.click(
-    screen.getByRole("button", {
-      name: `编辑林芳的跟进记录 ${data.customers[0].followUps![1].date}`,
-    }),
+  click(actionButton("查看林芳的全部跟进记录"));
+  click(
+    actionButton(`编辑林芳的跟进记录 ${data.customers[0].followUps![1].date}`),
   );
   expect(screen.getByLabelText("触达结果")).toHaveValue("0");
   expect(screen.getByLabelText("触达方式")).toHaveValue("3");
@@ -207,9 +248,8 @@ it("编辑旧跟进按记录ID保存，乐观重排，回填服务端数据且�
   fireEvent.change(screen.getByLabelText(/沟通记录/), {
     target: { value: "旧记录修改" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "保存记录" }));
+  click(actionButton("保存记录"));
   await screen.findByText("旧记录修改");
-  expect(screen.getByText("跟进接触计划1")).toBeInTheDocument();
   expect(saveInsuranceChange).toHaveBeenCalledWith(
     expect.anything(),
     expect.objectContaining({
@@ -226,9 +266,7 @@ it("编辑旧跟进按记录ID保存，乐观重排，回填服务端数据且�
   );
   expect(screen.queryByText("旧记录修改")).not.toBeInTheDocument();
   expect(screen.getByText("服务端确认的记录")).toBeInTheDocument();
-  fireEvent.click(
-    screen.getByRole("button", { name: "查看林芳的全部跟进记录" }),
-  );
+  click(actionButton("查看林芳的全部跟进记录"));
   expect(
     within(screen.getByRole("dialog")).getAllByRole("button", {
       name: /编辑林芳的跟进记录/,
@@ -246,7 +284,7 @@ it("新增计划保留旧记录，成功用服务端ID回填，继续编辑时�
   };
   vi.mocked(saveInsuranceChange).mockResolvedValueOnce(saved);
   await show();
-  fireEvent.click(screen.getByRole("button", { name: "新增林芳的接触计划" }));
+  click(actionButton("新增林芳的接触计划"));
   expect(screen.getByLabelText("接触安排")).toHaveValue("");
   fireEvent.change(screen.getByLabelText("接触日期"), {
     target: { value: saved.date },
@@ -254,20 +292,16 @@ it("新增计划保留旧记录，成功用服务端ID回填，继续编辑时�
   fireEvent.change(screen.getByLabelText("接触安排"), {
     target: { value: saved.content },
   });
-  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  click(actionButton("保存"));
   await screen.findByText(saved.content);
   await waitFor(() =>
-    expect(
-      screen.getByRole("button", { name: `编辑林芳的接触计划 ${saved.date}` }),
-    ).toBeEnabled(),
+    expect(actionButton(`编辑林芳的接触计划 ${saved.date}`)).toBeEnabled(),
   );
-  fireEvent.click(
-    screen.getByRole("button", { name: `编辑林芳的接触计划 ${saved.date}` }),
-  );
+  click(actionButton(`编辑林芳的接触计划 ${saved.date}`));
   fireEvent.change(screen.getByLabelText("接触安排"), {
     target: { value: "继续编辑" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  click(actionButton("保存"));
   await waitFor(() => expect(saveInsuranceChange).toHaveBeenCalledTimes(2));
   expect(saveInsuranceChange).toHaveBeenLastCalledWith(
     expect.objectContaining({
@@ -285,28 +319,27 @@ it("新增计划保留旧记录，成功用服务端ID回填，继续编辑时�
 
 it("旧记录编辑失败后恢复该记录及顺序，重试草稿不会带入另一条", async () => {
   const data = manyRecords();
+  data.customers[0].contactPlans = data.customers[0].contactPlans!.slice(0, 3);
   vi.mocked(saveInsuranceChange).mockRejectedValueOnce(new Error("保存失败"));
   await show();
-  fireEvent.click(
-    screen.getByRole("button", { name: "展开更多林芳的接触计划" }),
-  );
+  click(actionButton("查看林芳的全部接触计划"));
   const name = `编辑林芳的接触计划 ${data.customers[0].contactPlans![1].date}`;
-  fireEvent.click(screen.getByRole("button", { name }));
+  click(actionButton(name));
   fireEvent.change(screen.getByLabelText("接触安排"), {
     target: { value: "未成功的第二条" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  click(actionButton("保存"));
   await screen.findByRole("alert");
   expect(screen.getByText("接触计划1")).toBeInTheDocument();
-  expect(screen.getByText("接触计划2")).toBeInTheDocument();
-  fireEvent.click(
-    screen.getByRole("button", {
-      name: `编辑林芳的接触计划 ${data.customers[0].contactPlans![0].date}`,
-    }),
+  expect(screen.queryByText("接触计划2")).not.toBeInTheDocument();
+  click(
+    actionButton(
+      `编辑林芳的接触计划 ${data.customers[0].contactPlans![0].date}`,
+    ),
   );
   expect(screen.getByLabelText("接触安排")).toHaveValue("接触计划1");
-  fireEvent.click(screen.getByRole("button", { name: "取消" }));
-  fireEvent.click(screen.getByRole("button", { name }));
+  click(actionButton("取消"));
+  click(actionButton(name));
   expect(screen.getByLabelText("接触安排")).toHaveValue("未成功的第二条");
 }, 20000);
 function highCount() {
@@ -317,7 +350,7 @@ it.each([0, 1] as const)(
   "触达方式 %s 和待跟进以 number 保存，零值可校验通过",
   async (method) => {
     await show();
-    fireEvent.click(screen.getByRole("button", { name: "新增林芳的跟进记录" }));
+    click(actionButton("新增林芳的跟进记录"));
     expect(screen.getByLabelText("触达方式")).toHaveValue("0");
     fireEvent.change(screen.getByLabelText("触达时间"), {
       target: { value: "2026-11-05T15:00" },
@@ -331,7 +364,7 @@ it.each([0, 1] as const)(
     fireEvent.change(screen.getByLabelText(/沟通记录/), {
       target: { value: "数值字段验证" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "保存记录" }));
+    click(actionButton("保存记录"));
     await waitFor(() =>
       expect(saveInsuranceChange).toHaveBeenCalledWith(
         expect.anything(),
@@ -384,7 +417,7 @@ async function chooseIntention(name: string, option: string) {
     selector:
       ".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option-content",
   });
-  fireEvent.click(choices[choices.length - 1]);
+  click(choices[choices.length - 1]);
   fireEvent.mouseDown(document.body);
 }
 
@@ -397,7 +430,7 @@ it("展示九列且经营方案紧邻执行列，统计使用服务端全量人�
     "资产",
     "保险计划",
     "接触计划",
-    "最后跟进记录",
+    "跟进记录",
     "触达结果",
     "客户意向度",
     "经营方案",
@@ -408,7 +441,7 @@ it("展示九列且经营方案紧邻执行列，统计使用服务端全量人�
       .textContent,
   ).toBe("林芳");
   expect(screen.queryByText("城南支行")).not.toBeInTheDocument();
-  fireEvent.click(screen.getAllByRole("button", { name: "查看经营方案" })[0]);
+  click(screen.getAllByRole("button", { name: "查看经营方案" })[0]);
   expect(showScheme).toHaveBeenCalledWith(fixture().customers[0]);
   expect(highCount()).toHaveTextContent("8");
   expect(screen.queryByText(/客户数量/)).not.toBeInTheDocument();
@@ -416,7 +449,7 @@ it("展示九列且经营方案紧邻执行列，统计使用服务端全量人�
   expect(trackingCount.querySelector("b")).toHaveTextContent("12");
   expect(trackingCount.parentElement?.firstElementChild).toBe(trackingCount);
   expect(trackingCount.nextElementSibling).toHaveTextContent("高意向客户");
-  fireEvent.click(screen.getAllByRole("button", { name: /电\s*访/ })[0]);
+  click(screen.getAllByRole("button", { name: /电\s*访/ })[0]);
   expect(execute).toHaveBeenCalledWith("dial", fixture().customers[0]);
 });
 
@@ -471,32 +504,30 @@ it("编辑乐观更新并关闭弹窗，失败回滚且重新编辑时恢复填�
       }),
   );
   await show();
-  fireEvent.click(screen.getByRole("button", { name: "编辑林芳的保险计划" }));
+  click(actionButton("编辑林芳的保险计划"));
   const dialog = screen.getByRole("dialog");
   const input = within(dialog).getByLabelText("保险计划");
   fireEvent.change(input, { target: { value: "   " } });
-  fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+  click(within(dialog).getByRole("button", { name: "保存" }));
   await within(dialog).findByText("请输入保险计划");
   expect(saveInsuranceChange).not.toHaveBeenCalled();
   fireEvent.change(input, { target: { value: "养老年金计划" } });
-  fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+  click(within(dialog).getByRole("button", { name: "保存" }));
   await screen.findByText("养老年金计划");
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   expect(
-    within(screen.getByText("林芳").closest("tr")!).getByRole("status"),
-  ).toHaveTextContent("保存中");
+    within(screen.getByText("林芳").closest("tr")!).queryByText("保存中…"),
+  ).not.toBeInTheDocument();
   await act(async () => reject(new Error("服务暂不可用")));
   expect(screen.getByText("家庭医疗保障")).toBeInTheDocument();
   expect(screen.queryByText("养老年金计划")).not.toBeInTheDocument();
   expect(screen.getByRole("alert")).toHaveTextContent("已恢复原值");
-  fireEvent.click(
-    screen.getByRole("button", { name: "修改林芳的保险计划后重试" }),
-  );
+  click(actionButton("修改林芳的保险计划后重试"));
   const retryDialog = screen.getByRole("dialog");
   expect(within(retryDialog).getByLabelText("保险计划")).toHaveValue(
     "养老年金计划",
   );
-  fireEvent.click(within(retryDialog).getByRole("button", { name: "保存" }));
+  click(within(retryDialog).getByRole("button", { name: "保存" }));
   await waitFor(() =>
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
   );
@@ -512,7 +543,7 @@ it("编辑乐观更新并关闭弹窗，失败回滚且重新编辑时恢复填�
 
 it("新增跟进不带入上一条记录，确认保存后更新最后跟进记录", async () => {
   await show();
-  fireEvent.click(screen.getByRole("button", { name: "新增林芳的跟进记录" }));
+  click(actionButton("新增林芳的跟进记录"));
   const dialog = screen.getByRole("dialog");
   fireEvent.change(within(dialog).getByLabelText("触达时间"), {
     target: { value: "2026-11-04T09:30" },
@@ -539,7 +570,7 @@ it("新增跟进不带入上一条记录，确认保存后更新最后跟进记�
   fireEvent.change(within(dialog).getByRole("combobox", { name: "触达结果" }), {
     target: { value: "0" },
   });
-  fireEvent.click(within(dialog).getByRole("button", { name: "保存记录" }));
+  click(within(dialog).getByRole("button", { name: "保存记录" }));
   await screen.findByText("已沟通保障需求");
   expect(fetchInsuranceTracking).toHaveBeenCalledTimes(1);
   expect(screen.getByText("林芳").closest("tr")).toHaveTextContent(
@@ -623,7 +654,7 @@ it("加载失败不展示虚构数据，支持重试和真实空名单", async (
     customers: [],
     counts: { customers: 0, highIntention: 0, tracking: 0 },
   });
-  fireEvent.click(screen.getByRole("button", { name: "重新加载" }));
+  click(actionButton("重新加载"));
   await screen.findByText("暂未添加跟踪客户");
   expect(screen.queryByRole("table")).not.toBeInTheDocument();
   expect(
@@ -679,7 +710,7 @@ it("接触计划回填日期、方式和安排，取消不保存，修改后按�
   ];
   vi.mocked(fetchInsuranceTracking).mockResolvedValue(data);
   await show();
-  fireEvent.click(screen.getByRole("button", { name: /编辑林芳的接触计划/ }));
+  click(actionButton(/编辑林芳的接触计划/));
   let dialog = screen.getByRole("dialog");
   expect(within(dialog).getByLabelText("接触日期")).toHaveValue("2026-11-05");
   expect(within(dialog).getByLabelText("触达方式")).toHaveValue("0");
@@ -687,9 +718,9 @@ it("接触计划回填日期、方式和安排，取消不保存，修改后按�
   fireEvent.change(within(dialog).getByLabelText("接触安排"), {
     target: { value: "未保存安排" },
   });
-  fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+  click(within(dialog).getByRole("button", { name: "取消" }));
   expect(saveInsuranceChange).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: /编辑林芳的接触计划/ }));
+  click(actionButton(/编辑林芳的接触计划/));
   dialog = screen.getByRole("dialog");
   expect(within(dialog).getByLabelText("接触安排")).toHaveValue("原接触安排");
   fireEvent.change(within(dialog).getByLabelText("接触日期"), {
@@ -701,7 +732,7 @@ it("接触计划回填日期、方式和安排，取消不保存，修改后按�
   fireEvent.change(within(dialog).getByLabelText("接触安排"), {
     target: { value: "预约了解家庭保障需求" },
   });
-  fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+  click(within(dialog).getByRole("button", { name: "保存" }));
   await screen.findByText("预约了解家庭保障需求");
   expect(saveInsuranceChange).toHaveBeenCalledWith(data.customers[0], {
     kind: "contactPlan",
@@ -731,7 +762,7 @@ it("新增记录展示客户和场景，时间与沟通记录必填，不回填�
   ];
   vi.mocked(fetchInsuranceTracking).mockResolvedValue(data);
   await show();
-  fireEvent.click(screen.getByRole("button", { name: "新增林芳的跟进记录" }));
+  click(actionButton("新增林芳的跟进记录"));
   const dialog = screen.getByRole("dialog");
   expect(within(dialog).getByLabelText("跟进客户信息")).toHaveTextContent(
     "林芳",
@@ -747,7 +778,7 @@ it("新增记录展示客户和场景，时间与沟通记录必填，不回填�
   });
   expect(within(dialog).getByLabelText(/沟通记录/)).toHaveValue("");
   expect(within(dialog).getByLabelText("触达结果")).toHaveValue("1");
-  fireEvent.click(within(dialog).getByRole("button", { name: "保存记录" }));
+  click(within(dialog).getByRole("button", { name: "保存记录" }));
   await within(dialog).findByText("请选择触达时间");
   await within(dialog).findByText("请输入沟通记录");
   expect(saveInsuranceChange).not.toHaveBeenCalled();
@@ -762,30 +793,22 @@ it("提交后立即关闭弹窗，在途锁定客户行且重复提交只保存�
       }),
   );
   await show();
-  fireEvent.click(screen.getByRole("button", { name: "编辑林芳的保险计划" }));
+  click(actionButton("编辑林芳的保险计划"));
   const dialog = screen.getByRole("dialog");
   fireEvent.submit(dialog.querySelector("form")!);
   fireEvent.submit(dialog.querySelector("form")!);
   await waitFor(() => expect(saveInsuranceChange).toHaveBeenCalledTimes(1));
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-  expect(
-    screen.getByRole("button", { name: "编辑林芳的保险计划" }),
-  ).toBeDisabled();
-  expect(
-    screen.getByRole("button", { name: /编辑林芳的接触计划/ }),
-  ).toBeDisabled();
+  expect(actionButton("编辑林芳的保险计划")).toBeDisabled();
+  expect(actionButton(/编辑林芳的接触计划/)).toBeDisabled();
   expect(
     screen.getByRole("combobox", { name: "林芳的客户意向度" }),
   ).toBeDisabled();
-  expect(
-    screen.getByRole("button", { name: "编辑王海的保险计划" }),
-  ).toBeEnabled();
-  expect(screen.getByRole("button", { name: "刷新保险跟踪" })).toBeDisabled();
+  expect(actionButton("编辑王海的保险计划")).toBeEnabled();
+  expect(actionButton("刷新保险跟踪")).toBeDisabled();
   await act(async () => resolve());
   expect(screen.queryByText("保存中…")).not.toBeInTheDocument();
-  expect(
-    screen.getByRole("button", { name: "编辑林芳的保险计划" }),
-  ).toBeEnabled();
+  expect(actionButton("编辑林芳的保险计划")).toBeEnabled();
 });
 
 it("不同客户同时编辑时，一人的失败不会撤回另一人的计划和意向度", async () => {
@@ -798,22 +821,18 @@ it("不同客户同时编辑时，一人的失败不会撤回另一人的计划�
       : Promise.resolve(),
   );
   await show();
-  fireEvent.click(screen.getByRole("button", { name: "编辑林芳的保险计划" }));
+  click(actionButton("编辑林芳的保险计划"));
   fireEvent.change(screen.getByLabelText("保险计划"), {
     target: { value: "未保存计划" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  click(actionButton("保存"));
   await screen.findByText("未保存计划");
-  fireEvent.click(screen.getByRole("button", { name: "编辑王海的保险计划" }));
+  click(actionButton("编辑王海的保险计划"));
   fireEvent.change(screen.getByLabelText("保险计划"), {
     target: { value: "王海的新计划" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "保存" }));
-  await waitFor(() =>
-    expect(
-      screen.getByRole("button", { name: "编辑王海的保险计划" }),
-    ).toBeEnabled(),
-  );
+  click(actionButton("保存"));
+  await waitFor(() => expect(actionButton("编辑王海的保险计划")).toBeEnabled());
   await chooseIntention("王海", "低意向");
   await waitFor(() => expect(highCount()).toHaveTextContent("7"));
   await act(async () => reject(new Error("保存失败")));
@@ -845,7 +864,7 @@ it("新增跟进失败恢复上一条记录，草稿完整保留并可直接重�
       }),
   );
   await show();
-  fireEvent.click(screen.getByRole("button", { name: "新增林芳的跟进记录" }));
+  click(actionButton("新增林芳的跟进记录"));
   fireEvent.change(screen.getByLabelText("触达时间"), {
     target: { value: "2026-11-05T14:30" },
   });
@@ -858,34 +877,26 @@ it("新增跟进失败恢复上一条记录，草稿完整保留并可直接重�
   fireEvent.change(screen.getByLabelText(/沟通记录/), {
     target: { value: "本次跟进" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "保存记录" }));
+  click(actionButton("保存记录"));
   await screen.findByText("本次跟进");
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   expect(screen.queryByText("上次跟进")).not.toBeInTheDocument();
   await act(async () => reject(new Error("暂时不可用")));
   expect(screen.getByText("上次跟进")).toBeInTheDocument();
   expect(screen.queryByText("本次跟进")).not.toBeInTheDocument();
-  fireEvent.click(
-    screen.getByRole("button", { name: "修改林芳的跟进记录后重试" }),
-  );
+  click(actionButton("修改林芳的跟进记录后重试"));
   expect(screen.getByLabelText("触达时间")).toHaveValue("2026-11-05T14:30");
   expect(screen.getByLabelText("触达方式")).toHaveValue("3");
   expect(screen.getByLabelText("触达结果")).toHaveValue("0");
   expect(screen.getByLabelText(/沟通记录/)).toHaveValue("本次跟进");
-  fireEvent.click(screen.getByRole("button", { name: "取消" }));
-  fireEvent.click(screen.getByRole("button", { name: "编辑林芳的保险计划" }));
+  click(actionButton("取消"));
+  click(actionButton("编辑林芳的保险计划"));
   fireEvent.change(screen.getByLabelText("保险计划"), {
     target: { value: "已经成功的新保险计划" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "保存" }));
-  await waitFor(() =>
-    expect(
-      screen.getByRole("button", { name: "编辑林芳的保险计划" }),
-    ).toBeEnabled(),
-  );
-  fireEvent.click(
-    screen.getByRole("button", { name: "重试保存林芳的跟进记录" }),
-  );
+  click(actionButton("保存"));
+  await waitFor(() => expect(actionButton("编辑林芳的保险计划")).toBeEnabled());
+  click(actionButton("重试保存林芳的跟进记录"));
   await waitFor(() =>
     expect(screen.queryByRole("alert")).not.toBeInTheDocument(),
   );
@@ -929,7 +940,7 @@ it("接触计划失败只恢复该字段，正常编辑按钮也会回填失败�
       }),
   );
   await show();
-  fireEvent.click(screen.getByRole("button", { name: /编辑林芳的接触计划/ }));
+  click(actionButton(/编辑林芳的接触计划/));
   fireEvent.change(screen.getByLabelText("接触日期"), {
     target: { value: "2026-11-06" },
   });
@@ -939,13 +950,13 @@ it("接触计划失败只恢复该字段，正常编辑按钮也会回填失败�
   fireEvent.change(screen.getByLabelText("接触安排"), {
     target: { value: "新接触安排" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  click(actionButton("保存"));
   await screen.findByText("新接触安排");
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   await act(async () => reject(new Error("暂时不可用")));
   expect(screen.getByText("原接触安排")).toBeInTheDocument();
   expect(screen.getByText("家庭医疗保障")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: /编辑林芳的接触计划/ }));
+  click(actionButton(/编辑林芳的接触计划/));
   expect(screen.getByLabelText("接触日期")).toHaveValue("2026-11-06");
   expect(screen.getByLabelText("触达方式")).toHaveValue("3");
   expect(screen.getByLabelText("接触安排")).toHaveValue("新接触安排");
@@ -959,7 +970,7 @@ it.each([
   "$kind 显示实时字数，拒绝超长提交并允许恰好1000字",
   async ({ button, field, kind }) => {
     await show();
-    fireEvent.click(screen.getByRole("button", { name: button }));
+    click(actionButton(button));
     const dialog = screen.getByRole("dialog");
     const input = within(dialog).getByLabelText(field);
     expect(input).toHaveAttribute("maxlength", "1000");
@@ -974,7 +985,7 @@ it.each([
     // 程序化输入绕过浏览器 maxlength，仍须被提交校验拦截。
     fireEvent.change(input, { target: { value: "保".repeat(1001) } });
     await within(dialog).findByText("1001 / 1000");
-    fireEvent.click(
+    click(
       within(dialog).getByRole("button", {
         name: kind === "followUp" ? "保存记录" : "保存",
       }),
@@ -986,7 +997,7 @@ it.each([
     fireEvent.change(input, { target: { value: valid } });
     await within(dialog).findByText("1000 / 1000");
     expect(within(dialog).getByText("已达1000字上限")).toBeInTheDocument();
-    fireEvent.click(
+    click(
       within(dialog).getByRole("button", {
         name: kind === "followUp" ? "保存记录" : "保存",
       }),
@@ -1012,11 +1023,11 @@ it("历史超长内容不静默截断，必须删减到1000字以内才能提交
   data.customers[0].insurancePlan = original;
   vi.mocked(fetchInsuranceTracking).mockResolvedValue(data);
   await show();
-  fireEvent.click(screen.getByRole("button", { name: "编辑林芳的保险计划" }));
+  click(actionButton("编辑林芳的保险计划"));
   const dialog = screen.getByRole("dialog");
   expect(within(dialog).getByLabelText("保险计划")).toHaveValue(original);
   expect(within(dialog).getByText("1001 / 1000")).toBeInTheDocument();
-  fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+  click(within(dialog).getByRole("button", { name: "保存" }));
   await within(dialog).findByText("最多只能输入1000字");
   expect(saveInsuranceChange).not.toHaveBeenCalled();
 });
@@ -1030,15 +1041,15 @@ it("取消移除不发请求；确认移除成功前保留客户，成功后移�
       }),
   );
   await show();
-  fireEvent.click(screen.getByRole("button", { name: "移除王海的跟踪" }));
+  click(actionButton("移除王海的跟踪"));
   let dialog = screen.getByRole("dialog", { name: "移除跟踪" });
   expect(dialog).toHaveTextContent("王海");
-  fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+  click(within(dialog).getByRole("button", { name: "取消" }));
   expect(removeInsuranceTracking).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: "移除王海的跟踪" }));
+  click(actionButton("移除王海的跟踪"));
   dialog = screen.getByRole("dialog", { name: "移除跟踪" });
-  fireEvent.click(within(dialog).getByRole("button", { name: "确认移除" }));
-  fireEvent.click(within(dialog).getByRole("button", { name: "正在移除…" }));
+  click(within(dialog).getByRole("button", { name: "确认移除" }));
+  click(within(dialog).getByRole("button", { name: "正在移除…" }));
   expect(removeInsuranceTracking).toHaveBeenCalledTimes(1);
   expect(within(dialog).getByRole("button", { name: "取消" })).toBeDisabled();
   expect(screen.getByText("王海")).toBeInTheDocument();
@@ -1058,16 +1069,16 @@ it("移除失败保留客户和人数，可重试；非高意向客户移除不�
     .mockRejectedValueOnce(new Error("服务异常"))
     .mockResolvedValueOnce(undefined);
   await show();
-  fireEvent.click(screen.getByRole("button", { name: "移除林芳的跟踪" }));
+  click(actionButton("移除林芳的跟踪"));
   const dialog = screen.getByRole("dialog", { name: "移除跟踪" });
-  fireEvent.click(within(dialog).getByRole("button", { name: "确认移除" }));
+  click(within(dialog).getByRole("button", { name: "确认移除" }));
   await within(dialog).findByRole("alert");
   expect(screen.getByText("林芳")).toBeInTheDocument();
   expect(highCount()).toHaveTextContent("8");
   expect(
     screen.getByText(/^跟踪客户/, { selector: "span" }).querySelector("b"),
   ).toHaveTextContent("12");
-  fireEvent.click(within(dialog).getByRole("button", { name: "确认移除" }));
+  click(within(dialog).getByRole("button", { name: "确认移除" }));
   await waitFor(() =>
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
   );
@@ -1092,24 +1103,24 @@ it("资产和接触计划列头切换升序、降序、默认，切换列时只�
       .getAllByRole("row")
       .slice(1)
       .map((row) => within(row).getAllByRole("cell")[0].textContent);
-  fireEvent.click(screen.getByRole("button", { name: /^资产排序/ }));
+  click(actionButton(/^资产排序/));
   expect(names()).toEqual(["王海", "林芳"]);
   expect(screen.getAllByRole("columnheader")[1]).toHaveAttribute(
     "aria-sort",
     "ascending",
   );
-  fireEvent.click(screen.getByRole("button", { name: /^资产排序/ }));
+  click(actionButton(/^资产排序/));
   expect(names()).toEqual(["林芳", "王海"]);
-  fireEvent.click(screen.getByRole("button", { name: /^资产排序/ }));
+  click(actionButton(/^资产排序/));
   expect(screen.getAllByRole("columnheader")[1]).toHaveAttribute(
     "aria-sort",
     "none",
   );
-  fireEvent.click(screen.getByRole("button", { name: /^接触计划排序/ }));
+  click(actionButton(/^接触计划排序/));
   expect(names()).toEqual(["林芳", "王海"]);
-  fireEvent.click(screen.getByRole("button", { name: /^接触计划排序/ }));
+  click(actionButton(/^接触计划排序/));
   expect(names()).toEqual(["王海", "林芳"]);
-  fireEvent.click(screen.getByRole("button", { name: /^资产排序/ }));
+  click(actionButton(/^资产排序/));
   expect(screen.getAllByRole("columnheader")[3]).toHaveAttribute(
     "aria-sort",
     "none",
@@ -1121,8 +1132,8 @@ it("意向度列头可筛选零值并与搜索组合，无匹配显示搜索空�
   data.customers[0].intention = 0;
   vi.mocked(fetchInsuranceTracking).mockResolvedValue(data);
   await show();
-  fireEvent.click(screen.getByRole("button", { name: "筛选客户意向度" }));
-  fireEvent.click(await screen.findByRole("menuitem", { name: "待了解" }));
+  click(actionButton("筛选客户意向度"));
+  click(await screen.findByRole("menuitem", { name: "待了解" }));
   expect(screen.getByText("林芳")).toBeInTheDocument();
   expect(screen.queryByText("王海")).not.toBeInTheDocument();
   expect(highCount()).toHaveTextContent("8");
@@ -1133,7 +1144,7 @@ it("意向度列头可筛选零值并与搜索组合，无匹配显示搜索空�
     screen.getByText("未找到匹配的客户，请调整搜索或筛选条件"),
   ).toBeInTheDocument();
   expect(screen.queryByText("暂未添加跟踪客户")).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "清除客户意向度筛选" }));
+  click(actionButton("清除客户意向度筛选"));
   expect(screen.getByText("王海")).toBeInTheDocument();
 });
 
@@ -1142,31 +1153,23 @@ it("新增保存成功但回查失败不回滚、不提供重复保存，只锁�
     new InsuranceSyncError(),
   );
   await show();
-  fireEvent.click(screen.getByRole("button", { name: "新增林芳的接触计划" }));
+  click(actionButton("新增林芳的接触计划"));
   fireEvent.change(screen.getByLabelText("接触日期"), {
     target: { value: "2026-11-10" },
   });
   fireEvent.change(screen.getByLabelText("接触安排"), {
     target: { value: "已保存的新计划" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  click(actionButton("保存"));
   await screen.findByText(/保存已成功，但列表刷新失败/);
   expect(screen.getByText("已保存的新计划")).toBeInTheDocument();
   expect(
     screen.queryByRole("button", { name: /重试保存/ }),
   ).not.toBeInTheDocument();
-  expect(
-    screen.getByRole("button", { name: "新增林芳的接触计划" }),
-  ).toBeDisabled();
-  expect(
-    screen.getByRole("button", { name: "新增王海的接触计划" }),
-  ).toBeEnabled();
-  fireEvent.click(screen.getByRole("button", { name: "刷新保险跟踪" }));
-  await waitFor(() =>
-    expect(
-      screen.getByRole("button", { name: "新增林芳的接触计划" }),
-    ).toBeEnabled(),
-  );
+  expect(actionButton("新增林芳的接触计划")).toBeDisabled();
+  expect(actionButton("新增王海的接触计划")).toBeEnabled();
+  click(actionButton("刷新保险跟踪"));
+  await waitFor(() => expect(actionButton("新增林芳的接触计划")).toBeEnabled());
 });
 
 it("新增回查取得全量正式记录后替换临时数组，避免把新增记录重复插入", async () => {
@@ -1181,24 +1184,18 @@ it("新增回查取得全量正式记录后替换临时数组，避免把新增�
   ];
   vi.mocked(saveInsuranceChange).mockResolvedValueOnce({ records });
   await show();
-  fireEvent.click(screen.getByRole("button", { name: "新增林芳的接触计划" }));
+  click(actionButton("新增林芳的接触计划"));
   fireEvent.change(screen.getByLabelText("接触日期"), {
     target: { value: "2026-11-12" },
   });
   fireEvent.change(screen.getByLabelText("接触安排"), {
     target: { value: "已入库计划" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "保存" }));
-  await waitFor(() =>
-    expect(
-      screen.getByRole("button", { name: "新增林芳的接触计划" }),
-    ).toBeEnabled(),
-  );
+  click(actionButton("保存"));
+  await waitFor(() => expect(actionButton("新增林芳的接触计划")).toBeEnabled());
   expect(screen.getAllByText("已入库计划")).toHaveLength(1);
-  fireEvent.click(
-    screen.getByRole("button", { name: "编辑林芳的接触计划 2026-11-12" }),
-  );
-  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  click(actionButton("编辑林芳的接触计划 2026-11-12"));
+  click(actionButton("保存"));
   await waitFor(() => expect(saveInsuranceChange).toHaveBeenCalledTimes(2));
   expect(vi.mocked(saveInsuranceChange).mock.calls[1][1]).toMatchObject({
     recordId: "901",
@@ -1228,22 +1225,22 @@ it("触达结果展示主表touched，支持零值筛选、与意向度组合及
   expect(
     screen.queryByRole("button", { name: "筛选触达方式" }),
   ).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "筛选触达结果" }));
-  fireEvent.click(await screen.findByRole("menuitem", { name: "待跟进" }));
+  click(actionButton("筛选触达结果"));
+  click(await screen.findByRole("menuitem", { name: "待跟进" }));
   expect(screen.queryByText("王海")).not.toBeInTheDocument();
   expect(highCount()).toHaveTextContent("8");
-  fireEvent.click(screen.getByRole("button", { name: "筛选客户意向度" }));
-  fireEvent.click(await screen.findByRole("menuitem", { name: "高意向" }));
+  click(actionButton("筛选客户意向度"));
+  click(await screen.findByRole("menuitem", { name: "高意向" }));
   expect(
     screen.getByText("未找到匹配的客户，请调整搜索或筛选条件"),
   ).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "清除客户意向度筛选" }));
+  click(actionButton("清除客户意向度筛选"));
   expect(screen.getByText("林芳")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "筛选触达结果" }));
-  fireEvent.click(await screen.findByRole("menuitem", { name: "已完成" }));
+  click(actionButton("筛选触达结果"));
+  click(await screen.findByRole("menuitem", { name: "已完成" }));
   expect(screen.getByText("王海")).toBeInTheDocument();
   expect(screen.queryByText("林芳")).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "清除触达结果筛选" }));
+  click(actionButton("清除触达结果筛选"));
   expect(screen.getByText("林芳")).toBeInTheDocument();
 });
 
@@ -1265,18 +1262,16 @@ it("缺失触达方式编辑需补选，新建仍默认企微，触达结果独�
   expect(
     within(screen.getByText("林芳").closest("tr")!).getAllByRole("cell")[5],
   ).toHaveTextContent("—");
-  fireEvent.click(screen.getByRole("button", { name: "筛选触达结果" }));
-  fireEvent.click(await screen.findByRole("menuitem", { name: "待跟进" }));
+  click(actionButton("筛选触达结果"));
+  click(await screen.findByRole("menuitem", { name: "待跟进" }));
   expect(screen.queryByText("林芳")).not.toBeInTheDocument();
   expect(
     screen.getByText("未找到匹配的客户，请调整搜索或筛选条件"),
   ).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "清除触达结果筛选" }));
-  fireEvent.click(
-    screen.getByRole("button", { name: "编辑林芳的跟进记录 2026-11-05T10:00" }),
-  );
+  click(actionButton("清除触达结果筛选"));
+  click(actionButton("编辑林芳的跟进记录 2026-11-05T10:00"));
   expect(screen.getByLabelText("触达方式")).toHaveValue("");
-  fireEvent.click(screen.getByRole("button", { name: "保存记录" }));
+  click(actionButton("保存记录"));
   await screen.findByText("请选择触达方式", {
     selector: ".ant-form-item-explain-error",
   });
@@ -1284,7 +1279,7 @@ it("缺失触达方式编辑需补选，新建仍默认企微，触达结果独�
   fireEvent.change(screen.getByLabelText("触达方式"), {
     target: { value: "0" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "保存记录" }));
+  click(actionButton("保存记录"));
   await waitFor(() =>
     expect(saveInsuranceChange).toHaveBeenCalledWith(
       expect.anything(),
@@ -1293,15 +1288,11 @@ it("缺失触达方式编辑需补选，新建仍默认企微，触达结果独�
       }),
     ),
   );
-  await waitFor(() =>
-    expect(
-      screen.getByRole("button", { name: "新增林芳的跟进记录" }),
-    ).toBeEnabled(),
-  );
+  await waitFor(() => expect(actionButton("新增林芳的跟进记录")).toBeEnabled());
   expect(
     within(screen.getByText("林芳").closest("tr")!).getAllByRole("cell")[5],
   ).toHaveTextContent("已完成");
-  fireEvent.click(screen.getByRole("button", { name: "新增林芳的跟进记录" }));
+  click(actionButton("新增林芳的跟进记录"));
   expect(screen.getByLabelText("触达方式")).toHaveValue("0");
 });
 
@@ -1317,11 +1308,11 @@ it("跟进保存时乐观更新触达结果，失败回滚，重试成功同步�
   const result = () =>
     within(screen.getByText("林芳").closest("tr")!).getAllByRole("cell")[5];
   expect(result()).toHaveTextContent("待跟进");
-  fireEvent.click(screen.getByRole("button", { name: "新增林芳的跟进记录" }));
+  click(actionButton("新增林芳的跟进记录"));
   fireEvent.change(screen.getByLabelText(/沟通记录/), {
     target: { value: "沟通完成" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "保存记录" }));
+  click(actionButton("保存记录"));
   await waitFor(() => expect(result()).toHaveTextContent("已完成"));
   await act(async () => reject(new Error("保存失败")));
   expect(result()).toHaveTextContent("待跟进");
@@ -1337,14 +1328,8 @@ it("跟进保存时乐观更新触达结果，失败回滚，重试成功同步�
       },
     ],
   });
-  fireEvent.click(
-    screen.getByRole("button", { name: "重试保存林芳的跟进记录" }),
-  );
-  await waitFor(() =>
-    expect(
-      screen.getByRole("button", { name: "新增林芳的跟进记录" }),
-    ).toBeEnabled(),
-  );
+  click(actionButton("重试保存林芳的跟进记录"));
+  await waitFor(() => expect(actionButton("新增林芳的跟进记录")).toBeEnabled());
   expect(result()).toHaveTextContent("已完成");
   expect(highCount()).toHaveTextContent("8");
 });

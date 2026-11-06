@@ -488,7 +488,7 @@ export function InsuranceTracking({
               className={`${workbenchStyles.customerTable} ${styles.table}`}
             >
               <colgroup>
-                {[80, 85, 145, 150, 165, 100, 115, 105, 195].map(
+                {[80, 85, 135, 170, 195, 90, 105, 100, 180].map(
                   (width, index) => (
                     <col key={index} style={{ width }} />
                   ),
@@ -501,7 +501,7 @@ export function InsuranceTracking({
                     "资产",
                     "保险计划",
                     "接触计划",
-                    "最后跟进记录",
+                    "跟进记录",
                     "触达结果",
                     "客户意向度",
                     "经营方案",
@@ -691,11 +691,6 @@ export function InsuranceTracking({
                       {needsRefresh.has(customer.id) && (
                         <span className={styles.saving} role="status">
                           已保存，请刷新列表后继续编辑
-                        </span>
-                      )}
-                      {pending.has(customer.id) && (
-                        <span className={styles.saving} role="status">
-                          保存中…
                         </span>
                       )}
                     </td>

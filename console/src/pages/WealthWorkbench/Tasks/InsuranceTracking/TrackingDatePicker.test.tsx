@@ -9,6 +9,14 @@ import { afterEach, expect, it, vi } from "vitest";
 import dayjs from "dayjs";
 import { TrackingDatePicker } from "./TrackingDatePicker";
 import { trackingNow } from "./trackingDate";
+vi.stubGlobal(
+  "ResizeObserver",
+  class {
+    observe() {}
+    disconnect() {}
+    unobserve() {}
+  },
+);
 afterEach(cleanup);
 it("当前日期和时间按本地格式生成，不转UTC", () => {
   expect(trackingNow()).toBe(dayjs().format("YYYY-MM-DD"));

@@ -1,7 +1,8 @@
-import { useEffect, useState, type ChangeEvent } from "react";
+import { useEffect, useState } from "react";
 import { Form } from "antd";
 import { fetchSceneSkills } from "../../api";
 import workbenchStyles from "../../index.module.less";
+import { TrackingSelect } from "./TrackingSelect";
 import styles from "./Editor.module.less";
 
 export interface FollowUpScene {
@@ -70,9 +71,9 @@ export function FollowUpSceneField({
         getValueProps={(value?: FollowUpScene) => ({
           value: value?.skillId ?? "",
         })}
-        getValueFromEvent={(event: ChangeEvent<HTMLSelectElement>) => ({
-          skillId: event.target.value,
-          sceneName: event.target.selectedOptions[0]?.textContent ?? "",
+        getValueFromEvent={(value: string) => ({
+          skillId: value,
+          sceneName: options.get(value)?.sceneName ?? value,
         })}
         rules={[
           {
@@ -83,20 +84,17 @@ export function FollowUpSceneField({
           },
         ]}
       >
-        <select aria-required="true" aria-busy={loading}>
-          <option value="">请选择经营场景</option>
-          {[...options.values()].map((scene) => (
-            <option key={scene.skillId} value={scene.skillId}>
-              {scene.sceneName || scene.skillId}
-            </option>
-          ))}
-        </select>
+        <TrackingSelect<string>
+          aria-required="true"
+          loading={loading}
+          placeholder="请选择经营场景"
+          options={[...options.values()].map((scene) => ({
+            value: scene.skillId,
+            label: scene.sceneName || scene.skillId,
+          }))}
+        />
       </Form.Item>
-      {loading ? (
-        <div className={styles.sceneFeedback} role="status">
-          正在加载保险经营场景…
-        </div>
-      ) : error ? (
+      {!loading && error ? (
         <div className={styles.sceneFeedback} role="alert">
           经营场景加载失败，
           <button

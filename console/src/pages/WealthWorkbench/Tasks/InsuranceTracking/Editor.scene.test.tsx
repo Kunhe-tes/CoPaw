@@ -1,3 +1,32 @@
+vi.mock("./TrackingSelect", () => ({
+  TrackingSelect: ({
+    options = [],
+    value,
+    onChange,
+    ...props
+  }: Omit<React.SelectHTMLAttributes<HTMLSelectElement>, "onChange"> & {
+    options?: { value: string | number; label: React.ReactNode }[];
+    onChange?: (value?: string | number) => void;
+  }) => (
+    <select
+      {...props}
+      value={value ?? ""}
+      onChange={(event) =>
+        onChange?.(
+          options.find((option) => String(option.value) === event.target.value)
+            ?.value,
+        )
+      }
+    >
+      {value == null || value === "" ? <option value="" /> : null}
+      {options.map((option) => (
+        <option key={option.value} value={option.value}>
+          {option.label}
+        </option>
+      ))}
+    </select>
+  ),
+}));
 import {
   act,
   cleanup,

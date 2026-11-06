@@ -1,6 +1,6 @@
 import { useId, useLayoutEffect, useRef, useState } from "react";
 import { Tooltip } from "antd";
-import { ChevronDown, ChevronUp, PencilLine, Plus } from "lucide-react";
+import { PencilLine } from "lucide-react";
 import {
   EDIT_LABELS,
   FOLLOW_UP_RESULTS,
@@ -30,19 +30,29 @@ function RecordText({
   customerName: string;
   kind: RecordKind;
 }) {
+  if (!full) {
+    const date = entry.date.replace("T", " ").slice(0, 16);
+    return (
+      <Tooltip
+        title={`${entry.date.replace("T", " ")} · ${followUpMethodLabel(
+          entry.method,
+        )} · ${entry.content || "—"}`}
+        trigger={["hover", "focus"]}
+      >
+        <div className={styles.recordLine} tabIndex={0}>
+          <span className={styles.recordTime}>
+            {date} · {followUpMethodLabel(entry.method)}
+          </span>
+          <span className={styles.recordSummary}>{entry.content || "—"}</span>
+        </div>
+      </Tooltip>
+    );
+  }
   return (
     <div className={styles.record}>
       <div className={styles.recordHead}>
-        {full ? (
-          <p className={styles.fullContent}>{entry.content}</p>
-        ) : (
-          <Tooltip title={entry.content} trigger={["hover", "focus"]}>
-            <p className={styles.recordPreview} tabIndex={0}>
-              {entry.content || "—"}
-            </p>
-          </Tooltip>
-        )}
-        <Tooltip title="编辑" trigger={["hover", "focus"]}>
+        <p className={styles.fullContent}>{entry.content}</p>
+        <Tooltip title="编辑此条" trigger={["hover", "focus"]}>
           <button
             type="button"
             className={`${workbenchStyles.btn} ${styles.edit}`}
@@ -58,7 +68,7 @@ function RecordText({
         <span>{entry.date.replace("T", " ")}</span>
         {" · "}
         <span>{followUpMethodLabel(entry.method)}</span>
-        {full && "result" in entry
+        {"result" in entry
           ? ` · ${
               entry.result == null
                 ? "触达结果未知"
@@ -109,8 +119,17 @@ function RecordHistory({
       <div className={workbenchStyles.dialogHead}>
         <h2 id={titleId}>
           {EDIT_LABELS[kind]} · {customerName}
+          <span className={styles.historyCount}>共 {entries.length} 条</span>
         </h2>
       </div>
+      <button
+        type="button"
+        className={`${workbenchStyles.iconbtn} ${workbenchStyles.dialogClose}`}
+        aria-label="关闭"
+        onClick={onClose}
+      >
+        ×
+      </button>
       <div className={`${workbenchStyles.dialogBody} ${styles.historyBody}`}>
         {entries.map((entry) => (
           <RecordText
@@ -164,24 +183,35 @@ export function RecordCell({
   onEdit: (entry: RecordEntry) => void;
   onAdd: () => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
   const [history, setHistory] = useState(false);
   return (
     <div className={styles.cell}>
       <div className={styles.records}>
         {entries.length ? (
-          entries
-            .slice(0, expanded ? 3 : 1)
-            .map((entry) => (
+          entries.slice(0, 1).map((entry) => (
+            <div
+              key={entry.id}
+              className={`${styles.recordHead} ${styles.recordPreviewHead}`}
+            >
               <RecordText
-                key={entry.id}
                 entry={entry}
                 kind={kind}
                 customerName={customerName}
                 disabled={disabled}
-                onEdit={() => onEdit(entry)}
+                onEdit={() => setHistory(true)}
               />
-            ))
+              <Tooltip title="查看 / 编辑" trigger={["hover", "focus"]}>
+                <button
+                  type="button"
+                  className={`${workbenchStyles.btn} ${styles.edit}`}
+                  aria-label={`查看${customerName}的全部${EDIT_LABELS[kind]}`}
+                  onClick={() => setHistory(true)}
+                >
+                  <PencilLine size={14} aria-hidden />
+                </button>
+              </Tooltip>
+            </div>
+          ))
         ) : (
           <p className={styles.secondary}>
             {kind === "contactPlan" ? "暂无接触计划" : "暂无跟进记录"}
@@ -191,44 +221,14 @@ export function RecordCell({
       <div className={styles.recordActions}>
         <button
           type="button"
-          className={`${workbenchStyles.link} ${styles.add}`}
+          className={`${workbenchStyles.btn} ${workbenchStyles.primary} ${styles.recordButton}`}
           disabled={disabled}
           aria-label={`新增${customerName}的${EDIT_LABELS[kind]}`}
           onClick={onAdd}
         >
-          <Plus size={12} aria-hidden />
+          <span aria-hidden="true">+</span>{" "}
           {kind === "contactPlan" ? "新增计划" : "新增记录"}
         </button>
-        {entries.length > 1 && (
-          <div className={styles.browseActions}>
-            <button
-              type="button"
-              className={`${workbenchStyles.link} ${styles.more}`}
-              aria-expanded={expanded}
-              aria-label={`${expanded ? "收起" : "展开更多"}${customerName}的${
-                EDIT_LABELS[kind]
-              }`}
-              onClick={() => setExpanded((value) => !value)}
-            >
-              {expanded ? "收起" : "展开更多"}
-              {expanded ? (
-                <ChevronUp size={12} aria-hidden />
-              ) : (
-                <ChevronDown size={12} aria-hidden />
-              )}
-            </button>
-            {expanded && entries.length > 3 && (
-              <button
-                type="button"
-                className={`${workbenchStyles.link} ${styles.more}`}
-                onClick={() => setHistory(true)}
-                aria-label={`查看${customerName}的全部${EDIT_LABELS[kind]}`}
-              >
-                全部{entries.length}条
-              </button>
-            )}
-          </div>
-        )}
       </div>
       {history && (
         <RecordHistory

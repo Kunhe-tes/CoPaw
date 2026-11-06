@@ -578,3 +578,17 @@ NODE_OPTIONS=--max-old-space-size=8192 npm run build
 - 常驻任务列表 `console/src/pages/Chat/components/ChatTaskList/index.tsx` 和侧栏展开面板 `console/src/pages/Chat/components/ChatSidebar/ExpandablePanel/index.tsx` 共用 `TaskTitle.tsx`。
 - 标题保留各自的单行省略样式，仅在 `scrollWidth > clientWidth` 时提供完整内容 Tooltip；初次渲染、内容变化及 ResizeObserver 通知时测量，悬停不重复测量，不能用标题字符数判断是否省略。
 - 回归入口：`console/src/pages/Chat/components/TaskTitle.test.tsx`，覆盖完整显示、宽度相等、溢出提示、尺寸及内容变化和点击透传。DOM 测量单测不替代真实 Chromium 108 与嵌入模式验收。
+
+- 跟踪表单下拉统一使用 `InsuranceTracking/TrackingSelect.tsx`（Ant Design Select），选项浮层挂载到当前 dialog，枚举保持 number，经营场景保持字符串 ID。日期浮层宽度随输入框变化；列表保存保留禁用与失败反馈，不展示“保存中”；新增计划／记录使用浅蓝底按钮，执行按钮紧凑单行。弹窗仅保留 1000 字计数与到达上限提示。
+
+- 接触计划与跟进记录的表格编辑图标统一先进入 RecordHistory 管理弹窗（单条也进入），完整查看后选中单条编辑；管理弹窗支持新增，继续复用原编辑及保存流程。
+
+- 接触计划／最后跟进记录的正文不放编辑图标，默认仅显示最新一条；底部新增按钮与“查看详情”同行，详情承接全部记录浏览及单条编辑，不再使用表格内展开入口。
+
+- 跟踪表格接触计划／最后跟进记录使用“时间 · 内容”单行预览，时间保留至分钟、正文超长省略；悬停或聚焦查看完整时间、方式与内容，详情弹窗仍完整展示。
+
+- 跟踪列表单元格垂直居中；两列底部为“+ 新增”和“查看 / 编辑”。执行列使用两列网格，移除跟踪独占第二行；释放列宽给接触计划与跟进记录，表格总最小宽度不增加。
+
+- 跟踪列表两列预览改为上下两行：上行时间（分钟）与触达方式，下行内容单行省略；列名为“跟进记录”，新增与查看／编辑使用工作台主、次按钮样式。
+
+- 两列预览右上角使用与保险计划一致的无边框编辑图标，点击打开全部内容管理弹窗；底部主按钮恢复“+ 新增计划／+ 新增记录”。

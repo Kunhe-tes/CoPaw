@@ -30,6 +30,16 @@ export function TrackingDatePicker({
 }: Props) {
   const pickerRef = useRef<GetRef<typeof DatePicker>>(null);
   const [open, setOpen] = useState(false);
+  const [popupWidth, setPopupWidth] = useState<number>();
+  useEffect(() => {
+    const element = pickerRef.current?.nativeElement;
+    if (!element) return;
+    const resize = () => setPopupWidth(element.getBoundingClientRect().width);
+    resize();
+    const observer = new ResizeObserver(resize);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
   useEffect(() => {
     if (!open) return;
     const dialog = pickerRef.current?.nativeElement.closest("dialog");
@@ -53,6 +63,7 @@ export function TrackingDatePicker({
       classNames={{
         popup: { root: `${styles.popup} ${withTime ? styles.timePopup : ""}` },
       }}
+      styles={{ popup: { root: { width: popupWidth } } }}
       locale={zhCN}
       inputReadOnly
       value={parsed?.isValid() ? parsed.locale("zh-cn") : null}
