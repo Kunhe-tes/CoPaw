@@ -45,6 +45,7 @@ it.each(["contactPlan", "followUp"] as const)(
       screen.queryByRole("button", { name: /编辑林芳/ }),
     ).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /查看林芳的全部/ }));
+    expect(screen.getByText("编辑 (2)")).toBeInTheDocument();
     expect(onEdit).not.toHaveBeenCalled();
     const dialog = screen.getByRole("dialog");
     expect(within(dialog).getByText("最新内容")).toBeInTheDocument();

@@ -22,6 +22,8 @@ import { CustomerSchemePreview } from "../components/CustomerSchemePreview";
 import { CustomerMetrics } from "../components/CustomerMetrics";
 import { CustomerScenes } from "../components/CustomerScenes";
 import { buildCustomerGroups } from "./customerGroups";
+import { CustomerListSkeleton } from "./CustomerListSkeleton";
+import skeletonStyles from "./CustomerListSkeleton.module.less";
 import { ContactStatusFilter } from "./ContactStatusFilter";
 import { SceneFilter } from "./SceneFilter";
 import { InsuranceTracking } from "./InsuranceTracking";
@@ -867,7 +869,12 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
               </div>
             )}
 
-            <div className={styles.customerGroups}>
+            {loading && (
+              <span className={skeletonStyles.status} role="status">
+                客户清单加载中…
+              </span>
+            )}
+            <div className={styles.customerGroups} aria-busy={loading}>
               {tableGroups.map((group, index) => {
                 const groupKey = `${selectedSkillId ?? ""}|${group.key}`;
                 const collapsed = collapsedGroups.has(groupKey);
@@ -1031,7 +1038,13 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                           </tr>
                         </thead>
                         <tbody>
-                          {group.customers.length ? (
+                          {loading ? (
+                            <CustomerListSkeleton
+                              business={isBiz}
+                              completed={doneView}
+                              showContactStatus={showContactStatus}
+                            />
+                          ) : group.customers.length ? (
                             group.customers.map((c) => (
                               <tr key={c.id}>
                                 <td className={styles.name}>{c.name}</td>
@@ -1176,16 +1189,11 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                           ) : (
                             <tr>
                               <td colSpan={columnCount}>
-                                <div
-                                  className={styles.empty}
-                                  role={loading ? "status" : undefined}
-                                >
-                                  {loading
-                                    ? "客户清单加载中…"
-                                    : isBiz &&
-                                      selectedTask &&
-                                      !search.trim() &&
-                                      contactStatus === "全部"
+                                <div className={styles.empty}>
+                                  {isBiz &&
+                                  selectedTask &&
+                                  !search.trim() &&
+                                  contactStatus === "全部"
                                     ? `「${selectedTask}」暂无客户名单，待定时任务执行后生成`
                                     : "暂无符合条件的客户"}
                                 </div>

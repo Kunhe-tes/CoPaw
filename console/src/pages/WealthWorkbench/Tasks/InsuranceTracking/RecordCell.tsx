@@ -189,10 +189,7 @@ export function RecordCell({
       <div className={styles.records}>
         {entries.length ? (
           entries.slice(0, 1).map((entry) => (
-            <div
-              key={entry.id}
-              className={`${styles.recordHead} ${styles.recordPreviewHead}`}
-            >
+            <div key={entry.id} className={styles.recordHead}>
               <RecordText
                 entry={entry}
                 kind={kind}
@@ -200,16 +197,6 @@ export function RecordCell({
                 disabled={disabled}
                 onEdit={() => setHistory(true)}
               />
-              <Tooltip title="查看 / 编辑" trigger={["hover", "focus"]}>
-                <button
-                  type="button"
-                  className={`${workbenchStyles.btn} ${styles.edit}`}
-                  aria-label={`查看${customerName}的全部${EDIT_LABELS[kind]}`}
-                  onClick={() => setHistory(true)}
-                >
-                  <PencilLine size={14} aria-hidden />
-                </button>
-              </Tooltip>
             </div>
           ))
         ) : (
@@ -229,6 +216,24 @@ export function RecordCell({
           <span aria-hidden="true">+</span>{" "}
           {kind === "contactPlan" ? "新增计划" : "新增记录"}
         </button>
+        {entries.length > 0 && (
+          <Tooltip
+            title={`查看全部 ${entries.length} 条${
+              kind === "contactPlan" ? "计划" : "记录"
+            }，可逐条编辑`}
+            trigger={["hover", "focus"]}
+          >
+            <button
+              type="button"
+              className={`${workbenchStyles.btn} ${styles.recordButton} ${styles.manageButton}`}
+              aria-label={`查看${customerName}的全部${EDIT_LABELS[kind]}`}
+              onClick={() => setHistory(true)}
+            >
+              <PencilLine size={14} aria-hidden />
+              {entries.length > 1 ? `编辑 (${entries.length})` : "编辑"}
+            </button>
+          </Tooltip>
+        )}
       </div>
       {history && (
         <RecordHistory
