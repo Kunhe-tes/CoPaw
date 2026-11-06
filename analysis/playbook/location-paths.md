@@ -604,3 +604,45 @@ NODE_OPTIONS=--max-old-space-size=8192 npm run build
 - 保险计划的编辑入口同样放在正文下方，复用 recordButton/manageButton 次按钮样式；点击直接编辑保险计划，不进入多记录管理弹窗。
 
 - 保险计划正文固定预留两行高度并最多展示两行，短内容留白；高度包含相邻记录两行之间的 3px 间隔，空记录也保留相同预览高度，使三列底部按钮对齐。
+
+## 智拓入口 JS 加载隔离
+
+### 边界与定位
+
+智拓对应 `/wealth/*`，也支持 `/console/wealth/*`。`console/src/App.tsx`
+只在路由匹配后加载财富工作台或 `ConsoleRoutes`。聊天、管理后台、登录、
+会话分享及 `DynamicRenderProvider` 放在 `console/src/ConsoleRoutes.tsx`，
+避免智拓入口静态引用聊天模板引擎、Markdown、Mermaid 和分析图表依赖。
+公共主题、Ant Design、路由和身份初始化仍属于共享依赖。
+
+新增入口代码时不要在 App 中重新静态导入 Console 页面或聊天模板 Provider。
+不要把 ConsoleRoutes 手动合并到首屏 vendor 包；文件拆分后仍须核对实际请求。
+本次边界按平台划分，财富工作台内部的看板、创建与任务页仍属于同一加载单元。
+
+### 复核方法
+
+在 `console/` 执行生产构建并临时生成 manifest：
+
+```bash
+NODE_OPTIONS=--max-old-space-size=8192 npm run build -- --manifest --outDir /tmp/copaw-wealth-bundle
+npm run test:run -- src/App.test.tsx src/utils/iframeMessage.test.ts src/access/consoleAccess.test.ts src/layouts/MainLayout/index.test.tsx src/pages/ChatShare/index.test.tsx
+```
+
+从 `.vite/manifest.json` 的 HTML 入口及财富入口递归追踪 `imports`，对文件去重后
+累加 JS 大小。`dynamicImports` 不直接计入，另用真实浏览器核对运行时是否加载。
+gzip 口径为逐文件压缩后求和，线上传输仍取决于服务器的压缩配置。
+
+2026-11-06 本地结果（十进制 MB）：原主 JS 为 8.008 MB / gzip 2.432 MB；
+隔离后的公共入口加财富工作台静态依赖共 3 个 JS，为 1.401 MB / gzip 0.448 MB，
+gzip 减少约 82%。不含 CSS、图片、接口响应及运行时配置脚本。
+这是本地依赖版本及构建环境下的结果，不保证其他安装环境具有相同 hash 或大小。
+
+本地生产预览使用模拟父窗口 USER_DATA 与空列表 API，检查智拓看板及
+`/console/wealth/board?hideMenu=true&hideLogo=true`，确认不请求 ConsoleRoutes。
+不以模拟接口替代真实智拓业务联调；实际 Chromium 108 / 360 浏览器仍需现场验收。
+
+验证记录：生产构建、TypeScript 检查、5 个相关测试文件共 65 项测试通过；
+Chromium 148 的上述两个 iframe 路径均只请求公共入口、财富入口、共享事件模块
+及运行时配置脚本，无页面异常和横向溢出。改动文件格式检查通过；ESLint 仍报告
+App 原有的 `bailianTheme as any`（本次未新增）。额外运行的 54 文件财富工作台
+全量测试超过两分钟仍未产生完成结果，已中止，不能计为全量通过。

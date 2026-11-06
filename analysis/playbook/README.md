@@ -6,6 +6,7 @@
 
 | 文档 | 摘要 |
 |------|------|
+| [智拓入口 JS 加载隔离](location-paths.md#智拓入口-js-加载隔离) | 智拓与 Console 的加载边界、首屏 JS 统计口径与构建复核方式 |
 | [ai-coding-session-retrospective.md](ai-coding-session-retrospective.md) | 近一周 AI Coding 会话复盘：返工原因、异步验收矩阵、测试选择与跨会话交接 |
 | [agent-config-read-consistency.md](agent-config-read-consistency.md) | agent 控制面读写一致性边界、排查入口和与 console agent switching 的职责分界 |
 | [agent-config-file-overwrite.md](agent-config-file-overwrite.md) | agent.json 手改后覆盖：回复整文件写回、模型规范化、引导自愈重建与并发丢失更新 |
