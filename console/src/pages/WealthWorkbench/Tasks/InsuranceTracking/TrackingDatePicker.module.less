@@ -16,6 +16,23 @@
   }
 }
 .popup {
+  :global(.ant-picker-panel-container),
+  :global(.swe-picker-panel-container),
+  :global(.ant-picker-panel),
+  :global(.swe-picker-panel),
+  :global(.ant-picker-date-panel),
+  :global(.swe-picker-date-panel) {
+    width: 100%;
+    min-width: 0;
+  }
+  :global(.ant-picker-content),
+  :global(.swe-picker-content) {
+    width: 100%;
+  }
+  :global(.ant-picker-cell-inner),
+  :global(.swe-picker-cell-inner) {
+    min-width: 0;
+  }
   max-height: calc(100vh - 48px);
   overflow: auto;
   @media (max-width: 600px) {
@@ -28,5 +45,27 @@
 @media (max-width: 600px) {
   .timePopup {
     max-height: 280px;
+  }
+}
+.popup {
+  :global(.ant-picker-header),
+  :global(.swe-picker-header) {
+    padding: 0 4px;
+  }
+  :global(.ant-picker-header-view),
+  :global(.swe-picker-header-view) {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    white-space: nowrap;
+    button {
+      padding: 0 2px;
+      margin: 0;
+      font-size: 12px;
+    }
+  }
+  :global(.ant-picker-header button),
+  :global(.swe-picker-header button) {
+    min-width: 16px;
   }
 }

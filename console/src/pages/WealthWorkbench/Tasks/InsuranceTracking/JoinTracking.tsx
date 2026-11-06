@@ -13,6 +13,7 @@ import { LimitedTextarea } from "./LimitedTextarea";
 import { TEXT_LIMIT_RULE } from "./textLimit";
 import type { Customer } from "../../types";
 import workbenchStyles from "../../index.module.less";
+import { TrackingSelect } from "./TrackingSelect";
 import styles from "./JoinTracking.module.less";
 
 function JoinConfirmation({
@@ -146,16 +147,16 @@ function JoinConfirmation({
             <Form.Item
               name="intention"
               label="客户意向度"
-              getValueFromEvent={(event) => Number(event.target.value)}
               rules={[{ required: true, message: "请选择客户意向度" }]}
             >
-              <select aria-required="true">
-                {Object.entries(INTENTION_LABELS).map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
+              <TrackingSelect
+                disabled={busy}
+                aria-required="true"
+                placeholder="请选择"
+                options={Object.entries(INTENTION_LABELS).map(
+                  ([value, label]) => ({ value: Number(value), label }),
+                )}
+              />
             </Form.Item>
           </fieldset>
         </div>

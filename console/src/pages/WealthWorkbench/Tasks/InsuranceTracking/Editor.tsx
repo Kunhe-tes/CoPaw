@@ -1,8 +1,9 @@
-import { useId, useLayoutEffect, useRef, type ChangeEvent } from "react";
+import { useId, useLayoutEffect, useRef } from "react";
 import { Form } from "antd";
 import { v4 as uuid } from "uuid";
 import { Icon } from "../../components/Icon";
 import workbenchStyles from "../../index.module.less";
+import { TrackingSelect } from "./TrackingSelect";
 import styles from "./Editor.module.less";
 import {
   EDIT_LABELS,
@@ -93,7 +94,7 @@ export function InsuranceEditor({
           ? `内容超出${MAX_TEXT_LENGTH}字上限，请删减`
           : textLength === MAX_TEXT_LENGTH
           ? `已达${MAX_TEXT_LENGTH}字上限`
-          : `最多可输入${MAX_TEXT_LENGTH}字`}
+          : ""}
       </span>
       <span>
         {textLength} / {MAX_TEXT_LENGTH}
@@ -186,7 +187,6 @@ export function InsuranceEditor({
         <div className={workbenchStyles.dialogBody}>
           {isFollowUp && (
             <>
-              <p>完成触达后，请登记沟通情况。</p>
               <div
                 className={`${workbenchStyles.detailGrid} ${styles.customerInfo}`}
                 aria-label="跟进客户信息"
@@ -239,11 +239,6 @@ export function InsuranceEditor({
                 className={styles.field}
                 name="method"
                 label="触达方式"
-                getValueFromEvent={(event: ChangeEvent<HTMLSelectElement>) =>
-                  event.target.value === ""
-                    ? undefined
-                    : Number(event.target.value)
-                }
                 rules={[
                   {
                     required: true,
@@ -251,40 +246,26 @@ export function InsuranceEditor({
                   },
                 ]}
               >
-                <select aria-required="true">
-                  {entry && entry.method == null && (
-                    <option value="">请选择触达方式</option>
-                  )}
-                  {methods.map((method) => (
-                    <option key={method.value} value={method.value}>
-                      {method.label}
-                    </option>
-                  ))}
-                </select>
+                <TrackingSelect
+                  aria-required="true"
+                  placeholder="请选择触达方式"
+                  options={methods}
+                />
               </Form.Item>
               {isFollowUp && (
                 <Form.Item
                   className={styles.field}
                   name="result"
                   label="触达结果"
-                  getValueFromEvent={(event: ChangeEvent<HTMLSelectElement>) =>
-                    event.target.value === ""
-                      ? undefined
-                      : Number(event.target.value)
-                  }
                   rules={[{ required: true, message: "请选择触达结果" }]}
                 >
-                  <select aria-required="true">
-                    {entry &&
-                      (!("result" in entry) || entry.result == null) && (
-                        <option value="">请选择触达结果</option>
-                      )}
-                    {Object.entries(FOLLOW_UP_RESULTS).map(([value, label]) => (
-                      <option key={value} value={value}>
-                        {label}
-                      </option>
-                    ))}
-                  </select>
+                  <TrackingSelect
+                    aria-required="true"
+                    placeholder="请选择"
+                    options={Object.entries(FOLLOW_UP_RESULTS).map(
+                      ([value, label]) => ({ value: Number(value), label }),
+                    )}
+                  />
                 </Form.Item>
               )}
               <Form.Item
@@ -325,9 +306,6 @@ export function InsuranceEditor({
                   }
                 />
               </Form.Item>
-              {isFollowUp && (
-                <p className={styles.note}>记录按触达时间倒序展示。</p>
-              )}
             </>
           )}
         </div>

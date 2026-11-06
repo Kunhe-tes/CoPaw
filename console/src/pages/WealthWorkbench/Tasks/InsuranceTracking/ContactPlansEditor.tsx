@@ -1,4 +1,3 @@
-import type { ChangeEvent } from "react";
 import { Form } from "antd";
 import { Plus, Trash2 } from "lucide-react";
 import { FOLLOW_UP_METHODS } from "./api";
@@ -7,6 +6,7 @@ import { trackingNow } from "./trackingDate";
 import { LimitedTextarea } from "./LimitedTextarea";
 import { TEXT_LIMIT_RULE } from "./textLimit";
 import workbenchStyles from "../../index.module.less";
+import { TrackingSelect } from "./TrackingSelect";
 import styles from "./ContactPlansEditor.module.less";
 
 /** Form.List 维护单条计划的稳定 key，增删中间项不会串写其他计划。 */
@@ -58,18 +58,16 @@ export function ContactPlansEditor({ disabled }: { disabled: boolean }) {
                   wrapperCol={{ flex: "auto", style: { minWidth: 0 } }}
                   name={[field.name, "method"]}
                   label="触达方式"
-                  getValueFromEvent={(event: ChangeEvent<HTMLSelectElement>) =>
-                    Number(event.target.value)
-                  }
                   rules={[{ required: true, message: "请选择触达方式" }]}
                 >
-                  <select aria-required="true">
-                    {Object.entries(FOLLOW_UP_METHODS).map(([value, label]) => (
-                      <option key={value} value={value}>
-                        {label}
-                      </option>
-                    ))}
-                  </select>
+                  <TrackingSelect
+                    disabled={disabled}
+                    aria-required="true"
+                    placeholder="请选择"
+                    options={Object.entries(FOLLOW_UP_METHODS).map(
+                      ([value, label]) => ({ value: Number(value), label }),
+                    )}
+                  />
                 </Form.Item>
               </div>
               <Form.Item

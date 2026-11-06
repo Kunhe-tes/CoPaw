@@ -5,7 +5,7 @@ import styles from "./LimitedTextarea.module.less";
 
 export function LimitedTextarea({
   autoSize = false,
-  showLimitHint = true,
+  showLimitHint = false,
   ...props
 }: TextareaHTMLAttributes<HTMLTextAreaElement> & {
   autoSize?: boolean;
