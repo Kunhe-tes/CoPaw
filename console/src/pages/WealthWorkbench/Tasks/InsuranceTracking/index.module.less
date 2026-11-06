@@ -1,4 +1,7 @@
 .root {
+  @media (min-width: 1800px) {
+    --tracking-execution-width: 240px;
+  }
   min-width: 0;
   .table .filterTrigger {
     padding-left: 0;
@@ -80,7 +83,7 @@
     }
   }
   .table {
-    min-width: 1140px;
+    min-width: 1125px;
     table-layout: fixed;
     white-space: normal;
     th {
@@ -93,6 +96,8 @@
     }
     td {
       vertical-align: middle;
+      font-weight: 400;
+      line-height: 1.5;
       overflow-wrap: anywhere;
     }
     strong {
@@ -107,6 +112,8 @@
       font-weight: 400;
     }
     p {
+      font: inherit;
+      color: inherit;
       margin: 0;
       white-space: pre-wrap;
     }
@@ -119,6 +126,7 @@
     gap: 12px;
   }
   .records {
+    min-height: calc(3em + 3px);
     width: 100%;
   }
   .record + .record {
@@ -126,23 +134,14 @@
     margin-top: 12px;
     border-top: 1px solid var(--line);
   }
-  .recordHead,
-  .planCell {
+  .recordHead {
     display: flex;
     align-items: flex-start;
     gap: 4px;
   }
-  .recordHead > p,
-  .planCell .preview {
+  .recordHead > p {
     flex: 1;
     min-width: 0;
-  }
-  .recordPreviewHead {
-    gap: 0;
-    .edit {
-      width: 14px;
-      padding: 0;
-    }
   }
   .recordLine {
     flex: 1;
@@ -159,7 +158,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     color: var(--text);
-    font-size: 12px;
+    font: inherit;
     font-variant-numeric: tabular-nums;
   }
   .recordSummary {
@@ -176,18 +175,33 @@
     flex-wrap: wrap;
     align-items: center;
     width: 100%;
-    gap: 8px;
+    gap: 6px;
   }
   .recordButton {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-height: 26px;
-    padding: 3px 6px;
-    gap: 3px;
+    min-height: 30px;
+    padding: 4px 8px;
+    gap: 4px;
     font-size: 12px;
     line-height: 18px;
     white-space: nowrap;
+  }
+  .manageButton {
+    color: #495566;
+    border-color: #d5dce5;
+    background: #fff;
+    svg {
+      width: 14px;
+      height: 14px;
+      flex-shrink: 0;
+    }
+    &:hover:enabled {
+      color: var(--blue);
+      border-color: var(--blue);
+      background: #fff;
+    }
   }
   .history {
     width: min(640px, calc(100vw - 32px));
@@ -213,9 +227,12 @@
     overflow-y: auto;
   }
   .preview {
+    width: 100%;
+    height: calc(3em + 3px);
+    line-height: 1.5;
     display: -webkit-box;
     -webkit-box-orient: vertical;
-    -webkit-line-clamp: 3;
+    -webkit-line-clamp: 2;
     overflow: hidden;
   }
   .date {
@@ -239,6 +256,11 @@
     color: var(--blue);
     border: 1px solid transparent;
     background: transparent;
+    svg {
+      width: 14px;
+      height: 14px;
+      flex-shrink: 0;
+    }
     &:hover:enabled {
       background: var(--wash);
     }
@@ -255,9 +277,9 @@
     font-weight: 400;
   }
   .executionActions {
-    display: grid;
-    grid-template-columns: max-content max-content;
-    gap: 6px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
     button {
       padding: 4px 6px;
       min-width: 0;
@@ -270,8 +292,6 @@
       height: 13px;
     }
     .remove {
-      grid-column: 1 / -1;
-      justify-self: start;
       color: var(--red);
       border-color: #edc7c9;
       background: #fff5f5;
@@ -338,6 +358,8 @@
       font-weight: 600;
     }
     p {
+      font: inherit;
+      color: inherit;
       margin: 0;
       color: var(--text);
       line-height: 1.6;

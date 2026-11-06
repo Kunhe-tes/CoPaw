@@ -81,6 +81,49 @@ beforeEach(() => {
 });
 
 describe("今日任务加载", () => {
+  it.each([
+    { page: "today", customerView: false, columns: 7 },
+    { page: "today", customerView: true, columns: 9 },
+    { page: "pending", customerView: false, columns: 8 },
+    { page: "done", customerView: false, columns: 8 },
+  ] as const)(
+    "$page 客户视角=$customerView 首次加载显示对齐表头的五行骨架，完成后才显示空态",
+    ({ page, customerView, columns }) => {
+      const view = () => (
+        <MemoryRouter>
+          <Tasks page={page} />
+        </MemoryRouter>
+      );
+      // 等待规划期间也使用相同骨架，不提前展示无数据提示。
+      state.plansLoaded = false;
+      const { container, rerender } = render(view());
+      if (customerView)
+        fireEvent.click(screen.getByRole("button", { name: "客户视角" }));
+      const status = screen.getByRole("status");
+      expect(status).toHaveTextContent("客户清单加载中");
+      expect(status.nextElementSibling).toHaveAttribute("aria-busy", "true");
+      expect(screen.queryByText("暂无符合条件的客户")).not.toBeInTheDocument();
+      const headers = container.querySelectorAll("thead th");
+      expect(headers).toHaveLength(columns);
+      const rows = container.querySelectorAll("tbody tr");
+      expect(rows).toHaveLength(5);
+      for (const row of rows) {
+        expect(row).toHaveAttribute("aria-hidden", "true");
+        expect(row.querySelectorAll("td")).toHaveLength(columns);
+        expect(row.querySelector("button, a, input")).toBeNull();
+      }
+
+      state.plansLoaded = true;
+      rerender(view());
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+      expect(
+        container.querySelector('[aria-busy="false"]'),
+      ).toBeInTheDocument();
+      expect(screen.getByText("暂无符合条件的客户")).toBeInTheDocument();
+      expect(container.querySelectorAll("tbody tr")).toHaveLength(1);
+    },
+  );
+
   it.each(["target", "missing"])(
     "规划跳转参数 %s 在规划异步加载后选中对应 ID，无效 ID 回退首项",
     (skillId) => {
@@ -384,6 +427,11 @@ describe("今日任务加载", () => {
         screen.getByText(/待处理/, { selector: "span" }).querySelector("b"),
       ).toHaveTextContent("--");
       expect(screen.getByRole("status")).toHaveTextContent("客户清单加载中");
+      expect(
+        screen
+          .getByRole("table")
+          .querySelectorAll('tbody tr[aria-hidden="true"]'),
+      ).toHaveLength(5);
       expect(screen.queryByText("缓存客户0")).not.toBeInTheDocument();
       expect(screen.getByText("共 -- 条记录")).toBeInTheDocument();
       const loaded = cached

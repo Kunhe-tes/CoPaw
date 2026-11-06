@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Alert, Button, Empty, Input, Select, Skeleton, Tooltip } from "antd";
-import { PencilLine, RotateCw } from "lucide-react";
+import { PencilLine, RotateCw, UserMinus } from "lucide-react";
 import {
   fetchInsuranceTracking,
   saveInsuranceChange,
@@ -488,9 +488,17 @@ export function InsuranceTracking({
               className={`${workbenchStyles.customerTable} ${styles.table}`}
             >
               <colgroup>
-                {[80, 85, 135, 170, 195, 90, 105, 100, 180].map(
+                {[80, 85, 115, 185, 185, 90, 105, 100, 180].map(
                   (width, index) => (
-                    <col key={index} style={{ width }} />
+                    <col
+                      key={index}
+                      style={{
+                        width:
+                          index === 8
+                            ? "var(--tracking-execution-width, 180px)"
+                            : width,
+                      }}
+                    />
                   ),
                 )}
               </colgroup>
@@ -551,10 +559,12 @@ export function InsuranceTracking({
                       <strong>
                         {customer.assets === "" ? "—" : customer.assets ?? "—"}
                       </strong>
-                      <small>{customer.assetsDescription || ""}</small>
+                      {customer.assetsDescription?.trim() && (
+                        <small>{customer.assetsDescription}</small>
+                      )}
                     </td>
                     <td>
-                      <div className={styles.planCell}>
+                      <div className={styles.cell}>
                         <Tooltip
                           title={customer.insurancePlan}
                           trigger={["hover", "focus"]}
@@ -566,22 +576,28 @@ export function InsuranceTracking({
                             {customer.insurancePlan || "暂无保险计划"}
                           </p>
                         </Tooltip>
-                        <Tooltip title="编辑" trigger={["hover", "focus"]}>
-                          <button
-                            type="button"
-                            className={`${workbenchStyles.btn} ${styles.edit}`}
-                            disabled={
-                              pending.has(customer.id) ||
-                              needsRefresh.has(customer.id)
-                            }
-                            aria-label={`编辑${customer.name}的保险计划`}
-                            onClick={() =>
-                              openEditor(customer, "insurancePlan")
-                            }
+                        <div className={styles.recordActions}>
+                          <Tooltip
+                            title="编辑保险计划"
+                            trigger={["hover", "focus"]}
                           >
-                            <PencilLine size={14} aria-hidden />
-                          </button>
-                        </Tooltip>
+                            <button
+                              type="button"
+                              className={`${workbenchStyles.btn} ${styles.recordButton} ${styles.manageButton}`}
+                              disabled={
+                                pending.has(customer.id) ||
+                                needsRefresh.has(customer.id)
+                              }
+                              aria-label={`编辑${customer.name}的保险计划`}
+                              onClick={() =>
+                                openEditor(customer, "insurancePlan")
+                              }
+                            >
+                              <PencilLine size={14} aria-hidden />
+                              编辑
+                            </button>
+                          </Tooltip>
+                        </div>
                       </div>
                     </td>
                     <td>
@@ -685,7 +701,8 @@ export function InsuranceTracking({
                           }
                           onClick={() => setRemoving(customer)}
                         >
-                          移除跟踪
+                          <UserMinus size={13} aria-hidden />
+                          移除
                         </button>
                       </div>
                       {needsRefresh.has(customer.id) && (
