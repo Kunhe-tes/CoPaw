@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Alert, Button, Empty, Input, Select, Skeleton, Tooltip } from "antd";
-import { PencilLine, RotateCw, UserMinus } from "lucide-react";
+import { Alert, Button, Empty, Input, Select, Tooltip } from "antd";
+import { RotateCw } from "lucide-react";
 import {
   fetchInsuranceTracking,
   saveInsuranceChange,
@@ -19,6 +19,8 @@ import {
 } from "./api";
 import { InsuranceEditor } from "./Editor";
 import { RecordCell } from "./RecordCell";
+import { InsuranceListSkeleton } from "./InsuranceListSkeleton";
+import skeletonStyles from "../CustomerListSkeleton.module.less";
 import { RemoveTracking } from "./RemoveTracking";
 import { TableHeading } from "./TableHeading";
 import { orderCustomers, type ListSort, type SortKey } from "./listOrder";
@@ -49,10 +51,26 @@ function editTarget(change: InsuranceEditorChange) {
     : `${change.kind}-${change.recordId ?? "new"}`;
 }
 
-function sortRecords<T extends { id: string; date: string }>(entries: T[]) {
-  return [...entries].sort((a, b) =>
-    b.date.replace(" ", "T").localeCompare(a.date.replace(" ", "T")),
+function recordTimestamp(date: string) {
+  const normalized = date.replace(" ", "T");
+  const timestamp = Date.parse(
+    normalized.length === 10 ? `${normalized}T00:00:00` : normalized,
   );
+  return Number.isNaN(timestamp) ? Number.NEGATIVE_INFINITY : timestamp;
+}
+
+function sortRecords<T extends { id: string; date: string }>(
+  entries: T[],
+  preferredIds: string[] = [],
+) {
+  return [...entries].sort((a, b) => {
+    const left = recordTimestamp(a.date);
+    const right = recordTimestamp(b.date);
+    if (left !== right) return right - left;
+    return (
+      Number(preferredIds.includes(b.id)) - Number(preferredIds.includes(a.id))
+    );
+  });
 }
 
 export function InsuranceTracking({
@@ -229,12 +247,15 @@ export function InsuranceTracking({
     const optimisticValue =
       change.kind === "insurancePlan"
         ? change.value
-        : sortRecords([
-            ...(
-              (row[field] ?? []) as (ContactRecord | FollowUpRecord)[]
-            ).filter((entry) => entry.id !== optimisticId),
-            { ...change.value, id: optimisticId },
-          ]);
+        : sortRecords(
+            [
+              ...(
+                (row[field] ?? []) as (ContactRecord | FollowUpRecord)[]
+              ).filter((entry) => entry.id !== optimisticId),
+              { ...change.value, id: optimisticId },
+            ],
+            [optimisticId],
+          );
     apply(
       optimisticValue,
       change.kind === "followUp" ? change.value.result : row.touched,
@@ -245,7 +266,15 @@ export function InsuranceTracking({
       .then((record) => {
         if (!record || change.kind === "insurancePlan") return;
         if ("records" in record) {
-          apply(record.records, record.touched);
+          const previousIds = new Set(
+            Array.isArray(previous) ? previous.map((entry) => entry.id) : [],
+          );
+          const preferredIds = change.recordId
+            ? [change.recordId]
+            : record.records
+                .filter((entry) => !previousIds.has(entry.id))
+                .map((entry) => entry.id);
+          apply(sortRecords(record.records, preferredIds), record.touched);
           return;
         }
         setData((current) => ({
@@ -257,12 +286,18 @@ export function InsuranceTracking({
                   ...(change.kind === "followUp"
                     ? { touched: change.value.result }
                     : {}),
-                  [field]: sortRecords([
-                    ...(
-                      (item[field] ?? []) as (ContactRecord | FollowUpRecord)[]
-                    ).filter((entry) => entry.id !== optimisticId),
-                    record,
-                  ]),
+                  [field]: sortRecords(
+                    [
+                      ...(
+                        (item[field] ?? []) as (
+                          | ContactRecord
+                          | FollowUpRecord
+                        )[]
+                      ).filter((entry) => entry.id !== optimisticId),
+                      record,
+                    ],
+                    [record.id],
+                  ),
                 }
               : item,
           ),
@@ -304,7 +339,7 @@ export function InsuranceTracking({
         ...(row.followUps ?? []).map((entry) => entry.content),
       ].some((value) => value?.toLocaleLowerCase().includes(query)),
   );
-  const rows = orderCustomers(filtered, sort);
+  const rows = loading ? [] : orderCustomers(filtered, sort);
   const toggleSort = (key: SortKey) => {
     setSort((current) =>
       current?.key !== key
@@ -442,15 +477,7 @@ export function InsuranceTracking({
           }
         />
       ))}
-      {loading ? (
-        <div
-          className={styles.loading}
-          role="status"
-          aria-label="正在加载保险跟踪"
-        >
-          <Skeleton active paragraph={{ rows: 5 }} />
-        </div>
-      ) : error ? (
+      {!loading && error ? (
         <div className={styles.error} role="alert">
           <strong>{error}</strong>
           <p>请检查网络连接后重试。</p>
@@ -458,7 +485,7 @@ export function InsuranceTracking({
             重新加载
           </Button>
         </div>
-      ) : !data.customers.length ? (
+      ) : !loading && !data.customers.length ? (
         <div className={styles.initialEmpty} role="status">
           <h3>暂未添加跟踪客户</h3>
           <p>
@@ -478,17 +505,27 @@ export function InsuranceTracking({
         </div>
       ) : (
         <>
+          {loading && (
+            <span
+              className={skeletonStyles.status}
+              role="status"
+              aria-label="正在加载保险跟踪"
+            >
+              正在加载保险跟踪…
+            </span>
+          )}
           <div
             className={`${workbenchStyles.tableWrap} ${styles.tableScroll}`}
             tabIndex={0}
             role="region"
             aria-label="保险核心跟踪客户表，可横向滚动"
+            aria-busy={loading}
           >
             <table
               className={`${workbenchStyles.customerTable} ${styles.table}`}
             >
               <colgroup>
-                {[80, 85, 115, 185, 185, 90, 105, 100, 180].map(
+                {[80, 85, 100, 180, 185, 90, 105, 95, 180].map(
                   (width, index) => (
                     <col
                       key={index}
@@ -552,6 +589,7 @@ export function InsuranceTracking({
                 </tr>
               </thead>
               <tbody>
+                {loading && <InsuranceListSkeleton />}
                 {rows.map((customer) => (
                   <tr key={customer.id}>
                     <td className={workbenchStyles.name}>{customer.name}</td>
@@ -593,14 +631,13 @@ export function InsuranceTracking({
                                 openEditor(customer, "insurancePlan")
                               }
                             >
-                              <PencilLine size={14} aria-hidden />
                               编辑
                             </button>
                           </Tooltip>
                         </div>
                       </div>
                     </td>
-                    <td>
+                    <td className={styles.contactPlan}>
                       <RecordCell
                         entries={customer.contactPlans ?? []}
                         kind="contactPlan"
@@ -701,7 +738,6 @@ export function InsuranceTracking({
                           }
                           onClick={() => setRemoving(customer)}
                         >
-                          <UserMinus size={13} aria-hidden />
                           移除
                         </button>
                       </div>
@@ -715,7 +751,7 @@ export function InsuranceTracking({
                 ))}
               </tbody>
             </table>
-            {!rows.length && (
+            {!loading && !rows.length && (
               <Empty
                 className={styles.empty}
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
@@ -729,7 +765,7 @@ export function InsuranceTracking({
           </div>
           <div className={workbenchStyles.pagination}>
             <span className={workbenchStyles.total}>
-              共 {filtered.length} 条记录
+              共 {loading ? "--" : filtered.length} 条记录
             </span>
           </div>
         </>

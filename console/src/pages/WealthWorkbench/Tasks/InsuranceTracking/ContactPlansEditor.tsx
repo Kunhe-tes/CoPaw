@@ -1,5 +1,5 @@
 import { Form } from "antd";
-import { Plus, Trash2 } from "lucide-react";
+import { Trash2 } from "lucide-react";
 import { FOLLOW_UP_METHODS } from "./api";
 import { TrackingDatePicker } from "./TrackingDatePicker";
 import { trackingNow } from "./trackingDate";
@@ -101,7 +101,6 @@ export function ContactPlansEditor({ disabled }: { disabled: boolean }) {
             disabled={disabled}
             onClick={() => add({ date: trackingNow(), method: 0, content: "" })}
           >
-            <Plus size={14} aria-hidden />
             新增接触计划
           </button>
         </section>
