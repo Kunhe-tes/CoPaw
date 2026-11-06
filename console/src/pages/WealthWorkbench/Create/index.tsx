@@ -2,7 +2,7 @@
  * 智能财富工作台 —— 创建计划页（新建 / 修改工作规划）
  * 对应原型 createHTML：场景选择、方向与排程配置、规划名称、
  * 分发目标（仅支行行长/分行中台）、发布确认。
- * 执行排程与控制台定时任务同一模型，自定义规则在提交前转换为 cron。
+ * 执行频率与控制台定时任务同一模型，自定义规则在提交前转换为 cron。
  */
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -58,7 +58,7 @@ const STEP_DEFS = [
   {
     n: 3,
     title: "任务周期与排程",
-    sub: "按场景设置有效期与执行排程",
+    sub: "按场景设置有效期与执行频率",
     target: "direction",
   },
 ] as const;
@@ -861,7 +861,7 @@ export default function Create() {
               <p style={{ margin: 0 }}>
                 任务周期：{x.cycle}（{x.start} 至 {x.end}）
                 <br />
-                执行排程：
+                执行频率：
                 {x.schedule.type === "custom"
                   ? customScheduleLabel(x.schedule.rawCron)
                   : scheduleLabel(x.schedule)}
@@ -1202,9 +1202,9 @@ export default function Create() {
                 />
               </div>
             </div>
-            <p className={styles.pageNote}>
-              任务周期是场景的有效期，执行排程决定定时任务的触发节奏（每小时/每日/每周/自定义）；经营名单生成后自动下发。
-            </p>
+            {/* <p className={styles.pageNote}>
+              任务周期是场景的有效期，执行频率决定定时任务的触发节奏（每小时/每日/每周/自定义）；经营名单生成后自动下发。
+            </p> */}
           </section>
 
           {needsTargets && (

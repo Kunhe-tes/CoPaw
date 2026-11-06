@@ -60,7 +60,7 @@ export interface PlanItem {
   cycle: string;
   start?: string;
   end?: string;
-  /** 执行排程：与控制台定时任务同一模型（hourly/daily/weekly/custom） */
+  /** 执行频率：与控制台定时任务同一模型（hourly/daily/weekly/custom） */
   schedule: CronParts;
   /** 行长督办策略，随规划接口保存和回显。 */
   monitoring?: SceneMonitoring;

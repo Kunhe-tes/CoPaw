@@ -1,6 +1,5 @@
 import { useId, useLayoutEffect, useRef, useState } from "react";
 import { Tooltip } from "antd";
-import { PencilLine } from "lucide-react";
 import {
   EDIT_LABELS,
   FOLLOW_UP_RESULTS,
@@ -60,7 +59,7 @@ function RecordText({
             onClick={onEdit}
             aria-label={`编辑${customerName}的${EDIT_LABELS[kind]} ${entry.date}`}
           >
-            <PencilLine size={14} aria-hidden />
+            编辑
           </button>
         </Tooltip>
       </div>
@@ -213,7 +212,6 @@ export function RecordCell({
           aria-label={`新增${customerName}的${EDIT_LABELS[kind]}`}
           onClick={onAdd}
         >
-          <span aria-hidden="true">+</span>{" "}
           {kind === "contactPlan" ? "新增计划" : "新增记录"}
         </button>
         {entries.length > 0 && (
@@ -229,7 +227,6 @@ export function RecordCell({
               aria-label={`查看${customerName}的全部${EDIT_LABELS[kind]}`}
               onClick={() => setHistory(true)}
             >
-              <PencilLine size={14} aria-hidden />
               {entries.length > 1 ? `编辑 (${entries.length})` : "编辑"}
             </button>
           </Tooltip>

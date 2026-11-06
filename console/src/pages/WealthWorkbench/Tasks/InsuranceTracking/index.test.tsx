@@ -274,6 +274,102 @@ it("编辑旧跟进按记录ID保存，乐观重排，回填服务端数据且�
   ).toHaveLength(50);
 }, 20000);
 
+it.each([
+  { kind: "contactPlan", edit: false },
+  { kind: "contactPlan", edit: true },
+  { kind: "followUp", edit: false },
+  { kind: "followUp", edit: true },
+] as const)(
+  "$kind 编辑=$edit 时间相同时优先展示本次记录，回查旧记录在前也不改变首条",
+  async ({ kind, edit }) => {
+    const data = fixture();
+    const followUp = kind === "followUp";
+    const label = followUp ? "跟进记录" : "接触计划";
+    const date = followUp ? "2026-11-05T14:30" : "2026-11-05";
+    const entries = [
+      {
+        id: "old",
+        date: followUp ? `${date}:00` : date,
+        method: 2 as const,
+        content: "同时间的旧记录",
+        result: 0 as const,
+        skillId: "insurance-skill",
+        sceneName: "保险初筛识别",
+      },
+      {
+        id: "edited",
+        date,
+        method: 2 as const,
+        content: "待编辑记录",
+        result: 0 as const,
+        skillId: "insurance-skill",
+        sceneName: "保险初筛识别",
+      },
+    ];
+    data.customers[0][followUp ? "followUps" : "contactPlans"] = entries;
+    vi.mocked(fetchInsuranceTracking).mockResolvedValue(data);
+    let resolve!: (
+      value: Awaited<ReturnType<typeof saveInsuranceChange>>,
+    ) => void;
+    vi.mocked(saveInsuranceChange).mockImplementationOnce(
+      () =>
+        new Promise((yes) => {
+          resolve = yes;
+        }),
+    );
+    await show();
+    if (edit) {
+      click(actionButton(`查看林芳的全部${label}`));
+      const buttons = within(screen.getByRole("dialog")).getAllByRole(
+        "button",
+        { name: new RegExp(`编辑林芳的${label}`) },
+      );
+      click(buttons[1]);
+    } else {
+      click(actionButton(`新增林芳的${label}`));
+    }
+    fireEvent.change(
+      screen.getByLabelText(followUp ? "触达时间" : "接触日期"),
+      { target: { value: date } },
+    );
+    fireEvent.change(
+      screen.getByLabelText(followUp ? /沟通记录/ : "接触安排"),
+      { target: { value: "本次最新记录" } },
+    );
+    click(actionButton(followUp ? "保存记录" : "保存"));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(screen.getByText("本次最新记录")).toBeInTheDocument();
+      expect(screen.queryByText("同时间的旧记录")).not.toBeInTheDocument();
+    });
+    const saved = {
+      ...entries[1],
+      id: edit ? "edited" : "server-new",
+      date: followUp ? `${date}:00` : date,
+      content: "本次最新记录",
+    };
+    await act(async () =>
+      resolve(
+        edit && !followUp
+          ? saved
+          : {
+              records: [entries[0], ...(edit ? [] : [entries[1]]), saved],
+              touched: 0,
+            },
+      ),
+    );
+    expect(screen.getByText("本次最新记录")).toBeInTheDocument();
+    expect(screen.queryByText("同时间的旧记录")).not.toBeInTheDocument();
+    click(actionButton(`查看林芳的全部${label}`));
+    const records = within(screen.getByRole("dialog")).getAllByRole("button", {
+      name: new RegExp(`编辑林芳的${label}`),
+    });
+    expect(records).toHaveLength(edit ? 2 : 3);
+    expect(records[0]).toHaveAccessibleName(`编辑林芳的${label} ${saved.date}`);
+  },
+  20000,
+);
+
 it("新增计划保留旧记录，成功用服务端ID回填，继续编辑时提交正式ID", async () => {
   const data = manyRecords();
   const saved = {
@@ -635,6 +731,74 @@ it("本地搜索不改动全量统计，清空搜索后恢复客户", async () =
     target: { value: "" },
   });
   expect(screen.getByText("王海")).toBeInTheDocument();
+});
+
+it.each([false, true])("表格骨架保留九列表头，空名单=%s", async (empty) => {
+  let resolve!: (value: InsuranceList) => void;
+  vi.mocked(fetchInsuranceTracking).mockImplementationOnce(
+    () =>
+      new Promise((yes) => {
+        resolve = yes;
+      }),
+  );
+  render(
+    <InsuranceTracking
+      refreshKey={0}
+      onExecute={execute}
+      onShowScheme={showScheme}
+    />,
+  );
+  const table = screen.getByRole("table");
+  expect(
+    screen.getAllByRole("columnheader").map((header) => header.textContent),
+  ).toEqual([
+    "客户姓名",
+    "资产",
+    "保险计划",
+    "接触计划",
+    "跟进记录",
+    "触达结果",
+    "客户意向度",
+    "经营方案",
+    "执行",
+  ]);
+  const region = screen.getByRole("region", {
+    name: "保险核心跟踪客户表，可横向滚动",
+  });
+  expect(region).toHaveAttribute("aria-busy", "true");
+  expect(
+    screen.getByRole("status", { name: "正在加载保险跟踪" }),
+  ).toHaveTextContent("正在加载保险跟踪");
+  expect(screen.getByText("共 -- 条记录")).toBeInTheDocument();
+  expect(screen.queryByText("暂未添加跟踪客户")).not.toBeInTheDocument();
+  const rows = table.querySelectorAll("tbody tr");
+  expect(rows).toHaveLength(5);
+  for (const row of rows) {
+    expect(row).toHaveAttribute("aria-hidden", "true");
+    expect(row.querySelectorAll("td")).toHaveLength(9);
+    expect(row.querySelector("button, input, select, a")).toBeNull();
+  }
+  const columns = table.querySelector("colgroup")?.innerHTML;
+  const data = empty
+    ? { customers: [], counts: { customers: 0, highIntention: 0, tracking: 0 } }
+    : fixture();
+  await act(async () => resolve(data));
+  expect(
+    screen.queryByRole("status", { name: "正在加载保险跟踪" }),
+  ).not.toBeInTheDocument();
+  if (empty) {
+    expect(screen.getByText("暂未添加跟踪客户")).toBeInTheDocument();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  } else {
+    expect(screen.getByRole("table")).toBe(table);
+    expect(table.querySelector("colgroup")?.innerHTML).toBe(columns);
+    expect(region).toHaveAttribute("aria-busy", "false");
+    expect(screen.getByText("林芳")).toBeInTheDocument();
+    expect(table.querySelectorAll('tbody tr[aria-hidden="true"]')).toHaveLength(
+      0,
+    );
+    expect(screen.getByText("共 2 条记录")).toBeInTheDocument();
+  }
 });
 
 it("加载失败不展示虚构数据，支持重试和真实空名单", async () => {
