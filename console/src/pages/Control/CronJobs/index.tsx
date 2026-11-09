@@ -452,6 +452,7 @@ function CronJobsPage() {
             <SelectedMigration
               selectedIds={migrationSelection}
               clearSelection={clearMigrationSelection}
+              refreshJobs={fetchJobs}
             />
             <Button type="primary" onClick={handleCreate}>
               + {t("cronJobs.createJob")}

@@ -12,10 +12,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ...config import utils as config_utils
 from ...runtime_workers import run_runtime_state_work
-from .managed_api import _identity
+from .managed_api import ResourceRequest, _identity, _locked_operation
 from .managed_diagnostics import format_storage_error
 from .migration_source import capture_loaded_states
-from .selected_migration_source import read_member
+from .selected_migration_source import read_member, stop_legacy_member
 
 router = APIRouter(
     prefix="/internal/cron/managed",
@@ -27,6 +27,32 @@ logger = logging.getLogger(__name__)
 class SnapshotRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     job_id: str = Field(min_length=1, max_length=128)
+
+
+@router.post("/migration-stop-legacy")
+async def migration_stop_legacy(request: Request, body: ResourceRequest):
+    actor, tenant, source, agent = _identity(request)
+    async with _locked_operation(request, body) as operation:
+        if (
+            operation["action"] != "migrate"
+            or operation["status"] != "running"
+            or operation["actor_id"] != actor
+            or not operation["_migration"]
+        ):
+            raise HTTPException(404, "cron_operation_not_found")
+        try:
+            await stop_legacy_member(
+                config_utils.WORKING_DIR,
+                (tenant, source, agent, body.job_id),
+                body.operation_id,
+                json.loads(operation["payload_json"]),
+            )
+        except ValueError as exc:
+            code = str(exc)
+            if not code.startswith("cron_migration_"):
+                code = "cron_migration_legacy_file_changed"
+            raise HTTPException(409, code) from exc
+    return {"stopped": True}
 
 
 def _row_identity(row, key):
@@ -58,8 +84,10 @@ async def _member(db, key, loaded, row):
     if row.get("creator_user_id") != definition["creator_user_id"]:
         raise ValueError("cron_migration_owner_conflict")
     for field in ("task_chat_id", "task_session_id"):
-        if row.get(field) != state.get(field) or not state.get(field):
-            raise ValueError("cron_migration_binding_conflict")
+        if row.get(field) != state.get(field):
+            result["warnings"].append(
+                f"cron_migration_binding_conflict:{key[3]}:swe_cron_jobs:{field}",
+            )
     watermark = await db.fetch_one(
         "SELECT MAX(id) AS max_id FROM swe_cron_executions WHERE job_id=%s AND tenant_id=%s",
         (key[3], key[0]),
@@ -123,15 +151,15 @@ async def snapshot_group(db, key, actor, manager, loaded):
     mode = await _mode(db, key, parent)
     parent["state"]["dispatch_state"] = mode
     children = await db.fetch_all(
-        "SELECT * FROM swe_cron_jobs WHERE source_id=%s AND deleted_at IS NULL "
+        "SELECT * FROM swe_cron_jobs WHERE source_id=%s "
+        "AND source_id COLLATE utf8mb4_bin=%s AND deleted_at IS NULL "
         "AND JSON_UNQUOTE(JSON_EXTRACT(CASE WHEN JSON_VALID(meta) THEN meta ELSE '{}' END, "
         "'$.broadcast_source_job_id'))=%s ORDER BY id",
-        (key[1], key[3]),
+        (key[1], key[1], key[3]),
     )
     members = [parent]
     for child in children:
         meta = json.loads(child.get("meta") or "{}")
-        _parent_relation(meta, key)
         child_key = (
             child["tenant_id"],
             child["source_id"],
@@ -139,16 +167,7 @@ async def snapshot_group(db, key, actor, manager, loaded):
             child["id"],
         )
         member = await _member(db, child_key, loaded, child)
-        _parent_relation(member["definition"]["spec_json"]["meta"], key)
-        member["definition"].update(
-            {
-                f"parent_{name}": value
-                for name, value in zip(
-                    ("tenant_id", "source_id", "agent_id", "job_id"),
-                    key,
-                )
-            },
-        )
+        _set_parent(member, key, meta)
         member["state"]["dispatch_state"] = mode
         members.append(member)
     return {
@@ -158,17 +177,25 @@ async def snapshot_group(db, key, actor, manager, loaded):
     }
 
 
-def _parent_relation(meta, key):
-    # Old broadcast writes only parent tenant/job. Source and Agent are the
-    # selected source/Agent, verified again against each actual workspace file.
-    actual = (
-        meta.get("broadcast_source_tenant_id"),
-        meta.get("broadcast_source_source_id", key[1]),
-        meta.get("broadcast_source_agent_id", key[2]),
-        meta.get("broadcast_source_job_id"),
-    )
-    if actual != key:
-        raise ValueError("cron_migration_parent_conflict")
+def _set_parent(member, key, old_meta):
+    definition = member["definition"]
+    spec_meta = definition["spec_json"]["meta"]
+    for name, value in zip(
+        ("tenant_id", "source_id", "agent_id", "job_id"),
+        key,
+    ):
+        field = f"broadcast_source_{name}"
+        default = value if name in {"source_id", "agent_id"} else None
+        for origin, meta in (
+            ("swe_cron_jobs", old_meta),
+            ("jobs.json", spec_meta),
+        ):
+            if meta.get(field, default) != value:
+                member["warnings"].append(
+                    f"cron_migration_parent_conflict:{definition['job_id']}:{origin}:{field}",
+                )
+        spec_meta[field] = value
+        definition[f"parent_{name}"] = value
 
 
 async def _mode(db, key, parent):

@@ -27,6 +27,20 @@ export interface MigrationProgress {
     skipped_count?: number;
   }[];
 }
+export interface ChannelMigrationJob {
+  job_id: string;
+  name: string;
+  tenant_id: string;
+  source_id: string;
+  agent_id: string | null;
+  parent_job_id: string | null;
+  migration_status: string;
+}
+export interface ChannelMigrationOperation extends MigrationProgress {
+  tenant_id: string;
+  agent_id: string;
+  can_confirm: boolean;
+}
 const ROOT = "/scheduler/cron/migrations";
 function call<T>(
   context: ManagedCronContext,
@@ -39,6 +53,21 @@ function call<T>(
   });
 }
 export const cronMigrationApi = {
+  channelJobs: (context: ManagedCronContext, params: URLSearchParams, signal?: AbortSignal) =>
+    call<{ items: ChannelMigrationJob[]; next_cursor: string | null }>(
+      context, `/channel/jobs?${params}`, { signal },
+    ),
+  channelRecent: (context: ManagedCronContext, signal?: AbortSignal) =>
+    call<{ items: ChannelMigrationOperation[] }>(context, "/channel/operations", { signal }),
+  channelSubmit: (context: ManagedCronContext, jobIds: string[], requestId: string) =>
+    call<{ items: MigrationProgress[] }>(context, "/channel/operations", {
+      method: "POST",
+      body: JSON.stringify({ job_ids: jobIds, request_id: requestId }),
+    }),
+  channelConfirm: (context: ManagedCronContext, operationId: string) =>
+    call<MigrationProgress>(context, `/channel/operations/${encodeURIComponent(operationId)}/confirm`, {
+      method: "POST",
+    }),
   submit: (context: ManagedCronContext, jobIds: string[], requestId: string) =>
     call<MigrationProgress>(context, "", {
       method: "POST",

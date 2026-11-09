@@ -19,9 +19,11 @@ const labels: Record<string, string> = {
 export default function SelectedMigration({
   selectedIds,
   clearSelection,
+  refreshJobs,
 }: {
   selectedIds: string[];
   clearSelection: () => void;
+  refreshJobs?: () => void;
 }) {
   useAgentStore((state) => state.selectedAgent);
   useIframeStore((state) => state.userId);
@@ -42,7 +44,15 @@ export default function SelectedMigration({
   const submission = useRef<{ selection: string; id: string } | null>(null);
   const progressId = progress?.operation_id;
   const progressStatus = progress?.status;
+  const refresh = useRef(refreshJobs);
+  refresh.current = refreshJobs;
+  const migrated = progress?.groups.some((group) => group.status === "completed");
   const valid = (key: string) => mounted.current && key === latestScope.current;
+
+  useEffect(() => {
+    if (migrated && ["completed", "failed"].includes(progressStatus ?? ""))
+      refresh.current?.();
+  }, [migrated, progressStatus, progressId]);
 
   useEffect(() => {
     mounted.current = true;
@@ -168,7 +178,7 @@ export default function SelectedMigration({
           <Alert
             type="warning"
             showIcon
-            message="保留原任务和会话 ID；父任务将连同全部子任务迁移。旧入口不会自动关闭，请另行处理，避免重复执行。"
+            message="保留原任务和会话 ID；父任务连同子任务迁移。确认后先暂停已识别的旧平台定时器，再切换新版；已入队或运行中的任务不取消。"
           />
           <Typography.Text type="secondary">
             每次最多选择 100
@@ -236,11 +246,20 @@ export default function SelectedMigration({
                   },
                   {
                     title: "说明",
-                    render: (_, row) =>
-                      row.error_code ||
-                      (row.warnings?.includes("memory_state_missing")
-                        ? "当前实例无内存状态，使用可恢复快照"
-                        : "—"),
+                    render: (_, row) => {
+                      const warnings = (row.warnings ?? []).map((warning) => {
+                        if (warning === "memory_state_missing")
+                          return "当前实例无内存状态，使用可恢复快照";
+                        const [code, job, origin, field] = warning.split(":");
+                        if (code === "cron_migration_binding_conflict")
+                          return `${job}：${origin} 的 ${field} 不一致，采用 jobs.json`;
+                        if (code === "cron_migration_parent_conflict")
+                          return `${job}：${origin} 的 ${field} 不一致，采用本组父任务 ${row.job_id}`;
+                        return warning;
+                      });
+                      const lines = [row.error_code, ...warnings].filter(Boolean);
+                      return lines.length ? lines.map((line) => <div key={line}>{line}</div>) : "—";
+                    },
                   },
                 ]}
               />

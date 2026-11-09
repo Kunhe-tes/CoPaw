@@ -15,6 +15,7 @@ import Chat from "../../pages/Chat";
 import ChannelsPage from "../../pages/Control/Channels";
 import SessionsPage from "../../pages/Control/Sessions";
 import CronJobsPage from "../../pages/Control/CronJobs";
+import ChannelCronMigration from "../../pages/Control/ChannelCronMigration";
 import SchedulerCronJobsPage from "../../pages/Control/SchedulerCronJobs";
 import FeaturedCasesPage from "../../pages/Control/FeaturedCases";
 import ScenarioPresetsPage from "../../pages/Control/ScenarioPresets";
@@ -61,6 +62,7 @@ const pathToKey: Record<string, string> = {
   "/channels": "channels",
   "/sessions": "sessions",
   "/cron-jobs": "cron-jobs",
+  "/channel-cron-migration": "channel-cron-migration",
   "/scheduler-cron-jobs": "scheduler-cron-jobs",
   "/greeting-management": "greeting-management",
   "/featured-cases-management": "featured-cases-management",
@@ -173,6 +175,7 @@ export default function MainLayout() {
               <Route path="/channels" element={<ChannelsPage />} />
               <Route path="/sessions" element={<SessionsPage />} />
               <Route path="/cron-jobs" element={<CronJobsPage />} />
+              <Route path="/channel-cron-migration" element={<ChannelCronMigration />} />
               <Route
                 path="/scheduler-cron-jobs"
                 element={<SchedulerCronJobsPage />}

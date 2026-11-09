@@ -76,6 +76,11 @@ def member(job, tenant="alice", parent=None):
 class Source:
     def __init__(self, groups):
         self.groups = groups
+        self.stopped = []
+
+    async def migration_stop_legacy(self, operation, caller):
+        self.stopped.append((caller.tenant_id, operation["job_id"]))
+        return {"stopped": True}
 
     async def migration_snapshot(self, caller, job_id):
         return copy.deepcopy(
@@ -92,6 +97,13 @@ def setup():
     )
 
     db, platform = ExecutionDatabase(), PlatformClient()
+    db.conn.executescript("""
+        CREATE TABLE swe_cron_dispatch_batches (
+            batch_id TEXT, tenant_id TEXT, source_id TEXT, agent_id TEXT,
+            parent_job_id TEXT
+        );
+        CREATE TABLE swe_cron_dispatch_intents (batch_id TEXT, status TEXT);
+    """)
     caller = CallerIdentity("alice", "bank", "default", "alice")
     source = Source(
         {
@@ -103,6 +115,178 @@ def setup():
     )
     service = SelectedMigrationService(db, source, platform)
     return db, platform, caller, service
+
+
+@pytest.mark.asyncio
+async def test_old_batch_must_drain_before_file_stop_and_platform_enable():
+    db, platform, caller, service = setup()
+    try:
+        for member in service.source.groups["parent"]:
+            member["state"]["dispatch_state"] = "batch_enabled"
+        db.conn.execute(
+            "INSERT INTO swe_cron_dispatch_batches VALUES "
+            "('old-batch','alice','bank','default','parent')",
+        )
+        db.conn.execute(
+            "INSERT INTO swe_cron_dispatch_intents VALUES ('old-batch','pending')",
+        )
+        batch = await service.submit(
+            caller,
+            {"request_id": "drain", "job_ids": ["parent"]},
+        )
+        op = batch["operation_id"]
+        await service.run(caller, op)
+        await service.confirm(caller, op)
+        await service.run(caller, op)
+        result = await service.get(caller, op)
+        assert (
+            result["groups"][0]["error_code"]
+            == "cron_migration_legacy_batch_not_drained"
+        )
+        assert not service.source.stopped
+        assert "enable" not in platform.calls
+        db.conn.execute(
+            "UPDATE swe_cron_dispatch_intents SET status='completed'",
+        )
+        await service.confirm(caller, op)
+        await service.run(caller, op)
+        assert (await service.get(caller, op))["status"] == "completed"
+        assert set(service.source.stopped) == {
+            ("alice", "parent"),
+            ("bob", "child"),
+        }
+        assert platform.calls.count("register") == 1
+    finally:
+        db.conn.close()
+
+
+@pytest.mark.asyncio
+async def test_channel_migration_lists_own_source_and_keeps_real_actor():
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from scheduler.app.routers import selected_cron_migration as api
+
+    db, _, _, service = setup()
+    app = FastAPI()
+    app.include_router(api.router, prefix="/api")
+    app.dependency_overrides[api.management_database] = lambda: db
+    app.dependency_overrides[api.migration_service] = lambda: service
+    db.conn.executemany(
+        "INSERT INTO swe_cron_jobs (id,tenant_id,source_id,name,meta) "
+        "VALUES (?,?,?,?,?)",
+        [
+            ("parent", "alice", "bank", "父任务", '{"agent_id":"default"}'),
+            (
+                "independent",
+                "bob",
+                "bank",
+                "独立任务",
+                '{"agent_id":"default"}',
+            ),
+            ("outside", "eve", "other", "其他渠道", '{"agent_id":"default"}'),
+        ],
+    )
+    path = "/api/scheduler/cron/migrations/channel"
+    headers = {"X-User-Id": "admin-user", "X-Source-Id": "bank"}
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            assert (
+                await client.get(f"{path}/jobs", headers=headers)
+            ).status_code == 403
+            headers["X-User-Role"] = "manager"
+            response = await client.get(f"{path}/jobs", headers=headers)
+            assert response.status_code == 200
+            assert {item["job_id"] for item in response.json()["items"]} == {
+                "parent",
+                "independent",
+            }
+            submitted = await client.post(
+                f"{path}/operations",
+                headers=headers,
+                json={"request_id": "admin", "job_ids": ["parent"]},
+            )
+            assert submitted.status_code == 202
+            operation_id = submitted.json()["items"][0]["operation_id"]
+            row = db.conn.execute(
+                "SELECT tenant_id,actor_id FROM swe_cron_registration_journal WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            assert tuple(row) == ("alice", "admin-user")
+            headers["X-Source-Id"] = "other"
+            response = await client.get(
+                f"{path}/operations/{operation_id}",
+                headers=headers,
+            )
+            assert response.status_code == 404
+    finally:
+        db.conn.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_pause", [False, True])
+async def test_legacy_timers_pause_before_new_enable_and_retry(fail_pause):
+    db, platform, caller, service = setup()
+    root, child = service.source.groups["parent"]
+    root["legacy_runtime"].update(
+        ordinary_external_job_id="101",
+        batch_external_job_id="102",
+    )
+    child["legacy_runtime"]["ordinary_external_job_id"] = "103"
+    for item in (root, child):
+        item["state"]["dispatch_state"] = "batch_enabled"
+    calls = []
+    should_fail = fail_pause
+
+    async def set_enabled(timer, enabled):
+        calls.append((timer, enabled))
+        if timer == "102" and should_fail:
+            raise RuntimeError("legacy timer pause rejected")
+
+    platform.set_enabled = set_enabled
+    try:
+        batch = await service.submit(
+            caller,
+            {"request_id": "legacy", "job_ids": ["parent"]},
+        )
+        operation = batch["operation_id"]
+        await service.run(caller, operation)
+        assert not calls and not platform.calls
+        await service.confirm(caller, operation)
+        await service.run(caller, operation)
+        result = await service.get(caller, operation)
+        if fail_pause:
+            assert result["status"] == "failed"
+            assert result["groups"][0]["error_code"] == (
+                "cron_migration_legacy_timer_pause_failed"
+            )
+            assert not any(enabled for _, enabled in calls)
+            assert {
+                row[0]
+                for row in db.conn.execute(
+                    "SELECT management_status FROM swe_cron_job_states",
+                )
+            } == {"migrating"}
+            should_fail = False
+            calls.clear()
+            await service.confirm(caller, operation)
+            await service.run(caller, operation)
+            result = await service.get(caller, operation)
+
+        assert result["status"] == "completed"
+        assert calls[0] == ("timer-parent", False)
+        assert set(calls[1:-1]) == {
+            ("101", False),
+            ("102", False),
+            ("103", False),
+        }
+        assert len(calls) == 5
+        assert calls[-1] == ("timer-parent", True)
+        assert platform.calls.count("register") == 1
+    finally:
+        db.conn.close()
 
 
 @pytest.mark.asyncio

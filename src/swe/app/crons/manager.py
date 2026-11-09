@@ -2853,6 +2853,9 @@ class CronManager(
             logger.debug("Failed to restore external_job_ids from jobs.json")
 
     async def _restore_external_job_id(self, job: CronJobSpec) -> None:
+        # 迁移只停旧定义，不允许重载重新打开普通或批定时器。
+        if (job.meta or {}).get("task_migration_stop"):
+            return
         ext_id = str((job.meta or {}).get("external_job_id", "") or "")
         if is_batch_dispatch_managed_broadcast_child(job):
             await self._restore_batch_dispatch_child_external_job(
