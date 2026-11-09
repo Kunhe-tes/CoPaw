@@ -209,7 +209,11 @@ def job_view(row: dict, actor_id: str, *, next_times=None) -> dict:
 
 def list_item(row: dict, actor_id: str, *, next_times=None) -> dict:
     view = job_view(row, actor_id, next_times=next_times)
-    return {**view.pop("spec"), **view}
+    return {
+        **view.pop("spec"),
+        **view,
+        "has_distributed_children": bool(row.get("has_distributed_children")),
+    }
 
 
 def child_item(row: dict, actor_id: str, *, next_times=None) -> dict:
