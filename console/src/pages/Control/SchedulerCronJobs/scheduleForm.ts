@@ -4,6 +4,7 @@ import type {
   ManagedCronSpec,
   ManagedCronSchedule,
   ManagedRunDateRange,
+  ManagedRecheckRule,
 } from "@/api/types/schedulerCron";
 
 import {
@@ -20,9 +21,14 @@ import {
 export type ManagedCronFormValues = CronJobFormValues & {
   schedule: ManagedCronSchedule;
   runDates?: [Dayjs, Dayjs] | null;
+  recheckEnabled?: boolean;
+  recheckDelay?: number | null;
+  recheckUnit?: "minutes" | "hours";
+  recheckInstruction?: string;
 };
 type DatedJob = CronJobSpecOutput & {
   run_date_range?: ManagedRunDateRange | null;
+  recheck?: ManagedRecheckRule | null;
 };
 
 const LAST_WORKDAY = "lastWorkday";
@@ -39,6 +45,15 @@ export function buildManagedCronFormValues(job: DatedJob) {
   values.runDates = job.run_date_range
     ? [dayjs(job.run_date_range.start_date), dayjs(job.run_date_range.end_date)]
     : null;
+  values.recheckEnabled = Boolean(job.recheck);
+  values.recheckUnit =
+    job.recheck?.delay_seconds && job.recheck.delay_seconds % 3600 === 0
+      ? "hours"
+      : "minutes";
+  values.recheckDelay = job.recheck
+    ? job.recheck.delay_seconds / (values.recheckUnit === "hours" ? 3600 : 60)
+    : 10;
+  values.recheckInstruction = job.recheck?.instruction ?? "";
   const schedule = job.schedule as ManagedCronSchedule;
   values.schedule = {
     ...schedule,
@@ -80,8 +95,27 @@ export function buildManagedCronSubmitPayload(
         schedule: { ...values.schedule, timezone: "Asia/Shanghai" },
       }
     : values;
-  const { runDates, ...baseValues } = source;
+  const {
+    runDates,
+    recheckEnabled,
+    recheckDelay,
+    recheckUnit,
+    recheckInstruction,
+    ...baseValues
+  } = source;
   const payload: ManagedCronSpec = buildCronJobSubmitPayload(baseValues);
+  if (payload.task_type === "agent" && recheckEnabled) {
+    const seconds = (recheckDelay ?? 0) * (recheckUnit === "hours" ? 3600 : 60);
+    const delay = Math.round(seconds);
+    const instruction = recheckInstruction?.trim() ?? "";
+    if (Math.abs(seconds - delay) > 1e-6 || delay < 60 || delay > 604800)
+      throw new Error("回检延迟须为 1 分钟至 7 天，精确到秒");
+    if (!instruction || Array.from(instruction).length > 4000)
+      throw new Error("回检指令须为 1 至 4000 个字符");
+    payload.recheck = { delay_seconds: delay, instruction };
+  } else if (original?.recheck) {
+    payload.recheck = null;
+  }
   payload.run_date_range = original?.meta?.broadcast_source_job_id
     ? original.run_date_range ?? null
     : runDates

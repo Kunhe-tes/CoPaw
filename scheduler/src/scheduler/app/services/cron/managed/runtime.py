@@ -20,6 +20,7 @@ from .schema import assert_managed_schema_ready
 from .swe_client import ManagedSweClient
 from .feedback import ManagedCapacityFeedback
 from .board_schema import assert_managed_board_schema_ready
+from .recheck_worker import prepare_recheck_storage
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ async def create_managed_worker(db):
     legacy = get_cron_scheduling_service()
     legacy.bind_managed_feedback(ManagedCapacityFeedback(db))
     await assert_managed_board_schema_ready(db)
+    rechecks_enabled = await prepare_recheck_storage(db)
     base = os.environ.get("SCHEDULER_SWE_API_BASE_URL", "")
     resources = ManagedSweClient(base)
     execution = ManagedSweExecutionClient(base)
@@ -42,6 +44,7 @@ async def create_managed_worker(db):
         platform,
         execution,
         capacity=ManagedCapacityGate(legacy),
+        rechecks_enabled=rechecks_enabled,
     )
 
 
