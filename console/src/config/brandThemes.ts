@@ -77,7 +77,7 @@ export const BRAND_THEMES: Record<string, BrandThemeConfig> = {
   },
   pfmind: {
     source: "pfmind",
-    brandName: "业绩小助Claw版",
+    brandName: "业绩Claw",
     logo: "/brands/rtauto/logo-rtauto.png",
     darkLogo: "/brands/rtauto/logo-rtauto.png",
     primaryColor: "#3769FC",

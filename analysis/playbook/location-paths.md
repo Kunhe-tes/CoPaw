@@ -621,6 +621,10 @@ NODE_OPTIONS=--max-old-space-size=8192 npm run build
 避免智拓入口静态引用聊天模板引擎、Markdown、Mermaid 和分析图表依赖。
 公共主题、Ant Design、路由和身份初始化仍属于共享依赖。
 
+排查分享页浏览器标签标题时，先检查分享链接的 `source` 参数。聊天分享工具栏从
+iframe 上下文取来源并写入链接，`BrandThemeContext.tsx` 仅在分享路由上使用
+已知来源的 `brandName` 覆盖标签标题。参数缺失或无法识别时沿用原有品牌标题。
+
 新增入口代码时不要在 App 中重新静态导入 Console 页面或聊天模板 Provider。
 不要把 ConsoleRoutes 手动合并到首屏 vendor 包；文件拆分后仍须核对实际请求。
 本次边界按平台划分，财富工作台内部的看板、创建与任务页仍属于同一加载单元。
@@ -675,3 +679,6 @@ Chromium 148 本地生产预览使用模拟静态报告接口和父窗口消息�
 onLoad、rawRecordData、resultId），保留函数体与现有运行逻辑。该类型声明不等于
 React 18 的 ref 转发，也未修复重复页面、自引用或编辑器实现；不要把类型检查通过
 当作编辑功能已恢复。模板 Provider 缺少的两个按名称访问方法由后续同步补齐。
+
+报告、财富工作台与 Console 入口在 App 中共用 Suspense 占位。等待分包时立即
+显示居中的入口图标、对应文案和细线加载指示。启用减少动态效果时细线保持静止。

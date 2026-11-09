@@ -3,6 +3,12 @@ import { ConfigProvider, bailianTheme } from "@agentscope-ai/design";
 import { App as AntdApp } from "antd";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { lazy, Suspense } from "react";
+import {
+  FileText,
+  LayoutDashboard,
+  PanelTop,
+  type LucideIcon,
+} from "lucide-react";
 import zhCN from "antd/locale/zh_CN";
 import { theme as antdTheme } from "antd";
 import dayjs from "dayjs";
@@ -20,6 +26,7 @@ import {
 import "./styles/layout.css";
 import "./styles/form-override.css";
 import "./styles/console-theme.css";
+import styles from "./App.module.css";
 
 const WealthWorkbench = lazy(() => import("./pages/WealthWorkbench"));
 const ReportViewEntry = lazy(() => import("./ReportViewEntry"));
@@ -36,8 +43,29 @@ function getRouterBasename(pathname: string): string | undefined {
   return /^\/console(?:\/|$)/.test(pathname) ? "/console" : undefined;
 }
 
+function RouteLoadingStatus({
+  label,
+  icon: Icon,
+}: {
+  label: string;
+  icon: LucideIcon;
+}) {
+  return (
+    <div className={styles.routeOpening}>
+      <div className={styles.routeStatus} role="status">
+        <div className={styles.routeIcon} aria-hidden="true">
+          <Icon size={24} strokeWidth={1.6} focusable="false" />
+        </div>
+        {label}
+        <div className={styles.routeProgress} aria-hidden="true">
+          <span className={styles.routeProgressSegment} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AppInner() {
-  const basename = getRouterBasename(window.location.pathname);
   const { isDark } = useTheme();
 
   // ==================== 品牌主题 (Kun He) ====================
@@ -46,7 +74,7 @@ function AppInner() {
   // ==================== 品牌主题结束 ====================
 
   return (
-    <BrowserRouter basename={basename}>
+    <>
       <GlobalStyle />
       <ConfigProvider
         {...bailianTheme}
@@ -69,20 +97,55 @@ function AppInner() {
         }}
       >
         <AntdApp>
-          <Suspense fallback={<div role="status">加载中…</div>}>
-            <Routes>
-              <Route path="/wealth/*" element={<WealthWorkbench />} />
-              <Route path="/reportView" element={<ReportViewEntry />} />
-              <Route path="/*" element={<ConsoleRoutes />} />
-            </Routes>
-          </Suspense>
+          <Routes>
+            <Route
+              path="/wealth/*"
+              element={
+                <Suspense
+                  fallback={
+                    <RouteLoadingStatus
+                      label="正在打开工作台"
+                      icon={LayoutDashboard}
+                    />
+                  }
+                >
+                  <WealthWorkbench />
+                </Suspense>
+              }
+            />
+            <Route
+              path="/reportView"
+              element={
+                <Suspense
+                  fallback={
+                    <RouteLoadingStatus label="正在打开报告" icon={FileText} />
+                  }
+                >
+                  <ReportViewEntry />
+                </Suspense>
+              }
+            />
+            <Route
+              path="/*"
+              element={
+                <Suspense
+                  fallback={
+                    <RouteLoadingStatus label="正在打开页面" icon={PanelTop} />
+                  }
+                >
+                  <ConsoleRoutes />
+                </Suspense>
+              }
+            />
+          </Routes>
         </AntdApp>
       </ConfigProvider>
-    </BrowserRouter>
+    </>
   );
 }
 
 function App() {
+  const basename = getRouterBasename(window.location.pathname);
   // ==================== 外部系统 Token 针权 ====================
   // Token 已在 main.tsx 中获取完成，此处无需等待
   // ==================== 外部系统 Token 针权结束 ====================
@@ -91,9 +154,11 @@ function App() {
     <ThemeProvider>
       {/* ==================== 品牌主题 (Kun He) ==================== */}
       {/* 包裹 BrandThemeProvider，根据 source 动态切换品牌配置 */}
-      <BrandThemeProvider>
-        <AppInner />
-      </BrandThemeProvider>
+      <BrowserRouter basename={basename}>
+        <BrandThemeProvider>
+          <AppInner />
+        </BrandThemeProvider>
+      </BrowserRouter>
       {/* ==================== 品牌主题结束 ==================== */}
     </ThemeProvider>
   );
