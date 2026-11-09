@@ -193,7 +193,7 @@ it("父任务模型和错误说明沿用旧版展示，不展示Owner或优先JS
     />,
   );
   await screen.findByText("子任务报告");
-  expect(screen.getByText("重试次数：2")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "重试次数 2，查看尝试历史" })).toBeInTheDocument();
   expect(screen.getByText("Network,Prompt")).toBeInTheDocument();
   expect(screen.queryByText(/次投递|业务尝试/)).toBeNull();
   expect(

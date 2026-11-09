@@ -25,9 +25,10 @@ import hoverStyles from "./hoverDetails.module.less";
 import { useBoardResource } from "./useBoardResource";
 import FailurePanel from "./FailurePanel";
 import PriorityOrder from "./PriorityOrder";
+import MemberAttempts from "./MemberAttempts";
 import { getBbkDisplayName } from "../../../constants/bbk";
 
-const memberColumns: ColumnsType<ManagedBatchMember> = [
+const memberColumns = (source: string, batchId: string): ColumnsType<ManagedBatchMember> => [
   {
     title: "顺位",
     dataIndex: "member_order",
@@ -58,7 +59,10 @@ const memberColumns: ColumnsType<ManagedBatchMember> = [
         <Tooltip title={`定时任务 ID：${item.job_id}`}>
           <span>{item.job_id}</span>
         </Tooltip>
-        <span>重试次数：{Math.max(0, item.business_attempt - 1)}</span>
+        <MemberAttempts
+          source={source} batchId={batchId} memberId={item.member_id}
+          count={Math.max(0, item.business_attempt - 1)}
+        />
       </div>
     ),
   },
@@ -295,7 +299,7 @@ export default function BatchDetail({
                   loading={detail.loading}
                   size="small"
                   rowKey="member_id"
-                  columns={memberColumns}
+                  columns={memberColumns(source, batch.batch_id)}
                   dataSource={data?.members || []}
                   pagination={false}
                   scroll={{ x: 1410, y: 292 }}
