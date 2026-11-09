@@ -412,6 +412,12 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 - 旧的 `branchTreeInfo`、`fetchDistributeBranches` 及 Python 代理仅保留兼容，不用于新中台组件。部署网关需将两个新路径转发到原机构人员服务，服务端凭证和 Cookie 处理沿用既有部署约定。
 - 回归入口：`distribution/api.test.ts`、`distribution/session.test.ts`、`TargetPicker.branches.test.tsx`、`TargetPicker.edit.test.tsx`、`Create/draftLifecycle.test.tsx`、`operations.switching.test.tsx` 和 `store.test.ts`。完整设计约定见 [分发目标选择器设计](../../docs/superpowers/specs/2026-11-03-wealth-distribution-target-picker-design.md)。
 
+### Excel 名单分发
+
+- 独立前端白名单 `wealthExcelDistributionUsers` 默认关闭，匹配真实登录 SAP 用户 ID。排查入口缺失时检查白名单和当前角色的选人权限，运维白名单不授予 Excel 分发权限。
+- `distribution/excelWorkbook.ts` 在浏览器读取固定模板，`distribution/api.ts::queryExcelPeople` 通过统一请求补齐人员字段。人员查询地址由 API 模块声明。联调时对照实际智拓契约，确认路径和分行/机构字段。人员查询一次提交全部去重 ID，读表按文件和单个解压 XML 的大小约束。
+- `Create/index.tsx` 隔离 Excel 和机构选人，发布时只取当前方式。外部服务的白名单授权和跨分行下发需要实测后启用。回归入口为 `Create/draftLifecycle.test.tsx` 和 `distribution/api.test.ts`。
+
 ## 财富任务列表后台刷新显示
 
 - 浏览器标签页切回引发的自动刷新由 `taskListsRefreshing` 标记。任务页在此期间保留现有名单、分类和统计，不清空为加载占位；最新名单返回后更新。首次进入页面、切换任务视角/经营场景和手动刷新时，保留表头并使用 `Tasks/CustomerListSkeleton.tsx` 展示五行与当前列对应的骨架，统计保持 `--`；本地筛选不触发骨架。骨架行对辅助技术隐藏，由独立状态文案提示加载，减少动画偏好下停止闪动。入口为 `Tasks/index.tsx`，回归入口为 `Tasks/loading.test.tsx`，覆盖今日任务双视角、待触达和已完成。

@@ -3,6 +3,7 @@ import { request } from "../../../api/request";
 import { useIframeStore } from "../../../stores/iframeStore";
 import {
   distributionContext,
+  queryExcelPeople,
   queryInstitutionPeople,
   queryInstitutionTree,
 } from "./api";
@@ -147,5 +148,49 @@ it("错误分行根及畸形人员响应不能当作成功空数据", async () =
   mock.mockResolvedValue({ code: "200", data: {} });
   await expect(queryInstitutionPeople(context, [root])).rejects.toThrow(
     "格式异常",
+  );
+});
+
+it("Excel 查询一次提交全部 ID，并保留收件人的机构编码", async () => {
+  const sapIds = Array.from({ length: 101 }, (_, index) =>
+    String(index + 12).padStart(5, "0"),
+  );
+  mock.mockResolvedValue({
+    code: "200",
+    data: [
+      {
+        sapID: "00012",
+        userName: "李四",
+        branchID: "120",
+        subBranchID: "12001",
+        subBranchName: "异地支行",
+      },
+      { sapID: "00013", userName: "王五" },
+      {
+        sapID: "unrequested",
+        userName: "赵六",
+        branchID: "110",
+        subBranchID: "11001",
+      },
+    ],
+  });
+  await expect(
+    queryExcelPeople(sapIds, new AbortController().signal),
+  ).resolves.toEqual([
+    {
+      sapId: "00012",
+      name: "李四",
+      orgName: "异地支行",
+      bbkId: "120",
+      bbkOrgId: "12001",
+    },
+  ]);
+  expect(mock).toHaveBeenCalledOnce();
+  expect(mock).toHaveBeenCalledWith(
+    "/agent/workspace/users/by-sap-ids",
+    expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ sapIds }),
+    }),
   );
 });

@@ -242,6 +242,7 @@ describe("运维开启与切换分行的完整状态边界", () => {
     await selectBranch("北京分行");
     await screen.findByText("规划看板内容：plan-110");
     fireEvent.click(screen.getByRole("button", { name: "创建计划" }));
+    expect(screen.queryByRole("radio", { name: "上传 Excel 名单" })).toBeNull();
     fireEvent.click(
       await screen.findByRole("button", { name: /测试经营场景/ }),
     );

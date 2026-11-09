@@ -136,3 +136,42 @@ export async function queryInstitutionPeople(
       bbkOrgId: user.subBranchID || user.branchID || "",
     }));
 }
+
+// 待智拓联调确认的接口契约，沿用工作台同源请求。
+const EXCEL_PEOPLE_PATH = "/agent/workspace/users/by-sap-ids";
+export async function queryExcelPeople(
+  sapIds: string[],
+  signal: AbortSignal,
+): Promise<DistributeTarget[]> {
+  if (!sapIds.length) return [];
+  const data = await query<UserPosition[]>(
+    EXCEL_PEOPLE_PATH,
+    { sapIds },
+    signal,
+  );
+  if (!Array.isArray(data)) throw new Error("人员数据格式异常，请重试");
+  const people: DistributeTarget[] = [];
+  const requested = new Set(sapIds);
+  for (const user of data) {
+    if (
+      !requested.has(user?.sapID) ||
+      typeof user.userName !== "string" ||
+      !user.userName.trim() ||
+      typeof user.branchID !== "string" ||
+      !user.branchID.trim()
+    )
+      continue;
+    const branchId = user.branchID.trim();
+    const orgId =
+      typeof user.subBranchID === "string" ? user.subBranchID.trim() : "";
+    people.push({
+      sapId: user.sapID,
+      name: user.userName.trim(),
+      orgName: user.subBranchName || user.branchName || orgId || branchId,
+      ...(user.branchName ? { branchName: user.branchName } : {}),
+      bbkId: branchId,
+      bbkOrgId: orgId || branchId,
+    });
+  }
+  return people;
+}
