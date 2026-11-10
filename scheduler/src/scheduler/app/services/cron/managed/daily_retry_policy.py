@@ -9,7 +9,6 @@ from .failure_policy import is_model_failure
 
 MARKER = "daily_failure_retry"
 PROTOCOL = "scheduler_managed_v1"
-NATIVE_BATCH_ATTEMPTS = 3
 STOP_ERRORS = (
     "cron auth user_info is expired",
     "workflow sapid does not match target user",
