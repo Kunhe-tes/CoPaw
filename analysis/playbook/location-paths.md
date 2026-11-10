@@ -307,39 +307,19 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 - 统计和技能明细各自通过 GET /task-type-report/export 导出后端 XLSX，传当前完整筛选、移除分页，包含未加载的行；模拟模式禁用导出。50000行以上后端返回413。契约见 docs/superpowers/specs/2026-09-14-claw-report-console/API.md。
 - 客户行为同时展示去重客户数和点击总次数：`insight_customer_count` / `insight_count`、`phone_customer_count` / `phone_count`；次数列位于对应覆盖率之后，非名单方案显示“—”。
 
-## 创建计划的经营场景可见范围
+## 财富规划场景、权限与发布
 
-- Console 创建页场景列表及看板可用能力计数由 `console/src/pages/WealthWorkbench/api.ts` 的 `fetchSceneSkills()` 使用统一 `request("/agent/workspace/skill-config/list")` 请求 `POST {API base}/api/agent/workspace/skill-config/list`，由前端 Nginx 转发，不经过 Python 场景代理。JSON 只传 iframe 上下文的 `bbkId`（缺失时为空）和 `category`（空表示全部）；通过统一 request 附加鉴权和上下文请求头。读取外部 `code/data`，HTTP/业务失败、解析异常、网络异常或 60 秒超时，列表返回空数组、计数返回 null。后端代理保留兼容及规划校验用途。
-- 外部服务负责返回当前分行及 `bbkId=100` 的共享场景，本项目直接展示返回结果，不额外查询 `100` 或合并场景列表。
-- 创建和修改计划均通过 `_validate_plan_scenes_for_branch()` 校验，允许当前分行及 `100` 的场景，其他分行、无归属或已失效的场景仍拒绝；请求分行缺失时仍拒绝发布。使用共享场景不会改变规划本身的 `bbk_id`，规划保留创建人的分行归属。
-- 排查入口：场景查询为父系统 `iframeContext.bbk` → POST body 的 `bbkId`；规划提交/校验仍为 `X-Bbk-Id` → `request.state.bbk_id`。场景卡片来源文案 `skillBbkLabel` 只用于展示。
-- 回归入口：`venv/bin/python -m pytest tests/unit/app/wealth_plans/test_router.py -q`。
-
-## 财富工作台岗位角色映射
-
-- 财富岗位映射需同时维护 `console/src/pages/WealthWorkbench/permissions.ts` 与 `src/swe/app/wealth_plans/roles.py`；`RB0108` 为理财主管岗（综合），映射为 `president`，沿用支行行长的页面权限、分行规划可见范围、分发要求和“行长关注”发布来源。
-- 行长角色查看“行长关注”时，除同一 `bbk_id` 外，还要求当前用户 ID 与规划创建人 `sap_id` 一致；同 BBK 的两位行长不能互看，即使另一位行长在分发对象中。列表的 SQL/内存过滤与详情权限均需同步维护，入口为 `WealthPlanStore.list_for_viewer()`、`_visible_to()` 和路由 `_get_visible_plan()`。分行关注仍按原管理范围可见，客户经理仍可查看同 BBK 下分发给自己的行长关注。当前用户优先取 `request.state.tenant_id`，其次取 `X-User-Id`。
-
-## 财富规划任务类型与技能/MCP 下发
-
-- `POST /api/agent/workspace/skill-config/list` 返回的 `mcpRelationList` 经 Console 映射为规划场景的 `mcp_relations`。
-- `src/swe/app/wealth_plans/publish.py` 的 `_build_job_spec` 按场景判断：空数组创建 `workflow`，非空数组保持 `agent`。只判断数组是否为空，`["    "]` 仍按非空处理。
-- `src/swe/app/wealth_plans/market_dispatch.py` 的 `collect_distribution_items` 只汇总非空 MCP 关联数组场景的技能 item 和 MCP item；全是 workflow 场景时不调用 market 下发接口，混合规划只下发 agent 场景。
-- 财富规划的 `_broadcast_scene_job` 复用 `crons.api.broadcast_job`，显式传 `enable_batch_dispatch=True`、`enable_offset=False`、`offset_window_hours=0`；首次分发完成后启用父任务批调度并同步子任务。父批调度在外部平台的注册时间与目标子任务均使用规划原排程，不按默认 4 小时窗口提前或错峰。窗口变化时，即使父任务已启用批调度，重新分发也会更新窗口和外部平台任务。仅创建人本人为目标时仍跳过广播、沿用本人源任务。
-- 已发布的存量财富规划不会仅因代码更新自动改写外部平台；部署后需修改/重新发布相应规划，确认父任务的 `batch_dispatch_offset_window_hours`、`batch_dispatch_offset_minutes` 均为 `0`，外部批任务 cron 为原排程。其他入口默认仍使用 4 小时窗口。
-- 中台选多人后，定时任务主列表仍只查询当前请求租户的 `CronManager`，显示创建人的源/父任务，不能据此判定其他人的子任务未生成。通过父任务“更多 → 查看分发用户”并刷新核对目标子任务；缺失时继续查场景的 `broadcast_task_id`、广播结果的 `failed_count/results/error`，以及目标租户初始化和任务创建错误。批调度子任务的独立外部调度会被跳过或暂停，由父批任务统一触发。
-- 若中台失败而行长正常，不能仅归因于主列表隔离。后台多人广播没有按这两个岗位分支；按 `wealth plan publish loaded` 检查落库重读后的 `position/source/agent/target_count`，按 `wealth plan cron broadcast requested/scheduled` 检查过滤后目标数、归一化人数和广播任务 ID；错误日志 `cron broadcast target failed` 定位目标租户创建异常，`cron broadcast task failed` 定位身份补齐、进度落库或分发后批调度同步异常。接口收到 10 人及规划状态 `published` 均不代表 10 人实际创建成功。
-- `cron broadcast task started` 打印归一化后的实际分发用户 ID 列表 `target_tenant_ids`；`cron broadcast target result` 逐人打印 `tenant/success/child_job/error`。用同一 `task` 串联名单与结果；逐人成功表示子任务创建/更新完成，后续批调度同步仍需结合广播任务最终状态判断。
-- 批调度切换失败查看广播任务的 `failure_summary`；检查 `SWE_CRON_DISPATCH_INTENTS_ENABLED` 与调度服务配置。不要仅给广播上下文设批调度标志，否则会漏掉父任务的调度注册与子任务同步。
-- 创建/广播定时任务的顺序不变；`workflow` 保留 `scene_id` 作为 `skill_ids`，其 `text` 和 `request` 由 `CronJobSpec` 校验器清空。
-- 回归入口：`venv/bin/python -m pytest tests/unit/app/wealth_plans/ -q`。
+- 场景列表由前端请求 `POST /api/agent/workspace/skill-config/list`，发送当前分行 `bbkId` 和分类 `category`；上游返回本分行与共享场景。创建与修改的场景归属、角色和冲突校验由 Java 规划服务负责。
+- 岗位映射见 `console/src/pages/WealthWorkbench/permissions.ts`；`RB0108` 沿用行长权限。行长可见本分行的“分行关注”和本人创建的“行长关注”；中台只看本分行的“分行关注”；客户经理看本分行自己创建或分发给自己的规划。列表与详情权限应在 Java 校验。
+- 规划发布、分发及状态回写由 Java 负责。排查子任务时用场景对应的源任务及广播 ID 对照共享 Cron 的广播结果和失败日志；不要仅从源租户的任务列表或规划发布状态判断目标子任务是否创建。
+- 旧 Python `/api/wealth/*` 路由和规划编排已移除。共享 Cron、工作流绑定、机构人员接口和规划表保留；Java 接入见 [网关说明](../../docs/api/wealth-plans-java-gateway.md)。
 
 ## 财富规划推送客户数
 
 - 创建/修改规划的每个场景可选填“推送客户数”，必须为正整数且不超过 JavaScript 安全整数范围，空值表示不限。配置区采用紧凑单行：经营场景和经营方向为独立列，场景与方向按约 6:4 分配可用宽度，最小宽度分别为 230px 和 140px，优先展示场景；方向列仅显示输入框并铺满该列，相邻列间距 25px，任务周期和执行频率都使用直接点击的按钮组；每日/每小时保持单行，每周/自定义的频率配置允许两行（频率按钮与时刻可同行，执行日或自定义规则放下一行）；客户数列 110px，横向操作列 82px。每日/每小时行高 56px，每周/自定义展开后约 93px，数量提示移至表头悬停说明，非法数量仍在控件下方提示。表头和数据行用 CSS subgrid 共享列宽，周期和频率按内容定宽，场景和方向共同分配剩余空间，输入框宽度为方向列的 100%；场景名称过长省略并提供悬停全文。1920px 下已验证每日单行、每周/自定义两行，含自定义日期和多个执行日均无横向滚动；窄屏仅配置区内部横向滚动，不挤压控件。
 - 表头统一展示“经营场景 / 经营方向 / 任务周期 / 执行频率 / 推送客户数（选填）”，使用浅蓝色背景（#F7FAFF）及 12px、600 字重的蓝灰色列名（#596E8C），与数据行连续衔接，行间用横向细分隔线。自定义重复规则下拉框固定 104px；不再显示标准或自定义频率的重复摘要，仅旧版复杂规则保留编辑提示；发布确认仍展示完整频率。
 - 任务周期使用原有按钮组，通过 `onClick` 调用原 `setTaskCycle`，五种周期及选中状态直接可见；重复点击当前快捷周期按当前日期重算起止范围，点击“自定义”保持手填日期。周期、场景、方向及数量保持横向排列；每周/自定义仅频率配置区允许两行，空间仍不足时配置区域通过 `overflow-x:auto` 横向滚动，不挤压控件。执行频率使用原按钮组，仍调用原 `updateSchedule`，cron 更新逻辑保持原样。`Create/index.test.tsx` 覆盖五种当前周期的重复点击、初始渲染不改日期及其他场景数据隔离。
-- `PlanItem.custNum` 由草稿状态独立保存，发布确认展示具体人数或“不限”。`api.ts` 创建 POST、修改 PUT `/zt/wealth/plans` 均在对应 `scenes[]` 条目携带数值 `custNum`；空值完全省略该字段，不能转换为 0 或 null。规划查询响应的 `scenes[].custNum` 回填至编辑草稿，缺失或 null 显示不限。此链路直接转发 Java，Python 兼容规划模块不参与。
+- `PlanItem.custNum` 由草稿状态独立保存，发布确认展示具体人数或“不限”。`api.ts` 创建 POST、修改 PUT `/zt/wealth/plans` 均在对应 `scenes[]` 条目携带数值 `custNum`；空值完全省略该字段，不能转换为 0 或 null。规划查询响应的 `scenes[].custNum` 回填至编辑草稿，缺失或 null 显示不限。此链路直接转发 Java，已移除的 Python 规划模块不参与。
 - `/api/agent/workspace/name-list` 的 `skillIds` 为对象数组：`[{ skillId, custNum? }]`。客户数从当天有效规划场景经任务树传入查询；经营视角只传当前场景，客户视角、待触达、已完成和人数角标传当天全部场景，未配置客户数时每项仅传 `skillId`，不得携带 null 或默认数量。按技能去重，沿用任务树首个命中规划的配置。
 - 回归入口：`Create/index.test.tsx`（输入、清空、无效提示、发布确认）、`api.test.ts`（名单对象参数、去重及省略客户数）和 `store.test.ts`（正整数校验、逐场景隔离、创建/修改 payload、编辑回显、各名单透传客户数）。
 
@@ -372,9 +352,9 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 - 今日任务在 `Tasks/index.tsx` 分组后对每个分类的名单稳定排序：`touched === 1` 的已接触客户排后，其余待处理（未接触及未知状态）排前。同类状态保持接口顺序，分类顺序和 store 原始名单不变；客户视角同样适用，待触达/已完成不参与此排序。回归入口为 `Tasks/groupTables.test.tsx`。
 - 今日任务、待触达和已完成页均展示“目标客户 / 今日已触达 / 七日内已触达 / 待处理”，使用各自名单响应的后端统计，搜索和筛选不重算汇总；已完成页不展示“累计已完成 / 今日已完成”，也不读取今日任务缓存统计。触达日期与人数由外部接口计算。
 - Console 直接请求 `POST /api/agent/workspace/name-list`，由前端 Nginx 转发；前端把外部 `data.list`、统计及字段配置转换为 `items`、四项计数、`skillFieldList`、`allFields`。
-- 今日任务、待触达和已完成分别查询客户名单，均传 `sapId` 与 `skillIds` 数组：经营视角只传当前选中场景，客户视角、待触达、已完成及今日人数角标均传当天工作任务树全部去重场景 ID。前端使用统一 `request("/agent/workspace/name-list")` POST `{API base}/api/agent/workspace/name-list`，由部署方前端 Nginx 转发外部服务，不再经过 Python 名单代理。JSON 直接传 `skillIds: ["a", "b"]`、`sapId`、`touched`，并从 iframe 上下文补充 `bbkId`、可选 `subBbkId/posId` 及固定 `platformSource/pageSource`；不显式设置 `credentials`，沿用 fetch 默认的同源 Cookie 行为；鉴权和上下文请求头由统一 request 构建。前端读取外部 `code` 与 `data.list`，转换为页面 `items`；HTTP/业务失败、网络异常或六十秒超时返回空名单。原后端代理保留兼容，但工作台不再调用。当天无场景时前端直接清空名单，不请求接口。触达状态保持今日任务 `2`、待触达 `0`、已完成 `1`，直接使用接口返回的名单。场景切换只重查选中技能，手动刷新与标签切回保持该选择，旧场景响应不覆盖新选择。回归入口为 `api.test.ts`、`store.test.ts`、`Tasks/loading.test.tsx` 和 `tests/unit/app/wealth_plans/test_router.py`。
+- 今日任务、待触达和已完成分别查询客户名单，均传 `sapId` 与 `skillIds` 数组：经营视角只传当前选中场景，客户视角、待触达、已完成及今日人数角标均传当天工作任务树全部去重场景 ID。前端使用统一 `request("/agent/workspace/name-list")` POST `{API base}/api/agent/workspace/name-list`，由部署方前端 Nginx 转发外部服务，不再经过 Python 名单代理。JSON 直接传 `skillIds: ["a", "b"]`、`sapId`、`touched`，并从 iframe 上下文补充 `bbkId`、可选 `subBbkId/posId` 及固定 `platformSource/pageSource`；不显式设置 `credentials`，沿用 fetch 默认的同源 Cookie 行为；鉴权和上下文请求头由统一 request 构建。前端读取外部 `code` 与 `data.list`，转换为页面 `items`；HTTP/业务失败、网络异常或六十秒超时返回空名单。旧 Python 名单代理已移除。当天无场景时前端直接清空名单，不请求接口。触达状态保持今日任务 `2`、待触达 `0`、已完成 `1`，直接使用接口返回的名单。场景切换只重查选中技能，手动刷新与标签切回保持该选择，旧场景响应不覆盖新选择。回归入口为 `api.test.ts`、`store.test.ts`、`Tasks/loading.test.tsx`。
 - 客户动态值数组的正式字段名是 `fieldList`；属性仍为 `filedName / filedNameCn / filedValue`。数组名拼错会导致模型丢弃明细，前端即使收到 `allFields` 也显示“暂无指标”。
-- 指标丢失先检查 `src/swe/app/wealth_plans/models.py` 和 `router.py` 是否保留客户明细及顶层字段配置，再检查 `console/src/pages/WealthWorkbench/api.ts` 的映射。
+- 指标丢失先检查外部名单服务是否返回客户明细及顶层字段配置，再检查 `console/src/pages/WealthWorkbench/api.ts` 的映射。
 - `allFields` 提供中文名称；经营视角按技能的 `fields` 顺序与客户实际字段取交集，客户视角按全局字段顺序展示客户实际字段。不为其他客户的字段生成占位。
 - 只有今日任务经营视角使用 `groupField`。组合值完全一致才合并，空数组不分组；把客户姓名配置为分组字段可能导致每人一组。每个分类对应独立表格，分类标题、人数和折叠按钮放在表格上方；多个字段以 ` / ` 分隔。
 - `touched=1` 标记客户已触达；客户字段缺失不展示、返回空值显示“未提供”、数值 `0` 正常展示。
