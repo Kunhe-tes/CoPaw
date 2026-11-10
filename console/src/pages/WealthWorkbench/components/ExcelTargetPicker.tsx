@@ -6,11 +6,7 @@ import {
 } from "@ant-design/icons";
 import cx from "classnames";
 import { BBK_ID_TO_NAME_MAP } from "../../../constants/bbk";
-import { queryExcelPeople } from "../distribution/api";
-import {
-  MAX_EXCEL_FILE_MB,
-  readExcelRoster,
-} from "../distribution/excelWorkbook";
+import { importExcelPeople, MAX_EXCEL_FILE_MB } from "../distribution/api";
 import type { DistributeTarget } from "../types";
 import styles from "./ExcelTargetPicker.module.less";
 import cardStyles from "./MiddleTargetPicker.module.less";
@@ -70,7 +66,7 @@ export function ExcelTargetPicker({
     setFile(next);
     setMode(intent);
     setAlreadySelected(0);
-    setStage("正在读取文件…");
+    setStage("正在上传并解析名单…");
     setError("");
     setIssues([]);
     setDuplicates(0);
@@ -78,55 +74,19 @@ export function ExcelTargetPicker({
     if (editing) onPendingChange?.(true);
     else onChange([]);
     try {
-      const roster = await readExcelRoster(next);
+      const roster = await importExcelPeople(next, controller.signal);
       if (controller.signal.aborted) return;
       setDuplicates(roster.duplicates);
       setIssues(roster.errors);
       if (roster.errors.length) return;
       const currentIds = new Set(currentTargets?.map(({ sapId }) => sapId));
-      const rows =
+      const matched =
         intent === "append"
-          ? roster.rows.filter(({ sapId }) => !currentIds.has(sapId))
-          : roster.rows;
-      setAlreadySelected(roster.rows.length - rows.length);
-      setStage("正在查询人员信息…");
-      const targets = rows.length
-        ? await queryExcelPeople(
-            rows.map(({ sapId }) => sapId),
-            controller.signal,
-          )
-        : [];
-      if (controller.signal.aborted) return;
-      const byId = new Map<string, DistributeTarget>();
-      const ambiguous = new Set<string>();
-      for (const target of targets) {
-        const previous = byId.get(target.sapId);
-        if (
-          previous &&
-          (previous.name !== target.name ||
-            previous.bbkId !== target.bbkId ||
-            previous.bbkOrgId !== target.bbkOrgId)
-        )
-          ambiguous.add(target.sapId);
-        byId.set(target.sapId, target);
-      }
-      const matched: DistributeTarget[] = [];
-      const failures: string[] = [];
-      for (const { sapId, row } of rows) {
-        const person = byId.get(sapId);
-        if (!person || ambiguous.has(sapId)) {
-          failures.push(
-            `第 ${row} 行 · ${sapId}：${
-              person ? "人员信息不一致" : "未找到完整的人员信息"
-            }`,
-          );
-        } else {
-          matched.push(person);
-        }
-      }
+          ? roster.people.filter(({ sapId }) => !currentIds.has(sapId))
+          : roster.people;
+      setAlreadySelected(roster.people.length - matched.length);
       setPeople(matched);
-      setIssues(failures);
-      if (!failures.length && !editing) onChange(matched);
+      if (!editing) onChange(matched);
     } catch (reason) {
       if (!controller.signal.aborted)
         setError(reason instanceof Error ? reason.message : "名单读取失败");

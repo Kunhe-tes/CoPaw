@@ -8,14 +8,13 @@ import {
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as api from "../api";
-import { readExcelRoster } from "../distribution/excelWorkbook";
 import { ExcelRosterSummary } from "../components/ExcelTargetPicker";
 import { Sidebar } from "../components/Sidebar";
 import { fetchDistributeTargets } from "../distributeTargets";
 import { useWealthStore } from "../store";
 import { useIframeStore } from "../../../stores/iframeStore";
 import {
-  queryExcelPeople,
+  importExcelPeople,
   queryInstitutionTree,
   queryInstitutionPeople,
 } from "../distribution/api";
@@ -29,13 +28,9 @@ vi.mock("../api", async (importOriginal) => ({
 
 vi.mock("../distribution/api", async (original) => ({
   ...(await original<typeof import("../distribution/api")>()),
-  queryExcelPeople: vi.fn(),
+  importExcelPeople: vi.fn(),
   queryInstitutionTree: vi.fn(),
   queryInstitutionPeople: vi.fn(),
-}));
-vi.mock("../distribution/excelWorkbook", async (original) => ({
-  ...(await original<typeof import("../distribution/excelWorkbook")>()),
-  readExcelRoster: vi.fn(),
 }));
 vi.mock("../distributeTargets", () => ({
   fetchDistributeTargets: vi
@@ -55,7 +50,7 @@ beforeEach(() => {
     sysId: "retail",
   });
   vi.stubGlobal("__env__", {});
-  vi.mocked(queryExcelPeople).mockReset();
+  vi.mocked(importExcelPeople).mockReset();
   vi.stubGlobal(
     "ResizeObserver",
     class {
@@ -197,7 +192,7 @@ it("非白名单只显示现有选人方式", () => {
   renderWorkbench();
   expect(screen.queryByRole("radio", { name: "上传 Excel 名单" })).toBeNull();
   expect(screen.getByRole("textbox", { name: "搜索分发目标" })).toBeVisible();
-  expect(queryExcelPeople).not.toHaveBeenCalled();
+  expect(importExcelPeople).not.toHaveBeenCalled();
 });
 
 it("白名单默认 Excel，切换保留手选，发布只提交剔除后的 Excel 名单", async () => {
@@ -223,15 +218,11 @@ it("白名单默认 Excel，切换保留手选，发布只提交剔除后的 Exc
     bbkId: "110",
     bbkOrgId: "11001",
   };
-  vi.mocked(readExcelRoster).mockResolvedValue({
-    rows: [
-      { sapId: "000123", row: 2 },
-      { sapId: "000456", row: 3 },
-    ],
+  vi.mocked(importExcelPeople).mockResolvedValue({
+    people: [...recipients, removed],
     errors: [],
     duplicates: 0,
   });
-  vi.mocked(queryExcelPeople).mockResolvedValue([...recipients, removed]);
   const publish = vi.spyOn(api, "publishPlan").mockResolvedValue({
     created: true,
     plans: [],
@@ -298,7 +289,7 @@ it("非白名单无法通过发布入口提交 Excel 目标", async () => {
   }
 });
 
-it("修改规划回显当前名单，追加只查询新 ID 并在确认后保存完整名单", async () => {
+it("修改规划回显当前名单，追加跳过已有人员并在确认后保存完整名单", async () => {
   vi.stubGlobal("__env__", { wealthExcelDistributionUsers: ["publisher"] });
   useWealthStore.setState({ accountId: "president", plansLoaded: true });
   const existing = useWealthStore.getState().targets[0];
@@ -309,15 +300,11 @@ it("修改规划回显当前名单，追加只查询新 ID 并在确认后保存
     bbkId: "120",
     bbkOrgId: "12001",
   };
-  vi.mocked(readExcelRoster).mockResolvedValue({
-    rows: [
-      { sapId: existing.sapId, row: 2 },
-      { sapId: added.sapId, row: 3 },
-    ],
+  vi.mocked(importExcelPeople).mockResolvedValue({
+    people: [existing, added],
     errors: [],
     duplicates: 0,
   });
-  vi.mocked(queryExcelPeople).mockResolvedValue([added]);
   const publish = vi.spyOn(api, "publishPlan").mockResolvedValue({
     created: false,
     plans: [],
@@ -334,8 +321,8 @@ it("修改规划回显当前名单，追加只查询新 ID 并在确认后保存
       target: { files: [new File(["fixture"], "追加名单.xlsx")] },
     });
     await screen.findByText(/新增 1 人 · 1 人已在名单中 · 确认后共 2 人/);
-    expect(queryExcelPeople).toHaveBeenCalledWith(
-      [added.sapId],
+    expect(importExcelPeople).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "追加名单.xlsx" }),
       expect.any(AbortSignal),
     );
     expect(
@@ -365,20 +352,19 @@ it("修改规划回显当前名单，追加只查询新 ID 并在确认后保存
 it("修改规划可取消替换，确认替换后只保留新文件名单", async () => {
   vi.stubGlobal("__env__", { wealthExcelDistributionUsers: ["publisher"] });
   useWealthStore.setState({ accountId: "president", plansLoaded: true });
-  vi.mocked(readExcelRoster).mockResolvedValue({
-    rows: [{ sapId: "000999", row: 2 }],
+  vi.mocked(importExcelPeople).mockResolvedValue({
+    people: [
+      {
+        sapId: "000999",
+        name: "替换人员",
+        orgName: "外地支行",
+        bbkId: "120",
+        bbkOrgId: "12001",
+      },
+    ],
     errors: [],
     duplicates: 0,
   });
-  vi.mocked(queryExcelPeople).mockResolvedValue([
-    {
-      sapId: "000999",
-      name: "替换人员",
-      orgName: "外地支行",
-      bbkId: "120",
-      bbkOrgId: "12001",
-    },
-  ]);
   renderWorkbench();
   const replace = async () => {
     fireEvent.click(
