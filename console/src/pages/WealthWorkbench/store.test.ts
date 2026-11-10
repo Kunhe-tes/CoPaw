@@ -1155,6 +1155,41 @@ describe("WealthWorkbench store", () => {
     expect(s.draft.items.length).toBeGreaterThan(0);
   });
 
+  it("editPlan 按已选 ID 顺序回填详情，重复详情取第一条，缺失详情时保留 ID", () => {
+    const plan = useWealthStore
+      .getState()
+      .plans.find((p) => p.id === "plan-demo-2")!;
+    const first = {
+      sapId: "0001",
+      name: "第一条详情",
+      orgName: "朝阳支行",
+      bbkOrgId: "11001",
+    };
+    const second = {
+      sapId: "0002",
+      name: "另一人",
+      orgName: "浦东支行",
+      bbkOrgId: "12001",
+    };
+    useWealthStore.setState({
+      plans: [
+        {
+          ...plan,
+          targetSapIds: ["0002", "missing", "0001"],
+          targets: [first, second, { ...first, name: "重复详情" }],
+        },
+      ],
+    });
+
+    useWealthStore.getState().editPlan(plan.id);
+
+    expect(useWealthStore.getState().targets).toEqual([
+      second,
+      { sapId: "missing", name: "missing", orgName: "" },
+      first,
+    ]);
+  });
+
   it("removePlan 移除规划并提示", async () => {
     await useWealthStore.getState().removePlan("plan-demo-3");
     const s = useWealthStore.getState();

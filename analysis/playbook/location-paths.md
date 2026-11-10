@@ -412,6 +412,12 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 - 旧的 `branchTreeInfo`、`fetchDistributeBranches` 及 Python 代理仅保留兼容，不用于新中台组件。部署网关需将两个新路径转发到原机构人员服务，服务端凭证和 Cookie 处理沿用既有部署约定。
 - 回归入口：`distribution/api.test.ts`、`distribution/session.test.ts`、`TargetPicker.branches.test.tsx`、`TargetPicker.edit.test.tsx`、`Create/draftLifecycle.test.tsx`、`operations.switching.test.tsx` 和 `store.test.ts`。完整设计约定见 [分发目标选择器设计](../../docs/superpowers/specs/2026-11-03-wealth-distribution-target-picker-design.md)。
 
+### Excel 名单分发
+
+- 独立前端白名单 `wealthExcelDistributionUsers` 默认关闭，匹配真实登录 SAP 用户 ID。排查入口缺失时检查白名单和当前角色的选人权限，运维白名单不授予 Excel 分发权限。
+- `distribution/api.ts::importExcelPeople` 通过统一请求上传原始 Excel，外部智拓服务解析并返回人员及异常行。前端校验 5 MB 文件上限、映射人员信息并按 ID 处理追加去重。联调时核对路径、上传字段、响应和授权规则。
+- `Create/index.tsx` 隔离 Excel 和机构选人，发布时只取当前方式。外部服务的白名单授权和跨分行下发需要实测后启用。回归入口为 `Create/draftLifecycle.test.tsx` 和 `distribution/api.test.ts`。
+
 ## 财富任务列表后台刷新显示
 
 - 浏览器标签页切回引发的自动刷新由 `taskListsRefreshing` 标记。任务页在此期间保留现有名单、分类和统计，不清空为加载占位；最新名单返回后更新。首次进入页面、切换任务视角/经营场景和手动刷新时，保留表头并使用 `Tasks/CustomerListSkeleton.tsx` 展示五行与当前列对应的骨架，统计保持 `--`；本地筛选不触发骨架。骨架行对辅助技术隐藏，由独立状态文案提示加载，减少动画偏好下停止闪动。入口为 `Tasks/index.tsx`，回归入口为 `Tasks/loading.test.tsx`，覆盖今日任务双视角、待触达和已完成。
@@ -615,6 +621,10 @@ NODE_OPTIONS=--max-old-space-size=8192 npm run build
 避免智拓入口静态引用聊天模板引擎、Markdown、Mermaid 和分析图表依赖。
 公共主题、Ant Design、路由和身份初始化仍属于共享依赖。
 
+排查分享页浏览器标签标题时，先检查分享链接的 `source` 参数。聊天分享工具栏从
+iframe 上下文取来源并写入链接，`BrandThemeContext.tsx` 仅在分享路由上使用
+已知来源的 `brandName` 覆盖标签标题。参数缺失或无法识别时沿用原有品牌标题。
+
 新增入口代码时不要在 App 中重新静态导入 Console 页面或聊天模板 Provider。
 不要把 ConsoleRoutes 手动合并到首屏 vendor 包；文件拆分后仍须核对实际请求。
 本次边界按平台划分，财富工作台内部的看板、创建与任务页仍属于同一加载单元。
@@ -669,3 +679,6 @@ Chromium 148 本地生产预览使用模拟静态报告接口和父窗口消息�
 onLoad、rawRecordData、resultId），保留函数体与现有运行逻辑。该类型声明不等于
 React 18 的 ref 转发，也未修复重复页面、自引用或编辑器实现；不要把类型检查通过
 当作编辑功能已恢复。模板 Provider 缺少的两个按名称访问方法由后续同步补齐。
+
+报告、财富工作台与 Console 入口在 App 中共用 Suspense 占位。等待分包时立即
+显示居中的入口图标、对应文案和细线加载指示。启用减少动态效果时细线保持静止。
