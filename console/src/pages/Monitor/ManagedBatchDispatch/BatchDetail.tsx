@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import { validate as isUuid } from "uuid";
 import {
   Alert,
   Button,
@@ -38,7 +39,10 @@ function eventLabel(event: ManagedBatchEvent) {
   return event.event_type;
 }
 
-const memberColumns = (source: string, batchId: string): ColumnsType<ManagedBatchMember> => [
+const memberColumns = (
+  source: string,
+  batchId: string,
+): ColumnsType<ManagedBatchMember> => [
   {
     title: "顺位",
     dataIndex: "member_order",
@@ -73,7 +77,9 @@ const memberColumns = (source: string, batchId: string): ColumnsType<ManagedBatc
           <span tabIndex={0}>执行 ID：{item.execution_id || "-"}</span>
         </Tooltip>
         <MemberAttempts
-          source={source} batchId={batchId} memberId={item.member_id}
+          source={source}
+          batchId={batchId}
+          memberId={item.member_id}
           count={Math.max(0, item.business_attempt - 1)}
         />
       </div>
@@ -166,16 +172,20 @@ export default function BatchDetail({
     member_query: "",
     event_page: 1,
     event_limit: 50,
-    event_type: "",
-    event_execution_id: "",
+    event_query: "",
   });
   const load = useCallback(
     (signal: AbortSignal) => {
       void refresh;
+      const { event_query, ...params } = filters;
+      const query = event_query.trim();
+      const eventFilter = isUuid(query)
+        ? { event_execution_id: query.toLowerCase() }
+        : { event_type: query };
       return managedBatchBoard.detail(
         source,
         batch.batch_id,
-        { ...filters, event_execution_id: filters.event_execution_id.trim() },
+        { ...params, ...eventFilter },
         signal,
       );
     },
@@ -358,52 +368,53 @@ export default function BatchDetail({
             label: `调度事件 (${data?.event_total ?? "-"})`,
             children: (
               <>
-                <Space align="end" wrap>
-                  <Input
-                    aria-label="筛选新版事件类型"
-                    placeholder="事件类型，如 running"
-                    value={filters.event_type}
-                    onChange={(event) =>
-                      setFilters({
-                        ...filters,
-                        event_type: event.target.value,
-                        event_page: 1,
-                      })
-                    }
-                  />
-                  <label>
-                    执行 ID
-                    <Input
-                      allowClear
-                      maxLength={128}
-                      placeholder="输入完整执行 ID"
-                      value={filters.event_execution_id}
-                      onChange={(event) =>
-                        setFilters({
-                          ...filters,
-                          event_execution_id: event.target.value,
-                          event_page: 1,
-                        })
-                      }
-                    />
-                  </label>
-                </Space>
+                <Input
+                  allowClear
+                  aria-label="筛选调度事件"
+                  maxLength={64}
+                  placeholder="输入事件类型或完整执行 ID"
+                  style={{ maxWidth: 360, marginBottom: 8 }}
+                  value={filters.event_query}
+                  onChange={(event) =>
+                    setFilters({
+                      ...filters,
+                      event_query: event.target.value,
+                      event_page: 1,
+                    })
+                  }
+                />
                 <Spin spinning={detail.loading}>
                   <div className={styles.eventList}>
                     {data?.events.map((event) => (
                       <div className={styles.eventItem} key={event.event_id}>
                         <time>{timeText(event.occurred_at)}</time>
-                        <strong title={event.event_type}>{eventLabel(event)}</strong>
+                        <strong title={event.event_type}>
+                          {eventLabel(event)}
+                        </strong>
                         <Tooltip title={event.execution_id}>
                           <p>
                             执行 {event.execution_id || "-"} · 操作者{" "}
                             {event.actor_id}
                           </p>
                         </Tooltip>
-                        <Tooltip trigger={["hover", "focus"]} placement="topRight"
-                          overlayStyle={{ maxWidth: "min(640px, calc(100vw - 32px))" }}
-                          title={<pre className={hoverStyles.eventTooltip} aria-label="完整事件详情">{JSON.stringify(event.details, null, 2)}</pre>}>
-                          <em tabIndex={0} aria-label="查看完整事件详情">{JSON.stringify(event.details)}</em>
+                        <Tooltip
+                          trigger={["hover", "focus"]}
+                          placement="topRight"
+                          overlayStyle={{
+                            maxWidth: "min(640px, calc(100vw - 32px))",
+                          }}
+                          title={
+                            <pre
+                              className={hoverStyles.eventTooltip}
+                              aria-label="完整事件详情"
+                            >
+                              {JSON.stringify(event.details, null, 2)}
+                            </pre>
+                          }
+                        >
+                          <em tabIndex={0} aria-label="查看完整事件详情">
+                            {JSON.stringify(event.details)}
+                          </em>
                         </Tooltip>
                       </div>
                     ))}

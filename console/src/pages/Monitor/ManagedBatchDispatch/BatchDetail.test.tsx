@@ -1,4 +1,10 @@
-import { cleanup, render, screen, fireEvent } from "@testing-library/react";
+import {
+  cleanup,
+  render,
+  screen,
+  fireEvent,
+  within,
+} from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import BatchDetail from "./BatchDetail";
 import type { ManagedBatch } from "@/api/modules/managedBatchBoard";
@@ -112,6 +118,7 @@ it.each([
   ["auto_unread_threshold", "未读暂停，重试未入队"],
   ["manual", "手动停用，重试未入队"],
 ])("展示 %s 的拦截原因和完整事件详情", async (reason, label) => {
+  const executionId = "548b6d5d-9a4a-5461-b0c9-38c12605426f";
   const batch = {
     batch_id: "batch",
     job_id: "parent",
@@ -131,7 +138,7 @@ it.each([
       {
         event_id: "event",
         event_type: "auto_retry_blocked",
-        execution_id: "failed-execution",
+        execution_id: executionId,
         actor_id: "alice",
         occurred_at: "2026-11-05T01:00:00Z",
         details,
@@ -148,14 +155,28 @@ it.each([
     />,
   );
   fireEvent.click(await screen.findByRole("tab", { name: "调度事件 (1)" }));
-  fireEvent.change(screen.getByRole("textbox", { name: "执行 ID" }), {
-    target: { value: " failed-execution " },
+  const events = within(screen.getByRole("tabpanel", { name: /调度事件/ }));
+  const search = events.getByRole("textbox", { name: "筛选调度事件" });
+  expect(events.getAllByRole("textbox")).toHaveLength(1);
+  expect(events.queryByText("执行 ID")).not.toBeInTheDocument();
+  fireEvent.change(search, { target: { value: " auto_retry_blocked " } });
+  expect(api.detail).toHaveBeenLastCalledWith(
+    "bank",
+    "batch",
+    expect.objectContaining({
+      event_type: "auto_retry_blocked",
+      event_page: 1,
+    }),
+    expect.any(AbortSignal),
+  );
+  fireEvent.change(search, {
+    target: { value: ` ${executionId.toUpperCase()} ` },
   });
   expect(api.detail).toHaveBeenLastCalledWith(
     "bank",
     "batch",
     expect.objectContaining({
-      event_execution_id: "failed-execution",
+      event_execution_id: executionId,
       event_page: 1,
     }),
     expect.any(AbortSignal),
@@ -213,7 +234,9 @@ it("父任务模型和错误说明沿用旧版展示，不展示Owner或优先JS
     />,
   );
   await screen.findByText("子任务报告");
-  expect(screen.getByRole("button", { name: "重试次数 2，查看尝试历史" })).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "重试次数 2，查看尝试历史" }),
+  ).toBeInTheDocument();
   expect(screen.getByText("Network,Prompt")).toBeInTheDocument();
   expect(screen.queryByText(/次投递|业务尝试/)).toBeNull();
   expect(
