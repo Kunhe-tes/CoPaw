@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""只处理平台实际送达的新版普通/批触发，原子保存执行快照及触发回执。"""
+"""受理新版平台触发和手动批触发，原子保存执行快照及触发回执。"""
 
 import json
 import logging
@@ -22,7 +22,7 @@ from .operations import IDENTITY_FIELDS, WHERE_JOB
 from .batch_order import ordered_members
 from .repository import ManagedCronRepository
 from .storage import insert, transaction
-from .batch_members import record_batch_members
+from .batch_members import active_batch_id, record_batch_members
 from .date_policy import reason as date_reason
 from .calendar_policy import TriggerObservation, admission
 from ..workday_calendar import CalendarService, CalendarStore
@@ -38,8 +38,16 @@ def _allows_empty_batch(targets, kind):
     )
 
 
+class BatchAlreadyActive(ExecutionConflict):
+    """同一父任务仍有未结束的批次。"""
+
+    def __init__(self, batch_id):
+        super().__init__("cron_batch_already_active")
+        self.batch_id = batch_id
+
+
 class TriggerGrant:
-    """已验证平台注册绑定产生的内部受理权限，不伪造用户或管理角色。"""
+    """已授权触发只可为当前父任务及其关联成员登记执行。"""
 
     def __init__(self, source_key, kind):
         self.source_key = source_key
@@ -103,15 +111,59 @@ class ManagedSchedulingService:
             now,
             decision,
         )
+        return await self._record_trigger(caller, key, observation, identifier)
+
+    async def run_batch(self, caller, job_id):
+        root = await ManagedCronRepository(self.db)._authorized_row(
+            caller,
+            job_id,
+            False,
+        )
+        now = self.clock().astimezone(timezone.utc)
+        receipt_id = str(uuid4())
+        observation = TriggerObservation(
+            {
+                "definition_version": root["definition_version"],
+                # 手动受理没有平台绑定或注册操作，回执兼容现有非空列。
+                "external_id": "",
+                "operation_id": "",
+            },
+            "batch",
+            now,
+            now,
+            receipt_id,
+            now,
+            {"allowed": True, "time_basis": "manual"},
+        )
+        return await self._record_trigger(
+            caller,
+            caller.job_key(job_id),
+            observation,
+            receipt_id,
+        )
+
+    async def _record_trigger(self, caller, key, observation, identifier):
+        job_id = key[-1]
+        binding = observation.binding
+        kind = observation.kind
+        now = observation.now
+        receipt_id = observation.receipt_id
+        time_basis = observation.calendar["time_basis"]
         async with transaction(self.db) as tx:
             await tx.fetch_one(
                 f"SELECT job_id FROM swe_cron_jobs_v2 WHERE {WHERE_JOB} FOR UPDATE",
                 key,
             )
-            root = await ManagedCronRepository(tx)._get_row(
-                key,
-                include_deleted=True,
-            )
+            repository = ManagedCronRepository(tx)
+            if time_basis == "manual":
+                root = await repository._authorized_row(caller, job_id, False)
+                if root.get("parent_job_id"):
+                    raise ExecutionConflict("cron_batch_run_requires_parent")
+                existing_batch = await active_batch_id(tx, key)
+                if existing_batch is not None:
+                    raise BatchAlreadyActive(existing_batch)
+            else:
+                root = await repository._get_row(key, include_deleted=True)
             response, members = await self._accept_locked(
                 tx,
                 caller,
@@ -130,8 +182,12 @@ class ManagedSchedulingService:
                     "operation_id": binding["operation_id"],
                     "kind": kind,
                     "trigger_id": identifier,
-                    "logical_fire_at": logical.replace(tzinfo=None),
-                    "physical_fire_at": physical.replace(tzinfo=None),
+                    "logical_fire_at": observation.logical.replace(
+                        tzinfo=None,
+                    ),
+                    "physical_fire_at": observation.physical.replace(
+                        tzinfo=None,
+                    ),
                     "batch_id": response.get("batch_id"),
                     "status": (
                         "accepted" if response["accepted"] else "skipped"
@@ -143,7 +199,8 @@ class ManagedSchedulingService:
             )
             await record_batch_members(tx, response.get("batch_id"), now=now)
         logger.info(
-            "平台触发已持久处理 receipt_id=%s job_id=%s kind=%s accepted=%s",
+            "%s触发已持久处理 receipt_id=%s job_id=%s kind=%s accepted=%s",
+            "手动批调度" if time_basis == "manual" else "平台",
             receipt_id,
             job_id,
             kind,
@@ -158,26 +215,11 @@ class ManagedSchedulingService:
         root,
         observation,
     ):
-        binding = observation.binding
         kind = observation.kind
-        physical = observation.physical
         receipt_id = observation.receipt_id
         now = observation.now
-        reason = self._gate(root, binding, physical, now)
-        if not reason and not observation.calendar["allowed"]:
-            reason = observation.calendar["skipped"]
-        if kind == "batch":
-            control = await tx.fetch_one(
-                f"SELECT state FROM {CONTROLS} WHERE {WHERE_JOB}",
-                caller.job_key(root["job_id"]),
-            )
-            if control and control["state"] == "batch_paused":
-                reason = "batch_paused"
-            if (
-                control is None
-                and root["state_dispatch_state"] == "batch_paused"
-            ):
-                reason = "batch_paused"
+        manual = observation.calendar["time_basis"] == "manual"
+        reason = await self._trigger_gate(tx, root, observation)
         if reason:
             return {
                 "job_id": root["job_id"],
@@ -197,7 +239,7 @@ class ManagedSchedulingService:
                 for row in children
             ]
         selected = [row for row in targets if self._eligible(row, kind, now)]
-        if not selected and not _allows_empty_batch(targets, kind):
+        if not selected and (manual or not _allows_empty_batch(targets, kind)):
             return {
                 "job_id": root["job_id"],
                 "accepted": False,
@@ -235,6 +277,31 @@ class ManagedSchedulingService:
             "enqueued_intents": len(members),
             "status": "queued",
         }, members
+
+    async def _trigger_gate(self, tx, root, observation):
+        reason = self._gate(
+            root,
+            observation.binding,
+            observation.physical,
+            observation.now,
+        )
+        if not reason and not observation.calendar["allowed"]:
+            reason = observation.calendar["skipped"]
+        if observation.kind != "batch":
+            return reason
+        control = await tx.fetch_one(
+            f"SELECT state FROM {CONTROLS} WHERE {WHERE_JOB}",
+            tuple(root[name] for name in IDENTITY_FIELDS),
+        )
+        state = control["state"] if control else root["state_dispatch_state"]
+        if state == "batch_paused":
+            return "batch_paused"
+        if (
+            observation.calendar["time_basis"] == "manual"
+            and state != "batch_enabled"
+        ):
+            return reason or "job_not_in_batch_mode"
+        return reason
 
     @staticmethod
     def _gate(root, binding, physical, now):

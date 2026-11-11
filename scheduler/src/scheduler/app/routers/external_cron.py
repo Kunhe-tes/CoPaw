@@ -1,16 +1,41 @@
 # -*- coding: utf-8 -*-
-"""新版用户任务独立对外数组接口，旧SWE接口保持原文件任务语义。"""
+"""新版用户任务的对外查询及批调度触发接口。"""
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .managed_callbacks import scheduling_service
+from .managed_cron import caller_identity
+from .managed_cron_management import require_managed_runtime
 from ..database import connection
+from ..services.cron.managed.contracts import ManagedCronNotFound
+from ..services.cron.managed.executions import ExecutionConflict
 from ..services.cron.managed.external_query import ExternalManagedJobs
-from ..services.cron.managed.identity import encode_scope, identity_value
+from ..services.cron.managed.identity import (
+    CallerIdentity,
+    encode_scope,
+    identity_value,
+)
+from ..services.cron.managed.scheduling import (
+    BatchAlreadyActive,
+    ManagedSchedulingService,
+)
 
 router = APIRouter(prefix="/scheduler/external/cron", tags=["external-cron"])
 logger = logging.getLogger(__name__)
+
+
+class BatchRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str = Field(alias="jobId", description="新版批调度父任务 ID")
+
+    @field_validator("job_id")
+    @classmethod
+    def validate_job_id(cls, value):
+        return identity_value(value)
 
 
 def _identity(headers):
@@ -58,3 +83,37 @@ async def list_external_jobs(request: Request):
             type(error).__name__,
         )
         raise HTTPException(503, "cron_database_unavailable") from error
+
+
+@router.post(
+    "/batch/run",
+    status_code=202,
+    summary="对外受理新版整批手动执行",
+    dependencies=[Depends(require_managed_runtime)],
+)
+async def run_external_batch(
+    body: BatchRunRequest,
+    caller: CallerIdentity = Depends(caller_identity),
+    service: ManagedSchedulingService = Depends(scheduling_service),
+):
+    """沿用可信网关身份及任务归属，按父任务登记整批执行。"""
+    try:
+        result = await service.run_batch(caller, body.job_id)
+    except ManagedCronNotFound as error:
+        raise HTTPException(404, "cron_job_not_found") from error
+    except BatchAlreadyActive as error:
+        raise HTTPException(
+            409,
+            {"code": str(error), "batch_id": error.batch_id},
+        ) from error
+    except ExecutionConflict as error:
+        raise HTTPException(409, str(error)) from error
+    except Exception as error:
+        logger.warning(
+            "external_cron_batch_run_unavailable error_type=%s",
+            type(error).__name__,
+        )
+        raise HTTPException(503, "cron_batch_run_unavailable") from error
+    if not result["accepted"]:
+        raise HTTPException(409, result["reason"])
+    return result
