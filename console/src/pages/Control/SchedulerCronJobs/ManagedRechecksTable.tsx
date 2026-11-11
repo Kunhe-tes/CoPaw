@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Alert, Space, Tabs, Tag } from "antd";
+import { Alert, Segmented, Space, Tag } from "antd";
 import { Button, Card, Table } from "@agentscope-ai/design";
 import dayjs from "dayjs";
 import { Link } from "react-router-dom";
@@ -12,6 +12,7 @@ import type {
 } from "@/api/types/schedulerCron";
 import styles from "../CronJobs/index.module.less";
 import { failureMessage } from "./helpers";
+import managementStyles from "./management.module.less";
 
 const statuses: Record<ManagedRecheck["status"], [string, string]> = {
   queued: ["待执行", "default"],
@@ -29,13 +30,12 @@ function formatTime(value: string | null | undefined) {
     : "—";
 }
 
-function RecheckPage({
+export function ManagedRechecksTable({
   context,
-  view,
 }: {
   context: ManagedCronContext;
-  view: ManagedRecheckView;
 }) {
+  const [view, setView] = useState<ManagedRecheckView>("active");
   const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
   const [revision, setRevision] = useState(0);
   const [page, setPage] = useState<ManagedPage<ManagedRecheck>>();
@@ -64,6 +64,13 @@ function RecheckPage({
 
   const history = view === "history";
   const next = page?.next_cursor;
+  const changeView = (value: ManagedRecheckView) => {
+    setView(value);
+    setCursors([undefined]);
+    setPage(undefined);
+    setError(undefined);
+    setLoading(true);
+  };
   const columns = [
     { title: "原任务", dataIndex: "job_name", key: "job_name" },
     { title: "回检 ID", dataIndex: "recheck_id", key: "recheck_id" },
@@ -128,30 +135,43 @@ function RecheckPage({
 
   return (
     <Card className={styles.tableCard}>
-      <Space>
-        <Button
-          aria-label="刷新"
-          loading={loading}
-          onClick={() => {
-            setCursors([undefined]);
-            setRevision((value) => value + 1);
-          }}
-        >
-          刷新
-        </Button>
-        <Button
-          disabled={loading || cursors.length <= 1}
-          onClick={() => setCursors((value) => value.slice(0, -1))}
-        >
-          上一页
-        </Button>
-        <Button
-          disabled={loading || !next}
-          onClick={() => next && setCursors((value) => [...value, next])}
-        >
-          下一页
-        </Button>
-      </Space>
+      <div
+        className={`${managementStyles.listToolbar} ${managementStyles.recheckToolbar}`}
+      >
+        <Segmented<ManagedRecheckView>
+          aria-label="回检任务视图"
+          value={view}
+          options={[
+            { label: "当前任务", value: "active" },
+            { label: "历史记录", value: "history" },
+          ]}
+          onChange={changeView}
+        />
+        <Space className={managementStyles.toolbarActions} wrap>
+          <Button
+            aria-label="刷新"
+            loading={loading}
+            onClick={() => {
+              setCursors([undefined]);
+              setRevision((value) => value + 1);
+            }}
+          >
+            刷新
+          </Button>
+          <Button
+            disabled={loading || cursors.length <= 1}
+            onClick={() => setCursors((value) => value.slice(0, -1))}
+          >
+            上一页
+          </Button>
+          <Button
+            disabled={loading || !next}
+            onClick={() => next && setCursors((value) => [...value, next])}
+          >
+            下一页
+          </Button>
+        </Space>
+      </div>
       {error ? (
         <Alert type="error" showIcon message={error} />
       ) : (
@@ -166,34 +186,5 @@ function RecheckPage({
         />
       )}
     </Card>
-  );
-}
-
-export function ManagedRechecksTable({
-  context,
-}: {
-  context: ManagedCronContext;
-}) {
-  return (
-    <Tabs
-      defaultActiveKey="active"
-      destroyOnHidden
-      items={[
-        {
-          key: "active",
-          label: "当前任务",
-          children: (
-            <RecheckPage key="active" context={context} view="active" />
-          ),
-        },
-        {
-          key: "history",
-          label: "历史记录",
-          children: (
-            <RecheckPage key="history" context={context} view="history" />
-          ),
-        },
-      ]}
-    />
   );
 }

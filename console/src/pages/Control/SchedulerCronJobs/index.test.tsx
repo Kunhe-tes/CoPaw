@@ -115,16 +115,25 @@ it("编辑读取最新详情后同步列表排程，不保留旧列表10点而�
   expect(screen.getByText(/ 09:00$/)).toBeInTheDocument();
 });
 
-it("已删除任务筛选位于页头操作区且可以开启和关闭", async () => {
+it("页头在任务导航上方，任务列表操作区可开启和关闭已删除任务筛选", async () => {
   render(<SchedulerCronJobsPage />);
   await screen.findByText("新版任务");
   const header = screen.getByRole("banner");
-  const filter = within(header).getByRole("button", {
+  const tabList = screen.getByRole("tablist");
+  expect(
+    header.compareDocumentPosition(tabList) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  const actions = screen.getByRole("group", { name: "定时任务操作" });
+  const filter = within(actions).getByRole("button", {
     name: "包含已删除任务（查看清理进度）",
   });
-  expect(within(header).getByRole("button", { name: /刷\s*新/ })).toBeVisible();
   expect(
-    within(header).getByRole("button", { name: /cronJobs.createJob|创建任务/ }),
+    within(actions).getByRole("button", { name: /刷\s*新/ }),
+  ).toBeVisible();
+  expect(
+    within(actions).getByRole("button", {
+      name: /cronJobs.createJob|创建任务/,
+    }),
   ).toBeVisible();
   expect(filter).toHaveAttribute("aria-pressed", "false");
   filter.focus();
