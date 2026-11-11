@@ -3,6 +3,7 @@ import { request } from "../../../api/request";
 import { useIframeStore } from "../../../stores/iframeStore";
 import {
   distributionContext,
+  importExcelPeople,
   queryInstitutionPeople,
   queryInstitutionTree,
 } from "./api";
@@ -148,4 +149,68 @@ it("错误分行根及畸形人员响应不能当作成功空数据", async () =
   await expect(queryInstitutionPeople(context, [root])).rejects.toThrow(
     "格式异常",
   );
+});
+
+it("Excel 导入上传原始文件，按服务端结果回填人员及机构编码", async () => {
+  const file = new File(["excel fixture"], "分发名单.xlsx");
+  mock.mockResolvedValue({
+    code: "200",
+    data: {
+      users: [
+        {
+          sapID: "00012",
+          userName: "李四",
+          branchID: "120",
+          subBranchID: "12001",
+          subBranchName: "异地支行",
+        },
+      ],
+      duplicates: 1,
+    },
+  });
+  await expect(
+    importExcelPeople(file, new AbortController().signal),
+  ).resolves.toEqual({
+    people: [
+      {
+        sapId: "00012",
+        name: "李四",
+        orgName: "异地支行",
+        bbkId: "120",
+        bbkOrgId: "12001",
+      },
+    ],
+    errors: [],
+    duplicates: 1,
+  });
+  expect(mock).toHaveBeenCalledOnce();
+  expect(mock).toHaveBeenCalledWith(
+    "/agent/workspace/users/import-excel",
+    expect.objectContaining({ method: "POST", body: expect.any(FormData) }),
+  );
+  const body = mock.mock.calls[0][1]?.body as FormData;
+  expect(body.get("file")).toBe(file);
+});
+
+it("Excel 导入返回逐行错误，超限文件不发送请求", async () => {
+  const signal = new AbortController().signal;
+  const oversized = new File(
+    [new Uint8Array(5 * 1024 * 1024 + 1)],
+    "超限.xlsx",
+  );
+  await expect(importExcelPeople(oversized, signal)).rejects.toThrow(
+    "不超过 5 MB",
+  );
+  expect(mock).not.toHaveBeenCalled();
+  mock.mockResolvedValue({
+    code: "200",
+    data: { users: [], errors: ["第 2 行：客户经理不存在"] },
+  });
+  await expect(
+    importExcelPeople(new File(["fixture"], "名单.xlsx"), signal),
+  ).resolves.toEqual({
+    people: [],
+    errors: ["第 2 行：客户经理不存在"],
+    duplicates: 0,
+  });
 });

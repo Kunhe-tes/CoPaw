@@ -103,12 +103,14 @@ export interface SkillStat {
   generatedTaskCount: number;
 }
 
-/** 分发目标用户（行长/中台发布规划时选择的下属客户经理） */ export interface DistributeTarget {
+/** 分发目标用户（行长/中台发布规划时选择的下属客户经理） */
+export interface DistributeTarget {
   /** 发布目标 SAP ID（机构岗位人员接口返回的 sapID） */
   sapId: string;
   name: string;
   /** 所属机构名称（可能为空） */
   orgName: string;
+  branchName?: string;
   /** 接收人所属分行编码，人员接口 branchID。 */
   bbkId?: string;
   /** 接收人所属支行编码，人员接口 subBranchID。 */

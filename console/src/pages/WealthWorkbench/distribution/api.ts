@@ -52,7 +52,7 @@ async function query<T>(path: string, body: unknown, signal?: AbortSignal) {
   try {
     const result = await request<Response<T>>(path, {
       method: "POST",
-      body: JSON.stringify(body),
+      body: body instanceof FormData ? body : JSON.stringify(body),
       signal: controller.signal,
     });
     if (controller.signal.aborted) throw new Error("分发查询已取消或超时");
@@ -135,4 +135,83 @@ export async function queryInstitutionPeople(
       bbkId: user.branchID ?? context.bbk,
       bbkOrgId: user.subBranchID || user.branchID || "",
     }));
+}
+
+// 外部智拓服务的暂定契约，实际路径和字段待联调确认。
+const EXCEL_IMPORT_PATH = "/agent/workspace/users/import-excel";
+export const MAX_EXCEL_FILE_MB = 5;
+const EXCEL_RESPONSE_ERROR = "人员名单响应格式异常，请重试";
+
+interface ExcelImportResponse {
+  users: UserPosition[];
+  errors?: string[];
+  duplicates?: number;
+}
+
+export async function importExcelPeople(file: File, signal: AbortSignal) {
+  if (
+    !/\.xlsx$/i.test(file.name) ||
+    file.size === 0 ||
+    file.size > MAX_EXCEL_FILE_MB * 1024 * 1024
+  ) {
+    throw new Error(`请选择不超过 ${MAX_EXCEL_FILE_MB} MB 的非空 .xlsx 文件`);
+  }
+  const body = new FormData();
+  body.append("file", file);
+  const result = await query<ExcelImportResponse>(
+    EXCEL_IMPORT_PATH,
+    body,
+    signal,
+  );
+  if (
+    !Array.isArray(result?.users) ||
+    (result.errors !== undefined &&
+      (!Array.isArray(result.errors) ||
+        result.errors.some(
+          (error) => typeof error !== "string" || !error.trim(),
+        ))) ||
+    (result.duplicates !== undefined &&
+      (!Number.isSafeInteger(result.duplicates) || result.duplicates < 0))
+  )
+    throw new Error(EXCEL_RESPONSE_ERROR);
+
+  const errors = result.errors ?? [];
+  let duplicates = result.duplicates ?? 0;
+  const targets = new Map<string, DistributeTarget>();
+  for (const user of result.users) {
+    const sapId = typeof user?.sapID === "string" ? user.sapID.trim() : "";
+    const name = typeof user?.userName === "string" ? user.userName.trim() : "";
+    const branchId =
+      typeof user?.branchID === "string" ? user.branchID.trim() : "";
+    if (!sapId || !name || !branchId) throw new Error(EXCEL_RESPONSE_ERROR);
+    const orgId =
+      typeof user.subBranchID === "string" ? user.subBranchID.trim() : "";
+    const branchName =
+      typeof user.branchName === "string" ? user.branchName.trim() : "";
+    const orgName =
+      typeof user.subBranchName === "string" ? user.subBranchName.trim() : "";
+    const target = {
+      sapId,
+      name,
+      orgName: orgName || branchName || orgId || branchId,
+      ...(branchName ? { branchName } : {}),
+      bbkId: branchId,
+      bbkOrgId: orgId || branchId,
+    };
+    const previous = targets.get(sapId);
+    if (previous) {
+      if (
+        previous.name !== name ||
+        previous.bbkId !== branchId ||
+        previous.bbkOrgId !== target.bbkOrgId
+      )
+        throw new Error(`客户经理ID ${sapId} 的人员信息不一致，请重新核对名单`);
+      duplicates++;
+    } else {
+      targets.set(sapId, target);
+    }
+  }
+  if (!targets.size && !errors.length)
+    throw new Error("未找到可导入的人员，请核对名单");
+  return { people: [...targets.values()], errors, duplicates };
 }
