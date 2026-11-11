@@ -1,4 +1,10 @@
-import { cleanup, render, screen, fireEvent } from "@testing-library/react";
+import {
+  cleanup,
+  render,
+  screen,
+  fireEvent,
+  within,
+} from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import BatchDetail from "./BatchDetail";
 import type { ManagedBatch } from "@/api/modules/managedBatchBoard";
@@ -61,7 +67,7 @@ it("详情不展示任务数说明行，成员保留子任务状态文案", asyn
   expect(screen.getByRole("tab", { name: "执行成员 (1)" })).toBeInTheDocument();
   expect(screen.getByText("子任务成功")).toHaveClass("ant-tag-success");
   expect(screen.getByText("parent")).toBeInTheDocument();
-  expect(screen.queryByText("exec")).toBeNull();
+  expect(screen.getByText("执行 ID：exec")).toBeInTheDocument();
   expect(screen.queryByText(/收敛/)).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: /expand|展开/i }));
   expect(screen.queryByText(/；收敛/)).toBeNull();
@@ -108,7 +114,11 @@ it("异步子任务失败单独显示红色标签，不把主执行成功当作�
   expect(screen.getByText("主执行成功")).toHaveClass("ant-tag-success");
 });
 
-it("悬停事件详情展示完整且格式化的JSON，而不是截断的预览", async () => {
+it.each([
+  ["auto_unread_threshold", "未读暂停，重试未入队"],
+  ["manual", "手动停用，重试未入队"],
+])("展示 %s 的拦截原因和完整事件详情", async (reason, label) => {
+  const executionId = "548b6d5d-9a4a-5461-b0c9-38c12605426f";
   const batch = {
     batch_id: "batch",
     job_id: "parent",
@@ -116,8 +126,8 @@ it("悬停事件详情展示完整且格式化的JSON，而不是截断的预览
     member_count: 0,
   } as ManagedBatch;
   const details = {
-    reason: "完整原因".repeat(100),
-    nested: { description: "<b>这只是文本</b>" },
+    reason,
+    nested: { description: "<b>这只是文本</b>".repeat(100) },
   };
   api.detail.mockResolvedValue({
     batch,
@@ -127,7 +137,8 @@ it("悬停事件详情展示完整且格式化的JSON，而不是截断的预览
     events: [
       {
         event_id: "event",
-        event_type: "retry_skipped",
+        event_type: "auto_retry_blocked",
+        execution_id: executionId,
         actor_id: "alice",
         occurred_at: "2026-11-05T01:00:00Z",
         details,
@@ -144,6 +155,36 @@ it("悬停事件详情展示完整且格式化的JSON，而不是截断的预览
     />,
   );
   fireEvent.click(await screen.findByRole("tab", { name: "调度事件 (1)" }));
+  const events = within(screen.getByRole("tabpanel", { name: /调度事件/ }));
+  const search = events.getByRole("textbox", { name: "筛选调度事件" });
+  expect(events.getAllByRole("textbox")).toHaveLength(1);
+  expect(events.queryByText("执行 ID")).not.toBeInTheDocument();
+  fireEvent.change(search, { target: { value: " auto_retry_blocked " } });
+  expect(api.detail).toHaveBeenLastCalledWith(
+    "bank",
+    "batch",
+    expect.objectContaining({
+      event_type: "auto_retry_blocked",
+      event_page: 1,
+    }),
+    expect.any(AbortSignal),
+  );
+  fireEvent.change(search, {
+    target: { value: ` ${executionId.toUpperCase()} ` },
+  });
+  expect(api.detail).toHaveBeenLastCalledWith(
+    "bank",
+    "batch",
+    expect.objectContaining({
+      event_execution_id: executionId,
+      event_page: 1,
+    }),
+    expect.any(AbortSignal),
+  );
+  expect(await screen.findByText(label)).toHaveAttribute(
+    "title",
+    "auto_retry_blocked",
+  );
   fireEvent.mouseOver(screen.getByLabelText("查看完整事件详情"));
   const full = await screen.findByLabelText("完整事件详情");
   expect(full.textContent).toBe(JSON.stringify(details, null, 2));
@@ -193,7 +234,9 @@ it("父任务模型和错误说明沿用旧版展示，不展示Owner或优先JS
     />,
   );
   await screen.findByText("子任务报告");
-  expect(screen.getByRole("button", { name: "重试次数 2，查看尝试历史" })).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "重试次数 2，查看尝试历史" }),
+  ).toBeInTheDocument();
   expect(screen.getByText("Network,Prompt")).toBeInTheDocument();
   expect(screen.queryByText(/次投递|业务尝试/)).toBeNull();
   expect(

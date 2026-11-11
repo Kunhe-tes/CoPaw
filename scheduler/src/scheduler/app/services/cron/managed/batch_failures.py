@@ -98,7 +98,8 @@ async def member_rows(db, receipt, *, lock=False, member_ids=None):
         + ",m.member_id,m.version AS member_version,m.business_attempt,"
         "m.initial_execution_id,m.current_execution_id,m.member_role,m.dispatch_order AS member_order,"
         "d.definition_version AS current_definition_version,d.management_owner,s.job_id AS current_state_job_id,"
-        "s.queue_invalidation_version AS current_queue_invalidation_version "
+        "s.queue_invalidation_version AS current_queue_invalidation_version,"
+        "s.pause_reason AS current_pause_reason "
         f"FROM {MEMBERS} m LEFT JOIN swe_cron_execution_runs r ON m.current_execution_id=r.execution_id AND {joins} "
         f"LEFT JOIN swe_cron_jobs_v2 d ON {definitions} LEFT JOIN swe_cron_job_states s ON {states} WHERE m.batch_id=%s"
         + selection

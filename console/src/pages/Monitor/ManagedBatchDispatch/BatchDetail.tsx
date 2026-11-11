@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import { validate as isUuid } from "uuid";
 import {
   Alert,
   Button,
@@ -16,6 +17,7 @@ import type { ColumnsType } from "antd/es/table";
 import {
   managedBatchBoard,
   type ManagedBatch,
+  type ManagedBatchEvent,
   type ManagedBatchMember,
   type ManagedRetryResult,
 } from "../../../api/modules/managedBatchBoard";
@@ -28,7 +30,19 @@ import PriorityOrder from "./PriorityOrder";
 import MemberAttempts from "./MemberAttempts";
 import { getBbkDisplayName } from "../../../constants/bbk";
 
-const memberColumns = (source: string, batchId: string): ColumnsType<ManagedBatchMember> => [
+function eventLabel(event: ManagedBatchEvent) {
+  if (event.event_type === "auto_retry_blocked") {
+    if (event.details.reason === "manual") return "手动停用，重试未入队";
+    if (event.details.reason === "auto_unread_threshold")
+      return "未读暂停，重试未入队";
+  }
+  return event.event_type;
+}
+
+const memberColumns = (
+  source: string,
+  batchId: string,
+): ColumnsType<ManagedBatchMember> => [
   {
     title: "顺位",
     dataIndex: "member_order",
@@ -59,8 +73,13 @@ const memberColumns = (source: string, batchId: string): ColumnsType<ManagedBatc
         <Tooltip title={`定时任务 ID：${item.job_id}`}>
           <span>{item.job_id}</span>
         </Tooltip>
+        <Tooltip title={item.execution_id} trigger={["hover", "focus"]}>
+          <span tabIndex={0}>执行 ID：{item.execution_id || "-"}</span>
+        </Tooltip>
         <MemberAttempts
-          source={source} batchId={batchId} memberId={item.member_id}
+          source={source}
+          batchId={batchId}
+          memberId={item.member_id}
           count={Math.max(0, item.business_attempt - 1)}
         />
       </div>
@@ -153,12 +172,22 @@ export default function BatchDetail({
     member_query: "",
     event_page: 1,
     event_limit: 50,
-    event_type: "",
+    event_query: "",
   });
   const load = useCallback(
     (signal: AbortSignal) => {
       void refresh;
-      return managedBatchBoard.detail(source, batch.batch_id, filters, signal);
+      const { event_query, ...params } = filters;
+      const query = event_query.trim();
+      const eventFilter = isUuid(query)
+        ? { event_execution_id: query.toLowerCase() }
+        : { event_type: query };
+      return managedBatchBoard.detail(
+        source,
+        batch.batch_id,
+        { ...params, ...eventFilter },
+        signal,
+      );
     },
     [source, batch.batch_id, filters, refresh],
   );
@@ -340,13 +369,16 @@ export default function BatchDetail({
             children: (
               <>
                 <Input
-                  aria-label="筛选新版事件类型"
-                  placeholder="事件类型，如 running、retry_accepted"
-                  value={filters.event_type}
+                  allowClear
+                  aria-label="筛选调度事件"
+                  maxLength={64}
+                  placeholder="输入事件类型或完整执行 ID"
+                  style={{ maxWidth: 360, marginBottom: 8 }}
+                  value={filters.event_query}
                   onChange={(event) =>
                     setFilters({
                       ...filters,
-                      event_type: event.target.value,
+                      event_query: event.target.value,
                       event_page: 1,
                     })
                   }
@@ -356,17 +388,33 @@ export default function BatchDetail({
                     {data?.events.map((event) => (
                       <div className={styles.eventItem} key={event.event_id}>
                         <time>{timeText(event.occurred_at)}</time>
-                        <strong>{event.event_type}</strong>
+                        <strong title={event.event_type}>
+                          {eventLabel(event)}
+                        </strong>
                         <Tooltip title={event.execution_id}>
                           <p>
                             执行 {event.execution_id || "-"} · 操作者{" "}
                             {event.actor_id}
                           </p>
                         </Tooltip>
-                        <Tooltip trigger={["hover", "focus"]} placement="topRight"
-                          overlayStyle={{ maxWidth: "min(640px, calc(100vw - 32px))" }}
-                          title={<pre className={hoverStyles.eventTooltip} aria-label="完整事件详情">{JSON.stringify(event.details, null, 2)}</pre>}>
-                          <em tabIndex={0} aria-label="查看完整事件详情">{JSON.stringify(event.details)}</em>
+                        <Tooltip
+                          trigger={["hover", "focus"]}
+                          placement="topRight"
+                          overlayStyle={{
+                            maxWidth: "min(640px, calc(100vw - 32px))",
+                          }}
+                          title={
+                            <pre
+                              className={hoverStyles.eventTooltip}
+                              aria-label="完整事件详情"
+                            >
+                              {JSON.stringify(event.details, null, 2)}
+                            </pre>
+                          }
+                        >
+                          <em tabIndex={0} aria-label="查看完整事件详情">
+                            {JSON.stringify(event.details)}
+                          </em>
                         </Tooltip>
                       </div>
                     ))}
