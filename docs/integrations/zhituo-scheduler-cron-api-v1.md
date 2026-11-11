@@ -19,6 +19,7 @@
 | 7 | 查看分发子任务列表 | Scheduler | GET /api/scheduler/cron/jobs/{job_id}/broadcast/children | 已实现本地查询 |
 | 8 | 按 skill_id 查询 Workflow 绑定 | SWE | GET /api/cron/workflow-bindings/{skill_id} | 存量接口，保留原实现 |
 | 9 | 批量删除分发子任务（异步） | Scheduler | POST /api/scheduler/cron/jobs/{job_id}/broadcast/children/batch-delete | 202受理，后台处理，支持查询和恢复 |
+| 10 | 手动触发整批 | Scheduler | POST /api/scheduler/external/cron/batch/run | 202受理，返回批次 ID |
 
 第 5、6 项及其配套查询已注册到本地代码，后台处理器也已实现；后台已接入正常应用生命周期，但仍须全部必需表列、既有连接地址和平台配置就绪，提交受理不等于部署环境已经验收。“本地已实现”不代表预发布已部署。新版普通/批回调已开发，实际平台和数据库联调尚未完成，现在不要创建启用中的真实定时器做完整执行验收。
 
@@ -872,6 +873,10 @@ GET {SweBaseUrl}/api/cron/workflow-bindings/{skill_id}
 正式联调前确认：目标版本已部署、分发和模式接口已完成；网关正确路由 Scheduler 与 SWE；身份 Header 来源可信；共享表人工 DDL 已对齐；使用真实 source/技能/Workflow 绑定；新执行入口与回调配置已完成。本文不表示这些条件已经在当前环境满足。
 
 请求端应允许响应增加字段，不把未知管理状态字符串当作 ready，也不要把管理 operation、分发 task 和执行 batch 的状态混为同一种状态。
+
+## 十五 手动触发整批
+
+请求体只传父任务 `jobId`。受理返回 `202` 和新批次 ID，已有未结束批次时返回 `409` 和现有批次 ID。完整参数、授权和错误响应见 [Scheduler 整批触发接口](scheduler-external-batch-run.md)。
 
 ## 附录 Postman 文件
 
