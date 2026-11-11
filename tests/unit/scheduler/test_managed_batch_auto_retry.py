@@ -254,6 +254,45 @@ async def test_async_failure_and_old_timeout_rule(
     )
 
 
+@pytest.mark.parametrize("pause_reason", ["auto_unread_threshold", "manual"])
+@pytest.mark.asyncio
+async def test_task_pause_records_one_retry_block_event(
+    callback_setup,
+    pause_reason,
+):
+    from scheduler.app.services.cron.managed.settlement import (
+        ExecutionSettlement,
+    )
+
+    db, _, batch_id, original, now, worker = await failed_setup(callback_setup)
+    await db.execute(
+        "UPDATE swe_cron_execution_runs SET status='success',settled_status=NULL,"
+        "error_code=NULL,result_json=NULL",
+    )
+    await db.execute(
+        "UPDATE swe_cron_executions SET status='success',async_status='error',error_type='Prompt'",
+    )
+    await db.execute(
+        "UPDATE swe_cron_job_states SET pause_reason=%s,"
+        "queue_invalidation_version=%s",
+        (pause_reason, original["enqueued_state_version"] + 1),
+    )
+    assert await ExecutionSettlement(db, clock=lambda: now).tick() == 1
+    assert await worker.tick() == 0
+    assert await worker.tick() == 0
+    events = await db.fetch_all(
+        "SELECT * FROM swe_cron_managed_dispatch_events "
+        "WHERE event_type='auto_retry_blocked'",
+    )
+    assert len(events) == 1
+    assert events[0]["batch_id"] == batch_id
+    assert events[0]["execution_id"] == original["execution_id"]
+    assert json.loads(events[0]["details_json"])["reason"] == pause_reason
+    assert (
+        len(await db.fetch_all("SELECT * FROM swe_cron_execution_runs")) == 1
+    )
+
+
 @pytest.mark.asyncio
 async def test_error_metadata_and_history_both_prevent_terminal_retry(
     callback_setup,

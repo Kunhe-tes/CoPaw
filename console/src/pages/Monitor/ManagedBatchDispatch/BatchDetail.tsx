@@ -16,6 +16,7 @@ import type { ColumnsType } from "antd/es/table";
 import {
   managedBatchBoard,
   type ManagedBatch,
+  type ManagedBatchEvent,
   type ManagedBatchMember,
   type ManagedRetryResult,
 } from "../../../api/modules/managedBatchBoard";
@@ -27,6 +28,15 @@ import FailurePanel from "./FailurePanel";
 import PriorityOrder from "./PriorityOrder";
 import MemberAttempts from "./MemberAttempts";
 import { getBbkDisplayName } from "../../../constants/bbk";
+
+function eventLabel(event: ManagedBatchEvent) {
+  if (event.event_type === "auto_retry_blocked") {
+    if (event.details.reason === "manual") return "手动停用，重试未入队";
+    if (event.details.reason === "auto_unread_threshold")
+      return "未读暂停，重试未入队";
+  }
+  return event.event_type;
+}
 
 const memberColumns = (source: string, batchId: string): ColumnsType<ManagedBatchMember> => [
   {
@@ -58,6 +68,9 @@ const memberColumns = (source: string, batchId: string): ColumnsType<ManagedBatc
         <strong>{item.job_name || item.job_id}</strong>
         <Tooltip title={`定时任务 ID：${item.job_id}`}>
           <span>{item.job_id}</span>
+        </Tooltip>
+        <Tooltip title={item.execution_id} trigger={["hover", "focus"]}>
+          <span tabIndex={0}>执行 ID：{item.execution_id || "-"}</span>
         </Tooltip>
         <MemberAttempts
           source={source} batchId={batchId} memberId={item.member_id}
@@ -154,11 +167,17 @@ export default function BatchDetail({
     event_page: 1,
     event_limit: 50,
     event_type: "",
+    event_execution_id: "",
   });
   const load = useCallback(
     (signal: AbortSignal) => {
       void refresh;
-      return managedBatchBoard.detail(source, batch.batch_id, filters, signal);
+      return managedBatchBoard.detail(
+        source,
+        batch.batch_id,
+        { ...filters, event_execution_id: filters.event_execution_id.trim() },
+        signal,
+      );
     },
     [source, batch.batch_id, filters, refresh],
   );
@@ -339,24 +358,42 @@ export default function BatchDetail({
             label: `调度事件 (${data?.event_total ?? "-"})`,
             children: (
               <>
-                <Input
-                  aria-label="筛选新版事件类型"
-                  placeholder="事件类型，如 running、retry_accepted"
-                  value={filters.event_type}
-                  onChange={(event) =>
-                    setFilters({
-                      ...filters,
-                      event_type: event.target.value,
-                      event_page: 1,
-                    })
-                  }
-                />
+                <Space align="end" wrap>
+                  <Input
+                    aria-label="筛选新版事件类型"
+                    placeholder="事件类型，如 running"
+                    value={filters.event_type}
+                    onChange={(event) =>
+                      setFilters({
+                        ...filters,
+                        event_type: event.target.value,
+                        event_page: 1,
+                      })
+                    }
+                  />
+                  <label>
+                    执行 ID
+                    <Input
+                      allowClear
+                      maxLength={128}
+                      placeholder="输入完整执行 ID"
+                      value={filters.event_execution_id}
+                      onChange={(event) =>
+                        setFilters({
+                          ...filters,
+                          event_execution_id: event.target.value,
+                          event_page: 1,
+                        })
+                      }
+                    />
+                  </label>
+                </Space>
                 <Spin spinning={detail.loading}>
                   <div className={styles.eventList}>
                     {data?.events.map((event) => (
                       <div className={styles.eventItem} key={event.event_id}>
                         <time>{timeText(event.occurred_at)}</time>
-                        <strong>{event.event_type}</strong>
+                        <strong title={event.event_type}>{eventLabel(event)}</strong>
                         <Tooltip title={event.execution_id}>
                           <p>
                             执行 {event.execution_id || "-"} · 操作者{" "}
