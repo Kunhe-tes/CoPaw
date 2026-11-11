@@ -187,6 +187,8 @@ class ManagedCronRepository:
         parent_id: str | None = None,
     ) -> dict:
         result = await self.page_rows(caller, options, parent_id=parent_id)
+        if parent_id is None:
+            await self._mark_distributed_parents(result["items"])
         result["items"] = await render_rows(
             result["items"],
             caller.actor_id,
@@ -195,6 +197,31 @@ class ManagedCronRepository:
             child_item if parent_id is not None else list_item,
         )
         return result
+
+    async def _mark_distributed_parents(self, rows):
+        keys = [_key(row) for row in rows if _parent_key(row) is None]
+        parents = set()
+        if keys:
+            fields = ", ".join(f"parent_{key}" for key in IDENTITY_FIELDS)
+            columns = ", ".join(
+                f"parent_{key} COLLATE utf8mb4_bin AS parent_{key}"
+                for key in IDENTITY_FIELDS
+            )
+            markers = ", ".join(["(%s,%s,%s,%s)"] * len(keys))
+            try:
+                matches = await self.db.fetch_all(
+                    f"SELECT DISTINCT {columns} FROM swe_cron_jobs_v2 "
+                    f"WHERE ({fields}) IN ({markers}) "
+                    "AND management_owner='scheduler'",
+                    tuple(value for key in keys for value in key),
+                )
+            except Exception as exc:
+                raise ManagedCronUnavailable(
+                    "cron_database_unavailable",
+                ) from exc
+            parents = {_parent_key(row) for row in matches}
+        for row in rows:
+            row["has_distributed_children"] = _key(row) in parents
 
     async def page_rows(
         self,

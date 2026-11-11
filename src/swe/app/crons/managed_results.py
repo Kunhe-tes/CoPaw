@@ -16,6 +16,7 @@ from .managed_history import (
 from .managed_events import append_run_event
 from .managed_failure import public_error_message
 from .managed_daily_retry import finalize_daily_history, newer_success_exists
+from .managed_recheck_store import register_recheck
 from ..source_system_config.runtime import (
     get_current_source_system_config,
     resolve_cron_unread_auto_pause_config,
@@ -77,6 +78,7 @@ class ExecutionOutcome:
     input_snapshot: dict | None = None
     execution_meta: dict | None = None
     executor_leader: str = ""
+    recheck_output: str | None = None
 
 
 def utc_now():
@@ -383,6 +385,8 @@ class ExecutionWriter:
             )
         else:
             await self._release_stale_running(run, outcome)
+        if outcome.status == "success":
+            await register_recheck(self.db, definition, run, outcome, now)
 
     async def _finalize_previous_history(self, run):
         """与新历史同事务替换业务重试结果，不影响其他任务或其他批次。"""

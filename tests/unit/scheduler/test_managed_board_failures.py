@@ -43,6 +43,7 @@ def duplicate_batch(
     category="configuration",
     status="error",
     settled=None,
+    error_type=None,
 ):
     def copy(table):
         return dict(
@@ -58,6 +59,7 @@ def duplicate_batch(
     history = copy("swe_cron_executions")
     history.pop("id")
     history["error_message"] = message
+    history["error_type"] = error_type
     history_id = insert("swe_cron_executions", history)
     run = copy("swe_cron_execution_runs")
     run.pop("queue_order")
@@ -91,6 +93,34 @@ def duplicate_batch(
         current_execution_id=run["execution_id"],
     )
     insert("swe_cron_managed_batch_members", member)
+
+
+@pytest.mark.asyncio
+async def test_subtask_error_types_keep_member_and_detail_totals(
+    callback_setup,
+):
+    db = callback_setup[0]
+    await failed_batch(callback_setup, category="configuration")
+    for number, error_type in enumerate(("Prompt", "Prompt", ""), start=2):
+        duplicate_batch(
+            db,
+            number,
+            message="子任务失败",
+            status="success",
+            settled="error",
+            error_type=error_type,
+        )
+    summary = await ManagedBoardQuery(db).failure_summary("bank")
+    groups = {g["failure_type"]: g for g in summary["groups"]}
+    failure = groups["subtask_failed"]
+    assert summary["total"] == 4
+    assert failure["count"] == 3
+    assert failure["details"] == [{"message": "子任务失败", "count": 3}]
+    assert failure["error_types"] == [
+        {"error_type": "Prompt", "count": 2},
+        {"error_type": None, "count": 1},
+    ]
+    assert "error_types" not in groups["configuration"]
 
 
 @pytest.mark.asyncio

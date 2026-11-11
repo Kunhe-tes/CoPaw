@@ -46,6 +46,7 @@ async def transaction(db):
 
 
 TABLES = {
+    "swe_cron_recheck_tasks",
     "swe_cron_failure_retry_calls",
     "swe_cron_system_jobs",
     "swe_cron_system_executions",

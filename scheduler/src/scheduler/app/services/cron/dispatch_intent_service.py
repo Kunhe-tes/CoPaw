@@ -2003,7 +2003,7 @@ class CronDispatchIntentService:
         normalized_strategy_id = str(strategy_id or "")
         row = await db.fetch_one(
             """
-            SELECT effective_workers, created_at
+            SELECT effective_workers, created_at, strategy_id, decision_reason
             FROM swe_cron_dispatch_worker_capacity
             WHERE source_id = %s
               AND provider_id = %s
@@ -2021,6 +2021,14 @@ class CronDispatchIntentService:
             ),
         )
         return dict(row) if row else None
+
+    async def list_worker_scopes(self):
+        """只从每个模型池一条的租约表枚举已知模型池。"""
+        db = get_db_connection()
+        return await db.fetch_all(
+            "SELECT source_id,provider_id,model_id "
+            "FROM swe_cron_dispatch_scope_leases",
+        )
 
     async def record_worker_capacity(
         self,

@@ -18,6 +18,23 @@ function jobWithCron(cron: string): CronJobSpecOutput {
   } as CronJobSpecOutput;
 }
 
+it("round trips an Agent recheck and explicitly clears it when disabled", () => {
+  const job = {
+    ...jobWithCron("0 10 * * *"),
+    task_type: "agent" as const,
+    request: { input: "提交报表" },
+    recheck: { delay_seconds: 7200, instruction: "核对报表" },
+  };
+  const values = buildManagedCronFormValues(job);
+  expect(buildManagedCronSubmitPayload(values, job).recheck).toEqual(
+    job.recheck,
+  );
+  expect(
+    buildManagedCronSubmitPayload({ ...values, recheckEnabled: false }, job)
+      .recheck,
+  ).toBeNull();
+});
+
 it.each([
   ["0 10 * * *", "10:00"],
   ["0 0 * * *", "00:00"],

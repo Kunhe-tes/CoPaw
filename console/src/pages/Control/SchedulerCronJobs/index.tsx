@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { Alert, Space } from "antd";
+import { Alert, Space, Tabs } from "antd";
 import { Button, Card, Table } from "@agentscope-ai/design";
 import { useTranslation } from "react-i18next";
 import type { ManagedCronContext, ManagedJob } from "@/api/types/schedulerCron";
@@ -17,6 +17,7 @@ import { ManagedJobEditor } from "./ManagedJobEditor";
 import { ManagedBroadcastModal } from "./ManagedBroadcastModal";
 import { ManagedChildrenModal } from "./ManagedChildrenModal";
 import { ManagedProgressModal } from "./ManagedProgressModal";
+import { ManagedRechecksTable } from "./ManagedRechecksTable";
 import { failureMessage, RequestIdentity } from "./helpers";
 import styles from "../CronJobs/index.module.less";
 
@@ -179,6 +180,7 @@ function SchedulerCronWorkspace({ context }: { context: ManagedCronContext }) {
 
 /** 工作区和角色变化时整体卸载子页面，旧弹窗不会借用新身份提交。 */
 export default function SchedulerCronJobsPage() {
+  const { t } = useTranslation();
   const user = useIframeStore((store) => store.userId);
   const source = useIframeStore((store) => store.source);
   const manager = useIframeStore((store) => store.manager);
@@ -195,9 +197,29 @@ export default function SchedulerCronJobsPage() {
     [actor, source, agent],
   );
   return (
-    <SchedulerCronWorkspace
+    <Tabs
       key={JSON.stringify([context, manager, admin])}
-      context={context}
+      defaultActiveKey="jobs"
+      destroyOnHidden
+      items={[
+        {
+          key: "jobs",
+          label: "定时任务",
+          children: <SchedulerCronWorkspace context={context} />,
+        },
+        {
+          key: "rechecks",
+          label: "回检任务",
+          children: (
+            <div className={styles.cronJobsPage}>
+              <PageHeader
+                items={[{ title: t("nav.runCenter") }, { title: "定时任务（新）" }]}
+              />
+              <ManagedRechecksTable context={context} />
+            </div>
+          ),
+        },
+      ]}
     />
   );
 }

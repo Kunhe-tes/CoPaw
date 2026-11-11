@@ -126,6 +126,11 @@ def member_error_message(row):
 
 
 class ManagedBoardQuery:
+    async def member_attempts(self, source, batch_id, member_id):
+        from .managed_board_attempts import member_attempts
+
+        return await member_attempts(self.db, source, batch_id, member_id)
+
     def __init__(self, db):
         self.db = db
 

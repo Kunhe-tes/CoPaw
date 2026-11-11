@@ -152,6 +152,15 @@ it("增加执行时间标识不移除任务名旁的分发子任务标签", () =
   expect(screen.getByText("分发子任务")).toBeVisible();
 });
 
+it("没有实际分发过的独立任务不显示父任务标识", () => {
+  const record = job("batch_enabled", false);
+  const { rerender } = render(<>{column("name").render?.(record.name, record, 0)}</>);
+  expect(screen.queryByText("父任务")).toBeNull();
+  const parent = { ...record, has_distributed_children: true };
+  rerender(<>{column("name").render?.(parent.name, parent, 0)}</>);
+  expect(screen.getByText("父任务")).toBeVisible();
+});
+
 it.each(["技能任务执行失败 [workflow=http_status, HTTP=502]", ""])(
   "新版error悬浮展示当前失败详情或明确缺失提示：%s",
   async (detail) => {

@@ -195,6 +195,19 @@ async def test_board_counts_current_member_without_growing_after_retry(
     assert detail["batch"]["member_count"] == 1
     assert detail["batch"]["status"] == "pending"
     assert detail["members"][0]["business_attempt"] == 2
+    member = detail["members"][0]
+    history = await service.member_attempts("bank", batch, member["member_id"])
+    assert [
+        (row["business_attempt"], row["current"]) for row in history["items"]
+    ] == [
+        (1, False),
+        (2, True),
+    ]
+    assert history["items"][0]["execution_id"] == member["member_id"]
+    assert history["items"][0]["status"] == "error"
+    assert history["items"][1]["execution_id"] == member["execution_id"]
+    with pytest.raises(LookupError):
+        await service.member_attempts("other", batch, member["member_id"])
     assert detail["event_total"] > 1
     assert len(detail["events"]) == 1
     assert not (

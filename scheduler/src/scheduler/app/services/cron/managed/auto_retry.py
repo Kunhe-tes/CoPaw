@@ -4,6 +4,8 @@
 import logging
 from datetime import datetime, timedelta, timezone
 
+from .....config.constant import CRON_BATCH_MAX_ATTEMPTS
+
 from .batch_failures import display_error_messages, member_rows
 from .batch_members import MEMBERS, RECEIPTS, BatchRelationUnavailable
 from .batch_retry import BatchRetryGrant, BatchRetryService, _utc
@@ -17,7 +19,6 @@ from .settlement import PROTOCOL, _history_matches
 from .storage import transaction, update
 
 logger = logging.getLogger(__name__)
-MAX_ATTEMPTS = 3
 RETRY_DELAY_SECONDS = 300
 SUBTASK_TIMEOUT_SECONDS = 7800
 
@@ -67,7 +68,7 @@ class AutoBatchRetry:
             "ORDER BY r.queue_order LIMIT %s",
             (
                 after,
-                MAX_ATTEMPTS,
+                CRON_BATCH_MAX_ATTEMPTS,
                 self.clock() - timedelta(seconds=SUBTASK_TIMEOUT_SECONDS),
                 self.limit,
             ),
@@ -166,7 +167,7 @@ class AutoBatchRetry:
         failed = row["status"] == "error" or (
             row["status"] == "success" and row["settled_status"] == "error"
         )
-        if not failed or row["business_attempt"] >= MAX_ATTEMPTS:
+        if not failed or row["business_attempt"] >= CRON_BATCH_MAX_ATTEMPTS:
             return False
         await display_error_messages(tx, [row])
         return is_model_failure(row, row.get("_history"))

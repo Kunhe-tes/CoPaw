@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Tabs } from "antd";
+import { Alert, Input, InputNumber, Select, Switch, Tabs } from "antd";
 import { Button, Drawer, Form, Modal } from "@agentscope-ai/design";
 import api from "@/api";
 import {
@@ -152,6 +152,10 @@ export function ManagedJobEditor({
             ? buildManagedCronFormValues(current)
             : {
                 ...DEFAULT_FORM_VALUES,
+                recheckEnabled: false,
+                recheckDelay: 10,
+                recheckUnit: "minutes",
+                recheckInstruction: "",
                 id: "由系统自动分配",
                 schedule: {
                   ...DEFAULT_FORM_VALUES.schedule,
@@ -297,6 +301,57 @@ export function ManagedJobEditor({
                   idDisabled
                   enabledDisabled={Boolean(job)}
                 />
+                <Form.Item
+                  noStyle
+                  shouldUpdate={(previous, current) =>
+                    previous.task_type !== current.task_type ||
+                    previous.recheckEnabled !== current.recheckEnabled
+                  }
+                >
+                  {({ getFieldValue }) =>
+                    getFieldValue("task_type") === "agent" && (
+                      <>
+                        <Form.Item
+                          name="recheckEnabled"
+                          label="启用回检"
+                          valuePropName="checked"
+                        >
+                          <Switch />
+                        </Form.Item>
+                        {getFieldValue("recheckEnabled") && (
+                          <>
+                            <Form.Item
+                              name="recheckDelay"
+                              label="回检延迟"
+                              rules={[{ required: true }]}
+                            >
+                              <InputNumber min={0} />
+                            </Form.Item>
+                            <Form.Item
+                              name="recheckUnit"
+                              label="延迟单位"
+                              rules={[{ required: true }]}
+                            >
+                              <Select
+                                options={[
+                                  { value: "minutes", label: "分钟" },
+                                  { value: "hours", label: "小时" },
+                                ]}
+                              />
+                            </Form.Item>
+                            <Form.Item
+                              name="recheckInstruction"
+                              label="回检指令"
+                              rules={[{ required: true, whitespace: true }]}
+                            >
+                              <Input.TextArea rows={3} />
+                            </Form.Item>
+                          </>
+                        )}
+                      </>
+                    )
+                  }
+                </Form.Item>
                 <ManagedDateRangeField
                   inherited={inherited}
                   disabled={loading || saving || localSaving}

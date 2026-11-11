@@ -16,6 +16,11 @@ from ..source_system_config.runtime import (
 
 from .managed_api import _identity
 from .managed_execution import ManagedExecutionService
+from .managed_recheck_store import (
+    RecheckLeaseLost,
+    RecheckNotFound,
+    RecheckStore,
+)
 from .managed_results import (
     ExecutionLeaseLost,
     ExecutionWriter,
@@ -50,6 +55,16 @@ class ExecuteRequest(ExecutionIdentityRequest):
         max_length=64,
         description="Scheduler 本次派发的共库租约标识，用于拒绝已释放或已转移的迟到请求；不是认证密钥",
     )
+
+
+class RecheckIdentityRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    recheck_id: str = Field(min_length=1, max_length=64)
+    job_id: str = Field(min_length=1, max_length=64)
+
+
+class ExecuteRecheckRequest(RecheckIdentityRequest):
+    dispatch_token: str = Field(min_length=1, max_length=64)
 
 
 async def _authorized_execution(request, body):
@@ -275,3 +290,114 @@ async def recover_managed_result(
             503,
             "cron_execution_recovery_unavailable",
         ) from exc
+
+
+async def _authorized_recheck(request, body):
+    actor, tenant, source, agent = _identity(request)
+    key = (tenant, source, agent, body.job_id)
+    db = getattr(request.app.state, "db_connection", None)
+    if db is None or not getattr(db, "is_connected", False):
+        raise HTTPException(503, "cron_database_unavailable")
+    store = RecheckStore(db)
+    try:
+        definition = await store.definition(key)
+        row = await store.get(body.recheck_id, key)
+    except RecheckNotFound as exc:
+        raise HTTPException(404, "cron_recheck_not_found") from exc
+    except Exception as exc:
+        raise HTTPException(503, "cron_recheck_storage_unavailable") from exc
+    if actor not in {row["actor_id"], definition["creator_user_id"]}:
+        raise HTTPException(404, "cron_recheck_not_found")
+    return store, key, row
+
+
+async def _recheck_service(request, store):
+    from ..agent_context import get_agent_for_request
+    from .executor import CronExecutor
+    from .managed_receipts import SessionResultReceipts
+    from .managed_recheck import RecheckService
+
+    workspace = await get_agent_for_request(request)
+    if workspace.agent_id != request.headers.get("X-Agent-Id", "default"):
+        raise HTTPException(400, "conflicting_cron_agent")
+    if workspace.runner is None or workspace.chat_manager is None:
+        raise HTTPException(503, "cron_runner_unavailable")
+    return RecheckService(
+        store,
+        CronExecutor(
+            runner=workspace.runner,
+            channel_manager=workspace.channel_manager,
+        ),
+        SessionResultReceipts(workspace.runner.session),
+        workspace.chat_manager,
+        workspace.workspace_dir,
+    )
+
+
+def _recheck_receipt(row):
+    return {
+        "recheck_id": row["recheck_id"],
+        "job_id": row["job_id"],
+        "status": row["status"],
+        "accepted": True,
+    }
+
+
+@router.post("/rechecks/execute", status_code=202)
+async def execute_managed_recheck(
+    request: Request,
+    body: ExecuteRecheckRequest,
+):
+    store, key, _ = await _authorized_recheck(request, body)
+    try:
+        row = await store.accept(body.recheck_id, key, body.dispatch_token)
+        if row["status"] == "accepted":
+            async with _source_config_scope(request, key):
+                service = await _recheck_service(request, store)
+                tasks = getattr(request.app.state, "managed_cron_tasks", None)
+                if tasks is None:
+                    tasks = set()
+                    request.app.state.managed_cron_tasks = tasks
+                task = asyncio.create_task(
+                    service.execute(row, key),
+                    name=f"managed-cron-recheck:{body.recheck_id}",
+                )
+                tasks.add(task)
+                task.add_done_callback(lambda done: _completed(tasks, done))
+        return _recheck_receipt(row)
+    except RecheckLeaseLost as exc:
+        raise HTTPException(409, "cron_dispatch_lease_lost") from exc
+    except RecheckNotFound as exc:
+        raise HTTPException(404, "cron_recheck_not_found") from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            503,
+            "cron_recheck_acceptance_unavailable",
+        ) from exc
+
+
+@router.post("/rechecks/recover")
+async def recover_managed_recheck(
+    request: Request,
+    body: RecheckIdentityRequest,
+):
+    store, key, row = await _authorized_recheck(request, body)
+    if row["status"] != "running":
+        return {
+            **_recheck_receipt(row),
+            "recovered": row["status"] in TERMINAL,
+        }
+    try:
+        async with _source_config_scope(request, key):
+            service = await _recheck_service(request, store)
+            recovered = await service.recover(row, key)
+        return {
+            **_recheck_receipt(recovered),
+            "recovered": recovered["status"] in TERMINAL,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(503, "cron_recheck_recovery_unavailable") from exc
