@@ -731,6 +731,8 @@ function ChatPageContent() {
   if (taskViewRef.current.scopeKey !== taskScopeKey)
     taskViewRef.current = { scopeKey: taskScopeKey };
   const taskView = taskViewRef.current;
+  const currentTaskJobsRef = useRef(jobs);
+  currentTaskJobsRef.current = jobs;
   const isCurrentTaskView = useCallback(
     (task: CronJobSpecOutput) =>
       taskView === taskViewRef.current &&
@@ -767,6 +769,23 @@ function ChatPageContent() {
   const dragCounterRef = useRef(0);
   const runtimeLoadingBridgeRef = useRef<RuntimeLoadingBridgeApi | null>(null);
   const { message } = useAppMessage();
+  const canWriteTask = useCallback(
+    (task: CronJobSpecOutput) => {
+      const current = currentTaskJobsRef.current.find((job) =>
+        sameTask(job, task),
+      );
+      if (
+        !isCurrentTaskView(task) ||
+        !current ||
+        taskOrigin(current)?.unavailable
+      ) {
+        message.warning("任务归属或状态已变化，请刷新后重试");
+        return false;
+      }
+      return true;
+    },
+    [isCurrentTaskView, message],
+  );
   const messageRef = useRef(message);
   messageRef.current = message;
   const composerInputState = useChatAnywhereInput((value) => ({
@@ -2066,7 +2085,7 @@ function ChatPageContent() {
 
   const handleTaskResume = useCallback(
     async (task: CronJobSpecOutput) => {
-      if (!isCurrentTaskView(task)) return;
+      if (!canWriteTask(task)) return;
       if (isSchedulerTask(task)) {
         await performManagedTask(task, "resume");
         return;
@@ -2102,12 +2121,19 @@ function ChatPageContent() {
         void refreshJobs();
       }
     },
-    [message, refreshJobs, performManagedTask, setJobs, isCurrentTaskView],
+    [
+      message,
+      refreshJobs,
+      performManagedTask,
+      setJobs,
+      isCurrentTaskView,
+      canWriteTask,
+    ],
   );
 
   const handleTaskPause = useCallback(
     async (task: CronJobSpecOutput) => {
-      if (!isCurrentTaskView(task)) return;
+      if (!canWriteTask(task)) return;
       if (isSchedulerTask(task)) {
         await performManagedTask(task, "pause");
         return;
@@ -2141,12 +2167,19 @@ function ChatPageContent() {
         void refreshJobs();
       }
     },
-    [message, refreshJobs, performManagedTask, setJobs, isCurrentTaskView],
+    [
+      message,
+      refreshJobs,
+      performManagedTask,
+      setJobs,
+      isCurrentTaskView,
+      canWriteTask,
+    ],
   );
 
   const handleTaskRun = useCallback(
     async (task: CronJobSpecOutput) => {
-      if (!isCurrentTaskView(task)) return;
+      if (!canWriteTask(task)) return;
       if (isSchedulerTask(task)) {
         await performManagedTask(task, "run");
         return;
@@ -2183,7 +2216,14 @@ function ChatPageContent() {
         void refreshJobs();
       }
     },
-    [message, refreshJobs, performManagedTask, setJobs, isCurrentTaskView],
+    [
+      message,
+      refreshJobs,
+      performManagedTask,
+      setJobs,
+      isCurrentTaskView,
+      canWriteTask,
+    ],
   );
 
   const handleTaskDelete = useCallback(
@@ -2197,7 +2237,7 @@ function ChatPageContent() {
         cancelText: "取消",
         cancelButtonProps: { type: "text" },
         onOk: async () => {
-          if (!isCurrentTaskView(task)) return;
+          if (!canWriteTask(task)) return;
           if (isSchedulerTask(task)) {
             const result = await performManagedTask(task, "delete");
             if (
@@ -2232,12 +2272,13 @@ function ChatPageContent() {
       performManagedTask,
       setJobs,
       isCurrentTaskView,
+      canWriteTask,
     ],
   );
 
   const handleTaskEdit = useCallback(
     async (task: CronJobSpecOutput) => {
-      if (!isCurrentTaskView(task)) return;
+      if (!canWriteTask(task)) return;
       let current = task;
       if (isSchedulerTask(task)) {
         try {
@@ -2273,7 +2314,7 @@ function ChatPageContent() {
             : undefined,
       } as Parameters<typeof taskEditForm.setFieldsValue>[0]);
     },
-    [taskEditForm, message, isCurrentTaskView],
+    [taskEditForm, message, isCurrentTaskView, canWriteTask],
   );
 
   const handleTaskEditClose = useCallback(() => {
@@ -2285,7 +2326,7 @@ function ChatPageContent() {
   const handleTaskEditSubmit = useCallback(
     async (values: CronTaskEditFormValues) => {
       if (!editingTask) return;
-      if (!isCurrentTaskView(editingTask)) return;
+      if (!canWriteTask(editingTask)) return;
 
       setTaskEditSaving(true);
       try {
@@ -2331,6 +2372,7 @@ function ChatPageContent() {
       taskEditForm,
       updateManagedTask,
       isCurrentTaskView,
+      canWriteTask,
     ],
   );
 

@@ -98,6 +98,7 @@ beforeEach(() => {
 it("编辑读取最新详情后同步列表排程，不保留旧列表10点而表单9点", async () => {
   const listed = { ...job, schedule: { ...job.schedule, cron: "0 10 * * *" } };
   vi.mocked(request).mockImplementation(async (url) => {
+    if (url.includes("/broadcast/children")) return { items: [] };
     if (url.includes("/new-job?"))
       return {
         ...job,
@@ -108,22 +109,31 @@ it("编辑读取最新详情后同步列表排程，不保留旧列表10点而�
   render(<SchedulerCronJobsPage />);
   await screen.findByText(/ 10:00$/);
   fireEvent.click(screen.getByRole("button", { name: "更多操作 新版任务" }));
-  fireEvent.click(await screen.findByText("编辑", { exact: true }));
+  fireEvent.click(await screen.findByText("任务设置", { exact: true }));
   await screen.findByDisplayValue("09:00");
   await waitFor(() => expect(screen.queryByText(/ 10:00$/)).toBeNull());
   expect(screen.getByText(/ 09:00$/)).toBeInTheDocument();
 });
 
-it("已删除任务筛选位于页头操作区且可以开启和关闭", async () => {
+it("页头在任务导航上方，任务列表操作区可开启和关闭已删除任务筛选", async () => {
   render(<SchedulerCronJobsPage />);
   await screen.findByText("新版任务");
   const header = screen.getByRole("banner");
-  const filter = within(header).getByRole("button", {
+  const tabList = screen.getByRole("tablist");
+  expect(
+    header.compareDocumentPosition(tabList) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  const actions = screen.getByRole("group", { name: "定时任务操作" });
+  const filter = within(actions).getByRole("button", {
     name: "包含已删除任务（查看清理进度）",
   });
-  expect(within(header).getByRole("button", { name: /刷\s*新/ })).toBeVisible();
   expect(
-    within(header).getByRole("button", { name: /cronJobs.createJob|创建任务/ }),
+    within(actions).getByRole("button", { name: /刷\s*新/ }),
+  ).toBeVisible();
+  expect(
+    within(actions).getByRole("button", {
+      name: /cronJobs.createJob|创建任务/,
+    }),
   ).toBeVisible();
   expect(filter).toHaveAttribute("aria-pressed", "false");
   filter.focus();
@@ -149,7 +159,7 @@ it("新页完整列表和启用动作只走 Scheduler，携带管理版本和真
   await screen.findByText("新版任务");
   expect(screen.getByText("普通调度")).toBeInTheDocument();
   expect(screen.queryByText("批调度")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "启用" }));
+  fireEvent.click(screen.getByRole("button", { name: "启用本任务" }));
   await waitFor(() =>
     expect(
       vi.mocked(request).mock.calls.some(([url]) => url.endsWith("/enabled")),
@@ -181,8 +191,8 @@ it("已停用任务不能直接执行，但可以单独编辑、分发及查看�
   expect(screen.getByRole("button", { name: "立即执行" })).toBeDisabled();
   fireEvent.click(screen.getByRole("button", { name: "更多操作 新版任务" }));
   await screen.findByText("分发");
-  expect(screen.getByText("调度方式 / 批调度配置")).toBeInTheDocument();
-  expect(screen.getByText("编辑")).toBeInTheDocument();
+  expect(screen.queryByText("调度方式 / 批调度配置")).toBeNull();
+  expect(screen.getByText("任务设置")).toBeInTheDocument();
 });
 
 it("立即执行需确认，取消不发请求，确认仍按新版版本提交", async () => {

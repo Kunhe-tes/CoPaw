@@ -99,12 +99,13 @@ async function dispatchUserDataMessage(data: Record<string, unknown>) {
 
 describe("fetchAndSetUserName", () => {
   it.each([
-    ["/wealth/board", "RCZT"],
-    ["/wealth/create", "RMASSIST"],
-    ["/console/wealth/board", "NEW_CHANNEL"],
+    ["/wealth/board", "RCZT", undefined, "总行"],
+    ["/wealth/create", "RCZT", undefined, "总行"],
+    ["/wealth/create", "RMASSIST", undefined, "总行"],
+    ["/console/wealth/board", "NEW_CHANNEL", "测试分行", "测试分行"],
   ])(
     "%s 消息入口使用渠道 %s 初始化",
-    async (path, source) => {
+    async (path, source, branchName) => {
       window.history.pushState({}, "", path);
       useIframeStore.getState().setContext({
         userId: "old-user",
@@ -129,6 +130,7 @@ describe("fetchAndSetUserName", () => {
           hideLogo: "true",
           userName: "张三",
           bbkId: "100",
+          branchName,
           positionId: "RB0101",
           orgCode: "ORG001",
           subBranchId: "SUB001",
@@ -188,6 +190,9 @@ describe("fetchAndSetUserName", () => {
     window.history.pushState({}, "", "/wealth/board?origin=Y&hideLogo=true");
     document.cookie = "userid=80000002; path=/";
     document.cookie = "positionID=RB0101; path=/";
+    document.cookie = "vbbk=100; path=/";
+    document.cookie = "username=%E5%BC%A0%E4%B8%89; path=/";
+    await dispatchUserDataMessage({ source: "RCZT" });
     initIframeMessageListener();
     expect(isWealthMessageEntry()).toBe(false);
     await handleUrlOriginParam();
@@ -197,16 +202,24 @@ describe("fetchAndSetUserName", () => {
       positionId: "RB0101",
       isOriginY: true,
     });
+    expect(mockedFetchCustomerInfo).not.toHaveBeenCalled();
+    expect(authApi.sendCronAuth).not.toHaveBeenCalled();
     window.history.pushState({}, "", "/wealth/create");
     expect(isWealthMessageEntry()).toBe(false);
   });
 
-  it("Chat 中已有的 USER_DATA 即使 source 为 RCZT 仍沿用用户查询流程", async () => {
+  it.each(["RCZT", "RMASSIST"])("Chat 中 %s 消息沿用用户查询和原 MMJ 配置", async (source) => {
     window.history.pushState({}, "", "/chat");
-    await dispatchUserDataMessage({ source: "RCZT", hideLogo: true, positionId: "RB0101" });
+    await dispatchUserDataMessage({
+      source,
+      hideLogo: true,
+      positionId: "RB0101",
+      bbkOrgId: "999",
+      branchName: "测试分行",
+    });
     expect(mockedFetchUserInfo).toHaveBeenCalledWith("80000001");
     expect(useIframeStore.getState()).toMatchObject({
-      source: "RCZT", userName: "张三", hideLogo: false, positionId: null,
+      source, userName: "张三", hideLogo: false, positionId: null,
     });
   });
 
@@ -255,6 +268,7 @@ describe("fetchAndSetUserName", () => {
       document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
     });
     useIframeStore.getState().clearContext();
+    vi.stubGlobal("__env__", { serviceUnitId: "test-unit", env: "test" });
     vi.clearAllMocks();
     mockedIsExternalTokenEnabled.mockReturnValue(false);
     mockedEnsureValidToken.mockResolvedValue("token");
@@ -263,6 +277,7 @@ describe("fetchAndSetUserName", () => {
   afterEach(() => {
     cleanupIframeMessageListener();
     restoreWindowTop();
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 

@@ -28,6 +28,7 @@ import { statusTag, timeText } from "./format";
 import { useBoardResource } from "./useBoardResource";
 import BatchDetail from "./BatchDetail";
 import SharedWorkers from "./SharedWorkers";
+import FailureSummary from "./FailureSummary";
 
 function buildRange(key: string): [Dayjs, Dayjs] {
   const now = dayjs();
@@ -174,7 +175,9 @@ function Board({ source, actor }: { source: string; actor: string }) {
         {metrics.map(([title, value, hint]) => (
           <div className={styles.summaryMetric} key={title}>
             <span>{title}</span>
-            <strong>{value ?? "-"}</strong>
+            {title === "失败任务" ? <FailureSummary source={source}
+              filters={{ start_time: start, end_time: end, status, query }} refresh={refresh}
+              value={stats?.failed_members} /> : <strong>{value ?? "-"}</strong>}
             <em>{hint}</em>
           </div>
         ))}
@@ -201,6 +204,11 @@ function Board({ source, actor }: { source: string; actor: string }) {
                         ? "运输重投"
                         : "新增业务尝试"
                       : item.reason}
+                    {item.execution_id && (
+                      <div style={{ overflowWrap: "anywhere" }}>
+                        执行 ID：{item.execution_id}
+                      </div>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -262,6 +270,7 @@ function Board({ source, actor }: { source: string; actor: string }) {
                   </span>
                   <span className={styles.batchProgress}>
                     {statusTag(item.status)}
+                    {item.batch_paused && <Tag color="warning">本批已暂停</Tag>}
                     {item.dispatch_paused &&
                       item.done_count < item.member_count && (
                         <Tag color="warning">批调度入口已暂停</Tag>
@@ -317,6 +326,7 @@ function Board({ source, actor }: { source: string; actor: string }) {
               batch={batch}
               refresh={refresh}
               onQueued={onQueued}
+              onPauseChanged={reload}
             />
           ) : (
             <div className={styles.detailEmpty}>

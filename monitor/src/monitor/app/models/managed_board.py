@@ -40,3 +40,4 @@ class BoardDetailQuery(BaseModel):
     event_page: int = Field(default=1, ge=1)
     event_limit: int = Field(default=50, ge=1, le=200)
     event_type: str | None = Field(default=None, max_length=64)
+    event_execution_id: str | None = Field(default=None, max_length=128)

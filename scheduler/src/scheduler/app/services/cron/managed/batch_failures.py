@@ -98,7 +98,8 @@ async def member_rows(db, receipt, *, lock=False, member_ids=None):
         + ",m.member_id,m.version AS member_version,m.business_attempt,"
         "m.initial_execution_id,m.current_execution_id,m.member_role,m.dispatch_order AS member_order,"
         "d.definition_version AS current_definition_version,d.management_owner,s.job_id AS current_state_job_id,"
-        "s.queue_invalidation_version AS current_queue_invalidation_version "
+        "s.queue_invalidation_version AS current_queue_invalidation_version,"
+        "s.pause_reason AS current_pause_reason "
         f"FROM {MEMBERS} m LEFT JOIN swe_cron_execution_runs r ON m.current_execution_id=r.execution_id AND {joins} "
         f"LEFT JOIN swe_cron_jobs_v2 d ON {definitions} LEFT JOIN swe_cron_job_states s ON {states} WHERE m.batch_id=%s"
         + selection
@@ -167,6 +168,7 @@ def preview_item(row):
             row.get("settled_error_code"),
         ),
         "error_message": row.get("display_error_message", ""),
+        "error_type": row.get("error_type"),
         "transport_only": row["status"] == "dispatch_failed"
         and not row.get("accepted_at"),
     }
@@ -180,7 +182,8 @@ async def display_error_messages(db, rows):
     ]
     histories = (
         await db.fetch_all(
-            "SELECT id,tenant_id,job_id,error_message FROM swe_cron_executions WHERE id IN ("
+            "SELECT id,tenant_id,job_id,status,async_status,error_type,error_message,meta "
+            "FROM swe_cron_executions WHERE id IN ("
             + ",".join("%s" for _ in ids)
             + ")",
             tuple(ids),
@@ -189,7 +192,11 @@ async def display_error_messages(db, rows):
         else []
     )
     messages = {
-        (item["id"], item["tenant_id"], item["job_id"]): item["error_message"]
+        (
+            item["id"],
+            item["tenant_id"],
+            item["job_id"],
+        ): item
         for item in histories
     }
     for row in rows:
@@ -207,11 +214,17 @@ async def display_error_messages(db, rows):
         row["display_error_message"] = next(
             (
                 value[:2048]
-                for value in (history, detail, code)
+                for value in (
+                    history.get("error_message") if history else None,
+                    detail,
+                    code,
+                )
                 if isinstance(value, str) and value.strip()
             ),
             "",
         )
+        row["_history"] = history
+        row["error_type"] = history.get("error_type") if history else None
 
 
 async def failure_preview(db, caller, batch_id, types=()):

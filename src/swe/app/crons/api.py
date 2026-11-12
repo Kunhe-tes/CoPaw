@@ -140,6 +140,7 @@ async def publish_workflow_binding(
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+
 BROADCAST_MODEL_SLOT_WARNING = (
     "model_slot not copied: provider/model unavailable in target tenant"
 )
@@ -2331,11 +2332,15 @@ async def _get_batch_child_job(
 async def list_jobs(
     request: Request,
     mgr: CronManager = Depends(get_cron_manager),
+    exclude_migrated: bool = False,
 ):
     user_id = _get_request_user_id(request)
+    source_jobs = await mgr.list_jobs()
+    if exclude_migrated and source_jobs:
+        source_jobs = await _hide_migrated_jobs(request, source_jobs)
     jobs = [
         await _ensure_task_binding_for_read(job, request, mgr)
-        for job in await mgr.list_jobs()
+        for job in source_jobs
     ]
     # 实时刷新每个 job 的 next_run_at（原依赖 APScheduler，现按需计算）
     for job in jobs:
@@ -2348,6 +2353,31 @@ async def list_jobs(
         )
         for job in jobs
     ]
+
+
+async def _hide_migrated_jobs(request, jobs):
+    db = getattr(request.app.state, "db_connection", None)
+    tenant = getattr(request.state, "tenant_id", None)
+    source = _request_source_id(request)
+    agent = _request_agent_id(request)
+    if db is None or not getattr(db, "is_connected", False):
+        raise HTTPException(503, "cron_migration_status_unavailable")
+    try:
+        rows = await db.fetch_all(
+            "SELECT tenant_id,source_id,agent_id,job_id FROM swe_cron_registration_journal "
+            "WHERE tenant_id=%s AND source_id=%s AND agent_id=%s "
+            "AND action='migrate' AND status='completed'",
+            (tenant, source, agent),
+        )
+    except Exception as exc:
+        raise HTTPException(503, "cron_migration_status_unavailable") from exc
+    hidden = {
+        row["job_id"]
+        for row in rows
+        if (row["tenant_id"], row["source_id"], row["agent_id"])
+        == (tenant, source, agent)
+    }
+    return [job for job in jobs if job.id not in hidden]
 
 
 @router.get(

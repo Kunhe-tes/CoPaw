@@ -3560,8 +3560,12 @@ The single user-identity term of the Wealth Workbench domain: the employee id su
 _Avoid_: account id, employee number, switching identities
 
 **Distribution Target (分发目标)**:
-The set of 客户经理 who receive a published Plan. For 支行行长 and 分行中台 the creator picks them in a dedicated wizard step from the branch's user pool (the tenants-by-source API filtered client-side by the operator's own branch id), and the chosen sapId list travels with the publish request. A 客户经理 never picks targets: their Plan is distributed to themselves by default.
+The set of 客户经理 selected to receive a published Plan. 支行行长 and 分行中台 choose recipients within their permitted institution scope; a 客户经理's Plan targets themselves by default.
 _Avoid_: plan audience, CC list, sharing recipients
+
+**Institution-wide Recipient Selection (整机构选择)**:
+Selection of all eligible Distribution Targets in an institution and all its descendant institutions. Selecting the branch root covers the entire branch; individual recipients may subsequently be deselected.
+_Avoid_: direct-members-only selection, selecting an institution without its descendants
 
 **Plan Visibility Scope (规划可见范围)**:
 Which Plans a viewer can see on the board, decided by Workbench Role on the server. A 客户经理 sees the Plans they created plus the Plans whose Distribution Targets include them. A 支行行长 or 分行中台 sees every Plan created within their own branch (same bbkId), whoever the targets are; the source labels (分行关注 / 行长关注 / 我的关注) distinguish origin, not access. Visibility never implies edit rights: only the creator may edit or remove a Plan.

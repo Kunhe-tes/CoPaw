@@ -209,17 +209,24 @@ async def test_workers_and_manual_retry_cannot_add_duplicate_attempts(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "async_status,elapsed,expected",
+    "async_status,error_type,elapsed,expected",
     [
-        ("error", 1, 1),
-        ("pending", 7799, 0),
-        ("pending", 7801, 1),
-        ("success", 7801, 0),
+        ("error", "Prompt", 1, 1),
+        ("error", "Business", 1, 0),
+        ("error", "prompt", 1, 0),
+        ("error", "Prompt ", 1, 1),
+        ("error", "Business,Prompt", 1, 1),
+        ("error", '["Network", "Prompt"]', 1, 1),
+        ("error", None, 1, 0),
+        ("pending", "Prompt", 7799, 0),
+        ("pending", None, 7801, 0),
+        ("success", "Prompt", 7801, 0),
     ],
 )
 async def test_async_failure_and_old_timeout_rule(
     callback_setup,
     async_status,
+    error_type,
     elapsed,
     expected,
 ):
@@ -233,8 +240,8 @@ async def test_async_failure_and_old_timeout_rule(
         (now - timedelta(seconds=elapsed),),
     )
     await db.execute(
-        "UPDATE swe_cron_executions SET status='success',async_status=%s",
-        (async_status,),
+        "UPDATE swe_cron_executions SET status='success',async_status=%s,error_type=%s",
+        (async_status, error_type),
     )
     await ExecutionSettlement(db, clock=lambda: now).tick()
     assert await worker.tick() == expected
@@ -244,6 +251,45 @@ async def test_async_failure_and_old_timeout_rule(
     assert (history["status"], history["async_status"]) == (
         "success",
         async_status,
+    )
+
+
+@pytest.mark.parametrize("pause_reason", ["auto_unread_threshold", "manual"])
+@pytest.mark.asyncio
+async def test_task_pause_records_one_retry_block_event(
+    callback_setup,
+    pause_reason,
+):
+    from scheduler.app.services.cron.managed.settlement import (
+        ExecutionSettlement,
+    )
+
+    db, _, batch_id, original, now, worker = await failed_setup(callback_setup)
+    await db.execute(
+        "UPDATE swe_cron_execution_runs SET status='success',settled_status=NULL,"
+        "error_code=NULL,result_json=NULL",
+    )
+    await db.execute(
+        "UPDATE swe_cron_executions SET status='success',async_status='error',error_type='Prompt'",
+    )
+    await db.execute(
+        "UPDATE swe_cron_job_states SET pause_reason=%s,"
+        "queue_invalidation_version=%s",
+        (pause_reason, original["enqueued_state_version"] + 1),
+    )
+    assert await ExecutionSettlement(db, clock=lambda: now).tick() == 1
+    assert await worker.tick() == 0
+    assert await worker.tick() == 0
+    events = await db.fetch_all(
+        "SELECT * FROM swe_cron_managed_dispatch_events "
+        "WHERE event_type='auto_retry_blocked'",
+    )
+    assert len(events) == 1
+    assert events[0]["batch_id"] == batch_id
+    assert events[0]["execution_id"] == original["execution_id"]
+    assert json.loads(events[0]["details_json"])["reason"] == pause_reason
+    assert (
+        len(await db.fetch_all("SELECT * FROM swe_cron_execution_runs")) == 1
     )
 
 

@@ -4,11 +4,13 @@ import type { CronJobSpecOutput } from "@/api/types";
 import {
   listTaskSources,
   mergeTaskSources,
+  retainMigrationOwnership,
 } from "@/api/modules/cronTaskSources";
 import { useAgentStore } from "@/stores/agentStore";
 import { useIframeStore } from "@/stores/iframeStore";
 import { DEFAULT_SOURCE_ID } from "@/constants/identity";
 import { getUserId } from "@/utils/identity";
+import type { MigrationOwnership } from "@/api/modules/cronMigration";
 
 /** 旧列表在前、新列表在后；失败来源保留，身份变化立即隔离旧展示与写回。 */
 export function useChatTaskSources() {
@@ -43,7 +45,8 @@ export function useChatTaskSources() {
     key: string;
     jobs: CronJobSpecOutput[];
     error: string | null;
-  }>({ key: scopeKey, jobs: [], error: null });
+    ownership: MigrationOwnership[];
+  }>({ key: scopeKey, jobs: [], error: null, ownership: [] });
   const setJobs: Dispatch<SetStateAction<CronJobSpecOutput[]>> = useCallback(
     (update) => {
       if (!mounted.current || currentKey.current !== scopeKey) return;
@@ -52,6 +55,7 @@ export function useChatTaskSources() {
         return {
           key: scopeKey,
           error: previous.key === scopeKey ? previous.error : null,
+          ownership: previous.key === scopeKey ? previous.ownership : [],
           jobs: typeof update === "function" ? update(jobs) : update,
         };
       });
@@ -75,6 +79,11 @@ export function useChatTaskSources() {
         jobs: mergeTaskSources(
           previous.key === scopeKey ? previous.jobs : [],
           sources,
+          previous.key === scopeKey ? previous.ownership : [],
+        ),
+        ownership: retainMigrationOwnership(
+          previous.key === scopeKey ? previous.ownership : [],
+          sources.ownership,
         ),
         error: sources.errors.length ? sources.errors.join("；") : null,
       }));

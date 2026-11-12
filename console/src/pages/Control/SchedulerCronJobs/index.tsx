@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { Alert, Space } from "antd";
+import { Alert, Space, Tabs } from "antd";
 import { Button, Card, Table } from "@agentscope-ai/design";
 import { useTranslation } from "react-i18next";
 import type { ManagedCronContext, ManagedJob } from "@/api/types/schedulerCron";
@@ -16,11 +16,11 @@ import { useManagedCronJobs } from "./useManagedCronJobs";
 import { ManagedJobEditor } from "./ManagedJobEditor";
 import { ManagedBroadcastModal } from "./ManagedBroadcastModal";
 import { ManagedChildrenModal } from "./ManagedChildrenModal";
-import { ManagedModeModal } from "./ManagedModeModal";
 import { ManagedProgressModal } from "./ManagedProgressModal";
-import { ManagedDateRangeModal } from "./ManagedDateRangeModal";
+import { ManagedRechecksTable } from "./ManagedRechecksTable";
 import { failureMessage, RequestIdentity } from "./helpers";
 import styles from "../CronJobs/index.module.less";
+import managementStyles from "./management.module.less";
 
 type Panel = ManagedJobPanel | { kind: "create" } | null;
 
@@ -75,31 +75,33 @@ function SchedulerCronWorkspace({ context }: { context: ManagedCronContext }) {
     [context, panel],
   );
   return (
-    <div className={styles.cronJobsPage}>
-      <PageHeader
-        items={[{ title: t("nav.runCenter") }, { title: "定时任务（新）" }]}
-        extra={
-          <Space>
-            <Button
-              type={includeDeleted ? "primary" : "default"}
-              aria-pressed={includeDeleted}
-              onClick={() => setIncludeDeleted((current) => !current)}
-            >
-              包含已删除任务（查看清理进度）
-            </Button>
-            <Button onClick={refresh} loading={data.loading}>
-              刷新
-            </Button>
-            <Button
-              type="primary"
-              disabled={data.busy}
-              onClick={() => setPanel({ kind: "create" })}
-            >
-              + {t("cronJobs.createJob")}
-            </Button>
-          </Space>
-        }
-      />
+    <>
+      <div className={managementStyles.listToolbar}>
+        <Space
+          className={managementStyles.toolbarActions}
+          role="group"
+          aria-label="定时任务操作"
+          wrap
+        >
+          <Button
+            type={includeDeleted ? "primary" : "default"}
+            aria-pressed={includeDeleted}
+            onClick={() => setIncludeDeleted((current) => !current)}
+          >
+            包含已删除任务（查看清理进度）
+          </Button>
+          <Button onClick={refresh} loading={data.loading}>
+            刷新
+          </Button>
+          <Button
+            type="primary"
+            disabled={data.busy}
+            onClick={() => setPanel({ kind: "create" })}
+          >
+            + {t("cronJobs.createJob")}
+          </Button>
+        </Space>
+      </div>
       {(data.error || actionError) && (
         <Alert type="error" showIcon message={actionError || data.error} />
       )}
@@ -121,7 +123,7 @@ function SchedulerCronWorkspace({ context }: { context: ManagedCronContext }) {
           rowKey={(job) =>
             JSON.stringify([job.tenant_id, job.source_id, job.agent_id, job.id])
           }
-          scroll={{ x: 3645 }}
+          scroll={{ x: 1435 }}
           pagination={{
             defaultPageSize: 10,
             showSizeChanger: true,
@@ -138,6 +140,7 @@ function SchedulerCronWorkspace({ context }: { context: ManagedCronContext }) {
           saving={data.busy}
           onLoaded={data.reconcileJob}
           onClose={close}
+          onChanged={refresh}
           onSave={(job, spec, id) =>
             job ? data.update(job, spec, id) : data.create(spec, id)
           }
@@ -160,22 +163,6 @@ function SchedulerCronWorkspace({ context }: { context: ManagedCronContext }) {
           onProgress={(job) => setPanel({ kind: "progress", job })}
         />
       )}
-      {panel?.kind === "mode" && (
-        <ManagedModeModal
-          context={target}
-          job={panel.job}
-          onClose={close}
-          onChanged={refresh}
-        />
-      )}
-      {panel?.kind === "dates" && (
-        <ManagedDateRangeModal
-          context={target}
-          job={panel.job}
-          onClose={close}
-          onChanged={refresh}
-        />
-      )}
       {panel?.kind === "progress" && (
         <ManagedProgressModal
           context={target}
@@ -190,12 +177,13 @@ function SchedulerCronWorkspace({ context }: { context: ManagedCronContext }) {
           }
         />
       )}
-    </div>
+    </>
   );
 }
 
 /** 工作区和角色变化时整体卸载子页面，旧弹窗不会借用新身份提交。 */
 export default function SchedulerCronJobsPage() {
+  const { t } = useTranslation();
   const user = useIframeStore((store) => store.userId);
   const source = useIframeStore((store) => store.source);
   const manager = useIframeStore((store) => store.manager);
@@ -212,9 +200,30 @@ export default function SchedulerCronJobsPage() {
     [actor, source, agent],
   );
   return (
-    <SchedulerCronWorkspace
-      key={JSON.stringify([context, manager, admin])}
-      context={context}
-    />
+    <div className={styles.cronJobsPage}>
+      <PageHeader
+        items={[{ title: t("nav.runCenter") }, { title: "定时任务（新）" }]}
+      />
+      <Tabs
+        key={JSON.stringify([context, manager, admin])}
+        className={managementStyles.workspaceTabs}
+        size="small"
+        tabBarStyle={{ marginBottom: 12 }}
+        defaultActiveKey="jobs"
+        destroyOnHidden
+        items={[
+          {
+            key: "jobs",
+            label: "定时任务",
+            children: <SchedulerCronWorkspace context={context} />,
+          },
+          {
+            key: "rechecks",
+            label: "回检任务",
+            children: <ManagedRechecksTable context={context} />,
+          },
+        ]}
+      />
+    </div>
   );
 }
