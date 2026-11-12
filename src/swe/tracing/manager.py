@@ -653,38 +653,39 @@ class TraceManager:
         if not self.enabled:
             return
 
-        # End skill detection before the final span flush because cleanup may
-        # update existing spans or emit a final skill span.
         ctx = get_current_trace()
-        if ctx and ctx.trace_id == trace_id and ctx.skill_detector:
-            try:
-                await ctx.skill_detector.on_reasoning_end()
-            except Exception as e:
-                logger.warning("Failed to end skill detection: %s", e)
+        try:
+            # End skill detection before the final span flush because cleanup may
+            # update existing spans or emit a final skill span.
+            if ctx and ctx.trace_id == trace_id and ctx.skill_detector:
+                try:
+                    await ctx.skill_detector.on_reasoning_end()
+                except Exception as e:
+                    logger.warning("Failed to end skill detection: %s", e)
 
-        await self._writer.flush(trace_id)
+            await self._writer.flush(trace_id)
 
-        trace = self._active_traces.get(
-            trace_id,
-        ) or await self.store.get_trace(trace_id)
-        if trace is None:
-            logger.warning("Trace not found: %s", trace_id)
-            return
+            trace = self._active_traces.get(
+                trace_id,
+            ) or await self.store.get_trace(trace_id)
+            if trace is None:
+                logger.warning("Trace not found: %s", trace_id)
+                return
 
-        trace = trace.model_copy()
-        trace.end_time = datetime.now()
-        trace.duration_ms = int(
-            (trace.end_time - trace.start_time).total_seconds() * 1000,
-        )
-        trace.status = status
-        trace.error = error
+            trace = trace.model_copy()
+            trace.end_time = datetime.now()
+            trace.duration_ms = int(
+                (trace.end_time - trace.start_time).total_seconds() * 1000,
+            )
+            trace.status = status
+            trace.error = error
 
-        await self.store.update_trace(trace)
-        self._active_traces.pop(trace_id, None)
+            await self.store.update_trace(trace)
 
-        # Clear context
-        if ctx and ctx.trace_id == trace_id:
-            set_current_trace(None)
+        finally:
+            self._active_traces.pop(trace_id, None)
+            if ctx and ctx.trace_id == trace_id:
+                set_current_trace(None)
 
     # Span operations
 

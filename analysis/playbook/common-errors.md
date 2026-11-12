@@ -10,7 +10,8 @@
 
 ## Tracing 错误字段过长与会话静默
 
-- `Tracing write failed; retaining batch` 配合 MySQL 1406、`error` 列超长时，失败批次会反复重试；队列达到容量后，新的 span 提交可能等待，进而阻塞模型调用。应按 Pod 和时间核实，不应仅凭 watchdog 日志断定原因。
+- 旧版本的 `Tracing write failed; retaining batch` 配合 MySQL 1406 时，失败批次会反复重试；队列达到容量后，新的 span 提交可能等待，进而阻塞模型调用。当前版本最多尝试三次，耗尽后丢弃 span 并释放队列容量，但对应 trace 的 flush 仍报告未确认，不能标记完成。应按 Pod 和时间核实，不应仅凭 watchdog 日志断定原因。
+- 失败 trace ID 的内存索引上限复用 `max_queue_spans`。超限后清空 ID 索引并保留固定大小的失败标志，所有 flush 保守报未确认；日志为 `Tracing failure history exceeded capacity`。修复数据库问题后需重启对应 writer/Pod 恢复完成确认，不能通过直接清空标志恢复。未超限时，数据库恢复后的新 trace 可正常完成，历史失败 trace 仍报错。`end_trace()` 无论成功、异常还是取消，都清理活动 trace 和当前上下文，不将失败 trace 更新为完成。
 - trace 的新增和更新，以及 span 的单条新增、批量新增和更新，在落库前将 error 限制为 4096 UTF-8 字节，包含截断标记。该限制不解决其他永久性写入错误或已运行进程中的旧队列积压。
 - 排查入口：`src/swe/tracing/store.py`、`src/swe/tracing/writer.py`；回归入口：`tests/unit/tracing/test_store.py`。
 

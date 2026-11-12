@@ -9,7 +9,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from swe.tracing.config import TracingConfig
-from swe.tracing.manager import TraceManager, set_current_trace
+from swe.tracing.manager import (
+    TraceManager,
+    get_current_trace,
+    set_current_trace,
+)
 from swe.tracing.models import EventType
 
 
@@ -157,6 +161,91 @@ async def test_permanently_failed_span_is_dropped_after_three_attempts(
                 await manager._writer.flush(target)
         await manager._writer.flush("unrelated-trace")
         assert not db.trace_completed.is_set()
+        assert trace_id not in manager._active_traces
+        if not flush_before_drop:
+            assert get_current_trace() is None
+    finally:
+        await manager.close()
+        set_current_trace(None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_count", [1, 5])
+async def test_failure_history_is_bounded_and_recovery_preserves_confirmation(
+    failure_count,
+    monkeypatch,
+):
+    monkeypatch.setattr("swe.tracing.writer._MAX_WRITE_ATTEMPTS", 1)
+    manager, db, trace_id = await new_manager(batch_size=1, max_queue_spans=2)
+    db.release.set()
+    original_insert = db.insert_prepared
+    db.insert_prepared = AsyncMock(side_effect=OSError("database unavailable"))
+    failed_trace_ids = []
+    try:
+        for index in range(failure_count):
+            if index:
+                trace_id = await manager.start_trace(
+                    "user",
+                    "session",
+                    "console",
+                    "source",
+                )
+            failed_trace_ids.append(trace_id)
+            await emit(manager, trace_id)
+            with pytest.raises(TimeoutError, match="unconfirmed"):
+                await manager.end_trace(trace_id)
+            async with manager._writer._changed:
+                await asyncio.wait_for(
+                    manager._writer._changed.wait_for(
+                        lambda: not manager._writer._entries,
+                    ),
+                    timeout=5,
+                )
+            assert not manager._active_traces
+            assert get_current_trace() is None
+            assert len(manager._writer._failed_traces) <= 2
+            assert not manager._writer.pending
+        assert not db.trace_completed.is_set()
+        assert manager._writer._failure_index_overflow == (failure_count > 2)
+        for failed_id in failed_trace_ids:
+            with pytest.raises(TimeoutError, match="unconfirmed"):
+                await manager._writer.flush(failed_id)
+
+        db.insert_prepared = original_insert
+        recovered_id = await manager.start_trace(
+            "user",
+            "session",
+            "console",
+            "source",
+        )
+        await emit(manager, recovered_id)
+        if failure_count > 2:
+            with pytest.raises(TimeoutError, match="unconfirmed"):
+                await manager.end_trace(recovered_id)
+            assert not db.trace_completed.is_set()
+        else:
+            await manager.end_trace(recovered_id)
+            assert db.trace_completed.is_set()
+        assert not manager._active_traces
+    finally:
+        await manager.close()
+        set_current_trace(None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [OSError("store unavailable"), asyncio.CancelledError()],
+)
+async def test_end_trace_releases_state_when_final_update_fails(failure):
+    manager, db, trace_id = await new_manager()
+    manager.store.update_trace = AsyncMock(side_effect=failure)
+    try:
+        with pytest.raises(type(failure)):
+            await manager.end_trace(trace_id)
+        assert trace_id not in manager._active_traces
+        assert get_current_trace() is None
+        assert not db.trace_completed.is_set()
     finally:
         await manager.close()
         set_current_trace(None)
@@ -224,7 +313,7 @@ async def test_failed_update_keeps_trace_unconfirmed():
         with pytest.raises(TimeoutError):
             await manager.end_trace(trace_id)
         assert not db.trace_completed.is_set()
-        assert trace_id in manager._active_traces
+        assert trace_id not in manager._active_traces
         assert span_id in manager._pending_spans
     finally:
         await flushing

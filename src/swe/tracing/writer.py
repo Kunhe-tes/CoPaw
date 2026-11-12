@@ -74,6 +74,7 @@ class SpanWriter:
         self._store: Optional[TraceStore] = None
         # Payloads may be discarded, but their traces remain unconfirmed.
         self._failed_traces: set[str] = set()
+        self._failure_index_overflow = False
 
     def start(self, store: TraceStore) -> None:
         """Start outside any request's transaction or tenant context."""
@@ -128,15 +129,29 @@ class SpanWriter:
             entry.queued = True
             self.queue.append(entry)
 
+    def _record_failure(self, trace_id: str) -> None:
+        """Bound tombstones; fail closed if exact history no longer fits."""
+        if self._failure_index_overflow or trace_id in self._failed_traces:
+            return
+        if len(self._failed_traces) >= self.config.max_queue_spans:
+            self._failure_index_overflow = True
+            self._failed_traces.clear()
+            logger.error(
+                "Tracing failure history exceeded capacity; all flushes will "
+                "remain unconfirmed until the writer is restarted",
+            )
+            return
+        self._failed_traces.add(trace_id)
+
     async def flush(self, trace_id: Optional[str] = None) -> None:
         """Confirm versions already accepted for a trace, including in-flight."""
         async with self._changed:
 
             def has_failed() -> bool:
-                return (
+                return self._failure_index_overflow or (
                     bool(self._failed_traces)
                     if trace_id is None
-                    else (trace_id in self._failed_traces)
+                    else trace_id in self._failed_traces
                 )
 
             if has_failed():
@@ -306,9 +321,7 @@ class SpanWriter:
                                     entry.span.span_id,
                                 )
                                 if entry.version == version:
-                                    self._failed_traces.add(
-                                        entry.span.trace_id,
-                                    )
+                                    self._record_failure(entry.span.trace_id)
                                     self._entries.pop(entry.span.span_id, None)
                                     self.pending.pop(entry.span.span_id, None)
                                     self._bytes -= entry.size
