@@ -35,11 +35,33 @@ export async function loadWorkerHistory(
 }
 
 export interface WorkerPoint {
-  value: [number, number];
+  value: [number, number | null];
   record: CronDispatchCapacityItem;
 }
 
-export function buildWorkerSeries(items: CronDispatchCapacityItem[]) {
+const baselineDecisions = new Set([
+  "initial_capacity",
+  "idle_reset",
+  "baseline_start",
+]);
+
+export function sampledOccupancy(record: CronDispatchCapacityItem) {
+  const { claimed_count, running_count, decision_reason } = record;
+  if (
+    baselineDecisions.has(decision_reason) ||
+    !Number.isInteger(claimed_count) ||
+    !Number.isInteger(running_count) ||
+    claimed_count < 0 ||
+    running_count < 0
+  )
+    return null;
+  return claimed_count + running_count;
+}
+
+export function buildWorkerSeries(
+  items: CronDispatchCapacityItem[],
+  showOccupancy = false,
+) {
   const groups = new Map<string, { name: string; data: WorkerPoint[] }>();
   for (const record of items) {
     const time = record.created_at ? dayjs(record.created_at).valueOf() : NaN;
@@ -55,14 +77,35 @@ export function buildWorkerSeries(items: CronDispatchCapacityItem[]) {
   }
   return [...groups]
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([id, group]) => ({
-      id,
-      name: group.name,
-      type: "line" as const,
-      step: "end" as const,
-      showSymbol: group.data.length <= 30,
-      data: group.data.sort(
+    .flatMap(([id, group]) => {
+      const data = group.data.sort(
         (a, b) => a.value[0] - b.value[0] || a.record.id - b.record.id,
-      ),
-    }));
+      );
+      const capacity = {
+        id,
+        name: showOccupancy ? "有效 Worker" : group.name,
+        type: "line" as const,
+        step: "end" as const,
+        showSymbol: data.length <= 30,
+        data,
+      };
+      if (!showOccupancy) return [capacity];
+      return [
+        capacity,
+        {
+          ...capacity,
+          id: `${id}:occupied`,
+          name: "占用 Worker",
+          step: undefined,
+          connectNulls: false,
+          lineStyle: { type: "dashed" as const },
+          data: data.map(
+            (point): WorkerPoint => ({
+              ...point,
+              value: [point.value[0], sampledOccupancy(point.record)],
+            }),
+          ),
+        },
+      ];
+    });
 }

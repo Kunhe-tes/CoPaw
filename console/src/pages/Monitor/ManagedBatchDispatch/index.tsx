@@ -28,6 +28,7 @@ import { statusTag, timeText } from "./format";
 import { useBoardResource } from "./useBoardResource";
 import BatchDetail from "./BatchDetail";
 import SharedWorkers from "./SharedWorkers";
+import WorkerOccupants from "./WorkerOccupants";
 import FailureSummary from "./FailureSummary";
 
 function buildRange(key: string): [Dayjs, Dayjs] {
@@ -339,6 +340,16 @@ function Board({ source, actor }: { source: string; actor: string }) {
         value={workers.value}
         loading={workers.loading}
         error={workers.error}
+        occupants={
+          <WorkerOccupants
+            source={source}
+            refresh={refresh}
+            pools={[
+              ...(workers.value?.policies ?? []),
+              ...(workers.value?.current_capacity ?? []),
+            ]}
+          />
+        }
       />
     </div>
   );
