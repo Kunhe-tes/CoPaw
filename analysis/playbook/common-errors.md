@@ -13,6 +13,7 @@
 - 旧版本的 `Tracing write failed; retaining batch` 配合 MySQL 1406 时，失败批次会反复重试；队列达到容量后，新的 span 提交可能等待，进而阻塞模型调用。当前版本批量 INSERT 失败后隔离为单项，UPDATE 逐项确认；每项最多单独尝试三次（不包含无法归因的批量诊断尝试），耗尽后只丢弃该 span 并释放队列容量，但对应 trace 的 flush 仍报告未确认，不能标记完成。应按 Pod 和时间核实，不应仅凭 watchdog 日志断定原因。
 - 失败状态按 trace 生命周期隔离，不保留全局历史黑名单或“超限后所有 flush 失败”标志。队列项及已开始的 flush 持有原状态引用；旧失败不影响新 trace。失败生命周期从注册表移除后，单 trace flush 仍因状态缺失报错；新的全局 flush 只检查当前目标，不追溯已回收的历史失败。MySQL 恢复后新 trace 无需重启即可正常完成。
 - 生命周期注册表数量上限复用 `max_queue_spans`；容量不足时先淘汰待重试快照，仍不足则快速拒绝新 tracing 接收，释放名额后自动恢复。活动业务请求不被无限阻塞。`end_trace()` 无论成功、异常还是取消都清理活动 trace 和当前上下文；可恢复失败保留有界快照，不将数据不完整的 trace 更新为完成。附加请求的外部生命周期注册须等到所有上下文释放、所有已接收 entry 处理完才回收；待写期间重新 attach 共享原状态，失败不会被新注册覆盖。
+- 父任务 attach 后创建子任务时，ContextVar 会共享同一个 TraceContext。子任务清理或替换继承上下文只能改变自身绑定，不能释放父任务的生产者引用；显式 attach 取得的引用按任务归属释放。排查 `Trace write state is unavailable or unconfirmed` 时同时检查任务上下文切换，回归入口为 `test_child_context_switch_preserves_parent_attachment`。
 - `Cannot attach to an unconfirmed trace lifecycle` 表示本地 owner 或待重试快照仍存在，但 writer 确认状态已失败/缺失；不能通过重新 attach 为该 owner 建立健康状态，否则会掩盖已丢失的 span。正常 attachment 只共享该 owner 已有的健康状态。
 - flush 超时或最终 UPDATE 失败/取消时，完整聚合保留到有数量和字节预算的待完成快照，供显式 `end_trace()` 重试；永久 span 丢失则无需保留快照。快照淘汰或超预算时必须同时标记 trace 不可确认，不能回退 MySQL 初始行完成。数据库仅有 running 行且本地聚合已不存在时也拒绝完成；数据库已是终态时重复结束不覆盖数据。完整方案与恢复边界见 [Tracing 生命周期设计](../../docs/superpowers/specs/2026-11-12-tracing-finalization-lifecycle.md)。
 - trace 的新增和更新，以及 span 的单条新增、批量新增和更新，在落库前将 error 限制为 4096 UTF-8 字节，包含截断标记。该限制不解决其他永久性写入错误或已运行进程中的旧队列积压。

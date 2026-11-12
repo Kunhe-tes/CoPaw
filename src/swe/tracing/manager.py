@@ -5,6 +5,7 @@ Provides the TraceManager for event collection, batching, and storage.
 """
 
 import asyncio
+import weakref
 import logging
 import uuid
 from collections import OrderedDict
@@ -59,6 +60,8 @@ class TraceContext:
         self.skill_detector: Optional[Any] = None  # SkillInvocationDetector
         self.enabled_skills: list[str] = []  # Skills enabled for this trace
         self.release_writes: Optional[Callable[[], None]] = None
+        self._writes_owner: Optional[weakref.ReferenceType] = None
+        self._writes_bound = False
         self.attached = attached  # 如果为 True，表示不应由当前代码结束 trace
 
     def push_span(self, span_id: str) -> None:
@@ -113,14 +116,28 @@ def get_current_trace() -> Optional[TraceContext]:
 
 
 def set_current_trace(ctx: Optional[TraceContext]) -> None:
-    """Set the current trace context."""
+    """Replace this task's context without releasing inherited producer leases."""
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        task = None
     previous = _current_trace.get()
     if (
         previous is not None
         and previous is not ctx
         and previous.release_writes is not None
+        and previous._writes_bound
+        and previous._writes_owner
+        == (weakref.ref(task) if task is not None else None)
     ):
         previous.release_writes()
+    if (
+        ctx is not None
+        and ctx.release_writes is not None
+        and not ctx._writes_bound
+    ):
+        ctx._writes_owner = weakref.ref(task) if task is not None else None
+        ctx._writes_bound = True
     _current_trace.set(ctx)
 
 

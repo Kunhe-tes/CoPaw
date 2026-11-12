@@ -1147,3 +1147,81 @@ async def test_attachment_reuses_healthy_owner_confirmation(
     finally:
         await manager.close()
         set_current_trace(None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "child_action",
+    ["clear", "attach", "cancel", "new_trace"],
+)
+async def test_child_context_switch_preserves_parent_attachment(child_action):
+    manager, db, trace_id = await new_manager(batch_size=1)
+    db.release.set()
+    external = manager._active_traces.pop(trace_id)
+    manager._writer.retire_trace(trace_id)
+    set_current_trace(None)
+    manager.store.get_trace = AsyncMock(return_value=external)
+
+    async def attach():
+        await manager.start_trace(
+            "user",
+            "session",
+            "console",
+            "source",
+            trace_id=trace_id,
+            attach_existing=True,
+        )
+
+    await attach()
+    parent_ctx = get_current_trace()
+    state = manager._writer._traces[trace_id]
+    child_attached = asyncio.Event()
+
+    async def child():
+        assert get_current_trace() is parent_ctx
+        try:
+            if child_action == "clear":
+                set_current_trace(None)
+            elif child_action == "new_trace":
+                own_id = await manager.start_trace(
+                    "u2",
+                    "s2",
+                    "console",
+                    "source",
+                )
+                await manager.end_trace(own_id)
+            else:
+                await attach()
+                assert state.producers == 2
+                child_attached.set()
+                if child_action == "cancel":
+                    await asyncio.Event().wait()
+                await emit(manager, trace_id)
+                await manager._writer.flush(trace_id)
+        finally:
+            set_current_trace(None)
+
+    task = asyncio.create_task(child())
+    try:
+        if child_action == "cancel":
+            await asyncio.wait_for(child_attached.wait(), 1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            await task
+        assert get_current_trace() is parent_ctx
+        assert manager._writer._traces.get(trace_id) is state
+        assert state.producers == 1
+        await emit(manager, trace_id)
+        await manager._writer.flush(trace_id)
+        # Replacing an attachment in its owning task must release the old one.
+        await attach()
+        assert state.producers == 1
+        set_current_trace(None)
+        assert not manager._writer.is_registered(trace_id)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        set_current_trace(None)
+        await manager.close()
