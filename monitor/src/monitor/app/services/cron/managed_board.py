@@ -54,6 +54,7 @@ def batch_item(row):
 def member_item(row):
     spec = json.loads(row["spec_json"])
     meta = json.loads(row["dispatch_meta_json"])
+    initial_meta = json.loads(row["initial_dispatch_meta_json"] or "{}")
     names = (
         *sql.KEYS,
         "member_id",
@@ -93,7 +94,7 @@ def member_item(row):
             "job_name": spec.get("name"),
             "bbk_id": spec.get("bbk_id"),
             "dispatch_priority": meta.get("dispatch_priority"),
-            "viewer_heat_score": meta.get("viewer_heat_score"),
+            "viewer_heat_score": initial_meta.get("viewer_heat_score"),
             "error_message": member_error_message(row),
             "error_type": row.get("history_error_type"),
         },
@@ -255,8 +256,10 @@ class ManagedBoardQuery:
             tuple(params),
         )
         rows = await self.db.fetch_all(
-            "SELECT r.*,h.error_type AS history_error_type,h.error_message AS history_error_message,m.member_id,m.business_attempt,m.member_role,m.dispatch_order AS member_order,d.definition_version AS current_definition_version,s.management_status,s.dispatch_state "
+            "SELECT r.*,i.dispatch_meta_json AS initial_dispatch_meta_json,"
+            "h.error_type AS history_error_type,h.error_message AS history_error_message,m.member_id,m.business_attempt,m.member_role,m.dispatch_order AS member_order,d.definition_version AS current_definition_version,s.management_status,s.dispatch_state "
             + sql.MEMBER_FROM
+            + f"LEFT JOIN {sql.RUNS} i ON m.initial_execution_id=i.execution_id AND {sql.identity_join('m', 'i')} "
             + "LEFT JOIN swe_cron_executions h ON h.id=r.history_execution_id AND h.tenant_id=r.tenant_id AND h.tenant_id COLLATE utf8mb4_bin=r.tenant_id AND h.job_id=r.job_id AND h.job_id COLLATE utf8mb4_bin=r.job_id "
             + f" WHERE {where} ORDER BY m.dispatch_order,m.member_id LIMIT %s OFFSET %s",
             (*params, limit, (page - 1) * limit),
