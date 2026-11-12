@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """只为锁内确认的失败创建新尝试，保留批关系和原通知时间。"""
 
-import hashlib
 from dataclasses import dataclass
-from datetime import timedelta, timezone
+from datetime import timezone
 
 from . import executions
 from .batch_members import MEMBERS, RECEIPTS
@@ -32,8 +31,6 @@ from .executions import (
 from .identity import CallerIdentity
 from .repository import IDENTITY_FIELDS, ManagedCronRepository
 from .storage import update
-
-RETRY_SPREAD_SECONDS = 3600
 
 
 @dataclass
@@ -188,22 +185,6 @@ async def eligible_reason(tx, call, row, current, member, receipt, prepared):
     )
 
 
-def retry_not_before_at(call, row):
-    """按调用和任务身份稳定散列到受理后的 1 小时窗口。"""
-    seed = "|".join(
-        [str(call["call_id"]), *(str(row[name]) for name in IDENTITY_FIELDS)],
-    )
-    slot = (
-        int.from_bytes(
-            hashlib.sha256(seed.encode("utf-8")).digest()[:8],
-            "big",
-        )
-        % RETRY_SPREAD_SECONDS
-    )
-    accepted_at = utc_time(call["cutoff_at"]).replace(tzinfo=timezone.utc)
-    return accepted_at + timedelta(seconds=slot)
-
-
 def retry_command(call, row, current, member):
     original = json_object(row["dispatch_meta_json"])
     prior = retry_marker(row)
@@ -250,7 +231,7 @@ def retry_command(call, row, current, member):
         ),
         expected_definition_version=current["definition_version"],
         dispatch_meta=metadata,
-        not_before_at=retry_not_before_at(call, row),
+        not_before_at=utc_time(call["cutoff_at"]).replace(tzinfo=timezone.utc),
     )
 
 
