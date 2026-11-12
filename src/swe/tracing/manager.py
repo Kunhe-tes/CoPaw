@@ -667,6 +667,19 @@ class TraceManager:
         *,
         external: bool = False,
     ) -> None:
+        # A missing writer state is failure evidence while local aggregates
+        # still belong to this lifecycle. An attachment must not replace it.
+        if (
+            external
+            and (
+                trace_id in self._active_traces
+                or trace_id in self._pending_finalizations
+            )
+            and self._writer.has_failed(trace_id)
+        ):
+            raise RuntimeError(
+                "Cannot attach to an unconfirmed trace lifecycle",
+            )
         if self._writer.is_registered(trace_id):
             return
         # Prefer releasing retry snapshots over denying a new request forever.

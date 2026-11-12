@@ -1038,3 +1038,111 @@ async def test_retired_batch_failure_cannot_invalidate_another_lifecycle(
         release.set()
         await manager.close()
         set_current_trace(None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pending_finalization", [False, True])
+async def test_attachment_cannot_reset_failed_owner_confirmation(
+    monkeypatch,
+    pending_finalization,
+):
+    monkeypatch.setattr("swe.tracing.writer._MAX_WRITE_ATTEMPTS", 1)
+    manager, db, trace_id = await new_manager(batch_size=1)
+    db.release.set()
+    owner_context = get_current_trace()
+    update = manager.store.update_trace
+    manager.store.update_trace = AsyncMock(
+        side_effect=OSError("final update unavailable"),
+    )
+    try:
+        if pending_finalization:
+            with pytest.raises(OSError):
+                await manager.end_trace(trace_id)
+            assert trace_id in manager._pending_finalizations
+        manager.store.update_trace = AsyncMock(wraps=update)
+        db.insert_prepared = AsyncMock(side_effect=OSError("span lost"))
+        await emit(manager, trace_id)
+        async with manager._writer._changed:
+            await asyncio.wait_for(
+                manager._writer._changed.wait_for(
+                    lambda: not manager._writer._entries,
+                ),
+                1,
+            )
+        assert not manager._writer.is_registered(trace_id)
+        assert manager._writer.has_failed(trace_id)
+
+        async def attach():
+            await manager.start_trace(
+                "user",
+                "session",
+                "console",
+                "source",
+                trace_id=trace_id,
+                attach_existing=True,
+            )
+
+        # Run as a separate request, preserving the owner's context.
+        if pending_finalization:
+            manager.store.get_trace = AsyncMock(
+                return_value=manager._pending_finalizations[trace_id][0],
+            )
+        with pytest.raises(RuntimeError, match="unconfirmed"):
+            await asyncio.create_task(attach())
+        assert not manager._writer.is_registered(trace_id)
+        if not pending_finalization:
+            assert get_current_trace() is owner_context
+        with pytest.raises(TimeoutError, match="unconfirmed"):
+            await manager.end_trace(trace_id)
+        manager.store.update_trace.assert_not_awaited()
+        assert not db.trace_completed.is_set()
+        assert not manager._active_traces
+        assert not manager._pending_finalizations
+    finally:
+        await manager.close()
+        set_current_trace(None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pending_finalization", [False, True])
+async def test_attachment_reuses_healthy_owner_confirmation(
+    pending_finalization,
+):
+    manager, db, trace_id = await new_manager(max_queue_spans=1)
+    db.release.set()
+    update = manager.store.update_trace
+    try:
+        if pending_finalization:
+            manager.store.update_trace = AsyncMock(
+                side_effect=OSError("unavailable"),
+            )
+            with pytest.raises(OSError):
+                await manager.end_trace(trace_id)
+            manager.store.get_trace = AsyncMock(
+                return_value=manager._pending_finalizations[trace_id][0],
+            )
+            manager.store.update_trace = update
+        state = manager._writer._traces[trace_id]
+
+        async def attach():
+            await manager.start_trace(
+                "user",
+                "session",
+                "console",
+                "source",
+                trace_id=trace_id,
+                attach_existing=True,
+            )
+            assert manager._writer._traces[trace_id] is state
+            set_current_trace(None)
+
+        await asyncio.create_task(attach())
+        assert manager._writer._traces[trace_id] is state
+        assert not state.external
+        assert state.producers == 0
+        await manager.end_trace(trace_id)
+        assert db.trace_completed.is_set()
+        assert not manager._writer._traces
+    finally:
+        await manager.close()
+        set_current_trace(None)
