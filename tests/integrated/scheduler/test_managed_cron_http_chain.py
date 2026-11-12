@@ -466,25 +466,11 @@ async def test_existing_skill_lookup_can_supply_new_scheduler_workflow_creation(
     assert detail["management_status"] == "ready"
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("kind,expected_runs", [("ordinary", 1), ("batch", 3)])
-@pytest.mark.parametrize("envelope", ["flat", "encoded"])
-async def test_each_platform_arrival_reaches_swe_through_new_callback(
-    chain,
-    kind,
-    expected_runs,
-    envelope,
-):
+async def prepare_trigger_source(chain, kind, context, fire):
     from scheduler.app.services.cron.managed.distribution_worker import (
         BroadcastProcessor,
     )
-    from scheduler.app.services.cron.managed.dispatcher import (
-        ExecutionDispatcher,
-        ManagedSweExecutionClient,
-    )
 
-    context = headers("research")
-    fire = datetime.now(timezone.utc).replace(second=0, microsecond=0)
     command = create_body(
         "ordinary" if kind == "ordinary" else "batch_enabled",
     )
@@ -519,18 +505,58 @@ async def test_each_platform_arrival_reaches_swe_through_new_callback(
         timer["jobAddress"]
         == f"http://gateway/api/scheduler/cron/{kind}/callback"
     )
+    return job_id, identifier, timer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind,expected_runs,envelope",
+    [
+        ("ordinary", 1, "flat"),
+        ("ordinary", 1, "encoded"),
+        ("batch", 3, "flat"),
+        ("batch", 3, "encoded"),
+        ("batch", 3, "external"),
+    ],
+)
+async def test_each_trigger_reaches_swe_through_managed_queue(
+    chain,
+    kind,
+    expected_runs,
+    envelope,
+):
+    from scheduler.app.services.cron.managed.dispatcher import (
+        ExecutionDispatcher,
+        ManagedSweExecutionClient,
+    )
+
+    context = headers("research")
+    fire = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    job_id, identifier, timer = await prepare_trigger_source(
+        chain,
+        kind,
+        context,
+        fire,
+    )
     callback = {
         "jobId": int(identifier),
         "jobParam": timer["jobParam"],
         "logId": 10001,
         "fireTime": fire.isoformat(),
     }
+    endpoint = f"/api/scheduler/cron/{kind}/callback"
+    trigger_headers = None
     if envelope == "flat":
         callback = json.loads(base64.urlsafe_b64decode(timer["jobParam"]))
-    # 平台封装中的完整身份来自真实客户端，不另造 Header 或操作引用。
+    elif envelope == "external":
+        endpoint = "/api/scheduler/external/cron/batch/run"
+        callback = {"jobId": job_id}
+        trigger_headers = context
+    platform_calls = len(chain.boundary.calls)
     first = await chain.http.post(
-        f"/api/scheduler/cron/{kind}/callback",
+        endpoint,
         json=callback,
+        headers=trigger_headers,
     )
     assert first.status_code == 202, first.text
     assert first.json()["accepted"]
@@ -546,12 +572,29 @@ async def test_each_platform_arrival_reaches_swe_through_new_callback(
     for row in rows:
         await dispatcher.dispatch_registered(row["execution_id"])
         await asyncio.gather(*chain.swe.state.managed_cron_tasks)
-        # 平台新请求不去重，不等于允许同一执行 ID 的内部重试再跑业务。
+        # 新触发请求独立受理，同一执行 ID 的内部重试仍幂等。
         await dispatcher.dispatch_registered(row["execution_id"])
     assert len(chain.engine.calls) == expected_runs
+    if envelope == "external":
+        from scheduler.app.services.cron.managed.settlement import (
+            ExecutionSettlement,
+        )
+
+        conflict = await chain.http.post(
+            endpoint,
+            json=callback,
+            headers=trigger_headers,
+        )
+        assert conflict.status_code == 409
+        assert conflict.json()["detail"]["batch_id"] == original["batch_id"]
+        chain.db.conn.execute(
+            "UPDATE swe_cron_executions SET async_status='success'",
+        )
+        assert await ExecutionSettlement(chain.db).tick() == expected_runs
     repeated = await chain.http.post(
-        f"/api/scheduler/cron/{kind}/callback",
+        endpoint,
         json=callback,
+        headers=trigger_headers,
     )
     assert repeated.status_code == 202, repeated.text
     assert repeated.json()["accepted"] and not repeated.json()["reused"]
@@ -578,3 +621,4 @@ async def test_each_platform_arrival_reaches_swe_through_new_callback(
         == expected_runs * 2
     )
     assert all(item[1]["x-user-id"] == "alice" for item in chain.sent)
+    assert len(chain.boundary.calls) == platform_calls

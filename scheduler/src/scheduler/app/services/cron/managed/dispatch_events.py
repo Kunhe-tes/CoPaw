@@ -25,6 +25,7 @@ EVENT_TYPES = frozenset(
         "retry_accepted",
         "retry_skipped",
         "auto_retry_scheduled",
+        "auto_retry_blocked",
     },
 )
 STATUSES = frozenset(

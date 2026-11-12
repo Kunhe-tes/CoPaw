@@ -15,7 +15,9 @@ import type {
 } from "../types";
 
 export const cronJobApi = {
-  listCronJobs: () => request<CronJobSpecOutput[]>("/cron/jobs"),
+  listCronJobs: (excludeMigrated = false) => request<CronJobSpecOutput[]>(
+    excludeMigrated ? "/cron/jobs?exclude_migrated=true" : "/cron/jobs",
+  ),
 
   createCronJob: (spec: CronJobSpecInput) =>
     request<CronJobSpecOutput>("/cron/jobs", {

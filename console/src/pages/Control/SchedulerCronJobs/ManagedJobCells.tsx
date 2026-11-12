@@ -36,9 +36,9 @@ export function TaskIdentity({
       <div className={styles.identifier}>{text(job.id, "任务ID")}</div>
       {isBroadcastChildJob(job) ? (
         <Tag color="blue">分发子任务</Tag>
-      ) : (
+      ) : job.has_distributed_children ? (
         <Tag>父任务</Tag>
-      )}
+      ) : null}
     </div>
   );
 }

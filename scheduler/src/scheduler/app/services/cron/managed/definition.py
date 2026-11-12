@@ -35,6 +35,7 @@ ALLOWED_SPEC_KEYS = {
     "runtime",
     "meta",
     "run_date_range",
+    "recheck",
 }
 
 # 关联由服务端分发写入，公开编辑只能保留既有值，不能从请求伪造。
@@ -151,6 +152,39 @@ def _content(spec):
     return kind
 
 
+def _recheck(raw, current, task_type):
+    if "recheck" in raw:
+        rule = raw["recheck"]
+    else:
+        rule = (
+            json.loads(current["spec_json"]).get("recheck")
+            if current
+            else None
+        )
+    if rule is None:
+        return None
+    if (
+        task_type != "agent"
+        or not isinstance(rule, dict)
+        or set(rule)
+        != {
+            "delay_seconds",
+            "instruction",
+        }
+    ):
+        raise ValueError("invalid_cron_recheck")
+    delay = rule["delay_seconds"]
+    instruction = rule["instruction"]
+    if (
+        type(delay) is not int
+        or not 60 <= delay <= 604800
+        or not isinstance(instruction, str)
+        or not 1 <= len(instruction.strip()) <= 4000
+    ):
+        raise ValueError("invalid_cron_recheck")
+    return {"delay_seconds": delay, "instruction": instruction.strip()}
+
+
 def normalize_spec(raw, caller, job_id, current=None):
     if not isinstance(raw, dict) or set(raw) - ALLOWED_SPEC_KEYS:
         raise ValueError("invalid_cron_spec")
@@ -177,6 +211,9 @@ def normalize_spec(raw, caller, job_id, current=None):
     spec["run_date_range"] = _run_date_range(raw, current)
     spec["runtime"] = _runtime(raw.get("runtime", {}))
     spec["task_type"] = _content(spec)
+    recheck = _recheck(raw, current, spec["task_type"])
+    if recheck is not None or "recheck" in raw:
+        spec["recheck"] = recheck
     spec["enabled"] = _enabled(raw, current)
     _profile(spec, caller, current)
     spec["meta"] = _metadata(spec.get("meta", {}), caller, current)

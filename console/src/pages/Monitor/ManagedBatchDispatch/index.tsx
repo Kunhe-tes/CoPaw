@@ -204,6 +204,11 @@ function Board({ source, actor }: { source: string; actor: string }) {
                         ? "运输重投"
                         : "新增业务尝试"
                       : item.reason}
+                    {item.execution_id && (
+                      <div style={{ overflowWrap: "anywhere" }}>
+                        执行 ID：{item.execution_id}
+                      </div>
+                    )}
                   </li>
                 ))}
               </ul>

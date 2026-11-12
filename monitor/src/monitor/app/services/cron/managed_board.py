@@ -126,6 +126,11 @@ def member_error_message(row):
 
 
 class ManagedBoardQuery:
+    async def member_attempts(self, source, batch_id, member_id):
+        from .managed_board_attempts import member_attempts
+
+        return await member_attempts(self.db, source, batch_id, member_id)
+
     def __init__(self, db):
         self.db = db
 
@@ -219,6 +224,7 @@ class ManagedBoardQuery:
             query.event_page,
             query.event_limit,
             query.event_type,
+            query.event_execution_id,
         )
         return {
             "batch": batch,
@@ -257,7 +263,15 @@ class ManagedBoardQuery:
         )
         return [member_item(row) for row in rows], int(count["total"])
 
-    async def _events(self, source, batch_id, page, limit, event_type):
+    async def _events(
+        self,
+        source,
+        batch_id,
+        page,
+        limit,
+        event_type,
+        execution_id,
+    ):
         # 普通入口先受理的首轮运行也属于批成员，不靠运行 kind 或元数据漏掉事实。
         selection, params = sql.event_selection(source, batch_id)
         joined = f"FROM ({selection}) selected JOIN {sql.EVENTS} e ON e.event_id=selected.event_id"
@@ -265,6 +279,9 @@ class ManagedBoardQuery:
         if event_type:
             where += " AND e.event_type=%s"
             params += (event_type,)
+        if execution_id:
+            where += " AND e.execution_id=%s AND e.execution_id COLLATE utf8mb4_bin=%s"
+            params += (execution_id, execution_id)
         count = await self.db.fetch_one(
             f"SELECT COUNT(*) AS total {joined} WHERE {where}",
             params,

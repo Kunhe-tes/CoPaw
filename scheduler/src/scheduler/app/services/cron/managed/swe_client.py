@@ -52,6 +52,9 @@ class ManagedSweClient:
             caller,
         )
 
+    async def migration_stop_legacy(self, operation, caller):
+        return await self._call("migration-stop-legacy", operation, caller)
+
     async def _call(self, action, operation, caller):
         logger.info(
             "调用 SWE 执行资源接口 action=%s operation_id=%s job_id=%s",

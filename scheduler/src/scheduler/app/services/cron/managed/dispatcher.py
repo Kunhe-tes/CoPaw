@@ -48,6 +48,9 @@ class ManagedSweExecutionClient:
         """恢复既有执行的结果提交，不调用执行业务入口。"""
         return await self._call("recover", row, caller)
 
+    async def recheck(self, action, row, caller):
+        return await self._call(f"rechecks/{action}", row, caller)
+
     async def _call(self, action, row, caller):
         headers = {
             **self.headers,
@@ -59,8 +62,11 @@ class ManagedSweExecutionClient:
         }
         if caller.is_manager:
             headers["X-User-Role"] = "manager"
-        body = {"execution_id": row["execution_id"], "job_id": row["job_id"]}
-        if action == "execute":
+        identity = (
+            "recheck_id" if action.startswith("rechecks/") else "execution_id"
+        )
+        body = {identity: row[identity], "job_id": row["job_id"]}
+        if action.endswith("execute"):
             body["dispatch_token"] = row["dispatch_owner"]
         url = f"{self.base_url}/api/internal/cron/managed/{action}"
         if self.http is not None:
@@ -75,7 +81,7 @@ class ManagedSweExecutionClient:
         result = response.json()
         if (
             not isinstance(result, dict)
-            or result.get("execution_id") != row["execution_id"]
+            or result.get(identity) != row[identity]
         ):
             raise ValueError("invalid_swe_execution_receipt")
         return result

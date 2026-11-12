@@ -68,6 +68,65 @@ def test_missing_or_conflicting_chat_does_not_create_replacement(tmp_path):
     }
 
 
+def test_conflicting_chat_warns_and_keeps_jobs_file_binding(tmp_path):
+    from swe.app.crons.selected_migration_source import read_member
+
+    path = source_files(tmp_path)
+    chats = path.with_name("chats.json")
+    data = json.loads(chats.read_text())
+    data["chats"][0]["session_id"] = "stale-session"
+    chats.write_text(json.dumps(data))
+    result = read_member(
+        tmp_path,
+        ("tenant-a", "source-a", "default", "job-1"),
+        {},
+    )
+    assert result["state"]["task_chat_id"] == "chat-old"
+    assert result["state"]["task_session_id"] == "session-old"
+    assert (
+        "cron_migration_binding_conflict:job-1:chats.json:session_id"
+        in result["warnings"]
+    )
+    assert json.loads(chats.read_text()) == data
+
+
+@pytest.mark.asyncio
+async def test_migration_stops_legacy_file_and_skips_workspace_restore(
+    tmp_path,
+):
+    from unittest.mock import AsyncMock
+    from swe.app.crons.manager import CronManager
+    from swe.app.crons.repo.json_repo import JsonJobRepository
+    from swe.app.crons.selected_migration_source import stop_legacy_member
+
+    path = source_files(tmp_path)
+    original_chat = path.with_name("chats.json").read_bytes()
+    snapshot = {
+        "spec": {"enabled": True, "meta": {}},
+        "migration": {"chat_id": "chat-old", "session_id": "session-old"},
+        "legacy_runtime": {},
+    }
+    key = ("tenant-a", "source-a", "default", "job-1")
+    await stop_legacy_member(tmp_path, key, "migration-1", snapshot)
+    await stop_legacy_member(tmp_path, key, "migration-1", snapshot)
+    repo = JsonJobRepository(path)
+    job = await repo.get_job("job-1")
+    assert job.enabled is False
+    assert job.meta["task_migration_stop"] == "migration-1"
+    assert job.meta["task_chat_id"] == "chat-old"
+    assert path.with_name("chats.json").read_bytes() == original_chat
+    adapter = AsyncMock()
+    manager = CronManager(
+        repo=repo,
+        runner=None,
+        channel_manager=None,
+        scheduler_adapter=adapter,
+    )
+    adapter.reset_mock()
+    await manager._restore_external_job_id(job)
+    assert adapter.mock_calls == []
+
+
 def test_running_snapshot_does_not_become_new_inflight_execution(tmp_path):
     from swe.app.crons.selected_migration_source import read_member
     from swe.config.context import encode_scope_id
@@ -214,13 +273,32 @@ async def test_group_discovers_child_from_old_table_and_rechecks_actual_parent(
         raw = json.loads(path.read_text())
         raw["jobs"][0]["meta"]["broadcast_source_tenant_id"] = "someone-else"
         path.write_text(json.dumps(raw))
-        with pytest.raises(ValueError, match="cron_migration_parent_conflict"):
-            await api.snapshot_group(
-                db,
-                ("tenant-a", "source-a", "default", "job-1"),
-                "u",
-                False,
-                {},
-            )
+        db.conn.execute(
+            "UPDATE swe_cron_jobs SET task_chat_id='' WHERE id='child'",
+        )
+        corrected = await api.snapshot_group(
+            db,
+            ("tenant-a", "source-a", "default", "job-1"),
+            "u",
+            False,
+            {},
+        )
+        actual = corrected["members"][1]
+        assert actual["definition"]["parent_tenant_id"] == "tenant-a"
+        assert (
+            actual["definition"]["spec_json"]["meta"][
+                "broadcast_source_tenant_id"
+            ]
+            == "tenant-a"
+        )
+        assert actual["state"]["task_chat_id"] == "child-chat"
+        assert (
+            "cron_migration_parent_conflict:child:jobs.json:broadcast_source_tenant_id"
+            in actual["warnings"]
+        )
+        assert (
+            "cron_migration_binding_conflict:child:swe_cron_jobs:task_chat_id"
+            in actual["warnings"]
+        )
     finally:
         db.conn.close()

@@ -49,5 +49,26 @@ async def test_board_api_does_not_fallback_on_missing_schema(callback_setup):
                 headers={**headers, "X-Source-Id": "other"},
             )
         ).status_code == 404
+        detail_path = path + "/" + batch
+        detail = (await client.get(detail_path, headers=headers)).json()
+        execution = detail["members"][0]["execution_id"]
+        response = await client.get(
+            detail_path,
+            headers=headers,
+            params={"event_execution_id": execution, "event_type": "error"},
+        )
+        assert response.status_code == 200
+        assert response.json()["event_total"] == 1
+        assert response.json()["events"][0]["execution_id"] == execution
+        response = await client.get(
+            detail_path,
+            headers=headers,
+            params={
+                "event_execution_id": "other-execution",
+                "event_type": "error",
+            },
+        )
+        assert response.json()["event_total"] == 0
+        assert response.json()["events"] == []
         db.conn.execute("DROP TABLE swe_cron_managed_dispatch_events")
         assert (await client.get(path, headers=headers)).status_code == 503

@@ -179,6 +179,13 @@ class CronJobRequest(BaseModel):
 TaskType = Literal["text", "agent", "workflow"]
 
 
+class CronRecheckSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    delay_seconds: int = Field(strict=True, ge=60, le=604800)
+    instruction: str = Field(min_length=1, max_length=4000)
+
+
 class CronJobSpec(BaseModel):
     id: str
     name: str
@@ -220,6 +227,7 @@ class CronJobSpec(BaseModel):
     task_type: TaskType = "agent"
     text: Optional[str] = None
     request: Optional[CronJobRequest] = None
+    recheck: CronRecheckSpec | None = None
     model_slot: Optional[ModelSlotConfig] = None
     skill_ids: str = ""
     workflow_binding_id: Optional[str] = None
@@ -235,6 +243,8 @@ class CronJobSpec(BaseModel):
 
     @model_validator(mode="after")
     def _validate_task_type_fields(self) -> "CronJobSpec":
+        if self.recheck is not None and self.task_type != "agent":
+            raise ValueError("recheck is only valid for agent tasks")
         if self.task_type != "workflow" and self.workflow_binding_id:
             raise ValueError("workflow_binding_id is only valid for workflow")
         if self.task_type == "text":

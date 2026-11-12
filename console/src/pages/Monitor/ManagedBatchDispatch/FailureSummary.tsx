@@ -29,6 +29,9 @@ function FailureDetails({ source, filters, value }: Omit<Props, "refresh">) {
     {data.total !== value && <p className={styles.hint}>失败数量已变化，明细按本次查询展示；可刷新看板。</p>}
     {data.groups.length === 0 ? <p>当前筛选范围暂无失败任务</p> : data.groups.map(group => <div key={group.failure_type} className={styles.failureGroup}>
       <Tag color="error">{group.label} · {group.count}</Tag>
+      {group.error_types?.length ? <ul aria-label="子任务失败类型">{group.error_types.map(item => <li key={item.error_type ?? ""}>
+        <span>{item.error_type ?? "未记录类型"}</span><strong>{item.count}</strong>
+      </li>)}</ul> : null}
       <ul>{group.details.map(item => <li key={item.message}>
         <span>{item.message}</span><strong>{item.count}</strong>
       </li>)}</ul>

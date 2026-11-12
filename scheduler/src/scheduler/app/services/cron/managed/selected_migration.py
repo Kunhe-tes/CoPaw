@@ -9,6 +9,7 @@ import httpx
 
 from .date_policy import platform_window_open
 from .diagnostics import format_management_error
+from .identity import CallerIdentity
 from .operations import LeaseLost
 from .selected_migration_store import (
     SelectedMigrationStore,
@@ -159,6 +160,12 @@ class SelectedMigrationService:
         root = tuple(snapshot["root"])
         for operation in operations:
             await self._prepare_timer(batch, operation, root)
+        targets = _legacy_timer_targets(operations, snapshot)
+        if operations and _root_dispatch_state(snapshot, root) != "ordinary":
+            await self._check_old_batch_drained(root)
+        for operation in operations:
+            await self._stop_legacy_definition(batch, operation)
+        await self._pause_legacy_timers(batch, targets)
         try:
             for operation in operations:
                 await self._activate(batch, operation)
@@ -179,6 +186,43 @@ class SelectedMigrationService:
                             format_management_error(exc),
                         )
             raise
+
+    async def _check_old_batch_drained(self, root):
+        waiting = await self.store.db.fetch_one(
+            "SELECT 1 AS pending FROM swe_cron_dispatch_batches b "
+            "JOIN swe_cron_dispatch_intents i ON i.batch_id=b.batch_id "
+            "WHERE b.tenant_id=%s AND b.source_id=%s AND b.agent_id=%s "
+            "AND b.parent_job_id=%s "
+            "AND i.status IN ('pending','claimed','acknowledged','dispatched') LIMIT 1",
+            root,
+        )
+        if waiting:
+            raise ValueError("cron_migration_legacy_batch_not_drained")
+
+    async def _stop_legacy_definition(self, batch, operation):
+        progress = json.loads(operation["progress_json"])
+        await self.store.step(batch, operation, progress)
+        caller = CallerIdentity(*key_of(operation)[:3], operation["actor_id"])
+        result = await self.source.migration_stop_legacy(operation, caller)
+        if result.get("stopped") is not True:
+            raise ValueError("cron_migration_legacy_file_stop_unconfirmed")
+
+    async def _pause_legacy_timers(self, batch, targets):
+        for timer, operation in targets.items():
+            progress = json.loads(operation["progress_json"])
+            await self.store.step(batch, operation, progress)
+            try:
+                await self.platform.set_enabled(timer, False)
+            except Exception as exc:
+                logger.error(
+                    "迁移暂停旧定时器失败 job_id=%s external_id=%s\n%s",
+                    operation["job_id"],
+                    timer,
+                    format_management_error(exc),
+                )
+                raise ValueError(
+                    "cron_migration_legacy_timer_pause_failed",
+                ) from exc
 
     async def _prepare_timer(self, batch, operation, root):
         payload = json.loads(operation["payload_json"])
@@ -222,6 +266,61 @@ class SelectedMigrationService:
             progress["external_id"],
             enabled and platform_window_open(payload["spec"]),
         )
+
+
+def _root_dispatch_state(snapshot, root):
+    return next(
+        member["state"]["dispatch_state"]
+        for member in snapshot["members"]
+        if key_of(member["definition"]) == root
+    )
+
+
+def _legacy_timer_targets(operations, snapshot):
+    new_ids = {
+        str(json.loads(op["progress_json"]).get("external_id") or "").lstrip(
+            "0",
+        )
+        for op in operations
+    }
+    warnings = {
+        key_of(member["definition"]): member.get("warnings", [])
+        for member in snapshot["members"]
+    }
+    targets = {}
+    for operation in operations:
+        legacy = json.loads(operation["payload_json"]).get(
+            "legacy_runtime",
+            {},
+        )
+        for timer in _legacy_timer_ids(legacy, warnings[key_of(operation)]):
+            if timer in new_ids:
+                raise ValueError(
+                    "cron_migration_legacy_timer_binding_conflict",
+                )
+            targets.setdefault(timer, operation)
+    return targets
+
+
+def _legacy_timer_ids(legacy, warnings):
+    for field in ("ordinary_external_job_id", "batch_external_job_id"):
+        if any(
+            f"{kind}:{field}" in warnings
+            for kind in ("binding_conflict", "invalid_state")
+        ):
+            raise ValueError("cron_migration_legacy_timer_binding_conflict")
+        value = legacy.get(field)
+        if not value:
+            continue
+        if not isinstance(value, str) or not re.fullmatch(
+            r"[0-9]{1,128}",
+            value,
+        ):
+            raise ValueError("cron_migration_legacy_timer_binding_conflict")
+        timer = value.lstrip("0")
+        if not timer:
+            raise ValueError("cron_migration_legacy_timer_binding_conflict")
+        yield timer
 
 
 def _validate_snapshot(caller, job, snapshot):
