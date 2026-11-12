@@ -41,6 +41,7 @@ it("详情不展示任务数说明行，成员保留子任务状态文案", asyn
         dispatch_attempt: 1,
         status: "success",
         settled_status: "success",
+        settled_at: "2026-11-12T00:17:06",
         dispatch_priority: {},
         definition_version: 1,
         current_definition_version: 1,
@@ -66,6 +67,7 @@ it("详情不展示任务数说明行，成员保留子任务状态文案", asyn
   expect(screen.queryByText(/任务数.*含父任务/)).toBeNull();
   expect(screen.getByRole("tab", { name: "执行成员 (1)" })).toBeInTheDocument();
   expect(screen.getByText("子任务成功")).toHaveClass("ant-tag-success");
+  expect(screen.getByText("子任务 2026-11-12 00:17:06")).toBeInTheDocument();
   expect(screen.getByText("parent")).toBeInTheDocument();
   expect(screen.getByText("执行 ID：exec")).toBeInTheDocument();
   expect(screen.queryByText(/收敛/)).toBeNull();
@@ -215,6 +217,7 @@ it("父任务模型和错误说明沿用旧版展示，不展示Owner或优先JS
         job_name: "子任务报告",
         status: "error",
         error_code: "cron_execution_failed",
+        settled_at: "2026-11-12T00:17:06",
         error_message: "子任务执行失败: 报告生成失败",
         error_type: "Network,Prompt",
         dispatch_priority: { basis: "user", user_rank: 1, branch_id: "100" },
@@ -238,6 +241,7 @@ it("父任务模型和错误说明沿用旧版展示，不展示Owner或优先JS
     screen.getByRole("button", { name: "重试次数 2，查看尝试历史" }),
   ).toBeInTheDocument();
   expect(screen.getByText("Network,Prompt")).toBeInTheDocument();
+  expect(screen.getByText("子任务 -")).toBeInTheDocument();
   expect(screen.queryByText(/次投递|业务尝试/)).toBeNull();
   expect(
     screen.getByText("frozen-provider / frozen-model"),
