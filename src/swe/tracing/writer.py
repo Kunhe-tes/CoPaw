@@ -55,6 +55,7 @@ class _TraceWrites:
     confirmed: bool = False
     external: bool = False
     producers: int = 0
+    pending_entries: int = 0
 
 
 @dataclass(eq=False)
@@ -67,6 +68,7 @@ class _Entry:
     acknowledged: int = -1
     queued: bool = True
     failures: int = 0
+    isolated: bool = False
 
 
 class SpanWriter:
@@ -131,6 +133,7 @@ class SpanWriter:
             span = span.model_copy(deep=True)
             if entry is None:
                 entry = _Entry(span, size, state, inserted=inserted)
+                state.pending_entries += 1
                 self._entries[span.span_id] = entry
                 self.queue.append(entry)
             else:
@@ -168,7 +171,7 @@ class SpanWriter:
         self._traces[trace_id] = _TraceWrites(external=external)
 
     def attach_producer(self, trace_id: str) -> Callable[[], None]:
-        """Release external-only registration when its last local context ends."""
+        """Release external registration once producers and accepted writes end."""
         state = self._traces[trace_id]
         state.producers += 1
         released = False
@@ -179,16 +182,22 @@ class SpanWriter:
                 return
             released = True
             state.producers -= 1
-            if (
-                state.external
-                and not state.producers
-                and self._traces.get(trace_id) is state
-            ):
-                # Accepted entries still own this state; their barriers remain valid.
-                self._traces.pop(trace_id)
-                self._wake.set()
+            self._release_external_if_idle(trace_id, state)
 
         return release
+
+    def _release_external_if_idle(
+        self,
+        trace_id: str,
+        state: _TraceWrites,
+    ) -> None:
+        if (
+            state.external
+            and not state.producers
+            and not state.pending_entries
+            and self._traces.get(trace_id) is state
+        ):
+            self.retire_trace(trace_id, confirmed=not state.failed)
 
     def retire_trace(self, trace_id: str, *, confirmed: bool = False) -> None:
         state = self._traces.pop(trace_id, None)
@@ -314,6 +323,15 @@ class SpanWriter:
         batch = []
         size = 0
         for entry in self.queue:
+            # A failed bulk operation cannot identify its bad row. Retry its
+            # members separately, including when new entries join the queue.
+            if batch and (
+                entry.isolated
+                or entry.inserted
+                or batch[0][0].isolated
+                or batch[0][0].inserted
+            ):
+                break
             if len(batch) >= self.config.batch_size:
                 break
             if batch and size + entry.size > self.config.max_batch_bytes:
@@ -359,12 +377,17 @@ class SpanWriter:
                 entry.acknowledged = version
                 entry.failures = 0
                 if entry.version == version:
-                    self._entries.pop(entry.span.span_id)
-                    self.pending.pop(entry.span.span_id)
-                    self._bytes -= entry.size
+                    self._remove_entry(entry)
                 else:
                     self._enqueue(entry)
             self._changed.notify_all()
+
+    def _remove_entry(self, entry: _Entry) -> None:
+        self._entries.pop(entry.span.span_id)
+        self.pending.pop(entry.span.span_id)
+        self._bytes -= entry.size
+        entry.trace_state.pending_entries -= 1
+        self._release_external_if_idle(entry.span.trace_id, entry.trace_state)
 
     def _requeue(self, batch: list[tuple[_Entry, Span, int]]) -> None:
         # The same entry may already hold an accepted, newer queued version.
@@ -373,6 +396,18 @@ class SpanWriter:
                 entry.queued = True
                 self.queue.appendleft(entry)
         self._wake.set()
+
+    def _isolate_failed_batch(
+        self,
+        batch: list[tuple[_Entry, Span, int]],
+    ) -> bool:
+        if len(batch) <= 1:
+            return False
+        for entry, _, _ in batch:
+            entry.isolated = True
+        self._requeue(batch)
+        logger.exception("Tracing batch failed; isolating individual writes")
+        return True
 
     async def _run(self) -> None:
         failures = 0
@@ -398,6 +433,8 @@ class SpanWriter:
                     raise
                 except Exception:
                     failures += 1
+                    if self._isolate_failed_batch(batch):
+                        continue
                     exhausted = []
                     for entry, _, version in batch:
                         entry.failures += 1
@@ -417,11 +454,10 @@ class SpanWriter:
                                     if (
                                         self._traces.get(entry.span.trace_id)
                                         is entry.trace_state
+                                        and not entry.trace_state.external
                                     ):
                                         self.retire_trace(entry.span.trace_id)
-                                    self._entries.pop(entry.span.span_id, None)
-                                    self.pending.pop(entry.span.span_id, None)
-                                    self._bytes -= entry.size
+                                    self._remove_entry(entry)
                                 else:
                                     entry.failures = 0
                                     self._enqueue(entry)

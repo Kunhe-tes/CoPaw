@@ -984,10 +984,11 @@ async def test_external_context_release_does_not_lose_pending_confirmation():
     await asyncio.sleep(0)
     set_current_trace(None)
     try:
-        assert not writer.is_registered("external")
-        assert writer.trace_count == 1
+        assert writer.is_registered("external")
+        assert writer.trace_count == 2
         db.release.set()
         await barrier
+        assert not writer.is_registered("external")
         await manager.end_trace(trace_id)
         assert not writer._traces
     finally:
