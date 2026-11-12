@@ -1,3 +1,7 @@
+/**
+ * ！！！！注意：此文件需要对比合并
+ *
+ */
 import type {
   IframeUserDataMessage,
   IframeIncomingMessage,
@@ -20,7 +24,24 @@ import {
 import { getWPlusCookie } from "./cookie-utils";
 import { authApi } from "../api/modules/auth";
 import { buildAuthHeaders as buildCookieHeaders } from "../api/authHeaders";
-// import mmjTrack from 'xxxx'
+import { BBK_ID_MAP } from "../constants/bbk";
+// import mmjTrack from '@la64.05/mmjtrack';
+
+const ZHITUO_MMJ_ROUTERS = [
+  { path: "/wealth/board", pageName: "规划看板" },
+  { path: "/wealth/today", pageName: "今日任务" },
+  { path: "/wealth/pending", pageName: "待触达客户" },
+  { path: "/wealth/create", pageName: "创建规划" },
+  { path: "/wealth/done", pageName: "已完成任务" },
+];
+
+interface MmjAppConfig {
+  appName: string;
+  userName?: string;
+  orgId?: string;
+  org?: string;
+  routers?: typeof ZHITUO_MMJ_ROUTERS;
+}
 
 /**
  * 允许的来源白名单
@@ -77,6 +98,7 @@ export function unregisterReportRequestHandler(): void {
 
 /** 是否已注册监听器 */
 let isListenerRegistered = false;
+let isZhituoTrackingInitialized = false;
 
 
 /** Cookie刷新定时器 */
@@ -104,7 +126,11 @@ function isWealthOriginEntry(): boolean {
   const isWealthPath = /^\/(?:console\/)?wealth(?:\/|$)/.test(
     window.location.pathname,
   );
-  return isWealthPath && getIframeContext().isOriginY;
+  return (
+    isWealthPath &&
+    (getIframeContext().isOriginY ||
+      new URLSearchParams(window.location.search).get("origin") === "Y")
+  );
 }
 
 /** 不带 origin=Y 的财富 iframe 等待父应用通过 USER_DATA 初始化。 */
@@ -139,6 +165,7 @@ function handleWealthUserData(
 ): void {
   const { data } = message;
   const userId = data.sapId || data.userId;
+  const bbk = data.bbkId || data.bbkOrgId || null;
   if (
     typeof data.source !== "string" ||
     !data.source.trim() ||
@@ -155,7 +182,7 @@ function handleWealthUserData(
     hideLogo: toBoolean(data.hideLogo),
     hideMenu: toBoolean(data.hideMenu),
     sysId: data.sysId ?? null,
-    bbk: data.bbkId || data.bbkOrgId || null,
+    bbk,
     orgCode: data.orgCode ?? null,
     subBranchId: data.subBranchId ?? null,
     orgLvl: data.orgLvl ?? null,
@@ -169,6 +196,10 @@ function handleWealthUserData(
     "message",
   );
   store.markInitialized();
+  if (!isZhituoTrackingInitialized) {
+    isZhituoTrackingInitialized = true;
+    initZhituoMmj(userId, data.userName, bbk, data.branchName);
+  }
 }
 
 function decodeCookieValue(value: string | null): string | null {
@@ -334,7 +365,9 @@ async function handleUserDataMessage(
   // const cookieValue = headers["x-header-cookie"] || document.cookie;
   // void authApi.sendCronAuth(cookieValue);
 
-  // initMmj(message?.data?.sapId ?? null)
+  if (!isWealthOriginEntry()) {
+    initMmj(message.data.sapId ?? null);
+  }
 }
 
 /**
@@ -495,6 +528,7 @@ export function initIframeMessageListener(): void {
   cleanupFn = () => {
     window.removeEventListener("message", handleMessage);
     isListenerRegistered = false;
+    isZhituoTrackingInitialized = false;
     stopCookieRefreshTimer();
     cleanupFn = null;
   };
@@ -607,6 +641,9 @@ export async function handleUrlOriginParam(): Promise<void> {
 
   if (urlParams.get("hideLogo") === "true") {
     store.markInitialized();
+    if (isWealthOriginEntry()) {
+      initWPlusWealthMmj(userId, vbbk);
+    }
     return;
   }
 
@@ -619,9 +656,9 @@ export async function handleUrlOriginParam(): Promise<void> {
  * 调用客户信息接口；非财富入口同时执行 Agent 用户初始化
  */
 async function initFromUrlParams(userId: string): Promise<void> {
-  const shouldInitializeAgent = !isWealthOriginEntry();
+  const isWealth = isWealthOriginEntry();
   // 非财富入口的用户初始化不能依赖可能较慢的客户信息接口完成。
-  if (shouldInitializeAgent) {
+  if (!isWealth) {
     initializeUser(userId);
   }
 
@@ -631,7 +668,7 @@ async function initFromUrlParams(userId: string): Promise<void> {
   // 客户信息接口可能修正 userId，修正后的用户仍需要初始化。
   const latestStore = useIframeStore.getState();
   const currentUserId = latestStore.userId;
-  if (shouldInitializeAgent && currentUserId && currentUserId !== userId) {
+  if (!isWealth && currentUserId && currentUserId !== userId) {
     initializeUser(currentUserId);
   }
 
@@ -640,29 +677,67 @@ async function initFromUrlParams(userId: string): Promise<void> {
   const headers = buildCookieHeaders();
   const cookieValue = headers["x-header-cookie"] || document.cookie;
   void authApi.sendCronAuth(cookieValue);
-  // initMmj(currentUserId);
+  if (isWealth) {
+    initWPlusWealthMmj(currentUserId, latestStore.bbk);
+  } else {
+    initMmj(currentUserId);
+  }
 
   // 启动Cookie定时刷新机制
   startCookieRefreshTimer();
 }
 
+function initWPlusWealthMmj(userId: string | null, bbk: string | null): void {
+  if (!userId?.trim()) {
+    return;
+  }
 
-// async function initMmj(userId) {
-//   if (mmjTrack) {
-//     mmjTrack.setConfig({
-//       appName: "xxxx",
-//       userId: userId,
-//       userIdType: '02', // 用户编号的类型，参考下表，如果是一事通号则是02
-//       productCode: 'xxxx',
-//       businessId: 'xxxx',
-//       firstLoadDB: true,
-//       openAllTrace: true,
-//       serviceUnitId: window.__env__.serviceUnitId, // 前端服务单元：必传！注意传对！（案例：LF39.18@cfzz_web_PRD_PRD）
-//       errorCode: 'MMJ0001', // 错误码
-//       env: window.__env__.env,
-//     })
-//   }
-// }
+  const cookieUserId = decodeCookieValue(getWPlusCookie("userid"));
+  const userName =
+    cookieUserId === userId ? decodeCookieValue(getWPlusCookie("username")) : null;
+  initZhituoMmj(userId, userName, bbk);
+}
+
+function initZhituoMmj(
+  userId: string,
+  userName: string | null | undefined,
+  bbk: string | null,
+  branchName?: string,
+): void {
+  const orgId = bbk || "";
+  const org =
+    (typeof branchName === "string" && branchName.trim()) ||
+    BBK_ID_MAP.find(({ value }) => value === orgId)?.label ||
+    "";
+  void initMmj(userId, {
+    appName: "智拓财富工作台",
+    userName: userName || "",
+    orgId,
+    org,
+    routers: ZHITUO_MMJ_ROUTERS,
+  });
+}
+
+async function initMmj(
+  userId: string | null,
+  appConfig: MmjAppConfig = { appName: "CMBCLAW" },
+) {
+  console.log('mmj配置打开注释并改动内容')
+  // if (mmjTrack) {
+  //   mmjTrack.setConfig({
+  //     ...appConfig,
+  //     userId: userId,
+  //     userIdType: '02', // 用户编号的类型，参考下表，如果是一事通号则是02
+  //     productCode: 'LQxx.xx',
+  //     businessId: 'LQXXXX',
+  //     firstLoadDB: true,
+  //     openAllTrace: true,
+  //     serviceUnitId: window.__env__.serviceUnitId, // 前端服务单元：必传！注意传对！（案例：LF39.18@cfzz_web_PRD_PRD）
+  //     errorCode: 'MMJ0001', // 错误码
+  //     env: window.__env__.env,
+  //   })
+  // }
+}
 
 /**
  * 从 cookie 参数调用客户信息接口

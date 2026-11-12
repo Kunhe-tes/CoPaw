@@ -482,6 +482,8 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 - `hideLogo: true`（兼容字符串 `"true"`）隐藏头部、播报与侧栏，内部导航持续生效，不补 URL 参数。身份和布局由消息提供；接口鉴权仍使用现有登录 Cookie，消息传参并不替代登录态。
 - 子页面在注册监听器时清除该入口残留的 iframe 上下文，收到父窗口的有效 USER_DATA 消息后才挂载工作台并加载业务数据。不查询用户信息、不初始化 Agent、不同步 cron-auth、不启动客户信息定时刷新。未收到有效消息时保持等待；每次 iframe 加载后由父应用发送一次初始化消息；切换用户或岗位时重新加载 iframe 后再发送。
 - 规划创建/更新请求体的 `sourceId` 使用消息传入的渠道（例如 `RCZT`）。原 `origin=Y` 财富入口继续使用 Cookie 初始化及 `RMASSIST` 来源，其他已有页面的 USER_DATA 行为不变。
+- 财富 iframe 消息入口收到有效 `USER_DATA` 后，所有嵌入渠道均使用 `appName: "智拓财富工作台"`，每次 iframe 加载初始化一次。W+ 的 `origin=Y` 财富入口使用同一配置，包括 `hideLogo=true` 时的 Cookie 快速初始化。W+ 聊天和通用消息入口沿用原 MMJ 配置，统一使用 `businessId: "LQ1303CMBSWE"`。
+- 智拓 MMJ 配置的 `userName` 取消息或 W+ 当前用户的 `username` Cookie，`orgId` 取消息的 `bbkId`（兼容 `bbkOrgId`）或 W+ 初始化后的分行 ID。`org` 优先取消息中的 `branchName`，缺省时查分行映射。无法取到的字段传空字符串。`routers` 配置看板、今日任务、待触达客户、创建规划和已完成任务的路径与名称。
 - 代码入口：`console/src/utils/iframeMessage.ts`、`console/src/main.tsx`、`console/src/pages/WealthWorkbench/index.tsx`。回归入口：`iframeMessage.test.ts`、财富 `index.test.tsx`、`planGateway.test.ts`。
 
 父应用示例（监听器先注册，再设置 iframe 地址）：
