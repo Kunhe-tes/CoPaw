@@ -75,6 +75,7 @@ class SpanWriter:
         # Payloads may be discarded, but their traces remain unconfirmed.
         self._failed_traces: set[str] = set()
         self._failure_index_overflow = False
+        self._sealed_traces: set[str] = set()
 
     def start(self, store: TraceStore) -> None:
         """Start outside any request's transaction or tenant context."""
@@ -97,6 +98,10 @@ class SpanWriter:
             while True:
                 if not self._accepting:
                     raise RuntimeError("Tracing writer is closing")
+                if span.trace_id in self._sealed_traces:
+                    raise RuntimeError(
+                        "Trace is finalizing; span admission is sealed",
+                    )
                 size = _estimate_bytes(span)
                 entry = self._entries.get(span.span_id)
                 if self._has_capacity(size, entry):
@@ -143,18 +148,30 @@ class SpanWriter:
             return
         self._failed_traces.add(trace_id)
 
+    def has_failed(self, trace_id: Optional[str] = None) -> bool:
+        return self._failure_index_overflow or (
+            bool(self._failed_traces)
+            if trace_id is None
+            else trace_id in self._failed_traces
+        )
+
+    def mark_trace_unconfirmed(self, trace_id: str) -> None:
+        """Invalidate lost finalization state and wake barriers from the writer loop."""
+        self._record_failure(trace_id)
+        self._wake.set()
+
+    def seal_trace(self, trace_id: str) -> None:
+        """Stop new admissions before taking the final flush snapshot."""
+        self._sealed_traces.add(trace_id)
+
+    def unseal_trace(self, trace_id: str) -> None:
+        self._sealed_traces.discard(trace_id)
+
     async def flush(self, trace_id: Optional[str] = None) -> None:
         """Confirm versions already accepted for a trace, including in-flight."""
         async with self._changed:
 
-            def has_failed() -> bool:
-                return self._failure_index_overflow or (
-                    bool(self._failed_traces)
-                    if trace_id is None
-                    else trace_id in self._failed_traces
-                )
-
-            if has_failed():
+            if self.has_failed(trace_id):
                 raise TimeoutError(
                     "Tracing writes remain unconfirmed: spans were dropped",
                 )
@@ -167,7 +184,7 @@ class SpanWriter:
             try:
                 await asyncio.wait_for(
                     self._changed.wait_for(
-                        lambda: has_failed()
+                        lambda: self.has_failed(trace_id)
                         or all(
                             entry.acknowledged >= version
                             for entry, version in targets
@@ -179,7 +196,7 @@ class SpanWriter:
                 raise TimeoutError(
                     "Tracing writes remain unconfirmed",
                 ) from exc
-            if has_failed():
+            if self.has_failed(trace_id):
                 raise TimeoutError(
                     "Tracing writes remain unconfirmed: spans were dropped",
                 )
@@ -296,6 +313,8 @@ class SpanWriter:
             except asyncio.TimeoutError:
                 pass
             self._wake.clear()
+            async with self._changed:
+                self._changed.notify_all()
             while self.queue:
                 batch = []
                 try:

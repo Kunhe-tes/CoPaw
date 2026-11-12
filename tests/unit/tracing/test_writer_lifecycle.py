@@ -648,3 +648,247 @@ def test_writer_limits_must_be_positive(field):
 
     with pytest.raises(ValidationError):
         TracingConfig(**{field: 0})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stage",
+    ["flush_timeout", "update_error", "cancel_flush", "cancel_update"],
+)
+async def test_finalization_retry_preserves_all_aggregates(stage):
+    manager, db, trace_id = await new_manager(batch_size=100)
+    db.release.set()
+    stale_trace = manager._active_traces[trace_id].model_copy(deep=True)
+    manager.store.get_trace = AsyncMock(return_value=stale_trace)
+    span_id = await emit(
+        manager,
+        trace_id,
+        model_name="model-a",
+        input_tokens=12,
+        tool_name="tool-a",
+        skill_name="skill-a",
+    )
+    await manager.update_span(span_id, trace_id, output_tokens=7)
+    flush = manager._writer.flush
+    update = manager.store.update_trace
+    started = asyncio.Event()
+
+    async def blocked(*_args):
+        started.set()
+        await asyncio.Event().wait()
+
+    if stage == "flush_timeout":
+        manager._writer.flush = AsyncMock(
+            side_effect=TimeoutError("unconfirmed"),
+        )
+    elif stage == "update_error":
+        manager.store.update_trace = AsyncMock(
+            side_effect=OSError("unavailable"),
+        )
+    elif stage == "cancel_flush":
+        manager._writer.flush = blocked
+    else:
+        manager.store.update_trace = blocked
+    try:
+        if stage.startswith("cancel"):
+            ending = asyncio.create_task(manager.end_trace(trace_id))
+            await asyncio.wait_for(started.wait(), 1)
+            ending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await ending
+        else:
+            with pytest.raises((TimeoutError, OSError)):
+                await manager.end_trace(trace_id)
+        assert trace_id not in manager._active_traces
+        assert trace_id in manager._pending_finalizations
+        assert not manager._finalizing_traces
+        manager._writer.flush = flush
+        manager.store.update_trace = AsyncMock(wraps=update)
+        # Late accepted updates must still contribute to the retained snapshot.
+        await emit(
+            manager,
+            trace_id,
+            model_name="model-b",
+            input_tokens=3,
+            tool_name="tool-b",
+            skill_name="skill-b",
+        )
+        await manager.end_trace(trace_id)
+        written = manager.store.update_trace.call_args.args[0]
+        assert written.total_input_tokens == 15
+        assert written.total_output_tokens == 7
+        assert written.model_name == "model-a"
+        assert written.tools_used == ["tool-a", "tool-b"]
+        assert written.skills_used == ["skill-a", "skill-b"]
+        manager.store.get_trace.assert_not_awaited()
+        assert trace_id not in manager._pending_finalizations
+        assert manager._finalization_bytes == 0
+        assert db.trace_completed.is_set()
+    finally:
+        manager._writer.flush = flush
+        await manager.close()
+        set_current_trace(None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_count", [3, 5])
+async def test_finalization_snapshot_eviction_cannot_complete_stale_trace(
+    failure_count,
+):
+    manager, db, first_id = await new_manager(max_queue_spans=2)
+    db.release.set()
+    update = manager.store.update_trace
+    manager.store.update_trace = AsyncMock(side_effect=OSError("unavailable"))
+    ids = []
+    try:
+        for index in range(failure_count):
+            trace_id = (
+                first_id
+                if index == 0
+                else await manager.start_trace(
+                    "user",
+                    "session",
+                    "console",
+                    "source",
+                )
+            )
+            ids.append(trace_id)
+            await emit(manager, trace_id, input_tokens=index + 1)
+            with pytest.raises(OSError):
+                await manager.end_trace(trace_id)
+            assert len(manager._pending_finalizations) <= 2
+            assert (
+                manager._finalization_bytes <= manager.config.max_queue_bytes
+            )
+            assert not manager._active_traces
+        manager.store.update_trace = AsyncMock(wraps=update)
+        # Failure history overflow must still reject every evicted snapshot.
+        for trace_id in ids[:-2]:
+            with pytest.raises(TimeoutError, match="unconfirmed"):
+                await manager.end_trace(trace_id)
+        manager.store.update_trace.assert_not_awaited()
+        assert not db.trace_completed.is_set()
+        if failure_count == 3:
+            await manager.end_trace(ids[-1])
+            written = manager.store.update_trace.call_args.args[0]
+            assert written.total_input_tokens == 3
+            assert ids[-1] not in manager._pending_finalizations
+    finally:
+        await manager.close()
+        set_current_trace(None)
+
+
+@pytest.mark.asyncio
+async def test_oversized_finalization_is_invalidated_instead_of_retained():
+    manager, db, trace_id = await new_manager(max_queue_bytes=1024)
+    manager.store.update_trace = AsyncMock(side_effect=OSError("unavailable"))
+    try:
+        with pytest.raises(OSError):
+            await manager.end_trace(trace_id)
+        assert not manager._pending_finalizations
+        assert manager._finalization_bytes == 0
+        with pytest.raises(TimeoutError, match="unconfirmed"):
+            await manager.end_trace(trace_id)
+        assert manager.store.update_trace.await_count == 1
+    finally:
+        await manager.close()
+        set_current_trace(None)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_finalization_cannot_write_a_stale_fallback():
+    manager, db, trace_id = await new_manager(batch_size=1)
+    await emit(manager, trace_id, input_tokens=12)
+    await db.started.wait()
+    ending = asyncio.create_task(manager.end_trace(trace_id))
+    await asyncio.sleep(0)
+    try:
+        with pytest.raises(RuntimeError, match="already in progress"):
+            await manager.end_trace(trace_id)
+        with pytest.raises(RuntimeError, match="sealed"):
+            await emit(manager, trace_id, input_tokens=100)
+        db.release.set()
+        await ending
+        assert not manager._writer._sealed_traces
+        assert not manager._finalizing_traces
+        assert not manager._active_traces
+    finally:
+        db.release.set()
+        await ending
+        await manager.close()
+        set_current_trace(None)
+
+
+@pytest.mark.asyncio
+async def test_retry_keeps_terminal_intent_and_does_not_rewrite_completed_trace():
+    from swe.tracing.models import TraceStatus
+
+    manager, db, trace_id = await new_manager()
+    update = manager.store.update_trace
+    manager.store.update_trace = AsyncMock(side_effect=OSError("unavailable"))
+    try:
+        with pytest.raises(OSError):
+            await manager.end_trace(
+                trace_id,
+                TraceStatus.ERROR,
+                "model failed",
+            )
+        snapshot = manager._pending_finalizations[trace_id][0]
+        manager.store.update_trace = AsyncMock(wraps=update)
+        await manager.end_trace(trace_id)
+        written = manager.store.update_trace.call_args.args[0]
+        assert written.status == TraceStatus.ERROR
+        assert written.error == "model failed"
+        assert written.end_time == snapshot.end_time
+        manager.store.get_trace = AsyncMock(return_value=written)
+        await manager.end_trace(trace_id)
+        assert manager.store.update_trace.await_count == 1
+        assert not manager._pending_finalizations
+    finally:
+        await manager.close()
+        set_current_trace(None)
+
+
+@pytest.mark.asyncio
+async def test_running_database_record_cannot_replace_missing_local_aggregates():
+    manager, db, trace_id = await new_manager()
+    stale = manager._active_traces.pop(trace_id)
+    manager.store.get_trace = AsyncMock(return_value=stale)
+    manager.store.update_trace = AsyncMock()
+    try:
+        with pytest.raises(TimeoutError, match="aggregates are unavailable"):
+            await manager.end_trace(trace_id)
+        manager.store.update_trace.assert_not_awaited()
+        assert not manager._active_traces
+        assert not manager._pending_finalizations
+        assert manager._writer.has_failed(trace_id)
+    finally:
+        await manager.close()
+        set_current_trace(None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_lost_skill_finalization_cannot_mark_trace_complete(cancelled):
+    manager, db, trace_id = await new_manager()
+    detector = MagicMock()
+    detector.on_reasoning_end = AsyncMock(
+        side_effect=(
+            asyncio.CancelledError() if cancelled else OSError("skill failed")
+        ),
+    )
+    get_current_trace().skill_detector = detector
+    try:
+        with pytest.raises(
+            asyncio.CancelledError if cancelled else TimeoutError,
+        ):
+            await manager.end_trace(trace_id)
+        assert not manager._active_traces
+        assert not manager._pending_finalizations
+        assert get_current_trace() is None
+        assert not db.trace_completed.is_set()
+        with pytest.raises(TimeoutError, match="unconfirmed"):
+            await manager.end_trace(trace_id)
+    finally:
+        await manager.close()
+        set_current_trace(None)

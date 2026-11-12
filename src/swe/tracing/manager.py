@@ -7,6 +7,7 @@ Provides the TraceManager for event collection, batching, and storage.
 import asyncio
 import logging
 import uuid
+from collections import OrderedDict
 from contextvars import Context, ContextVar
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -176,6 +177,11 @@ class TraceManager:
 
         # Active traces
         self._active_traces: dict[str, Trace] = {}
+        self._pending_finalizations: OrderedDict[str, tuple[Trace, int]] = (
+            OrderedDict()
+        )
+        self._finalization_bytes = 0
+        self._finalizing_traces: set[str] = set()
 
     @property
     def store(self) -> TraceStore:
@@ -637,10 +643,50 @@ class TraceManager:
         except Exception as e:
             logger.warning("Failed to setup skill detector: %s", e)
 
+    def _forget_finalization(self, trace_id: str) -> None:
+        retained = self._pending_finalizations.pop(trace_id, None)
+        if retained is not None:
+            self._finalization_bytes -= retained[1]
+
+    def _retain_finalization(self, trace: Trace) -> None:
+        """Retain retryable aggregates; loss of a snapshot invalidates its trace."""
+        self._forget_finalization(trace.trace_id)
+        if self._writer.has_failed(trace.trace_id):
+            return
+        size = 1024 + 4 * len(trace.model_dump_json().encode("utf-8"))
+        if size > self.config.max_queue_bytes:
+            self._writer.mark_trace_unconfirmed(trace.trace_id)
+            logger.error(
+                "Tracing finalization exceeds memory budget: %s",
+                trace.trace_id,
+            )
+            return
+        while self._pending_finalizations and (
+            len(self._pending_finalizations) >= self.config.max_queue_spans
+            or self._finalization_bytes + size > self.config.max_queue_bytes
+        ):
+            evicted_id, (_, evicted_size) = (
+                self._pending_finalizations.popitem(
+                    last=False,
+                )
+            )
+            self._finalization_bytes -= evicted_size
+            self._writer.mark_trace_unconfirmed(evicted_id)
+            logger.error(
+                "Evicting unconfirmed trace finalization: %s",
+                evicted_id,
+            )
+        if not self._writer.has_failed(trace.trace_id):
+            self._pending_finalizations[trace.trace_id] = (
+                trace.model_copy(deep=True),
+                size,
+            )
+            self._finalization_bytes += size
+
     async def end_trace(
         self,
         trace_id: str,
-        status: TraceStatus = TraceStatus.COMPLETED,
+        status: Optional[TraceStatus] = None,
         error: Optional[str] = None,
     ) -> None:
         """End a trace.
@@ -653,36 +699,59 @@ class TraceManager:
         if not self.enabled:
             return
 
+        if trace_id in self._finalizing_traces:
+            raise RuntimeError("Trace finalization already in progress")
+        self._finalizing_traces.add(trace_id)
         ctx = get_current_trace()
+        trace = self._active_traces.get(trace_id)
+        retained = self._pending_finalizations.get(trace_id)
+        if trace is None and retained is not None:
+            trace = retained[0]
+            self._forget_finalization(trace_id)
+            self._active_traces[trace_id] = trace
         try:
             # End skill detection before the final span flush because cleanup may
             # update existing spans or emit a final skill span.
             if ctx and ctx.trace_id == trace_id and ctx.skill_detector:
                 try:
                     await ctx.skill_detector.on_reasoning_end()
+                except asyncio.CancelledError:
+                    self._writer.mark_trace_unconfirmed(trace_id)
+                    raise
                 except Exception as e:
+                    self._writer.mark_trace_unconfirmed(trace_id)
                     logger.warning("Failed to end skill detection: %s", e)
 
+            self._writer.seal_trace(trace_id)
+            if trace is None:
+                await self._writer.flush(trace_id)
+                stored = await self.store.get_trace(trace_id)
+                if stored is None or stored.status != TraceStatus.RUNNING:
+                    return
+                self._writer.mark_trace_unconfirmed(trace_id)
+                raise TimeoutError(
+                    "Tracing finalization aggregates are unavailable",
+                )
+
+            trace = trace.model_copy(deep=True)
+            if status is not None or trace.status == TraceStatus.RUNNING:
+                trace.end_time = datetime.now()
+                trace.duration_ms = int(
+                    (trace.end_time - trace.start_time).total_seconds() * 1000,
+                )
+                trace.status = status or TraceStatus.COMPLETED
+                trace.error = error
             await self._writer.flush(trace_id)
 
-            trace = self._active_traces.get(
-                trace_id,
-            ) or await self.store.get_trace(trace_id)
-            if trace is None:
-                logger.warning("Trace not found: %s", trace_id)
-                return
-
-            trace = trace.model_copy()
-            trace.end_time = datetime.now()
-            trace.duration_ms = int(
-                (trace.end_time - trace.start_time).total_seconds() * 1000,
-            )
-            trace.status = status
-            trace.error = error
-
             await self.store.update_trace(trace)
-
+            self._forget_finalization(trace_id)
+        except (Exception, asyncio.CancelledError):
+            if trace is not None:
+                self._retain_finalization(trace)
+            raise
         finally:
+            self._writer.unseal_trace(trace_id)
+            self._finalizing_traces.discard(trace_id)
             self._active_traces.pop(trace_id, None)
             if ctx and ctx.trace_id == trace_id:
                 set_current_trace(None)
@@ -889,7 +958,10 @@ class TraceManager:
             is_update: If True, this is an update to existing span
         """
         trace = self._active_traces.get(trace_id)
-        if not trace:
+        retained = self._pending_finalizations.get(trace_id)
+        if trace is None and retained is not None:
+            trace = retained[0]
+        if trace is None:
             return
 
         if output_tokens:
@@ -905,6 +977,8 @@ class TraceManager:
             trace.tools_used.append(span.tool_name)
         if span.skill_name and span.skill_name not in trace.skills_used:
             trace.skills_used.append(span.skill_name)
+        if retained is not None:
+            self._retain_finalization(trace)
 
     async def emit_llm_input(
         self,
