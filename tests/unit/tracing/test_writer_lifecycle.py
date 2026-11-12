@@ -120,12 +120,20 @@ async def test_close_drains_inflight_without_cancelling_it():
 
 
 @pytest.mark.asyncio
-async def test_permanently_failed_span_is_dropped_after_three_attempts():
+@pytest.mark.parametrize("flush_before_drop", [False, True])
+async def test_permanently_failed_span_is_dropped_after_three_attempts(
+    flush_before_drop,
+):
     manager, db, trace_id = await new_manager(batch_size=1)
     db.release.set()
     db.insert_prepared = AsyncMock(side_effect=OSError("database unavailable"))
     try:
         await emit(manager, trace_id)
+        ending = (
+            asyncio.create_task(manager.end_trace(trace_id))
+            if flush_before_drop
+            else None
+        )
 
         async def wait_until_dropped():
             async with manager._writer._changed:
@@ -137,6 +145,18 @@ async def test_permanently_failed_span_is_dropped_after_three_attempts():
         assert db.insert_prepared.await_count == 3
         assert not manager._writer.pending
         assert not manager._writer.queue
+        assert manager._writer._bytes == 0
+        with pytest.raises(TimeoutError, match="unconfirmed"):
+            if ending is not None:
+                await asyncio.wait_for(ending, timeout=1)
+            else:
+                await manager.end_trace(trace_id)
+        # Repeated and global barriers must not forget discarded writes.
+        for target in (trace_id, None):
+            with pytest.raises(TimeoutError, match="spans were dropped"):
+                await manager._writer.flush(target)
+        await manager._writer.flush("unrelated-trace")
+        assert not db.trace_completed.is_set()
     finally:
         await manager.close()
         set_current_trace(None)

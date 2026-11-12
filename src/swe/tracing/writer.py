@@ -72,6 +72,8 @@ class SpanWriter:
         self._wake = asyncio.Event()
         self._accepting = False
         self._store: Optional[TraceStore] = None
+        # Payloads may be discarded, but their traces remain unconfirmed.
+        self._failed_traces: set[str] = set()
 
     def start(self, store: TraceStore) -> None:
         """Start outside any request's transaction or tenant context."""
@@ -129,6 +131,18 @@ class SpanWriter:
     async def flush(self, trace_id: Optional[str] = None) -> None:
         """Confirm versions already accepted for a trace, including in-flight."""
         async with self._changed:
+
+            def has_failed() -> bool:
+                return (
+                    bool(self._failed_traces)
+                    if trace_id is None
+                    else (trace_id in self._failed_traces)
+                )
+
+            if has_failed():
+                raise TimeoutError(
+                    "Tracing writes remain unconfirmed: spans were dropped",
+                )
             targets = [
                 (entry, entry.version)
                 for entry in self._entries.values()
@@ -138,7 +152,8 @@ class SpanWriter:
             try:
                 await asyncio.wait_for(
                     self._changed.wait_for(
-                        lambda: all(
+                        lambda: has_failed()
+                        or all(
                             entry.acknowledged >= version
                             for entry, version in targets
                         ),
@@ -149,6 +164,10 @@ class SpanWriter:
                 raise TimeoutError(
                     "Tracing writes remain unconfirmed",
                 ) from exc
+            if has_failed():
+                raise TimeoutError(
+                    "Tracing writes remain unconfirmed: spans were dropped",
+                )
 
     async def close(self) -> None:
         """Stop admission and drain; report unconfirmed data at the deadline."""
@@ -287,6 +306,9 @@ class SpanWriter:
                                     entry.span.span_id,
                                 )
                                 if entry.version == version:
+                                    self._failed_traces.add(
+                                        entry.span.trace_id,
+                                    )
                                     self._entries.pop(entry.span.span_id, None)
                                     self.pending.pop(entry.span.span_id, None)
                                     self._bytes -= entry.size
