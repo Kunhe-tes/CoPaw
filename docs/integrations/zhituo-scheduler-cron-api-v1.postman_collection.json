@@ -380,7 +380,7 @@
               }
             ],
             "url": "{{scheduler_base_url}}/api/scheduler/cron/jobs/{{job_id}}",
-            "description": "先 GET 详情更新 definition_version。PUT 完整替换业务定义，保留自身启停和运行状态；存在未删除子任务或活动分发时不允许修改源内容。",
+            "description": "先 GET 详情更新 definition_version。PUT 完整替换业务定义，保留自身启停和运行状态。父任务显式传 sync_children 时，修改后的 Cron 表达式、时区和可执行日期均同步给子任务。传 true 还会同步其他变更字段。活动分发仍会阻止父任务更新。",
             "body": {
               "mode": "raw",
               "raw": "{\n  \"request_id\": \"{{update_request_id}}\",\n  \"expected_definition_version\": {{definition_version}},\n  \"spec\": {\n    \"name\": \"智拓经营规划示例 更新\",\n    \"enabled\": true,\n    \"task_type\": \"workflow\",\n    \"plan_id\": \"{{plan_id}}\",\n    \"skill_ids\": \"{{skill_id}}\",\n    \"workflow_binding_id\": \"{{workflow_binding_id}}\",\n    \"schedule\": {\n      \"cron\": \"0 9 * * *\",\n      \"timezone\": \"Asia/Shanghai\"\n    },\n    \"meta\": {\n      \"wealth_plan_id\": \"{{plan_id}}\",\n      \"wealth_scene_id\": \"{{skill_id}}\",\n      \"wealth_item_id\": \"item-example\"\n    }\n  }\n}",

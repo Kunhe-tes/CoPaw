@@ -52,6 +52,11 @@
 - 可选 Query 参数 `bbk_id` 通过 `TenantInitSourceStore.get_by_source` 下推 SQL 精确匹配；不传时返回该来源全部条目，无匹配时返回空列表。回归入口：`tests/unit/routers/test_user_info_tenant_source.py`、`tests/unit/workspace/test_tenant_init_source.py`。
 - 在 `migrate_tenant_init_source_bbk.sql` 之后执行 `scripts/sql/migrate_tenant_init_source_source_bbk_index.sql`，为新旧数据库补充 `idx_source_bbk (source_id, bbk_id)` 联合索引；脚本检查当前数据库索引是否存在，可重复执行。
 
+## 新版定时任务保存与子任务同步
+
+- 控制台入口在 `ManagedJobEditor.tsx` 的基本配置页签。有分发子任务时，修改 Cron 表达式、时区或可执行日期会在普通保存前提示确认。「保存并同步子任务」直接提交。两种方式都同步这三个字段的变更，其他字段随「保存并同步子任务」同步。
+- Scheduler 在 `operations.py` 发布父任务定义时同步日期，并由 `definition_sync.py` 登记子任务更新。通过返回的 `broadcast_task_id` 查逐项结果，父任务保存状态和子任务同步状态分别查询。
+
 ## 定时任务第一阶段全量快照迁移
 
 - 一次提交：`POST /api/internal/cron/migration/tasks`，operation 为 preview/import/verify；后台自动翻页，不必人工传递游标。只写新定义/状态业务表，旧 CRUD、文件、内存及执行入口不切换，独立系统任务不迁移。
