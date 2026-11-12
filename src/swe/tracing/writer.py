@@ -13,6 +13,7 @@ from .models import Span
 from .store import TraceStore
 
 logger = logging.getLogger(__name__)
+_MAX_WRITE_ATTEMPTS = 3
 
 
 def _estimate_bytes(span: Span) -> int:
@@ -54,6 +55,7 @@ class _Entry:
     version: int = 0
     acknowledged: int = -1
     queued: bool = True
+    failures: int = 0
 
 
 class SpanWriter:
@@ -232,6 +234,7 @@ class SpanWriter:
         async with self._changed:
             for entry, _, version in batch:
                 entry.acknowledged = version
+                entry.failures = 0
                 if entry.version == version:
                     self._entries.pop(entry.span.span_id)
                     self.pending.pop(entry.span.span_id)
@@ -269,9 +272,38 @@ class SpanWriter:
                     self._requeue(batch)
                     raise
                 except Exception:
-                    self._requeue(batch)
                     failures += 1
-                    logger.exception("Tracing write failed; retaining batch")
+                    exhausted = []
+                    for entry, _, version in batch:
+                        entry.failures += 1
+                        if entry.failures >= _MAX_WRITE_ATTEMPTS:
+                            exhausted.append((entry, version))
+                    if exhausted:
+                        async with self._changed:
+                            for entry, version in exhausted:
+                                logger.error(
+                                    "Dropping tracing span after %d failed write attempts: %s",
+                                    entry.failures,
+                                    entry.span.span_id,
+                                )
+                                if entry.version == version:
+                                    self._entries.pop(entry.span.span_id, None)
+                                    self.pending.pop(entry.span.span_id, None)
+                                    self._bytes -= entry.size
+                                else:
+                                    entry.failures = 0
+                                    self._enqueue(entry)
+                            self._changed.notify_all()
+                        retry_batch = [
+                            item
+                            for item in batch
+                            if item[0].failures < _MAX_WRITE_ATTEMPTS
+                            and item[0].version == item[2]
+                        ]
+                        self._requeue(retry_batch)
+                    else:
+                        self._requeue(batch)
+                    logger.exception("Tracing write failed")
                     await asyncio.sleep(
                         min(0.1 * 2 ** min(failures - 1, 6), 5),
                     )

@@ -120,6 +120,29 @@ async def test_close_drains_inflight_without_cancelling_it():
 
 
 @pytest.mark.asyncio
+async def test_permanently_failed_span_is_dropped_after_three_attempts():
+    manager, db, trace_id = await new_manager(batch_size=1)
+    db.release.set()
+    db.insert_prepared = AsyncMock(side_effect=OSError("database unavailable"))
+    try:
+        await emit(manager, trace_id)
+
+        async def wait_until_dropped():
+            async with manager._writer._changed:
+                await manager._writer._changed.wait_for(
+                    lambda: not manager._writer._entries,
+                )
+
+        await asyncio.wait_for(wait_until_dropped(), timeout=2)
+        assert db.insert_prepared.await_count == 3
+        assert not manager._writer.pending
+        assert not manager._writer.queue
+    finally:
+        await manager.close()
+        set_current_trace(None)
+
+
+@pytest.mark.asyncio
 async def test_update_during_insert_is_confirmed_before_trace_end():
     manager, db, trace_id = await new_manager(batch_size=100)
     span_id = await emit(manager, trace_id)
