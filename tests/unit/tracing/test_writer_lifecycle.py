@@ -155,11 +155,12 @@ async def test_permanently_failed_span_is_dropped_after_three_attempts(
                 await asyncio.wait_for(ending, timeout=1)
             else:
                 await manager.end_trace(trace_id)
-        # Repeated and global barriers must not forget discarded writes.
-        for target in (trace_id, None):
-            with pytest.raises(TimeoutError, match="spans were dropped"):
-                await manager._writer.flush(target)
-        await manager._writer.flush("unrelated-trace")
+        # Unknown historical targets fail; a fresh global barrier has no old targets.
+        with pytest.raises(TimeoutError, match="unconfirmed"):
+            await manager._writer.flush(trace_id)
+        await manager._writer.flush()
+        with pytest.raises(TimeoutError, match="unconfirmed"):
+            await manager._writer.flush("unrelated-trace")
         assert not db.trace_completed.is_set()
         assert trace_id not in manager._active_traces
         if not flush_before_drop:
@@ -203,10 +204,10 @@ async def test_failure_history_is_bounded_and_recovery_preserves_confirmation(
                 )
             assert not manager._active_traces
             assert get_current_trace() is None
-            assert len(manager._writer._failed_traces) <= 2
+            assert len(manager._writer._traces) <= 2
             assert not manager._writer.pending
         assert not db.trace_completed.is_set()
-        assert manager._writer._failure_index_overflow == (failure_count > 2)
+        assert not manager._writer._traces
         for failed_id in failed_trace_ids:
             with pytest.raises(TimeoutError, match="unconfirmed"):
                 await manager._writer.flush(failed_id)
@@ -219,13 +220,9 @@ async def test_failure_history_is_bounded_and_recovery_preserves_confirmation(
             "source",
         )
         await emit(manager, recovered_id)
-        if failure_count > 2:
-            with pytest.raises(TimeoutError, match="unconfirmed"):
-                await manager.end_trace(recovered_id)
-            assert not db.trace_completed.is_set()
-        else:
-            await manager.end_trace(recovered_id)
-            assert db.trace_completed.is_set()
+        await manager.end_trace(recovered_id)
+        assert db.trace_completed.is_set()
+        assert not manager._writer._traces
         assert not manager._active_traces
     finally:
         await manager.close()
@@ -626,6 +623,7 @@ async def test_writer_does_not_inherit_request_transaction_or_trace():
         _CURRENT_CONNECTION.reset(token)
         set_current_trace(None)
     db.release.set()
+    manager._writer.register_trace("trace")
     await emit(manager, "trace")
     await manager.close()
     assert observed == [(None, None)]
@@ -768,11 +766,10 @@ async def test_finalization_snapshot_eviction_cannot_complete_stale_trace(
                 await manager.end_trace(trace_id)
         manager.store.update_trace.assert_not_awaited()
         assert not db.trace_completed.is_set()
-        if failure_count == 3:
-            await manager.end_trace(ids[-1])
-            written = manager.store.update_trace.call_args.args[0]
-            assert written.total_input_tokens == 3
-            assert ids[-1] not in manager._pending_finalizations
+        await manager.end_trace(ids[-1])
+        written = manager.store.update_trace.call_args.args[0]
+        assert written.total_input_tokens == failure_count
+        assert ids[-1] not in manager._pending_finalizations
     finally:
         await manager.close()
         set_current_trace(None)
@@ -809,7 +806,9 @@ async def test_concurrent_finalization_cannot_write_a_stale_fallback():
             await emit(manager, trace_id, input_tokens=100)
         db.release.set()
         await ending
-        assert not manager._writer._sealed_traces
+        assert not any(
+            state.sealed for state in manager._writer._traces.values()
+        )
         assert not manager._finalizing_traces
         assert not manager._active_traces
     finally:
@@ -890,5 +889,152 @@ async def test_lost_skill_finalization_cannot_mark_trace_complete(cancelled):
         with pytest.raises(TimeoutError, match="unconfirmed"):
             await manager.end_trace(trace_id)
     finally:
+        await manager.close()
+        set_current_trace(None)
+
+
+@pytest.mark.asyncio
+async def test_global_barrier_keeps_failed_target_but_later_barrier_recovers(
+    monkeypatch,
+):
+    monkeypatch.setattr("swe.tracing.writer._MAX_WRITE_ATTEMPTS", 1)
+    manager, db, trace_id = await new_manager(batch_size=1)
+    original = db.insert_prepared
+    fail = asyncio.Event()
+
+    async def failing(*_args, **_kwargs):
+        db.started.set()
+        await fail.wait()
+        raise OSError("database unavailable")
+
+    db.insert_prepared = failing
+    await emit(manager, trace_id)
+    await db.started.wait()
+    barrier = asyncio.create_task(manager._writer.flush())
+    await asyncio.sleep(0)
+    try:
+        fail.set()
+        with pytest.raises(TimeoutError, match="unconfirmed"):
+            await barrier
+        assert not manager._writer._traces
+        with pytest.raises(TimeoutError):
+            await manager.end_trace(trace_id)
+        with pytest.raises(RuntimeError, match="unavailable"):
+            await emit(manager, trace_id)
+        db.insert_prepared = original
+        db.release.set()
+        recovered = await manager.start_trace(
+            "user",
+            "session",
+            "console",
+            "source",
+        )
+        await emit(manager, recovered, input_tokens=19)
+        await manager._writer.flush()
+        await manager.end_trace(recovered)
+        assert manager._writer.dropped_spans == 1
+        assert db.trace_completed.is_set()
+        assert not manager._writer._traces
+    finally:
+        fail.set()
+        await manager.close()
+        set_current_trace(None)
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_capacity_rejects_without_leaking_and_recovers():
+    manager, db, trace_id = await new_manager(max_queue_spans=1)
+    db.release.set()
+    create = manager.store.create_trace
+    manager.store.create_trace = AsyncMock(wraps=create)
+    try:
+        with pytest.raises(RuntimeError, match="capacity exhausted"):
+            await manager.start_trace("u2", "s2", "console", "source")
+        manager.store.create_trace.assert_not_awaited()
+        assert manager._writer.trace_count == 1
+        await manager.end_trace(trace_id)
+        recovered = await manager.start_trace("u2", "s2", "console", "source")
+        await manager.end_trace(recovered)
+        assert not manager._writer._traces
+    finally:
+        await manager.close()
+        set_current_trace(None)
+
+
+@pytest.mark.asyncio
+async def test_external_context_release_does_not_lose_pending_confirmation():
+    manager, db, trace_id = await new_manager(max_queue_spans=2, batch_size=1)
+    writer = manager._writer
+    writer.register_trace("external", external=True)
+    from swe.tracing.manager import TraceContext
+
+    ctx = TraceContext(
+        "external",
+        "user",
+        "session",
+        "console",
+        "source",
+        attached=True,
+    )
+    ctx.release_writes = writer.attach_producer("external")
+    set_current_trace(ctx)
+    await emit(manager, "external")
+    await db.started.wait()
+    barrier = asyncio.create_task(writer.flush("external"))
+    await asyncio.sleep(0)
+    set_current_trace(None)
+    try:
+        assert not writer.is_registered("external")
+        assert writer.trace_count == 1
+        db.release.set()
+        await barrier
+        await manager.end_trace(trace_id)
+        assert not writer._traces
+    finally:
+        db.release.set()
+        await manager.close()
+        set_current_trace(None)
+
+
+@pytest.mark.asyncio
+async def test_retired_batch_failure_cannot_invalidate_another_lifecycle(
+    monkeypatch,
+):
+    monkeypatch.setattr("swe.tracing.writer._MAX_WRITE_ATTEMPTS", 1)
+    manager, db, trace_id = await new_manager(batch_size=1)
+    original = db.insert_prepared
+    release = asyncio.Event()
+
+    async def failing(*_args, **_kwargs):
+        db.started.set()
+        await release.wait()
+        raise OSError("old batch failed")
+
+    db.insert_prepared = failing
+    await emit(manager, trace_id)
+    await db.started.wait()
+    manager._writer.mark_trace_unconfirmed(trace_id)
+    # Simulate independent registration while an old entry still owns its state.
+    manager._writer.register_trace(trace_id)
+    new_state = manager._writer._traces[trace_id]
+    release.set()
+    try:
+        async with manager._writer._changed:
+            await asyncio.wait_for(
+                manager._writer._changed.wait_for(
+                    lambda: not manager._writer._entries,
+                ),
+                1,
+            )
+        assert manager._writer._traces[trace_id] is new_state
+        assert not new_state.failed
+        db.insert_prepared = original
+        db.release.set()
+        # This synthetic lifecycle is not a license to complete old aggregates.
+        manager._writer.mark_trace_unconfirmed(trace_id)
+        with pytest.raises(TimeoutError):
+            await manager.end_trace(trace_id)
+    finally:
+        release.set()
         await manager.close()
         set_current_trace(None)

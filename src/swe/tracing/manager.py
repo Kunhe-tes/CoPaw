@@ -11,7 +11,7 @@ from collections import OrderedDict
 from contextvars import Context, ContextVar
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 from .config import TracingConfig
 from ..database import DatabaseConnection
@@ -58,6 +58,7 @@ class TraceContext:
         self._active_skills: list[str] = []  # Active skill context stack
         self.skill_detector: Optional[Any] = None  # SkillInvocationDetector
         self.enabled_skills: list[str] = []  # Skills enabled for this trace
+        self.release_writes: Optional[Callable[[], None]] = None
         self.attached = attached  # 如果为 True，表示不应由当前代码结束 trace
 
     def push_span(self, span_id: str) -> None:
@@ -113,6 +114,13 @@ def get_current_trace() -> Optional[TraceContext]:
 
 def set_current_trace(ctx: Optional[TraceContext]) -> None:
     """Set the current trace context."""
+    previous = _current_trace.get()
+    if (
+        previous is not None
+        and previous is not ctx
+        and previous.release_writes is not None
+    ):
+        previous.release_writes()
     _current_trace.set(ctx)
 
 
@@ -390,7 +398,14 @@ class TraceManager:
             model_output=model_output,
         )
 
-        await self.store.create_trace(trace)
+        if self._writer.is_registered(trace_id):
+            raise RuntimeError("Trace lifecycle already exists")
+        self._reserve_trace_writes(trace_id)
+        try:
+            await self.store.create_trace(trace)
+        except (Exception, asyncio.CancelledError):
+            self._writer.retire_trace(trace_id)
+            raise
         self._active_traces[trace_id] = trace
 
         # Create context
@@ -484,6 +499,8 @@ class TraceManager:
             )
             return "identity_mismatch"
 
+        # Attached producers share local confirmation state when available.
+        self._reserve_trace_writes(trace_id, external=True)
         # 仅设置 context，不创建数据库记录
         ctx = TraceContext(
             trace_id,
@@ -497,6 +514,7 @@ class TraceManager:
             attached=True,  # 标记为 attach，不应由当前代码结束
         )
         ctx.trace = existing_trace
+        ctx.release_writes = self._writer.attach_producer(trace_id)
         set_current_trace(ctx)
         return "attached"
 
@@ -643,6 +661,28 @@ class TraceManager:
         except Exception as e:
             logger.warning("Failed to setup skill detector: %s", e)
 
+    def _reserve_trace_writes(
+        self,
+        trace_id: str,
+        *,
+        external: bool = False,
+    ) -> None:
+        if self._writer.is_registered(trace_id):
+            return
+        # Prefer releasing retry snapshots over denying a new request forever.
+        while (
+            self._writer.trace_count >= self.config.max_queue_spans
+            and self._pending_finalizations
+        ):
+            evicted_id = next(iter(self._pending_finalizations))
+            self._forget_finalization(evicted_id)
+            self._writer.mark_trace_unconfirmed(evicted_id)
+            logger.warning(
+                "Evicting finalization to admit a new trace: %s",
+                evicted_id,
+            )
+        self._writer.register_trace(trace_id, external=external)
+
     def _forget_finalization(self, trace_id: str) -> None:
         retained = self._pending_finalizations.pop(trace_id, None)
         if retained is not None:
@@ -724,13 +764,12 @@ class TraceManager:
 
             self._writer.seal_trace(trace_id)
             if trace is None:
-                await self._writer.flush(trace_id)
                 stored = await self.store.get_trace(trace_id)
-                if stored is None or stored.status != TraceStatus.RUNNING:
+                if stored is not None and stored.status != TraceStatus.RUNNING:
                     return
                 self._writer.mark_trace_unconfirmed(trace_id)
                 raise TimeoutError(
-                    "Tracing finalization aggregates are unavailable",
+                    "Tracing writes remain unconfirmed: finalization aggregates are unavailable",
                 )
 
             trace = trace.model_copy(deep=True)
@@ -745,6 +784,7 @@ class TraceManager:
 
             await self.store.update_trace(trace)
             self._forget_finalization(trace_id)
+            self._writer.retire_trace(trace_id, confirmed=True)
         except (Exception, asyncio.CancelledError):
             if trace is not None:
                 self._retain_finalization(trace)

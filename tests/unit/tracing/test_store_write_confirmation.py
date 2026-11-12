@@ -150,6 +150,7 @@ async def test_shutdown_deadline_survives_cancelled_transport_rollback_error():
     cursor.execute.side_effect = cancelled_transport
     writer = SpanWriter(TracingConfig(batch_size=1, shutdown_timeout=0.02))
     writer.start(store)
+    writer.register_trace(spans[0].trace_id)
     await writer.submit(spans[0])
     await started.wait()
     closing = asyncio.create_task(writer.close())

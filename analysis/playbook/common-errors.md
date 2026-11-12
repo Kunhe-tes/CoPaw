@@ -11,7 +11,8 @@
 ## Tracing 错误字段过长与会话静默
 
 - 旧版本的 `Tracing write failed; retaining batch` 配合 MySQL 1406 时，失败批次会反复重试；队列达到容量后，新的 span 提交可能等待，进而阻塞模型调用。当前版本最多尝试三次，耗尽后丢弃 span 并释放队列容量，但对应 trace 的 flush 仍报告未确认，不能标记完成。应按 Pod 和时间核实，不应仅凭 watchdog 日志断定原因。
-- 失败 trace ID 的内存索引上限复用 `max_queue_spans`。超限后清空 ID 索引并保留固定大小的失败标志，所有 flush 保守报未确认；日志为 `Tracing failure history exceeded capacity`。修复数据库问题后需重启对应 writer/Pod 恢复完成确认，不能通过直接清空标志恢复。未超限时，数据库恢复后的新 trace 可正常完成，历史失败 trace 仍报错。`end_trace()` 无论成功、异常还是取消，都清理活动 trace 和当前上下文，不将失败 trace 更新为完成。
+- 失败状态按 trace 生命周期隔离，不保留全局历史黑名单或“超限后所有 flush 失败”标志。队列项及已开始的 flush 持有原状态引用；旧失败不影响新 trace。失败生命周期从注册表移除后，单 trace flush 仍因状态缺失报错；新的全局 flush 只检查当前目标，不追溯已回收的历史失败。MySQL 恢复后新 trace 无需重启即可正常完成。
+- 生命周期注册表数量上限复用 `max_queue_spans`；容量不足时先淘汰待重试快照，仍不足则快速拒绝新 tracing 接收，释放名额后自动恢复。活动业务请求不被无限阻塞。`end_trace()` 无论成功、异常还是取消都清理活动 trace 和当前上下文；可恢复失败保留有界快照，不将数据不完整的 trace 更新为完成。附加请求的外部生命周期注册随上下文释放，队列项仍保留其确认状态。
 - flush 超时或最终 UPDATE 失败/取消时，完整聚合保留到有数量和字节预算的待完成快照，供显式 `end_trace()` 重试；永久 span 丢失则无需保留快照。快照淘汰或超预算时必须同时标记 trace 不可确认，不能回退 MySQL 初始行完成。数据库仅有 running 行且本地聚合已不存在时也拒绝完成；数据库已是终态时重复结束不覆盖数据。完整方案与恢复边界见 [Tracing 生命周期设计](../../docs/superpowers/specs/2026-11-12-tracing-finalization-lifecycle.md)。
 - trace 的新增和更新，以及 span 的单条新增、批量新增和更新，在落库前将 error 限制为 4096 UTF-8 字节，包含截断标记。该限制不解决其他永久性写入错误或已运行进程中的旧队列积压。
 - 排查入口：`src/swe/tracing/store.py`、`src/swe/tracing/writer.py`；回归入口：`tests/unit/tracing/test_store.py`。

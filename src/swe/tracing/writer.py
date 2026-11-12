@@ -6,7 +6,7 @@ import logging
 from collections import deque
 from contextvars import Context
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 from .config import TracingConfig
 from .models import Span
@@ -48,9 +48,20 @@ def _estimate_bytes(span: Span) -> int:
 
 
 @dataclass(eq=False)
+class _TraceWrites:
+    failed: bool = False
+    sealed: bool = False
+    retired: bool = False
+    confirmed: bool = False
+    external: bool = False
+    producers: int = 0
+
+
+@dataclass(eq=False)
 class _Entry:
     span: Span
     size: int
+    trace_state: _TraceWrites
     inserted: bool = False
     version: int = 0
     acknowledged: int = -1
@@ -72,10 +83,8 @@ class SpanWriter:
         self._wake = asyncio.Event()
         self._accepting = False
         self._store: Optional[TraceStore] = None
-        # Payloads may be discarded, but their traces remain unconfirmed.
-        self._failed_traces: set[str] = set()
-        self._failure_index_overflow = False
-        self._sealed_traces: set[str] = set()
+        self._traces: dict[str, _TraceWrites] = {}
+        self.dropped_spans = 0
 
     def start(self, store: TraceStore) -> None:
         """Start outside any request's transaction or tenant context."""
@@ -95,15 +104,24 @@ class SpanWriter:
     async def submit(self, span: Span, *, inserted: bool = False) -> None:
         """Admit a version, waiting for capacity without starting another writer."""
         async with self._changed:
+            state = self._traces.get(span.trace_id)
             while True:
                 if not self._accepting:
                     raise RuntimeError("Tracing writer is closing")
-                if span.trace_id in self._sealed_traces:
+                if state is None or state.retired or state.failed:
+                    raise RuntimeError(
+                        "Trace write state is unavailable or unconfirmed",
+                    )
+                if state.sealed:
                     raise RuntimeError(
                         "Trace is finalizing; span admission is sealed",
                     )
                 size = _estimate_bytes(span)
                 entry = self._entries.get(span.span_id)
+                if entry is not None and entry.trace_state is not state:
+                    raise RuntimeError(
+                        "Span belongs to another trace lifecycle",
+                    )
                 if self._has_capacity(size, entry):
                     break
                 self._wake.set()
@@ -112,7 +130,7 @@ class SpanWriter:
             # Own nested input too: caller mutation must not bypass the budget.
             span = span.model_copy(deep=True)
             if entry is None:
-                entry = _Entry(span, size, inserted=inserted)
+                entry = _Entry(span, size, state, inserted=inserted)
                 self._entries[span.span_id] = entry
                 self.queue.append(entry)
             else:
@@ -134,57 +152,105 @@ class SpanWriter:
             entry.queued = True
             self.queue.append(entry)
 
-    def _record_failure(self, trace_id: str) -> None:
-        """Bound tombstones; fail closed if exact history no longer fits."""
-        if self._failure_index_overflow or trace_id in self._failed_traces:
-            return
-        if len(self._failed_traces) >= self.config.max_queue_spans:
-            self._failure_index_overflow = True
-            self._failed_traces.clear()
-            logger.error(
-                "Tracing failure history exceeded capacity; all flushes will "
-                "remain unconfirmed until the writer is restarted",
-            )
-            return
-        self._failed_traces.add(trace_id)
+    @property
+    def trace_count(self) -> int:
+        return len(self._traces)
 
-    def has_failed(self, trace_id: Optional[str] = None) -> bool:
-        return self._failure_index_overflow or (
-            bool(self._failed_traces)
-            if trace_id is None
-            else trace_id in self._failed_traces
-        )
+    def is_registered(self, trace_id: str) -> bool:
+        return trace_id in self._traces
 
-    def mark_trace_unconfirmed(self, trace_id: str) -> None:
-        """Invalidate lost finalization state and wake barriers from the writer loop."""
-        self._record_failure(trace_id)
+    def register_trace(self, trace_id: str, *, external: bool = False) -> None:
+        """Reserve confirmation state before accepting any events for a trace."""
+        if trace_id in self._traces:
+            return
+        if len(self._traces) >= self.config.max_queue_spans:
+            raise RuntimeError("Tracing lifecycle capacity exhausted")
+        self._traces[trace_id] = _TraceWrites(external=external)
+
+    def attach_producer(self, trace_id: str) -> Callable[[], None]:
+        """Release external-only registration when its last local context ends."""
+        state = self._traces[trace_id]
+        state.producers += 1
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if released:
+                return
+            released = True
+            state.producers -= 1
+            if (
+                state.external
+                and not state.producers
+                and self._traces.get(trace_id) is state
+            ):
+                # Accepted entries still own this state; their barriers remain valid.
+                self._traces.pop(trace_id)
+                self._wake.set()
+
+        return release
+
+    def retire_trace(self, trace_id: str, *, confirmed: bool = False) -> None:
+        state = self._traces.pop(trace_id, None)
+        if state is not None:
+            state.confirmed = confirmed
+            state.retired = True
         self._wake.set()
 
+    def has_failed(self, trace_id: str) -> bool:
+        state = self._traces.get(trace_id)
+        return state is None or state.failed or state.retired
+
+    def mark_trace_unconfirmed(self, trace_id: str) -> None:
+        """Invalidate this lifecycle; existing entries and barriers retain its state."""
+        state = self._traces.get(trace_id)
+        if state is not None:
+            state.failed = True
+        self.retire_trace(trace_id)
+
     def seal_trace(self, trace_id: str) -> None:
-        """Stop new admissions before taking the final flush snapshot."""
-        self._sealed_traces.add(trace_id)
+        state = self._traces.get(trace_id)
+        if state is not None:
+            state.sealed = True
 
     def unseal_trace(self, trace_id: str) -> None:
-        self._sealed_traces.discard(trace_id)
+        state = self._traces.get(trace_id)
+        if state is not None:
+            state.sealed = False
 
     async def flush(self, trace_id: Optional[str] = None) -> None:
         """Confirm versions already accepted for a trace, including in-flight."""
         async with self._changed:
 
-            if self.has_failed(trace_id):
-                raise TimeoutError(
-                    "Tracing writes remain unconfirmed: spans were dropped",
-                )
+            states: list[Optional[_TraceWrites]] = (
+                list(self._traces.values())
+                if trace_id is None
+                else [self._traces.get(trace_id)]
+            )
             targets = [
                 (entry, entry.version)
                 for entry in self._entries.values()
                 if trace_id is None or entry.span.trace_id == trace_id
             ]
+            states.extend(entry.trace_state for entry, _ in targets)
+
+            def has_failed() -> bool:
+                return any(
+                    state is None
+                    or state.failed
+                    or (state.retired and not state.confirmed)
+                    for state in states
+                )
+
+            if has_failed():
+                raise TimeoutError(
+                    "Tracing writes remain unconfirmed: spans were dropped",
+                )
             self._wake.set()
             try:
                 await asyncio.wait_for(
                     self._changed.wait_for(
-                        lambda: self.has_failed(trace_id)
+                        lambda: has_failed()
                         or all(
                             entry.acknowledged >= version
                             for entry, version in targets
@@ -196,7 +262,7 @@ class SpanWriter:
                 raise TimeoutError(
                     "Tracing writes remain unconfirmed",
                 ) from exc
-            if self.has_failed(trace_id):
+            if has_failed():
                 raise TimeoutError(
                     "Tracing writes remain unconfirmed: spans were dropped",
                 )
@@ -237,6 +303,12 @@ class SpanWriter:
                 message += "; writer still running after cancellation"
             logger.error(message)
             raise TimeoutError(message) from exc
+        finally:
+            if self.dropped_spans:
+                logger.warning(
+                    "Tracing writer discarded %d spans during its lifetime",
+                    self.dropped_spans,
+                )
 
     def _take_batch(self) -> list[tuple[_Entry, Span, int]]:
         batch = []
@@ -340,7 +412,13 @@ class SpanWriter:
                                     entry.span.span_id,
                                 )
                                 if entry.version == version:
-                                    self._record_failure(entry.span.trace_id)
+                                    entry.trace_state.failed = True
+                                    self.dropped_spans += 1
+                                    if (
+                                        self._traces.get(entry.span.trace_id)
+                                        is entry.trace_state
+                                    ):
+                                        self.retire_trace(entry.span.trace_id)
                                     self._entries.pop(entry.span.span_id, None)
                                     self.pending.pop(entry.span.span_id, None)
                                     self._bytes -= entry.size
