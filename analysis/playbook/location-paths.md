@@ -505,3 +505,10 @@ NODE_OPTIONS=--max-old-space-size=8192 npm run build
 - 常驻任务列表 `console/src/pages/Chat/components/ChatTaskList/index.tsx` 和侧栏展开面板 `console/src/pages/Chat/components/ChatSidebar/ExpandablePanel/index.tsx` 共用 `TaskTitle.tsx`。
 - 标题保留各自的单行省略样式，仅在 `scrollWidth > clientWidth` 时提供完整内容 Tooltip；初次渲染、内容变化及 ResizeObserver 通知时测量，悬停不重复测量，不能用标题字符数判断是否省略。
 - 回归入口：`console/src/pages/Chat/components/TaskTitle.test.tsx`，覆盖完整显示、宽度相等、溢出提示、尺寸及内容变化和点击透传。DOM 测量单测不替代真实 Chromium 108 与嵌入模式验收。
+
+
+## 聊天文件管理器排序
+
+- 目录列表排序入口为 `src/swe/app/file_manager.py` 的 `_entry_sort_key`：文件夹优先且按名称自然升序；其余条目按文件系统 `st_mtime_ns` 倒序，同时间按名称自然升序兜底。
+- 完整目录先排序再建立分页快照，前端 `FileColumn.tsx` 按接口返回顺序显示；不要仅在前端对当前页排序。刷新重新读取修改时间，翻页沿用同一快照。回收站仍按归档时间倒序。
+- 回归入口：`venv/bin/python -m pytest tests/unit/app/test_file_manager.py -q`。名称排序与分页容量测试应显式固定文件修改时间，避免依赖创建文件时的时钟精度。
