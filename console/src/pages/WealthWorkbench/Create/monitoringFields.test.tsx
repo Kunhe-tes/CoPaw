@@ -73,7 +73,7 @@ it("完成率清空后可重新输入，不补前导零，留空失焦时显示0
   ).toBe(0);
 });
 
-it("默认60%和每日11:00，编辑后重新挂载可正常回显", () => {
+it("默认60%和每日17:00，编辑后重新挂载可正常回显", () => {
   const view = mount();
   expect(screen.getByLabelText("经营场景预期完成率")).toHaveValue(60);
   expect(screen.getByText("督办推送时间")).toBeInTheDocument();
@@ -88,14 +88,14 @@ it("默认60%和每日11:00，编辑后重新挂载可正常回显", () => {
   ).toHaveAttribute("aria-pressed", "true");
   expect(
     screen.getByRole("button", { name: "经营场景督办推送时间" }),
-  ).toHaveTextContent("11:00");
+  ).toHaveTextContent("17:00");
   fireEvent.change(screen.getByLabelText("经营场景预期完成率"), {
     target: { value: "85" },
   });
   fireEvent.click(
     within(screen.getByRole("group", { name: "经营场景监控周期" })).getByRole(
       "button",
-      { name: "T+7日内" },
+      { name: "7日内" },
     ),
   );
   fireEvent.click(
@@ -124,7 +124,7 @@ it("默认60%和每日11:00，编辑后重新挂载可正常回显", () => {
   expect(
     within(screen.getByRole("group", { name: "经营场景监控周期" })).getByRole(
       "button",
-      { name: "T+7日内" },
+      { name: "7日内" },
     ),
   ).toHaveAttribute("aria-pressed", "true");
   expect(

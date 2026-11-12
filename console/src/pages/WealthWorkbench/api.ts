@@ -143,7 +143,9 @@ function mapScene(item: SceneSkillItem): Scene {
 }
 
 function mapSceneItem(scene: PlanSceneView): PlanItem {
-  const monitorSchedule = parseCron(scene.monitorTimeCron ?? "");
+  const monitorCron = scene.monitorTimeCron?.trim();
+  const monitorSchedule = monitorCron ? parseCron(monitorCron) : undefined;
+  const defaultMonitorSchedule = defaultMonitoring().schedule;
   return {
     id: scene.sceneId,
     sceneName: scene.sceneName,
@@ -169,12 +171,14 @@ function mapSceneItem(scene: PlanSceneView): PlanItem {
                 : ("today" as const),
             schedule: {
               type:
-                monitorSchedule.type === "weekly"
+                monitorSchedule?.type === "weekly"
                   ? ("weekly" as const)
                   : ("daily" as const),
-              hour: monitorSchedule.hour ?? 9,
-              minute: monitorSchedule.minute ?? 0,
-              daysOfWeek: monitorSchedule.daysOfWeek ?? ["mon"],
+              hour: monitorSchedule?.hour ?? defaultMonitorSchedule.hour,
+              minute: monitorSchedule?.minute ?? defaultMonitorSchedule.minute,
+              daysOfWeek:
+                monitorSchedule?.daysOfWeek ??
+                defaultMonitorSchedule.daysOfWeek,
             },
             expectedCompletionRate: scene.finishRate ?? 60,
           },

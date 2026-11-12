@@ -265,7 +265,7 @@ export default function Board() {
                                   <span>
                                     监控周期：
                                     {item.monitoring.cycle === "within7days"
-                                      ? "T+7日内"
+                                      ? "7日内"
                                       : "当日"}
                                   </span>
                                   <span>

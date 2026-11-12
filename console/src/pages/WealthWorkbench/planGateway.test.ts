@@ -107,7 +107,7 @@ afterEach(() => {
 
 describe("Java 规划网关契约", () => {
   it.each(["daily", "weekly"] as const)(
-    "%s 名单推送未设置时间时提交08:00，督办仍为11:00",
+    "%s 名单推送未设置时间时提交08:00，督办仍为17:00",
     async (type) => {
       vi.mocked(fetch)
         .mockResolvedValueOnce(ok({ id: "plan-a" }))
@@ -124,7 +124,7 @@ describe("Java 规划网关契约", () => {
       const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body));
       expect(body.scenes[0]).toMatchObject({
         cronExpr: type === "daily" ? "0 8 * * *" : "0 8 * * mon",
-        monitorTimeCron: "0 11 * * *",
+        monitorTimeCron: "0 17 * * *",
       });
     },
   );
@@ -228,7 +228,7 @@ describe("Java 规划网关契约", () => {
             endDate: "2026-10-31",
             cronExpr: "0 9 * * *",
             schedule: 1,
-            monitorTimeCron: "0 11 * * *",
+            monitorTimeCron: "0 17 * * *",
             finishRate: 60,
             cronExample: "生成名单",
             mcpRelations: ["mcp-a"],
@@ -435,7 +435,7 @@ describe("行长督办策略接口字段", () => {
         expect(scene).not.toHaveProperty(key);
     },
   );
-  it("回显保留0%，旧规划没有督办字段时不伪造已保存策略", async () => {
+  it("回显保留已保存的时间和0%，仅有周期时使用17:00", async () => {
     vi.mocked(fetch).mockResolvedValue(
       ok({
         items: [
@@ -447,17 +447,29 @@ describe("行长督办策略接口字段", () => {
               {
                 ...view.scenes[0],
                 schedule: 1,
-                monitorTimeCron: "0 9 * * *",
+                monitorTimeCron: "0 11 * * *",
                 finishRate: 0,
               },
             ],
+          },
+          {
+            ...view,
+            id: "cycle-only",
+            scenes: [{ ...view.scenes[0], schedule: 2 }],
           },
         ],
       }),
     );
     const plans = await api.fetchPlanList(true);
     expect(plans[0].items![0].monitoring).toBeUndefined();
-    expect(plans[1].items![0].monitoring?.expectedCompletionRate).toBe(0);
+    expect(plans[1].items![0].monitoring).toMatchObject({
+      expectedCompletionRate: 0,
+      schedule: { type: "daily", hour: 11, minute: 0 },
+    });
+    expect(plans[2].items![0].monitoring).toMatchObject({
+      cycle: "within7days",
+      schedule: { type: "daily", hour: 17, minute: 0 },
+    });
   });
 });
 
