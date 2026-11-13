@@ -3,7 +3,6 @@
 
 from .bundle import BundleBlock, BundleStore, new_operation_key
 from .identity import SessionIdentity, WorkspaceScope
-from .chat_repository import MySQLChatRepository
 
 __all__ = [
     "BundleBlock",
@@ -13,3 +12,12 @@ __all__ = [
     "MySQLChatRepository",
     "new_operation_key",
 ]
+
+
+def __getattr__(name: str):
+    # Admission middleware must not pull in the repository's runtime imports.
+    if name == "MySQLChatRepository":
+        from .chat_repository import MySQLChatRepository
+
+        return MySQLChatRepository
+    raise AttributeError(name)

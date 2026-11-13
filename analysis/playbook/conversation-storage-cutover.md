@@ -2,6 +2,21 @@
 
 适用：旧文件实现 → 七张 MySQL 元数据表及原 NAS 上的不可变 bundle。整个过程是一次连续停机；不做双写，不启新 workspace，不把 `SWE_DB_NAME` 改为源快照，也不备份/恢复整个共享业务库。
 
+## 启动期循环导入（2026-11-13）
+
+`aedfa7bb8` 在 `tenant_workspace.py` 顶层引入 `conversation_storage.tenant_admission` 后，启动会触发以下循环：
+
+```text
+_app → tenant_workspace → conversation_storage.__init__ → chat_repository
+→ publications → commit_plan → shares → chat_sharing.__init__ → service
+→ runner.api → runner.utils → agents.utils.tool_summary → agent_context
+→ tenant_workspace.TenantWorkspaceContext（尚未执行到类定义）
+```
+
+这发生在 MySQL/NAS 初始化之前。本地复现命令（在该 worktree）：`PYTHONPATH=src:tests/fakes ../../venv/bin/python -c 'import swe.app._app'`。`tests/fakes` 仅补齐本地测试环境缺少的 trace_sdk，部署不应使用 fake。
+
+修复将 `conversation_storage.__init__` 的 `MySQLChatRepository` 改为惰性导出，切断包级提前加载并保留公开接口。新增 `tests/unit/app/test_conversation_storage_import.py`，在全新子进程验证中间件导入及仓库公开接口，避免缓存模块或 stub 掩盖导入顺序问题。修复后独立进程导入 `_app` 成功，相关单元测试 1458 项通过；未执行连接真实 MySQL/NAS 的完整生命周期启动验证。
+
 ## 当前操作入口与历史说明
 
 当前 v3 全量严格迁移以 [全量手册](../../docs/superpowers/plans/2026-11-02-conversation-migration-and-launch-runbook.md) 为准；显式租户隔离与独立上线以 [租户操作增补](../../docs/superpowers/plans/2026-11-13-conversation-tenant-migration-operations.md) 为准。`discover --tenant-isolation` 的有效 partial_success 报告允许正常账号继续；失败/未登记账号仍不可用。共享 SQL/IO/锁故障不能当作坏租户跳过，verify/finalize 失败先 resume，修改已有导入数据的输入不支持直接 retry-review。
