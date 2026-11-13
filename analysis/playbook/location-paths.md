@@ -487,6 +487,8 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 - `hideLogo: true`（兼容字符串 `"true"`）隐藏头部、播报与侧栏，内部导航持续生效，不补 URL 参数。身份和布局由消息提供；接口鉴权仍使用现有登录 Cookie，消息传参并不替代登录态。
 - 子页面在注册监听器时清除该入口残留的 iframe 上下文，收到父窗口的有效 USER_DATA 消息后才挂载工作台并加载业务数据。不查询用户信息、不初始化 Agent、不同步 cron-auth、不启动客户信息定时刷新。未收到有效消息时保持等待；每次 iframe 加载后由父应用发送一次初始化消息；切换用户或岗位时重新加载 iframe 后再发送。
 - 规划创建/更新请求体的 `sourceId` 使用消息传入的渠道（例如 `RCZT`）。原 `origin=Y` 财富入口继续使用 Cookie 初始化及 `RMASSIST` 来源，其他已有页面的 USER_DATA 行为不变。
+- 财富 iframe 消息入口收到有效 `USER_DATA` 后，所有嵌入渠道均使用 `appName: "智拓财富工作台"`，每次 iframe 加载初始化一次。W+ 的 `origin=Y` 财富入口使用同一配置，包括 `hideLogo=true` 时的 Cookie 快速初始化。W+ 聊天和通用消息入口沿用原 MMJ 配置，统一使用 `businessId: "LQ1303CMBSWE"`。
+- 智拓 MMJ 配置的 `userName` 取消息或 W+ 当前用户的 `username` Cookie，`orgId` 取消息的 `bbkId`（兼容 `bbkOrgId`）或 W+ 初始化后的分行 ID。`org` 优先取消息中的 `branchName`，缺省时查分行映射。无法取到的字段传空字符串。`routers` 配置看板、今日任务、待触达客户、创建规划和已完成任务的路径与名称。
 - 代码入口：`console/src/utils/iframeMessage.ts`、`console/src/main.tsx`、`console/src/pages/WealthWorkbench/index.tsx`。回归入口：`iframeMessage.test.ts`、财富 `index.test.tsx`、`planGateway.test.ts`。
 
 父应用示例（监听器先注册，再设置 iframe 地址）：
@@ -571,6 +573,13 @@ NODE_OPTIONS=--max-old-space-size=8192 npm run build
 - 常驻任务列表 `console/src/pages/Chat/components/ChatTaskList/index.tsx` 和侧栏展开面板 `console/src/pages/Chat/components/ChatSidebar/ExpandablePanel/index.tsx` 共用 `TaskTitle.tsx`。
 - 标题保留各自的单行省略样式，仅在 `scrollWidth > clientWidth` 时提供完整内容 Tooltip；初次渲染、内容变化及 ResizeObserver 通知时测量，悬停不重复测量，不能用标题字符数判断是否省略。
 - 回归入口：`console/src/pages/Chat/components/TaskTitle.test.tsx`，覆盖完整显示、宽度相等、溢出提示、尺寸及内容变化和点击透传。DOM 测量单测不替代真实 Chromium 108 与嵌入模式验收。
+
+
+## 聊天文件管理器排序
+
+- 目录列表排序入口为 `src/swe/app/file_manager.py` 的 `_entry_sort_key`：文件夹优先且按名称自然升序；其余条目按文件系统 `st_mtime_ns` 倒序，同时间按名称自然升序兜底。
+- 完整目录先排序再建立分页快照，前端 `FileColumn.tsx` 按接口返回顺序显示；不要仅在前端对当前页排序。刷新重新读取修改时间，翻页沿用同一快照。回收站仍按归档时间倒序。
+- 回归入口：`venv/bin/python -m pytest tests/unit/app/test_file_manager.py -q`。名称排序与分页容量测试应显式固定文件修改时间，避免依赖创建文件时的时钟精度。
 
 - 跟踪表单下拉统一使用 `InsuranceTracking/TrackingSelect.tsx`（Ant Design Select），选项浮层挂载到当前 dialog，枚举保持 number，经营场景保持字符串 ID。日期浮层宽度随输入框变化；列表保存保留禁用与失败反馈，不展示“保存中”；新增计划／记录使用浅蓝底按钮，执行按钮紧凑单行。弹窗仅保留 1000 字计数与到达上限提示。
 
