@@ -10,7 +10,8 @@
 ## 批调度子任务错误类型与模型反馈
 
 - 执行历史 `swe_cron_executions.error_type` 保留原始值；子任务 `async_status=error` 且原值包含大小写敏感的 `Prompt` 时才按模型失败处理。逗号分隔文本和包含该词的 JSON 字符串均命中。
-- 新版统一分类入口为 `scheduler/src/scheduler/app/services/cron/managed/failure_policy.py`，用于自动、每日和人工业务重试及模型池反馈。非模型失败保留业务失败状态，但计入 worker 成功样本。
+- 新版 `scheduler/src/scheduler/app/services/cron/managed/failure_policy.py` 用于自动重试、每日补跑和模型池反馈。非模型失败保留业务失败状态，但计入 worker 成功样本。
+- 新版看板人工重跑按当前失败状态受理，支持所有失败类型。结果不明、超时及其他错误仍需确认旧执行已停止。
 - 当前尝试关联的原始错误类型在看板成员及失败预览中显示，空值显示 `-`。
 - 数据库列由外部预先新增；不会自动对已有库执行 ALTER。终态 `async_status` 和 `error_type` 应在一次提交中写入。
 
@@ -51,6 +52,11 @@
 - `GET /user-info/tenants/by-source` 位于 `src/swe/app/routers/user_info.py::list_tenants_by_source`；`source_id` 未传时沿用请求头来源，查询包含模板条目。
 - 可选 Query 参数 `bbk_id` 通过 `TenantInitSourceStore.get_by_source` 下推 SQL 精确匹配；不传时返回该来源全部条目，无匹配时返回空列表。回归入口：`tests/unit/routers/test_user_info_tenant_source.py`、`tests/unit/workspace/test_tenant_init_source.py`。
 - 在 `migrate_tenant_init_source_bbk.sql` 之后执行 `scripts/sql/migrate_tenant_init_source_source_bbk_index.sql`，为新旧数据库补充 `idx_source_bbk (source_id, bbk_id)` 联合索引；脚本检查当前数据库索引是否存在，可重复执行。
+
+## 新版定时任务保存与子任务同步
+
+- 控制台入口在 `ManagedJobEditor.tsx` 的基本配置页签。有分发子任务时，修改 Cron 表达式、时区或可执行日期会在普通保存前提示确认。「保存并同步子任务」直接提交。两种方式都同步这三个字段的变更，其他字段随「保存并同步子任务」同步。
+- Scheduler 在 `operations.py` 发布父任务定义时同步日期，并由 `definition_sync.py` 登记子任务更新。通过返回的 `broadcast_task_id` 查逐项结果，父任务保存状态和子任务同步状态分别查询。
 
 ## 定时任务第一阶段全量快照迁移
 
@@ -568,6 +574,13 @@ NODE_OPTIONS=--max-old-space-size=8192 npm run build
 - 常驻任务列表 `console/src/pages/Chat/components/ChatTaskList/index.tsx` 和侧栏展开面板 `console/src/pages/Chat/components/ChatSidebar/ExpandablePanel/index.tsx` 共用 `TaskTitle.tsx`。
 - 标题保留各自的单行省略样式，仅在 `scrollWidth > clientWidth` 时提供完整内容 Tooltip；初次渲染、内容变化及 ResizeObserver 通知时测量，悬停不重复测量，不能用标题字符数判断是否省略。
 - 回归入口：`console/src/pages/Chat/components/TaskTitle.test.tsx`，覆盖完整显示、宽度相等、溢出提示、尺寸及内容变化和点击透传。DOM 测量单测不替代真实 Chromium 108 与嵌入模式验收。
+
+
+## 聊天文件管理器排序
+
+- 目录列表排序入口为 `src/swe/app/file_manager.py` 的 `_entry_sort_key`：文件夹优先且按名称自然升序；其余条目按文件系统 `st_mtime_ns` 倒序，同时间按名称自然升序兜底。
+- 完整目录先排序再建立分页快照，前端 `FileColumn.tsx` 按接口返回顺序显示；不要仅在前端对当前页排序。刷新重新读取修改时间，翻页沿用同一快照。回收站仍按归档时间倒序。
+- 回归入口：`venv/bin/python -m pytest tests/unit/app/test_file_manager.py -q`。名称排序与分页容量测试应显式固定文件修改时间，避免依赖创建文件时的时钟精度。
 
 - 跟踪表单下拉统一使用 `InsuranceTracking/TrackingSelect.tsx`（Ant Design Select），选项浮层挂载到当前 dialog，枚举保持 number，经营场景保持字符串 ID。日期浮层宽度随输入框变化；列表保存保留禁用与失败反馈，不展示“保存中”；新增计划／记录使用浅蓝底按钮，执行按钮紧凑单行。弹窗仅保留 1000 字计数与到达上限提示。
 

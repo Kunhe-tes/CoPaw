@@ -10,6 +10,80 @@ from tests.unit.scheduler.test_managed_cron_settlement import completed
 
 
 @pytest.mark.asyncio
+async def test_feedback_uses_frozen_subtask_counts_and_separate_main_samples(
+    execution_setup,
+):
+    from scheduler.app.services.cron.managed.feedback import (
+        ManagedCapacityFeedback,
+    )
+    from scheduler.app.services.cron.managed.operations import utc_now
+
+    db, _, _ = execution_setup
+    _, history = await completed(execution_setup)
+    await db.execute(
+        "UPDATE swe_cron_executions SET trace_id='workflow-trace' WHERE id=%s",
+        (history,),
+    )
+    await db.execute(
+        "INSERT INTO swe_cron_subtasks VALUES "
+        "('workflow-trace','ok','SUC',NULL), "
+        "('workflow-trace','model','FAIL','HTTP,Prompt'), "
+        "('workflow-trace','business','PART_SUC','HTTP'), "
+        "('workflow-trace','pending',NULL,NULL), "
+        "('other-trace','model','FAIL','Prompt')",
+    )
+    feedback = ManagedCapacityFeedback(db)
+    now = utc_now()
+    args = {
+        "since": now - timedelta(minutes=1),
+        "now_utc": now + timedelta(minutes=1),
+    }
+    assert await feedback.tick() == 0
+    assert (await feedback.summarize(**args))["success_count"] == 0
+    await db.execute(
+        "UPDATE swe_cron_executions SET async_status='error',error_type='Prompt' WHERE id=%s",
+        (history,),
+    )
+    assert await feedback.tick() == 1
+    await db.execute(
+        "INSERT INTO swe_cron_subtasks VALUES ('workflow-trace','late','FAIL','Prompt')",
+    )
+    await db.execute(
+        "UPDATE swe_cron_subtasks SET status='SUC' WHERE task_id='pending'",
+    )
+    assert await feedback.tick() == 0
+    value = await feedback.summarize(**args)
+    assert value["subtask_success_count"] == 2
+    assert value["subtask_failure_count"] == 1
+    assert value["success_count"] == 2
+    assert value["failure_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_feedback_skips_scheduler_timeout_without_async_result(
+    execution_setup,
+):
+    from scheduler.app.services.cron.managed.feedback import (
+        ManagedCapacityFeedback,
+    )
+    from scheduler.app.services.cron.managed.operations import utc_now
+
+    db, _, _ = execution_setup
+    row, _ = await completed(execution_setup)
+    now = utc_now()
+    await db.execute(
+        "UPDATE swe_cron_execution_runs SET settled_status='error', settled_at=%s, "
+        "settled_error_code='cron_async_subtasks_timeout' WHERE execution_id=%s",
+        (now, row["execution_id"]),
+    )
+    value = await ManagedCapacityFeedback(db).summarize(
+        since=now - timedelta(minutes=1),
+        now_utc=now + timedelta(minutes=1),
+    )
+    assert value["success_count"] == value["failure_count"] == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "error_type,failures",
     [
@@ -152,8 +226,11 @@ async def test_one_capacity_controller_merges_old_and_new_feedback_once(
     db, caller, _ = execution_setup
     run, history = await completed(execution_setup, "error")
     await db.execute(
-        "UPDATE swe_cron_executions SET error_type='Prompt' WHERE id=%s",
+        "UPDATE swe_cron_executions SET trace_id='child-trace',error_type='Prompt' WHERE id=%s",
         (history,),
+    )
+    await db.execute(
+        "INSERT INTO swe_cron_subtasks VALUES ('child-trace','child','FAIL','Prompt')",
     )
     now = datetime.now(timezone.utc)
     await ExecutionStore(db).enqueue(
@@ -198,6 +275,8 @@ async def test_one_capacity_controller_merges_old_and_new_feedback_once(
     assert decision["source_id"] == "bank"
     assert decision["success_count"] == 9
     assert decision["failure_count"] == 1
+    assert decision["subtask_success_count"] == 0
+    assert decision["subtask_failure_count"] == 1
     assert decision["error_rate"] == 0.1
     assert decision["effective_workers"] == 2
     assert not await runtime.adjust_worker_capacity_if_due(

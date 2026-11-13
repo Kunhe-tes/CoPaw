@@ -15,6 +15,7 @@ PROTOCOL = (
     "JSON_UNQUOTE(JSON_EXTRACT(r.dispatch_meta_json,'$.protocol'))="
     "'scheduler_managed_v1'"
 )
+SUBTASK_TERMINAL = "('SUC','FAIL','PART_SUC','TIMEOUT')"
 
 
 def _history_matches(run, history):
@@ -74,9 +75,13 @@ class ExecutionSettlement:
 
     async def _outcome(self, tx, run):
         if run["status"] != "success":
-            return run["status"], run.get("error_code")
+            return {
+                "settled_status": run["status"],
+                "settled_error_code": run.get("error_code"),
+            }
         history = await tx.fetch_one(
-            "SELECT job_id,tenant_id,status,async_status,meta FROM swe_cron_executions WHERE id=%s",
+            "SELECT job_id,tenant_id,status,async_status,trace_id,meta "
+            "FROM swe_cron_executions WHERE id=%s",
             (run["history_execution_id"],),
         )
         if not _history_matches(run, history):
@@ -85,11 +90,30 @@ class ExecutionSettlement:
                 run["execution_id"],
             )
             return None
-        if history["async_status"] == "error":
-            return "error", "cron_async_subtasks_failed"
-        if history["async_status"] == "success":
-            return "success", None
-        return None
+        status = history["async_status"]
+        if status not in ("success", "error"):
+            return None
+        outcome = {
+            "settled_status": status,
+            "settled_error_code": (
+                "cron_async_subtasks_failed" if status == "error" else None
+            ),
+        }
+        if history["trace_id"]:
+            counts = await tx.fetch_one(
+                "SELECT COUNT(*) AS total, "
+                "COUNT(CASE WHEN status<>'SUC' AND "
+                "INSTR(COALESCE(error_type,'') COLLATE utf8mb4_bin,'Prompt')>0 "
+                "THEN 1 END) AS failures FROM swe_cron_subtasks "
+                f"WHERE trace_id=%s AND status IN {SUBTASK_TERMINAL}",
+                (history["trace_id"],),
+            )
+            if counts["total"]:
+                outcome["subtask_success_count"] = (
+                    counts["total"] - counts["failures"]
+                )
+                outcome["subtask_failure_count"] = counts["failures"]
+        return outcome
 
     async def _settle(self, execution_id):
         async with transaction(self.db) as tx:
@@ -106,8 +130,7 @@ class ExecutionSettlement:
                 return False
             observed = self.clock()
             values = {
-                "settled_status": outcome[0],
-                "settled_error_code": outcome[1],
+                **outcome,
                 "settled_at": observed,
                 "updated_at": observed,
                 "version": run["version"] + 1,
@@ -125,6 +148,6 @@ class ExecutionSettlement:
             logger.info(
                 "执行派发已收敛 execution_id=%s settled_status=%s",
                 execution_id,
-                outcome[0],
+                outcome["settled_status"],
             )
         return bool(changed)

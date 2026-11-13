@@ -38,7 +38,8 @@ REQUIRED_COLUMNS = {
         "run_owner run_lease_until accepted_at started_at finished_at "
         "history_execution_id output_preview trace_id error_code "
         "result_json version created_at updated_at "
-        "settled_status settled_at settled_error_code"
+        "settled_status settled_at settled_error_code "
+        "subtask_success_count subtask_failure_count"
     ),
     "swe_cron_managed_broadcast_tasks": (
         "created_order task_id active_key tenant_id source_id agent_id "
@@ -86,11 +87,13 @@ REQUIRED_COLUMNS = {
         "source_id provider_id model_id lock_owner locked_at "
         "lease_expires_at heartbeat_at"
     ),
+    "swe_cron_subtasks": "trace_id status error_type",
     "swe_cron_dispatch_worker_capacity": (
         "id worker_id source_id provider_id model_id strategy_id "
         "previous_workers baseline_workers min_workers max_workers "
         "effective_workers pending_count claimed_count running_count "
-        "success_count failure_count error_rate matched_rule avg_latency_ms "
+        "success_count failure_count subtask_success_count subtask_failure_count "
+        "error_rate matched_rule avg_latency_ms "
         "decision_reason created_at"
     ),
     "swe_cron_dispatch_intents": "id source_id provider_id model_id status",

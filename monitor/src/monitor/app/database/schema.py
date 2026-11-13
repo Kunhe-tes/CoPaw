@@ -527,6 +527,8 @@ CREATE TABLE IF NOT EXISTS swe_cron_dispatch_worker_capacity (
     running_count INT NOT NULL DEFAULT 0 COMMENT 'running intents',
     success_count INT NOT NULL DEFAULT 0 COMMENT 'recent success count',
     failure_count INT NOT NULL DEFAULT 0 COMMENT 'recent terminal failure count',
+    subtask_success_count INT DEFAULT NULL COMMENT 'subtask success samples',
+    subtask_failure_count INT DEFAULT NULL COMMENT 'subtask failure samples',
     error_rate DECIMAL(8,6) NOT NULL DEFAULT 0 COMMENT 'terminal failure rate',
     matched_rule JSON DEFAULT NULL COMMENT 'matched adjustment rule',
     avg_latency_ms INT NOT NULL DEFAULT 0 COMMENT 'recent average latency',
@@ -656,6 +658,8 @@ ALTER_CRON_DISPATCH_BATCHES_MODEL_COLUMNS = [
 ]
 
 ALTER_CRON_DISPATCH_WORKER_CAPACITY_COLUMNS = [
+    "ALTER TABLE swe_cron_dispatch_worker_capacity ADD COLUMN subtask_success_count INT DEFAULT NULL",
+    "ALTER TABLE swe_cron_dispatch_worker_capacity ADD COLUMN subtask_failure_count INT DEFAULT NULL",
     """
     ALTER TABLE swe_cron_dispatch_worker_capacity
     ADD COLUMN provider_id VARCHAR(128) NOT NULL DEFAULT 'default'

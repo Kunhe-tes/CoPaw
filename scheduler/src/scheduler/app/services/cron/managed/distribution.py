@@ -121,7 +121,8 @@ async def _children(db, key, targets):
         params.extend(tenants)
     return await db.fetch_all(
         "SELECT d.tenant_id, d.source_id, d.agent_id, d.job_id, d.enabled, "
-        "d.definition_version, d.original_cron_expr, d.cron_expr, d.timezone "
+        "d.definition_version, d.original_cron_expr, d.cron_expr, d.timezone, "
+        "d.offset_minutes, d.enable_offset, d.offset_window_hours "
         "FROM swe_cron_jobs_v2 d WHERE "
         + " AND ".join(clauses)
         + " ORDER BY d.tenant_id, d.source_id, d.agent_id, d.job_id",
@@ -158,17 +159,14 @@ def _reserved_items(task, current, targets):
 
 
 def _reserved_item(task, target, current, index, offset, retime):
-    source = json.loads(task["payload_json"])["source_spec"]
-    original = (
-        current["original_cron_expr"] or current["cron_expr"]
-        if retime
-        else source["schedule"]["cron"]
-    )
-    zone = current["timezone"] if retime else source["schedule"]["timezone"]
-    shifted = (
-        shift_cron_expression(original, zone, offset_minutes=offset)
-        if offset
-        else ShiftedCron(original, zone, 0)
+    payload = json.loads(task["payload_json"])
+    sync = payload.get("definition_changes")
+    original, zone, shifted = _reserved_schedule(
+        payload["source_spec"]["schedule"],
+        sync,
+        current,
+        offset,
+        retime,
     )
     job_id = (
         current["job_id"]
@@ -188,12 +186,17 @@ def _reserved_item(task, target, current, index, offset, retime):
         )
     )
     plan = {
-        "profile": target,
+        "profile": {} if sync else target,
         "enabled": bool(current["enabled"]) if current else True,
         "original_cron_expr": original,
         "original_timezone": zone,
         "retime_only": retime,
     }
+    if sync:
+        plan.update(
+            enable_offset=current["enable_offset"],
+            offset_window_hours=current["offset_window_hours"],
+        )
     return {
         "task_id": task["task_id"],
         "index_no": index,
@@ -220,6 +223,37 @@ def _reserved_item(task, target, current, index, offset, retime):
         "created_at": task["created_at"],
         "updated_at": task["created_at"],
     }
+
+
+def _reserved_schedule(schedule, sync, current, offset, retime):
+    if sync:
+        return _sync_schedule(current, sync.get("schedule", {}), offset)
+    original = (
+        current["original_cron_expr"] or current["cron_expr"]
+        if retime
+        else schedule["cron"]
+    )
+    zone = current["timezone"] if retime else schedule["timezone"]
+    shifted = (
+        shift_cron_expression(original, zone, offset_minutes=offset)
+        if offset
+        else ShiftedCron(original, zone, 0)
+    )
+    return original, zone, shifted
+
+
+def _sync_schedule(current, schedule, offset):
+    original = current["original_cron_expr"] or current["cron_expr"]
+    zone = schedule.get("timezone", current["timezone"])
+    if "cron" not in schedule:
+        return original, zone, ShiftedCron(current["cron_expr"], zone, offset)
+    original = schedule["cron"]
+    shifted = (
+        shift_cron_expression(original, zone, offset_minutes=offset)
+        if offset
+        else ShiftedCron(original, zone, 0)
+    )
+    return original, zone, shifted
 
 
 async def _summary(db, task):

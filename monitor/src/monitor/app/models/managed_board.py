@@ -18,6 +18,13 @@ class BoardListQuery(BaseModel):
     page_size: int = Field(default=20, ge=1, le=200)
 
 
+class BoardOccupancyQuery(BaseModel):
+    provider_id: str | None = Field(default=None, min_length=1, max_length=128)
+    model_id: str | None = Field(default=None, min_length=1, max_length=128)
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=10, ge=1, le=100)
+
+
 class BoardDetailQuery(BaseModel):
     member_page: int = Field(default=1, ge=1)
     member_limit: int = Field(default=50, ge=1, le=200)

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Alert, Empty, Pagination, Progress, Spin, Tag, Tooltip } from "antd";
 import { ChevronDown } from "lucide-react";
 import type {
@@ -8,15 +8,22 @@ import type {
 import WorkerHistoryChart from "../CronBatchDispatch/WorkerHistoryChart";
 import styles from "../CronBatchDispatch/index.module.less";
 import WorkerAdjustmentDetails from "./WorkerAdjustmentDetails";
+import workerStyles from "./workers.module.less";
+
+const capacityKey = (item: CronDispatchCapacityItem) =>
+  JSON.stringify([item.provider_id, item.model_id]);
 
 function CapacityRow({
   item,
   history,
+  expanded,
+  onToggle,
 }: {
   item: CronDispatchCapacityItem;
   history: CronDispatchCapacityItem[];
+  expanded: boolean;
+  onToggle: () => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
   return (
     <div>
       <button
@@ -24,7 +31,7 @@ function CapacityRow({
         className={styles.capacityRow}
         aria-label={`查看 ${item.provider_id} / ${item.model_id} 的 Worker 调整过程`}
         aria-expanded={expanded}
-        onClick={() => setExpanded((value) => !value)}
+        onClick={onToggle}
       >
         <span className={styles.capacityMeta}>
           <strong>{item.model_id}</strong>
@@ -52,6 +59,7 @@ function CapacityRow({
       </button>
       {expanded && (
         <WorkerHistoryChart
+          showOccupancy
           items={history.filter(
             (row) =>
               row.provider_id === item.provider_id &&
@@ -67,90 +75,103 @@ export default function SharedWorkers({
   value,
   loading,
   error,
+  occupants,
 }: {
   value?: CronDispatchWorkersResponse | null;
   loading: boolean;
   error?: string;
+  occupants?: ReactNode;
 }) {
   const [page, setPage] = useState(1);
+  const [expanded, setExpanded] = useState<string[]>([]);
   const events = value?.capacity_events || [];
   const current = Math.min(page, Math.max(1, Math.ceil(events.length / 5)));
+  const hasExpandedChart = value?.current_capacity.some((item) =>
+    expanded.includes(capacityKey(item)),
+  );
   return (
-    <section className={styles.strategyGrid}>
-      <article className={styles.panel}>
-        <div className={styles.panelHeader}>
-          <div>
-            <h2>Source 维度模型策略</h2>
-            <span>共享模型池：新旧调度共同使用策略和容量</span>
+    <section className={workerStyles.workerGrid}>
+      <div className={workerStyles.leftColumn}>
+        {occupants}
+        <article className={`${styles.panel} ${workerStyles.policy}`}>
+          <div className={styles.panelHeader}>
+            <div>
+              <h2>Source 维度模型策略</h2>
+              <span>共享模型池：新旧调度共同使用策略和容量</span>
+            </div>
           </div>
-        </div>
-        <Spin spinning={loading}>
-          <div className={styles.policyGridList}>
-            {value?.policies.map((policy) => (
-              <article
-                className={styles.policyCard}
-                key={JSON.stringify([policy.provider_id, policy.model_id])}
-              >
-                <div className={styles.policyHead}>
-                  <div>
-                    <h3>{policy.provider_id}</h3>
-                    <p>{policy.model_id}</p>
-                  </div>
-                  <Tag>{policy.enabled ? "启用" : "停用"}</Tag>
-                </div>
-                <div className={styles.policyGrid}>
-                  <span>默认策略</span>
-                  <strong>{policy.default_strategy_id}</strong>
-                  <span>最小 / 基线 / 最大</span>
-                  <strong>
-                    {String(policy.strategy?.min_workers ?? "-")} /{" "}
-                    {String(policy.strategy?.baseline_workers ?? "-")} /{" "}
-                    {String(policy.strategy?.max_workers ?? "-")}
-                  </strong>
-                  <span>调整间隔</span>
-                  <strong>
-                    {String(policy.strategy?.adjust_interval_seconds ?? "-")}s
-                  </strong>
-                  <span>反馈窗口</span>
-                  <strong>
-                    {String(policy.strategy?.feedback_window_seconds ?? "-")}s
-                  </strong>
-                </div>
-                <Tooltip
-                  title={
-                    <pre>
-                      {JSON.stringify(policy.strategy_schedule, null, 2)}
-                    </pre>
-                  }
+          <Spin spinning={loading}>
+            <div className={styles.policyGridList}>
+              {value?.policies.map((policy) => (
+                <article
+                  className={styles.policyCard}
+                  key={JSON.stringify([policy.provider_id, policy.model_id])}
                 >
-                  <div className={styles.policyJson}>
-                    schedule={JSON.stringify(policy.strategy_schedule)}
+                  <div className={styles.policyHead}>
+                    <div>
+                      <h3>{policy.provider_id}</h3>
+                      <p>{policy.model_id}</p>
+                    </div>
+                    <Tag>{policy.enabled ? "启用" : "停用"}</Tag>
                   </div>
-                </Tooltip>
-                <Tooltip
-                  title={
-                    <pre>
-                      {JSON.stringify(
-                        policy.strategy?.error_rate_rules,
-                        null,
-                        2,
-                      )}
-                    </pre>
-                  }
-                >
-                  <div className={styles.policyJson}>
-                    rules={JSON.stringify(policy.strategy?.error_rate_rules)}
+                  <div className={styles.policyGrid}>
+                    <span>默认策略</span>
+                    <strong>{policy.default_strategy_id}</strong>
+                    <span>最小 / 基线 / 最大</span>
+                    <strong>
+                      {String(policy.strategy?.min_workers ?? "-")} /{" "}
+                      {String(policy.strategy?.baseline_workers ?? "-")} /{" "}
+                      {String(policy.strategy?.max_workers ?? "-")}
+                    </strong>
+                    <span>调整间隔</span>
+                    <strong>
+                      {String(policy.strategy?.adjust_interval_seconds ?? "-")}s
+                    </strong>
+                    <span>反馈窗口</span>
+                    <strong>
+                      {String(policy.strategy?.feedback_window_seconds ?? "-")}s
+                    </strong>
                   </div>
-                </Tooltip>
-              </article>
-            ))}
-          </div>
-          {!loading && !value?.policies.length && (
-            <Empty description="暂无模型策略" />
-          )}
-        </Spin>
-      </article>
-      <article className={styles.panel}>
+                  <Tooltip
+                    title={
+                      <pre>
+                        {JSON.stringify(policy.strategy_schedule, null, 2)}
+                      </pre>
+                    }
+                  >
+                    <div className={styles.policyJson}>
+                      schedule={JSON.stringify(policy.strategy_schedule)}
+                    </div>
+                  </Tooltip>
+                  <Tooltip
+                    title={
+                      <pre>
+                        {JSON.stringify(
+                          policy.strategy?.error_rate_rules,
+                          null,
+                          2,
+                        )}
+                      </pre>
+                    }
+                  >
+                    <div className={styles.policyJson}>
+                      rules={JSON.stringify(policy.strategy?.error_rate_rules)}
+                    </div>
+                  </Tooltip>
+                </article>
+              ))}
+            </div>
+            {!loading && !value?.policies.length && (
+              <Empty description="暂无模型策略" />
+            )}
+          </Spin>
+        </article>
+      </div>
+      <article
+        className={`${styles.panel} ${workerStyles.rightPanel}${
+          hasExpandedChart ? ` ${workerStyles.rightExpanded}` : ""
+        }`}
+      >
         <div className={styles.panelHeader}>
           <div>
             <h2>Worker 变动</h2>
@@ -164,9 +185,18 @@ export default function SharedWorkers({
             <div className={styles.capacityList}>
               {value?.current_capacity.map((item) => (
                 <CapacityRow
-                  key={JSON.stringify([item.provider_id, item.model_id])}
+                  key={capacityKey(item)}
                   item={item}
                   history={events}
+                  expanded={expanded.includes(capacityKey(item))}
+                  onToggle={() =>
+                    setExpanded((keys) => {
+                      const key = capacityKey(item);
+                      return keys.includes(key)
+                        ? keys.filter((value) => value !== key)
+                        : [...keys, key];
+                    })
+                  }
                 />
               ))}
             </div>

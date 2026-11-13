@@ -26,10 +26,16 @@ interface Props {
   context: ManagedCronContext;
   job: ManagedJob;
   onClose: () => void;
+  syncTaskId?: string;
 }
 
 /** 分发只决定接收人与散列，调度三态在另一个弹窗管理。 */
-export function ManagedBroadcastModal({ context, job, onClose }: Props) {
+export function ManagedBroadcastModal({
+  context,
+  job,
+  onClose,
+  syncTaskId,
+}: Props) {
   const [tenants, setTenants] = useState<string[]>([]);
   const [profiles, setProfiles] = useState<TenantSourceInfo[]>([]);
   const [offset, setOffset] = useState(job.enable_offset ?? true);
@@ -41,8 +47,9 @@ export function ManagedBroadcastModal({ context, job, onClose }: Props) {
   const load = useCallback(async (): Promise<{
     task: ManagedBroadcastTask | null;
   }> => {
-    const current = taskId.current
-      ? { task: { task_id: taskId.current } }
+    const selectedTaskId = syncTaskId ?? taskId.current;
+    const current = selectedTaskId
+      ? { task: { task_id: selectedTaskId } }
       : await schedulerCronApi.currentBroadcast(context, job.id);
     if (!current.task) return { task: null };
     const first = await schedulerCronApi.broadcastTask(
@@ -66,7 +73,7 @@ export function ManagedBroadcastModal({ context, job, onClose }: Props) {
       cursor = page.next_cursor;
     }
     return { task: { ...first, results } };
-  }, [context, job.id]);
+  }, [context, job.id, syncTaskId]);
   const panel = useManagedPanel(load, unfinished);
   const task = panel.value?.task;
   const locked = Boolean(task) || attempted;
@@ -119,7 +126,7 @@ export function ManagedBroadcastModal({ context, job, onClose }: Props) {
   return (
     <Modal
       open
-      title="广播到租户"
+      title={syncTaskId ? "子任务同步进度" : "广播到租户"}
       width={800}
       onCancel={onClose}
       footer={
@@ -127,66 +134,72 @@ export function ManagedBroadcastModal({ context, job, onClose }: Props) {
           <Button onClick={() => void panel.reload()} loading={panel.loading}>
             刷新进度
           </Button>
-          {task && !unfinished({ task }) && (
+          {!syncTaskId && task && !unfinished({ task }) && (
             <Button disabled={panel.loading || sending} onClick={newRound}>
               新一轮分发
             </Button>
           )}
-          <Button
-            type="primary"
-            loading={sending}
-            disabled={!panel.value || Boolean(task) || tenants.length > 1000}
-            onClick={() => void submit()}
-          >
-            开始分发
-          </Button>
+          {!syncTaskId && (
+            <Button
+              type="primary"
+              loading={sending}
+              disabled={!panel.value || Boolean(task) || tenants.length > 1000}
+              onClick={() => void submit()}
+            >
+              开始分发
+            </Button>
+          )}
         </Space>
       }
     >
       <Space direction="vertical" style={{ width: "100%" }}>
         <Typography.Text>任务：{job.name}</Typography.Text>
-        <Alert
-          type="info"
-          message="0～1000 人；0 人仅调整已有子任务的散列时间。分发失败请在新一轮处理，不改变调度方式。"
-        />
-        {panel.error && <Alert type="error" showIcon message={panel.error} />}
-        <fieldset
-          disabled={locked || sending}
-          style={{ border: 0, padding: 0, margin: 0 }}
-        >
-          <TenantSelector
-            selectedTenantIds={tenants}
-            onChange={(ids) => {
-              if (!locked) setTenants(ids);
-            }}
-            onSelectionInfoChange={(items) => {
-              if (!locked) setProfiles(items);
-            }}
-            excludeTenantId={context.tenant_id}
+        {!syncTaskId && (
+          <Alert
+            type="info"
+            message="0～1000 人；0 人仅调整已有子任务的散列时间。分发失败请在新一轮处理，不改变调度方式。"
           />
-          <div className={styles.broadcastOffsetControls}>
-            <span>散列时间</span>
-            <Switch
-              checked={offset}
-              disabled={locked || sending}
-              onChange={setOffset}
+        )}
+        {panel.error && <Alert type="error" showIcon message={panel.error} />}
+        {!syncTaskId && (
+          <fieldset
+            disabled={locked || sending}
+            style={{ border: 0, padding: 0, margin: 0 }}
+          >
+            <TenantSelector
+              selectedTenantIds={tenants}
+              onChange={(ids) => {
+                if (!locked) setTenants(ids);
+              }}
+              onSelectionInfoChange={(items) => {
+                if (!locked) setProfiles(items);
+              }}
+              excludeTenantId={context.tenant_id}
             />
-            <InputNumber
-              min={0}
-              max={24}
-              value={hours}
-              disabled={!offset || locked || sending}
-              onChange={(value) => setHours(Number(value ?? 0))}
-            />
-            <span>小时</span>
-          </div>
-        </fieldset>
+            <div className={styles.broadcastOffsetControls}>
+              <span>散列时间</span>
+              <Switch
+                checked={offset}
+                disabled={locked || sending}
+                onChange={setOffset}
+              />
+              <InputNumber
+                min={0}
+                max={24}
+                value={hours}
+                disabled={!offset || locked || sending}
+                onChange={(value) => setHours(Number(value ?? 0))}
+              />
+              <span>小时</span>
+            </div>
+          </fieldset>
+        )}
         {task && (
           <>
             <Typography.Text>
-              分发 {task.task_id} · {task.status} · 成功 {task.success_count} /
-              失败 {task.failed_count} / 待处理 {task.pending_count} · 平台同步{" "}
-              {task.sync_status}
+              {syncTaskId ? "同步" : "分发"} {task.task_id} · {task.status} ·
+              成功 {task.success_count} / 失败 {task.failed_count} / 待处理{" "}
+              {task.pending_count} · 平台同步 {task.sync_status}
             </Typography.Text>
             {task.error_code && (
               <Alert type="warning" message={task.error_code} />

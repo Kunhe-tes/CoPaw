@@ -28,47 +28,10 @@ async def apply_group_range(tx, current, operation):
     """在同一事务更新父子日期，不借完整正文更新绕过源任务保护。"""
     key = tuple(current[name] for name in IDENTITY_FIELDS)
     period = json.loads(operation["payload_json"])["run_date_range"]
-    refs = [current, *await _children(tx, key, [])]
-    for ref in refs:
-        item_key = tuple(ref[name] for name in IDENTITY_FIELDS)
-        await _lock_definition(tx, item_key)
-        active = await tx.fetch_one(
-            f"SELECT operation_id FROM {JOURNAL} WHERE active_key=%s",
-            (request_hash(item_key),),
-        )
-        if active:
-            raise ManagementConflict("cron_management_in_progress")
-        row = await ManagedCronRepository(tx)._get_row(item_key, True)
-        state = await tx.fetch_one(
-            f"SELECT * FROM swe_cron_job_states WHERE {WHERE_JOB} FOR UPDATE",
-            item_key,
-        )
-        if state is None or state["management_status"] != "ready":
-            raise ManagementConflict("cron_job_not_ready")
-        spec = json.loads(row["spec_json"])
-        spec["run_date_range"] = period
-        await update(
-            tx,
-            "swe_cron_jobs_v2",
-            {
-                **columns(spec),
-                "spec_json": canonical(spec),
-                "updated_at": utc_now(),
-            },
-            WHERE_JOB,
-            item_key,
-        )
-        values = _state_values(state, bool(reason(spec)), configuration=True)
-        await update(tx, "swe_cron_job_states", values, WHERE_JOB, item_key)
-        await write_projection(
-            tx,
-            spec,
-            {**state, **values},
-            item_key[2],
-            utc_now(),
-        )
+    await _apply_range(tx, key, period)
+    child_count = await apply_child_ranges(tx, key, period)
     progress = json.loads(operation["progress_json"])
-    progress["affected_count"] = len(refs)
+    progress["affected_count"] = 1 + child_count
     operation["progress_json"] = canonical(progress)
     await update(
         tx,
@@ -77,6 +40,55 @@ async def apply_group_range(tx, current, operation):
         "operation_id=%s",
         (operation["operation_id"],),
     )
+
+
+async def apply_child_ranges(tx, key, period):
+    count = 0
+    for child in await _children(tx, key, []):
+        child_key = tuple(child[name] for name in IDENTITY_FIELDS)
+        count += await _apply_range(tx, child_key, period)
+    return count
+
+
+async def publish_group_range(tx, key, spec, state):
+    await apply_child_ranges(tx, key, spec["run_date_range"])
+    values = _state_values(state, bool(reason(spec)), configuration=True)
+    values["date_window_sync_required"] = False
+    await update(tx, "swe_cron_job_states", values, WHERE_JOB, key)
+    return {**state, **values}
+
+
+async def _apply_range(tx, key, period):
+    await _lock_definition(tx, key)
+    row = await ManagedCronRepository(tx)._get_row(key, True)
+    if row["deleted_at"]:
+        return False
+    active = await tx.fetch_one(
+        f"SELECT operation_id FROM {JOURNAL} WHERE active_key=%s",
+        (request_hash(key),),
+    )
+    if active:
+        raise ManagementConflict("cron_management_in_progress")
+    state = await tx.fetch_one(
+        f"SELECT * FROM swe_cron_job_states WHERE {WHERE_JOB} FOR UPDATE",
+        key,
+    )
+    if state is None or state["management_status"] != "ready":
+        raise ManagementConflict("cron_job_not_ready")
+    spec = json.loads(row["spec_json"])
+    spec["run_date_range"] = period
+    now = utc_now()
+    await update(
+        tx,
+        "swe_cron_jobs_v2",
+        {**columns(spec), "spec_json": canonical(spec), "updated_at": now},
+        WHERE_JOB,
+        key,
+    )
+    values = _state_values(state, bool(reason(spec)), configuration=True)
+    await update(tx, "swe_cron_job_states", values, WHERE_JOB, key)
+    await write_projection(tx, spec, {**state, **values}, key[2], now)
+    return True
 
 
 async def _lock_definition(tx, key):

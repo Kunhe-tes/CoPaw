@@ -69,9 +69,13 @@ const job = {
   dispatch_state: "ordinary",
 } as const;
 
-it.each([true, false])(
-  "父任务子任务存在=%s，日期单独清空只走日期接口",
-  async (hasChildren) => {
+it.each([
+  [false, false],
+  [true, false],
+  [true, true],
+])(
+  "子任务存在=%s，选择同步保存=%s，单独清空日期只走日期接口",
+  async (hasChildren, syncChildren) => {
     const dated = {
       ...job,
       run_date_range: { start_date: "2026-11-01", end_date: "2026-11-30" },
@@ -94,14 +98,24 @@ it.each([true, false])(
       />,
     );
     expect(await screen.findByDisplayValue("2026-11-01")).not.toBeDisabled();
-    expect(screen.getByDisplayValue("十点任务")).toHaveProperty(
-      "disabled",
-      hasChildren,
-    );
+    expect(screen.getByDisplayValue("十点任务")).not.toBeDisabled();
     fireEvent.click(
       view.baseElement.querySelector(".ant-picker-range .ant-picker-clear")!,
     );
-    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: syncChildren ? "保存并同步子任务" : /^保\s*存$/,
+      }),
+    );
+    if (hasChildren && !syncChildren) {
+      await screen.findByText(/可执行日期将同步到所有分发子任务/);
+      expect(
+        vi
+          .mocked(request)
+          .mock.calls.some(([url]) => url.endsWith("/run-date-range")),
+      ).toBe(false);
+      fireEvent.click(screen.getByRole("button", { name: "确认保存" }));
+    }
     await waitFor(() =>
       expect(
         vi
@@ -109,6 +123,7 @@ it.each([true, false])(
           .mock.calls.some(([url]) => url.endsWith("/run-date-range")),
       ).toBe(true),
     );
+    expect(screen.queryByText("确认同步调度变更")).not.toBeInTheDocument();
     expect(save).not.toHaveBeenCalled();
   },
 );
@@ -136,7 +151,7 @@ it("列表10点的任务打开真实编辑表单应为10点，原样保存仍为
   await waitFor(() =>
     expect(screen.getByDisplayValue("10:00")).toBeInTheDocument(),
   );
-  fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+  fireEvent.click(screen.getByRole("button", { name: /^保\s*存$/ }));
   await waitFor(() => expect(save).toHaveBeenCalled());
   expect(save.mock.calls[0][1].schedule).toMatchObject({
     cron: "0 10 * * *",
@@ -144,14 +159,51 @@ it("列表10点的任务打开真实编辑表单应为10点，原样保存仍为
   });
 });
 
-it("同时修改名称和日期，只提交一次普通更新", async () => {
+it.each([
+  ["保存", false],
+  ["保存并同步子任务", true],
+] as const)("有子任务时可编辑并使用%s", async (label, syncChildren) => {
+  vi.mocked(request).mockImplementation(async (url) =>
+    url.includes("/broadcast/children")
+      ? { items: [{ id: "child" }] }
+      : { ...job, spec: job },
+  );
+  const save = vi.fn().mockResolvedValue({ status: "completed" });
+  render(
+    <ManagedJobEditor
+      context={context}
+      job={job}
+      saving={false}
+      onSave={save}
+      onClose={() => {}}
+    />,
+  );
+  const name = await screen.findByDisplayValue("十点任务");
+  expect(name).not.toBeDisabled();
+  fireEvent.change(name, { target: { value: "修改后的任务" } });
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: label === "保存" ? /^保\s*存$/ : label,
+    }),
+  );
+  await waitFor(() =>
+    expect(save).toHaveBeenCalledWith(
+      expect.objectContaining({ id: job.id }),
+      expect.objectContaining({ name: "修改后的任务" }),
+      expect.any(String),
+      syncChildren,
+    ),
+  );
+});
+
+it("同时修改名称和日期，确认后只提交一次普通更新", async () => {
   const dated = {
     ...job,
     run_date_range: { start_date: "2026-11-01", end_date: "2026-11-30" },
   };
   vi.mocked(request).mockImplementation(async (url) =>
     url.includes("/broadcast/children")
-      ? { items: [] }
+      ? { items: [{ id: "child" }] }
       : { ...job, spec: dated },
   );
   const save = vi.fn().mockResolvedValue({ status: "completed" });
@@ -171,7 +223,10 @@ it("同时修改名称和日期，只提交一次普通更新", async () => {
   fireEvent.click(
     view.baseElement.querySelector(".ant-picker-range .ant-picker-clear")!,
   );
-  fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+  fireEvent.click(screen.getByRole("button", { name: /^保\s*存$/ }));
+  await screen.findByText(/可执行日期将同步到所有分发子任务/);
+  expect(save).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "确认保存" }));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
   expect(save.mock.calls[0][1]).toMatchObject({
     name: "新名称",
@@ -182,6 +237,84 @@ it("同时修改名称和日期，只提交一次普通更新", async () => {
       .mocked(request)
       .mock.calls.some(([url]) => url.endsWith("/run-date-range")),
   ).toBe(false);
+});
+
+it("有子任务时修改 Cron 先确认，取消后保留编辑内容", async () => {
+  const custom = { ...job, schedule: { ...job.schedule, cron: "*/5 * * * *" } };
+  vi.mocked(request).mockImplementation(async (url) =>
+    url.includes("/broadcast/children")
+      ? { items: [{ id: "child" }] }
+      : { ...custom, spec: custom },
+  );
+  const save = vi.fn().mockResolvedValue({ status: "completed" });
+  render(
+    <ManagedJobEditor
+      context={context}
+      job={custom}
+      saving={false}
+      onSave={save}
+      onClose={() => {}}
+    />,
+  );
+  const cron = await screen.findByLabelText("cronJobs.cronCustomExpression");
+  fireEvent.change(cron, { target: { value: "*/10 * * * *" } });
+  const button = screen.getByRole("button", { name: /^保\s*存$/ });
+  fireEvent.click(button);
+  await screen.findByText(/Cron 表达式将同步到所有分发子任务/);
+  fireEvent.click(screen.getByRole("button", { name: "继续编辑" }));
+  await waitFor(() =>
+    expect(
+      screen.queryByText(/Cron 表达式将同步到所有分发子任务/),
+    ).not.toBeInTheDocument(),
+  );
+  expect(save).not.toHaveBeenCalled();
+  expect(cron).toHaveValue("*/10 * * * *");
+
+  fireEvent.click(button);
+  fireEvent.click(await screen.findByRole("button", { name: "确认保存" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(save.mock.calls[0][1].schedule.cron).toBe("*/10 * * * *");
+  expect(save.mock.calls[0][3]).toBe(false);
+});
+
+it.each([false, true])("只改时区，选择同步保存=%s", async (syncChildren) => {
+  vi.mocked(request).mockImplementation(async (url) =>
+    url.includes("/broadcast/children")
+      ? { items: [{ id: "child" }] }
+      : { ...job, spec: job },
+  );
+  const save = vi.fn().mockResolvedValue({ status: "completed" });
+  render(
+    <ManagedJobEditor
+      context={context}
+      job={job}
+      saving={false}
+      onSave={save}
+      onClose={() => {}}
+    />,
+  );
+  const zone = await screen.findByRole("combobox", {
+    name: /cronJobs.scheduleTimezone/,
+  });
+  fireEvent.mouseDown(zone);
+  fireEvent.click(await screen.findByText("UTC", { exact: true }));
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: syncChildren ? "保存并同步子任务" : /^保\s*存$/,
+    }),
+  );
+  if (!syncChildren) {
+    await screen.findByText(/时区将同步到所有分发子任务/);
+    expect(save).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "确认保存" }));
+  }
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(screen.queryByText("确认同步调度变更")).not.toBeInTheDocument();
+  expect(save.mock.calls[0][1].schedule).toMatchObject({
+    cron: job.schedule.cron,
+    timezone: "UTC",
+  });
+  expect(save.mock.calls[0][3]).toBe(syncChildren);
 });
 
 it("子任务日期和调度只读，不查询自己的子任务或提交父组设置", async () => {
@@ -257,7 +390,7 @@ it("低于列表定义版本的详情不允许回填旧时间并提交", async (
     />,
   );
   await screen.findByText("任务详情版本落后于列表，请刷新后重新编辑。");
-  expect(screen.getByRole("button", { name: /保\s*存/ })).toBeDisabled();
+  expect(screen.getByRole("button", { name: /^保\s*存$/ })).toBeDisabled();
   expect(save).not.toHaveBeenCalled();
 });
 
@@ -279,7 +412,7 @@ it("新表单可选月末工作日与非工作日开关，并按新协议保存"
   fireEvent.click(holiday);
   fireEvent.mouseDown(screen.getAllByRole("combobox")[0]);
   fireEvent.click(await screen.findByText("每月最后一个工作日（北京时间）"));
-  fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+  fireEvent.click(screen.getByRole("button", { name: /^保\s*存$/ }));
   await waitFor(() => expect(save).toHaveBeenCalled());
   expect(save.mock.calls[0][1].schedule).toMatchObject({
     cron: "0 10 LW * *",
@@ -314,7 +447,7 @@ it.each([
     await screen.findByLabelText("cronJobs.cronCustomExpression"),
   ).toHaveValue(cron);
   expect(screen.queryByDisplayValue("09:00")).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+  fireEvent.click(screen.getByRole("button", { name: /^保\s*存$/ }));
   await waitFor(() => expect(save).toHaveBeenCalled());
   expect(save.mock.calls[0][1].schedule.cron).toBe(cron);
 });

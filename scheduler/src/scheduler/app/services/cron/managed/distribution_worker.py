@@ -194,7 +194,11 @@ class BroadcastProcessor:
                 operation_id,
             )
         current_spec = None
-        if item["operation"] == "retimed":
+        if item["operation"] == "retimed" or json.loads(
+            task["payload_json"],
+        ).get(
+            "definition_changes",
+        ):
             current = await ManagedCronRepository(self.db)._get_row(
                 caller.job_key(item["job_id"]),
                 include_deleted=True,

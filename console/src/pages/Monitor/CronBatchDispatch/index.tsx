@@ -42,7 +42,7 @@ import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
 import { useIframeStore } from "../../../stores/iframeStore";
 import styles from "./index.module.less";
 import WorkerHistoryChart from "./WorkerHistoryChart";
-import { loadWorkerHistory } from "./workerHistory";
+import { loadWorkerHistory, workerSampleRows } from "./workerHistory";
 import FailurePanel from "./FailurePanel";
 import { getBbkDisplayName } from "../../../constants/bbk";
 
@@ -358,12 +358,12 @@ function CapacityEventRow({ item }: { item: CronDispatchCapacityItem }) {
             {item.pending_count} / {item.claimed_count} / {item.running_count}
           </dd>
         </div>
-        <div>
-          <dt>成功 / 失败</dt>
-          <dd>
-            {item.success_count} / {item.failure_count}
-          </dd>
-        </div>
+        {workerSampleRows(item).map(([label, value]) => (
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
         <div>
           <dt>失败率</dt>
           <dd>{(item.error_rate * 100).toFixed(2)}%</dd>

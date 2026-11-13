@@ -226,7 +226,12 @@ export function useManagedCronJobs(
     setExecution,
     create: (spec: ManagedCronSpec, requestId: string) =>
       perform((ctx) => schedulerCronApi.create(ctx, spec, requestId)),
-    update: (job: ManagedJob, spec: ManagedCronSpec, requestId: string) =>
+    update: (
+      job: ManagedJob,
+      spec: ManagedCronSpec,
+      requestId: string,
+      syncChildren?: boolean,
+    ) =>
       perform((ctx) =>
         schedulerCronApi.update(
           targetManagedContext(ctx, job),
@@ -234,6 +239,12 @@ export function useManagedCronJobs(
           spec,
           job.definition_version,
           requestId,
+          syncChildren === undefined
+            ? undefined
+            : {
+                sync_children: syncChildren,
+                expected_management_version: job.management_version,
+              },
         ),
       ),
     remove: (job: ManagedJob, requestId: string) =>

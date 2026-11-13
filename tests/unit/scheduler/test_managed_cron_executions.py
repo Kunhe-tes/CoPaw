@@ -42,6 +42,7 @@ class ExecutionDatabase(ManagementDatabase):
                 output_preview TEXT, trace_id TEXT, error_code TEXT,
                 result_json TEXT, version INTEGER DEFAULT 1,
                 settled_status TEXT, settled_at TEXT, settled_error_code TEXT,
+                subtask_success_count INTEGER, subtask_failure_count INTEGER,
                 created_at TEXT, updated_at TEXT
             );
             CREATE TABLE swe_cron_executions (
@@ -55,6 +56,10 @@ class ExecutionDatabase(ManagementDatabase):
                 notification_due_at TEXT, notification_timezone TEXT,
                 is_read INTEGER, read_at TEXT, created_at TEXT,
                 is_final INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE swe_cron_subtasks (
+                trace_id TEXT, task_id TEXT, status TEXT, error_type TEXT,
+                PRIMARY KEY (trace_id, task_id)
             );
         """)
         add_board_tables(self.conn)
