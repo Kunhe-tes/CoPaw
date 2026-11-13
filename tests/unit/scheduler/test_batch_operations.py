@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import pytest
 
 from tests.unit.scheduler.test_cron_execution_reconciliation import _SqliteDb
@@ -23,7 +24,6 @@ async def test_manual_retry_keeps_attempt_and_only_adds_one_chance(
     db.connection.executescript("""
         ALTER TABLE swe_cron_dispatch_events ADD COLUMN batch_id TEXT;
         ALTER TABLE swe_cron_dispatch_events ADD COLUMN source_id TEXT;
-        ALTER TABLE swe_cron_dispatch_events ADD COLUMN details TEXT;
         CREATE TABLE swe_cron_jobs (
             id TEXT, tenant_id TEXT, source_id TEXT,
             enabled INTEGER, status TEXT
@@ -51,7 +51,9 @@ async def test_manual_retry_keeps_attempt_and_only_adds_one_chance(
     """)
     monkeypatch.setattr(ops, "get_db_connection", lambda: db)
     db.add_intent(
-        status="failed", attempt_count=3, error_message="network error"
+        status="failed",
+        attempt_count=3,
+        error_message="network error",
     )
     body = ops.RetryRequest(candidates=[{"id": 7, "attempt_count": 3}])
     result = await ops.retry_failed("source-a", "batch-1", "admin", body)
@@ -64,13 +66,13 @@ async def test_manual_retry_keeps_attempt_and_only_adds_one_chance(
     ] == 0
     assert (
         db.connection.execute(
-            "SELECT COUNT(*) FROM swe_cron_dispatch_events"
+            "SELECT COUNT(*) FROM swe_cron_dispatch_events",
         ).fetchone()[0]
         == 1
     )
     db.connection.execute(
         "UPDATE swe_cron_dispatch_intents "
-        "SET status='failed', attempt_count=4"
+        "SET status='failed', attempt_count=4",
     )
     assert (await ops.retry_failed("source-a", "batch-1", "admin", body))[
         "queued"
@@ -83,7 +85,7 @@ async def test_manual_retry_keeps_attempt_and_only_adds_one_chance(
     assert db.intent()["status"] == "failed"
     preview = await ops.failure_preview("source-a", "batch-1", [category])
     assert preview["counts"] == [
-        {"failure_type": category, "count": 1, "label": label}
+        {"failure_type": category, "count": 1, "label": label},
     ]
     assert preview["items"][0]["attempt_count"] == 4
     with pytest.raises(LookupError):
@@ -95,7 +97,7 @@ async def test_manual_retry_keeps_attempt_and_only_adds_one_chance(
     assert db.intent()["max_attempts"] == 5
     db.connection.execute(
         "UPDATE swe_cron_dispatch_intents SET status='failed', "
-        "attempt_count=5, error_message='execution timeout'"
+        "attempt_count=5, error_message='execution timeout'",
     )
     current.candidates[0].attempt_count = 5
     with pytest.raises(ValueError, match="旧执行已停止"):
@@ -106,7 +108,7 @@ async def test_manual_retry_keeps_attempt_and_only_adds_one_chance(
     ] == 1
     assert db.intent()["max_attempts"] == 6
     db.connection.execute(
-        "UPDATE swe_cron_dispatch_intents SET status='failed', attempt_count=6"
+        "UPDATE swe_cron_dispatch_intents SET status='failed', attempt_count=6",
     )
     db.connection.execute("UPDATE swe_cron_jobs SET enabled=0")
     current.candidates[0].attempt_count = 6
@@ -151,7 +153,7 @@ def test_sql_classification_matches_python_for_all_categories():
             db.connection.execute("DELETE FROM swe_cron_dispatch_intents")
             db.add_intent(error_message=message)
             assert db.connection.execute(
-                f"SELECT {failure_case_sql()} FROM swe_cron_dispatch_intents"
+                f"SELECT {failure_case_sql()} FROM swe_cron_dispatch_intents",
             ).fetchone()[0] == classify_failure(message)
     db.connection.close()
 
@@ -181,7 +183,7 @@ def test_gateway_rate_limit_errors_are_classified_in_python_and_sql(error):
     try:
         db.add_intent(error_message=error)
         result = db.connection.execute(
-            f"SELECT {failure_case_sql()} FROM swe_cron_dispatch_intents"
+            f"SELECT {failure_case_sql()} FROM swe_cron_dispatch_intents",
         ).fetchone()[0]
         assert result == "model_rate_limit"
     finally:
