@@ -62,13 +62,32 @@ it("known migration remains new and read-only on API failures", () => {
     { owner: "scheduler", unavailable: true },
   ]);
 });
-it("binding conflicts are rejected rather than merging two sessions", () => {
+it("ignores a stale legacy binding when the completed migration has a matching scheduler task", () => {
   const snapshot = {
     legacy: [task("legacy", "wrong")],
     scheduler: [task("scheduler") as never],
     errors: [] as string[],
     ownership: [fact],
   };
-  expect(mergeTaskSources([], snapshot)).toEqual([]);
-  expect(snapshot.errors.join()).toContain("绑定冲突");
+  expect(mergeTaskSources([], snapshot).map(taskOrigin)).toMatchObject([
+    { owner: "scheduler" },
+  ]);
+  expect(snapshot.errors).toEqual([]);
 });
+
+it.each([
+  { completed: true, legacyChat: "chat", schedulerChat: "wrong" },
+  { completed: false, legacyChat: "wrong", schedulerChat: "chat" },
+])(
+  "rejects a mismatched binding for the migration owner ($completed)",
+  ({ completed, legacyChat, schedulerChat }) => {
+    const snapshot = {
+      legacy: [task("legacy", legacyChat)],
+      scheduler: [task("scheduler", schedulerChat) as never],
+      errors: [] as string[],
+      ownership: [{ ...fact, completed }],
+    };
+    expect(mergeTaskSources([], snapshot)).toEqual([]);
+    expect(snapshot.errors.join()).toContain("绑定冲突");
+  },
+);
