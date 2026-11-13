@@ -4,6 +4,29 @@ import type {
   CronDispatchWorkersResponse,
 } from "../../../api/modules/monitor";
 
+export function workerSampleRows(record: CronDispatchCapacityItem) {
+  const {
+    success_count: success,
+    failure_count: failure,
+    subtask_success_count: subtaskSuccess,
+    subtask_failure_count: subtaskFailure,
+  } = record;
+  const hasBreakdown = subtaskSuccess != null && subtaskFailure != null;
+  return [
+    [
+      "主任务 成功 / 失败",
+      hasBreakdown
+        ? `${success - subtaskSuccess} / ${failure - subtaskFailure}`
+        : "—",
+    ],
+    [
+      "子任务 成功 / 失败",
+      hasBreakdown ? `${subtaskSuccess} / ${subtaskFailure}` : "—",
+    ],
+    ["合计 成功 / 失败", `${success} / ${failure}`],
+  ];
+}
+
 export async function loadWorkerHistory(
   loadPage: (cursor?: string) => Promise<CronDispatchWorkersResponse>,
   isCurrent: () => boolean,

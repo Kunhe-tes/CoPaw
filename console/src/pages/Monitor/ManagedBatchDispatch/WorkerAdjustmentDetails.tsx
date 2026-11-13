@@ -1,6 +1,7 @@
 import { ChevronDown } from "lucide-react";
 import type { CronDispatchCapacityItem } from "../../../api/modules/monitor";
 import styles from "../CronBatchDispatch/index.module.less";
+import { workerSampleRows } from "../CronBatchDispatch/workerHistory";
 import { timeText } from "./format";
 
 /** 旧版结构化Worker详情布局；不改变容量统计或调节行为。 */
@@ -23,7 +24,7 @@ export default function WorkerAdjustmentDetails({
       "等待 / 已领取 / 运行",
       `${item.pending_count} / ${item.claimed_count} / ${item.running_count}`,
     ],
-    ["成功 / 失败", `${item.success_count} / ${item.failure_count}`],
+    ...workerSampleRows(item),
     ["失败率", `${(item.error_rate * 100).toFixed(2)}%`],
     ["平均耗时", `${item.avg_latency_ms} ms`],
     ["记录时间", timeText(item.created_at)],

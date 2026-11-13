@@ -125,6 +125,8 @@ def complete_test_schema():
         "running_count INTEGER",
         "success_count INTEGER",
         "failure_count INTEGER",
+        "subtask_success_count INTEGER",
+        "subtask_failure_count INTEGER",
         "error_rate REAL",
         "matched_rule TEXT",
         "avg_latency_ms INTEGER",
