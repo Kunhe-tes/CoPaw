@@ -172,6 +172,10 @@ async def test_board_counts_current_member_without_growing_after_retry(
 
     db = callback_setup[0]
     caller, batch = await failed_batch(callback_setup)
+    db.conn.execute(
+        "UPDATE swe_cron_execution_runs "
+        "SET dispatch_meta_json=JSON_SET(dispatch_meta_json,'$.viewer_heat_score',6)",
+    )
     service = ManagedBoardQuery(db)
     first = await service.batches("bank", page_size=1)
     assert (
@@ -196,6 +200,7 @@ async def test_board_counts_current_member_without_growing_after_retry(
     assert detail["batch"]["status"] == "pending"
     assert detail["members"][0]["business_attempt"] == 2
     member = detail["members"][0]
+    assert member["viewer_heat_score"] == 6
     history = await service.member_attempts("bank", batch, member["member_id"])
     assert [
         (row["business_attempt"], row["current"]) for row in history["items"]

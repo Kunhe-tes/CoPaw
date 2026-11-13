@@ -12,6 +12,7 @@ const api = vi.hoisted(() => ({
   batches: vi.fn(),
   detail: vi.fn(),
   workers: vi.fn(),
+  workerOccupants: vi.fn(),
   failures: vi.fn(),
 }));
 const context = vi.hoisted(() => ({
@@ -32,6 +33,13 @@ vi.mock("../CronBatchDispatch/WorkerHistoryChart", () => ({
 }));
 beforeEach(() => {
   vi.clearAllMocks();
+  api.workerOccupants.mockResolvedValue({
+    total: 0,
+    page: 1,
+    page_size: 10,
+    sampled_at: "2026-11-12T01:00:00Z",
+    items: [],
+  });
   context.manager = true;
   api.batches.mockResolvedValue({
     items: [],
@@ -59,6 +67,45 @@ it("非管理员不加载跨用户看板数据", () => {
   expect(screen.getByText("仅管理员可访问批调度看板（新）")).toBeTruthy();
   expect(api.batches).not.toHaveBeenCalled();
   expect(api.workers).not.toHaveBeenCalled();
+  expect(api.workerOccupants).not.toHaveBeenCalled();
+});
+
+it("当前 Worker 占用独立查询并展示任务明细", async () => {
+  api.workerOccupants.mockResolvedValue({
+    total: 1,
+    page: 1,
+    page_size: 10,
+    sampled_at: "2026-11-12T01:00:00Z",
+    items: [
+      {
+        id: "managed:one",
+        provider_id: "provider",
+        model_id: "model",
+        tenant_id: "80074361",
+        tenant_name: "测试人员",
+        job_id: "worker-job",
+        job_name: "日报定时任务",
+        started_at: null,
+        status: "accepted",
+        execution_type: "daily_failure_retry",
+      },
+    ],
+  });
+  render(<ManagedBatchDispatchPage />);
+  expect(
+    await screen.findByRole("heading", { name: "当前 Worker 占用（1）" }),
+  ).toBeVisible();
+  expect(screen.getByText("测试人员")).toBeInTheDocument();
+  expect(screen.getByText("80074361")).toBeInTheDocument();
+  expect(screen.getByText("日报定时任务")).toBeInTheDocument();
+  expect(screen.getByText("worker-job")).toBeInTheDocument();
+  expect(screen.getByText("尚未开始")).toBeInTheDocument();
+  expect(screen.getByText("整点补跑")).toBeInTheDocument();
+  expect(api.workerOccupants).toHaveBeenCalledWith(
+    "bank",
+    { page: 1, page_size: 10 },
+    expect.any(AbortSignal),
+  );
 });
 it("零成员不伪造百分之百完成率，空数据没有旧接口回退", async () => {
   render(<ManagedBatchDispatchPage />);

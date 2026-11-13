@@ -174,20 +174,26 @@ class ManagementService:
             if operation["action"] == "update"
             else payload["dispatch_state"]
         )
-        if mode != "ordinary" and (
-            self.store.grant is not None
-            or await self.store.has_parent(operation)
-        ):
-            # 批子任务只由源批入口触发，公开编辑也不能另建独立批定时器。
-            logger.info(
-                "批子任务沿用源批入口 operation_id=%s job_id=%s mode=%s",
-                operation["operation_id"],
-                operation["job_id"],
-                mode,
-            )
-            progress["platform_synced"] = True
-            await self.store.checkpoint(operation, "publish", progress)
-            return
+        if mode != "ordinary":
+            if self.store.grant is not None or await self.store.has_parent(
+                operation,
+            ):
+                # 批子任务只由源批入口触发，公开编辑也不能另建独立批定时器。
+                logger.info(
+                    "批子任务沿用源批入口 operation_id=%s job_id=%s mode=%s",
+                    operation["operation_id"],
+                    operation["job_id"],
+                    mode,
+                )
+                progress["platform_synced"] = True
+                await self.store.checkpoint(operation, "publish", progress)
+                return
+            if payload.get("group_update"):
+                from .definition_sync import batch_platform_spec
+                from .operations import IDENTITY_FIELDS
+
+                key = tuple(operation[name] for name in IDENTITY_FIELDS)
+                spec = await batch_platform_spec(self.store.db, key, spec)
         field = (
             "ordinary_external_job_id"
             if mode == "ordinary"

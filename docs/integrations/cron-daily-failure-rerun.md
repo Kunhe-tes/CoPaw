@@ -101,7 +101,7 @@ Body 只接受 `source_id`，必填、最多 128 字符、不允许首尾空白�
 - 排除认证过期 `auth_expired`、`cron auth user_info is expired`、`workflow sapId does not match target user`、`技能任务结果不可用`；英文文本忽略大小写。
 - 删除、停用、未读自动暂停、管理中/未就绪以及结果未知的失联执行跳过。仅批入口暂停但成员自身可执行，允许补跑。
 - 同一原失败只能受理一条补跑，多次/多实例调用仍各有审计。新补跑明确失败后可再次被扫描，次数不限，跨日按新确认失败日期判断。
-- 同一次调用受理的补跑按调用 ID 与任务身份稳定散列，将 `not_before_at` 分散到 `cutoff_at` 起 1 小时内；扫描处理延迟时，已过散列时点的补跑立即进入派发，不延后散列窗口。
+- 新受理的补跑使用调用的 `cutoff_at` 作为 `not_before_at`。写入队列后即可参与派发，按共享模型池 Worker 余量和现有队列顺序领取。
 - 最新定义生成新运行记录，任务 ID、会话、原逻辑轮次及原通知时间不变。入队不写假历史、不提前改 running 或清空旧结果。
 - SWE 实际执行后新增 `swe_cron_executions`，在同事务把同链上一条历史 `is_final` 改为 0、新记录为 1。其他周期不动；新失败仍为 1。SWE 直接写共享 state 和结果，不回调 Scheduler。
 - 历史 `meta.daily_failure_retry` 保存 `call_id`、`root_execution_id`、`previous_execution_id`、`retry_count`；运行元数据另保存冻结的原通知时间。补跑次数独立于批成员 `business_attempt`，看板后者仍沿用原业务尝试口径。
@@ -111,7 +111,7 @@ Body 只接受 `source_id`，必填、最多 128 字符、不允许首尾空白�
 
 ## 预发布验证
 
-1. 准备一个该来源当日明确失败的新版普通任务。POST 后确认快速返回 202；GET 最终 queued_count=1，补跑 `not_before_at` 位于本次调用的 `cutoff_at` 至其后 1 小时。任务列表中的定义、会话 ID 和调度时间不变。
+1. 准备一个该来源当日明确失败的新版普通任务。POST 后确认快速返回 202，GET 最终返回 `queued_count=1`，补跑的 `not_before_at` 等于本次调用的 `cutoff_at`。有空闲 Worker 时，Scheduler 可在下一轮派发领取；池满时补跑继续排队。
 2. 连续/并发 POST 两次：两条调用记录，但同一原失败只能产生一个补跑执行；另一调用应跳过。手动成功不能改变自动失败候选口径。
 3. 等待 SWE 执行完成，用 GET 验证新 history_execution_id；通过现有历史接口或下列只读 SQL 核对原历史仍保留、同链 is_final 为 0/1、补跑 meta 和 state 更新。
 4. 再制造补跑失败，多次调用超过三次仍可受理；变成功后再次调用不再补跑。次日只应扫描次日确认的失败。

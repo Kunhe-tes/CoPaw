@@ -1159,7 +1159,8 @@ class QueryService:
                 c.previous_workers, c.baseline_workers, c.min_workers,
                 c.max_workers, c.effective_workers, c.pending_count,
                 c.claimed_count, c.running_count, c.success_count,
-                c.failure_count, c.error_rate, c.matched_rule,
+                c.failure_count, c.subtask_success_count, c.subtask_failure_count,
+                c.error_rate, c.matched_rule,
                 c.avg_latency_ms, c.decision_reason, c.created_at
             FROM swe_cron_dispatch_worker_capacity c
             INNER JOIN (

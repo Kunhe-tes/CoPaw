@@ -95,6 +95,7 @@ export interface ManagedJobDetail
 
 export interface ManagedOperation {
   operation_id: string;
+  broadcast_task_id?: string;
   job_id: string;
   action: string;
   status: "pending" | "running" | "completed" | "failed" | "superseded";

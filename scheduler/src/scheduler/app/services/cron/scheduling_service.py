@@ -398,6 +398,8 @@ class CronSchedulingService:
             "running_count",
             "success_count",
             "failure_count",
+            "subtask_success_count",
+            "subtask_failure_count",
         )
         return {
             **{
@@ -911,6 +913,14 @@ class CronSchedulingService:
             running_count=_worker_count(feedback, "running_count"),
             success_count=success_count,
             failure_count=failure_count,
+            subtask_success_count=_worker_count(
+                feedback,
+                "subtask_success_count",
+            ),
+            subtask_failure_count=_worker_count(
+                feedback,
+                "subtask_failure_count",
+            ),
             error_rate=error_rate,
             matched_rule=matched_rule,
             avg_latency_ms=_worker_count(feedback, "latency_p95_ms"),
@@ -1113,6 +1123,8 @@ class CronSchedulingService:
             running_count=0,
             success_count=0,
             failure_count=0,
+            subtask_success_count=0,
+            subtask_failure_count=0,
             error_rate=0,
             matched_rule={},
             avg_latency_ms=0,

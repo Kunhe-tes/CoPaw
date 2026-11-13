@@ -183,6 +183,8 @@ CREATE TABLE IF NOT EXISTS swe_cron_dispatch_worker_capacity (
     running_count INT NOT NULL DEFAULT 0 COMMENT 'running intents',
     success_count INT NOT NULL DEFAULT 0 COMMENT 'recent success count',
     failure_count INT NOT NULL DEFAULT 0 COMMENT 'recent terminal failure count',
+    subtask_success_count INT DEFAULT NULL COMMENT 'subtask success samples',
+    subtask_failure_count INT DEFAULT NULL COMMENT 'subtask failure samples',
     error_rate DECIMAL(8,6) NOT NULL DEFAULT 0 COMMENT 'terminal failure rate',
     matched_rule JSON DEFAULT NULL COMMENT 'matched adjustment rule',
     avg_latency_ms INT NOT NULL DEFAULT 0 COMMENT 'recent average latency',
@@ -375,6 +377,11 @@ CREATE_TABLE_STATEMENTS = [
 ]
 
 ALTER_STATEMENTS.extend(RUN_STATE_ALTERS)
+ALTER_STATEMENTS.extend(
+    "ALTER TABLE swe_cron_dispatch_worker_capacity "
+    f"ADD COLUMN {column} INT DEFAULT NULL"
+    for column in ("subtask_success_count", "subtask_failure_count")
+)
 
 
 async def init_database_tables() -> None:

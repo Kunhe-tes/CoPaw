@@ -159,6 +159,8 @@ CREATE TABLE IF NOT EXISTS swe_cron_execution_runs (
   settled_status VARCHAR(16) DEFAULT NULL COMMENT 'Scheduler整轮派发收敛结果，空表示尚未确认异步终态',
   settled_at DATETIME(6) DEFAULT NULL COMMENT 'Scheduler观察到整轮结束的时间，UTC，不替代SWE完成时间',
   settled_error_code VARCHAR(128) DEFAULT NULL COMMENT '整轮收敛错误码，不覆盖SWE主执行错误',
+  subtask_success_count INT DEFAULT NULL COMMENT '结算时固定的子任务成功样本数',
+  subtask_failure_count INT DEFAULT NULL COMMENT '结算时固定的子任务失败样本数',
   version BIGINT NOT NULL DEFAULT 1 COMMENT '并发更新及租约围栏版本',
   created_at DATETIME(6) NOT NULL COMMENT '本次执行入队时间，UTC',
   updated_at DATETIME(6) NOT NULL COMMENT '最近登记更新时间，UTC',

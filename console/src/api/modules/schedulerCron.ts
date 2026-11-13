@@ -164,11 +164,16 @@ export const schedulerCronApi = {
     spec: ManagedCronSpec,
     version: number,
     requestId: string,
+    group?: {
+      sync_children: boolean;
+      expected_management_version?: number;
+    },
   ) =>
     write<{ operation: ManagedOperation }>(context, jobPath(id), "PUT", {
       request_id: requestId,
       expected_definition_version: version,
       spec: definitionOnly(spec),
+      ...group,
     }),
   remove: (
     context: ManagedCronContext,

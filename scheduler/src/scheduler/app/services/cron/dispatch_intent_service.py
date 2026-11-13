@@ -2048,6 +2048,8 @@ class CronDispatchIntentService:
         running_count: int = 0,
         success_count: int = 0,
         failure_count: int = 0,
+        subtask_success_count: int | None = None,
+        subtask_failure_count: int | None = None,
         error_rate: float = 0,
         matched_rule: dict[str, Any] | None = None,
         avg_latency_ms: int = 0,
@@ -2063,12 +2065,14 @@ class CronDispatchIntentService:
                 previous_workers, baseline_workers, min_workers,
                 max_workers, effective_workers, pending_count, claimed_count,
                 running_count, success_count, failure_count, error_rate,
+                subtask_success_count, subtask_failure_count,
                 matched_rule, avg_latency_ms, decision_reason, created_at
             ) VALUES (
                 %s, %s, %s, %s, %s,
                 %s, %s, %s,
                 %s, %s, %s, %s,
                 %s, %s, %s, %s,
+                %s, %s,
                 %s, %s, %s, %s
             )
             """,
@@ -2089,6 +2093,8 @@ class CronDispatchIntentService:
                 success_count,
                 failure_count,
                 error_rate,
+                subtask_success_count,
+                subtask_failure_count,
                 _json_or_none(matched_rule),
                 avg_latency_ms,
                 (decision_reason or "")[:255],

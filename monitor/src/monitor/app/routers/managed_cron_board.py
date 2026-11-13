@@ -6,10 +6,15 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..database import get_db_connection
-from ..models.managed_board import BoardListQuery, BoardDetailQuery
+from ..models.managed_board import (
+    BoardDetailQuery,
+    BoardListQuery,
+    BoardOccupancyQuery,
+)
 from ..services.cron.managed_board import ManagedBoardQuery
 from ..services.cron.managed_board_sql import db_time
 from ..services.cron.managed_board_workers import shared_workers
+from ..services.cron.managed_board_occupancy import worker_occupants
 
 router = APIRouter(
     prefix="/monitor/cron/managed-dispatch",
@@ -98,6 +103,18 @@ async def workers(
             end.replace(tzinfo=timezone.utc) if end else None,
             capacity_cursor,
         )
+    except Exception as exc:
+        raise board_error(exc) from exc
+
+
+@router.get("/workers/occupants", summary="查询当前共享 Worker 占用明细")
+async def occupants(
+    filters: BoardOccupancyQuery = Depends(),
+    source=Depends(manager_source),
+    service=Depends(board_service),
+):
+    try:
+        return await worker_occupants(service.db, source, filters)
     except Exception as exc:
         raise board_error(exc) from exc
 

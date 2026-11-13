@@ -115,6 +115,15 @@ const memberColumns = (
         <span>最早 {timeText(item.not_before_at)}</span>
         <span>开始 {timeText(item.started_at)}</span>
         <span>完成 {timeText(item.finished_at)}</span>
+        <span title="Scheduler 确认子任务状态的时间">
+          子任务{" "}
+          {timeText(
+            item.status === "success" &&
+              item.settled_error_code !== "cron_async_subtasks_timeout"
+              ? item.settled_at
+              : null,
+          )}
+        </span>
       </div>
     ),
   },

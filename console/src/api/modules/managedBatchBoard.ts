@@ -163,6 +163,30 @@ export interface ManagedRetryResult {
     transport_only?: boolean;
   }[];
 }
+export interface ManagedWorkerPool {
+  provider_id: string;
+  model_id: string;
+}
+
+export interface ManagedWorkerOccupant extends ManagedWorkerPool {
+  id: string;
+  tenant_id: string;
+  tenant_name: string | null;
+  job_id: string;
+  job_name: string | null;
+  started_at: string | null;
+  status: string;
+  execution_type: string;
+}
+
+export interface ManagedWorkerOccupancy {
+  total: number;
+  page: number;
+  page_size: number;
+  sampled_at: string;
+  items: ManagedWorkerOccupant[];
+}
+
 type Filters = Record<string, string | number | undefined>;
 const MONITOR = "/monitor/cron/managed-dispatch";
 const SCHEDULER = "/scheduler/cron/managed-dispatch/batches";
@@ -217,6 +241,13 @@ export const managedBatchBoard = {
     call<CronDispatchWorkersResponse>(
       source,
       `${MONITOR}/workers`,
+      filters,
+      signal,
+    ),
+  workerOccupants: (source: string, filters: Filters, signal?: AbortSignal) =>
+    call<ManagedWorkerOccupancy>(
+      source,
+      `${MONITOR}/workers/occupants`,
       filters,
       signal,
     ),

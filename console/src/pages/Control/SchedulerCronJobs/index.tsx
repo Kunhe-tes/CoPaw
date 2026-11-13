@@ -22,7 +22,11 @@ import { failureMessage, RequestIdentity } from "./helpers";
 import styles from "../CronJobs/index.module.less";
 import managementStyles from "./management.module.less";
 
-type Panel = ManagedJobPanel | { kind: "create" } | null;
+type Panel =
+  | ManagedJobPanel
+  | { kind: "create" }
+  | { kind: "sync-progress"; job: ManagedJob; taskId: string }
+  | null;
 
 function SchedulerCronWorkspace({ context }: { context: ManagedCronContext }) {
   const { t } = useTranslation();
@@ -141,16 +145,22 @@ function SchedulerCronWorkspace({ context }: { context: ManagedCronContext }) {
           onLoaded={data.reconcileJob}
           onClose={close}
           onChanged={refresh}
-          onSave={(job, spec, id) =>
-            job ? data.update(job, spec, id) : data.create(spec, id)
+          onSave={(job, spec, id, syncChildren) =>
+            job
+              ? data.update(job, spec, id, syncChildren)
+              : data.create(spec, id)
+          }
+          onSyncStarted={(job, taskId) =>
+            setPanel({ kind: "sync-progress", job, taskId })
           }
         />
       )}
-      {panel?.kind === "broadcast" && (
+      {(panel?.kind === "broadcast" || panel?.kind === "sync-progress") && (
         <ManagedBroadcastModal
           context={target}
           job={panel.job}
           onClose={close}
+          syncTaskId={panel.kind === "sync-progress" ? panel.taskId : undefined}
         />
       )}
       {panel?.kind === "children" && (

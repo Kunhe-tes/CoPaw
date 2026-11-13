@@ -10,7 +10,8 @@
 ## 批调度子任务错误类型与模型反馈
 
 - 执行历史 `swe_cron_executions.error_type` 保留原始值；子任务 `async_status=error` 且原值包含大小写敏感的 `Prompt` 时才按模型失败处理。逗号分隔文本和包含该词的 JSON 字符串均命中。
-- 新版统一分类入口为 `scheduler/src/scheduler/app/services/cron/managed/failure_policy.py`，用于自动、每日和人工业务重试及模型池反馈。非模型失败保留业务失败状态，但计入 worker 成功样本。
+- 新版 `scheduler/src/scheduler/app/services/cron/managed/failure_policy.py` 用于自动重试、每日补跑和模型池反馈。非模型失败保留业务失败状态，但计入 worker 成功样本。
+- 新版看板人工重跑按当前失败状态受理，支持所有失败类型。结果不明、超时及其他错误仍需确认旧执行已停止。
 - 当前尝试关联的原始错误类型在看板成员及失败预览中显示，空值显示 `-`。
 - 数据库列由外部预先新增；不会自动对已有库执行 ALTER。终态 `async_status` 和 `error_type` 应在一次提交中写入。
 
@@ -51,6 +52,11 @@
 - `GET /user-info/tenants/by-source` 位于 `src/swe/app/routers/user_info.py::list_tenants_by_source`；`source_id` 未传时沿用请求头来源，查询包含模板条目。
 - 可选 Query 参数 `bbk_id` 通过 `TenantInitSourceStore.get_by_source` 下推 SQL 精确匹配；不传时返回该来源全部条目，无匹配时返回空列表。回归入口：`tests/unit/routers/test_user_info_tenant_source.py`、`tests/unit/workspace/test_tenant_init_source.py`。
 - 在 `migrate_tenant_init_source_bbk.sql` 之后执行 `scripts/sql/migrate_tenant_init_source_source_bbk_index.sql`，为新旧数据库补充 `idx_source_bbk (source_id, bbk_id)` 联合索引；脚本检查当前数据库索引是否存在，可重复执行。
+
+## 新版定时任务保存与子任务同步
+
+- 控制台入口在 `ManagedJobEditor.tsx` 的基本配置页签。有分发子任务时，修改 Cron 表达式、时区或可执行日期会在普通保存前提示确认。「保存并同步子任务」直接提交。两种方式都同步这三个字段的变更，其他字段随「保存并同步子任务」同步。
+- Scheduler 在 `operations.py` 发布父任务定义时同步日期，并由 `definition_sync.py` 登记子任务更新。通过返回的 `broadcast_task_id` 查逐项结果，父任务保存状态和子任务同步状态分别查询。
 
 ## 定时任务第一阶段全量快照迁移
 
