@@ -21,7 +21,7 @@ async def test_batch_operations_headers_idempotency_and_strict_body(
         BatchRetryService,
     )
 
-    caller, batch = await failed_batch(callback_setup)
+    caller, batch = await failed_batch(callback_setup, category="auth_expired")
     service = BatchRetryService(callback_setup[0])
     app = FastAPI()
     app.include_router(api.router, prefix="/api")

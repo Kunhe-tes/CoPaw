@@ -68,13 +68,12 @@ async def test_business_retry_uses_current_workflow_version_while_batch_entry_pa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "error_type,queued",
-    [("Prompt", 1), ("Business,Prompt", 1), ("Business", 0), (None, 0)],
+    "error_type",
+    ["Prompt", "Business,Prompt", "Business", None],
 )
-async def test_manual_retry_requires_prompt_for_async_failure(
+async def test_manual_retry_accepts_async_failure_regardless_of_error_type(
     callback_setup,
     error_type,
-    queued,
 ):
     from tests.unit.scheduler.test_managed_batch_retry import (
         failed_batch,
@@ -99,6 +98,5 @@ async def test_manual_retry_requires_prompt_for_async_failure(
         batch,
         retry_body(await service.preview(caller, batch)),
     )
-    assert result["queued"] == queued
-    if not queued:
-        assert result["results"][0]["reason"] == "cron_retry_non_model_failure"
+    assert result["queued"] == 1
+    assert result["skipped"] == 0

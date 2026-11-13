@@ -140,6 +140,7 @@ async def test_native_retry_after_urgent_attempt_keeps_urgent_lane(
         batch_id,
         retry_body(await service.preview(caller, batch_id), stopped=True),
     )
+    assert accepted["queued"] == 1, accepted["results"]
     identifier = accepted["results"][0]["execution_id"]
     run = await db.fetch_one(
         "SELECT * FROM swe_cron_execution_runs WHERE execution_id=%s",
