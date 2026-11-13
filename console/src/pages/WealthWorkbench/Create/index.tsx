@@ -615,7 +615,7 @@ export function MonitoringFields({
           {(
             [
               ["today", "当日"],
-              ["within7days", "T+7日内"],
+              ["within7days", "7日内"],
             ] as const
           ).map(([cycle, label]) => (
             <button
