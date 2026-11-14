@@ -2,10 +2,129 @@
 """Conservative failure attribution for independently published tenants."""
 
 from copy import deepcopy
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 import json
 from pathlib import Path
 
 from ..identity import WorkspaceScope
+
+
+def _tenant_semantic(selected, validator):
+    from .inventory_v3 import inventory_discovery
+    from .source_inputs import SourceInputInvalid
+    from .spool import MigrationCapacityError, MigrationDiskCapacityError
+
+    try:
+        if selected.get("in_place"):
+            from .in_place_source import freeze_evidence
+
+            for item in selected["workspaces"]:
+                item["in_place_evidence"] = freeze_evidence(item)
+        return (validator or inventory_discovery)(selected)
+    except MigrationDiskCapacityError:
+        raise
+    except (
+        MigrationCapacityError,
+        SourceInputInvalid,
+        FileNotFoundError,
+    ) as error:
+        return error
+
+
+def map_tenant_semantics(
+    items,
+    *,
+    workers=4,
+    io_workers=4,
+    memory_bytes=512 * 1024 * 1024,
+):
+    """Bound tenant parsers globally; yield only detached count summaries."""
+    if not 1 <= workers <= 32 or not 1 <= io_workers <= 32:
+        raise ValueError("workers and io-workers must be between 1 and 32")
+    if memory_bytes // workers <= 0:
+        raise ValueError("memory budget is smaller than worker count")
+    allowance = memory_bytes // workers
+    return map_tenant_calls(
+        items,
+        lambda data: _tenant_semantic(
+            data,
+            lambda selected: _compact_tenant_inventory(selected, allowance),
+        ),
+        workers=workers,
+        io_workers=io_workers,
+    )
+
+
+def _compact_tenant_inventory(data, allowance):
+    from .inventory_parallel import _preflight_workspace
+    from .inventory_v3 import (
+        inventory_workspace,
+        _inventory_shares,
+        _preflight_share_budget,
+    )
+
+    summaries, references, blockers = [], [], []
+    for index, workspace in enumerate(data["workspaces"]):
+        _preflight_workspace(workspace, allowance)
+        result = inventory_workspace(data, index)
+        parsed = result["workspaces"][0]
+        summaries.append(
+            {
+                "sessions": range(len(parsed["sessions"])),
+                "chats": range(len(parsed["chats"])),
+            },
+        )
+        blockers.extend(result["blockers"])
+        if data["shares"]:
+            references.append(
+                {
+                    "scope": parsed["scope"],
+                    "chats": [
+                        {
+                            "position": chat["position"],
+                            "spec": {"id": chat["spec"]["id"]},
+                        }
+                        for chat in parsed["chats"]
+                    ],
+                },
+            )
+        del result, parsed
+    _preflight_share_budget(data, allowance)
+    for source in data["shares"]:
+        report = {"workspaces": references, "blockers": [], "shares": []}
+        _inventory_shares({**data, "shares": [source]}, report)
+        blockers.extend(report["blockers"])
+    return {"blockers": blockers, "workspaces": summaries}
+
+
+def map_tenant_calls(items, function, *, workers=4, io_workers=4):
+    """Ordered bounded synchronous calls retaining read-only guard context."""
+    if not 1 <= workers <= 32 or not 1 <= io_workers <= 32:
+        raise ValueError("workers and io-workers must be between 1 and 32")
+    iterator = iter(items)
+    pending = deque()
+    with ThreadPoolExecutor(
+        max_workers=min(workers, io_workers),
+        thread_name_prefix="migration-discovery",
+    ) as pool:
+        try:
+            for _ in range(min(workers, io_workers)):
+                item = next(iterator, None)
+                if item is None:
+                    break
+                pending.append(pool.submit(copy_context().run, function, item))
+            while pending:
+                yield pending.popleft().result()
+                item = next(iterator, None)
+                if item is not None:
+                    pending.append(
+                        pool.submit(copy_context().run, function, item),
+                    )
+        finally:
+            for future in pending:
+                future.cancel()
 
 
 def _configs(service):
@@ -81,8 +200,6 @@ def _collect_config_tenants(report, tenants, paths, evidence):
 
 def isolate_discovery(report, shares, validator):
     """Preserve all blockers and quarantine every affected tenant before parsing."""
-    from .inventory_v3 import inventory_discovery
-
     services = report["services"]
     tenants, paths, positions = {}, [], {}
     evidence = {}
@@ -114,10 +231,10 @@ def isolate_discovery(report, shares, validator):
             candidates,
         )
     _attribute_blockers(report, services, tenants, paths, positions)
-    for key in sorted(tenants):
-        if tenants[key]:
-            continue
-        selected = {
+    keys = [key for key in sorted(tenants) if not tenants[key]]
+
+    def select(key):
+        return {
             **report,
             "blockers": [],
             "workspaces": [
@@ -131,42 +248,35 @@ def isolate_discovery(report, shares, validator):
                 if (s["service_unit_id"], s["tenant_id"]) == key
             ],
         }
-        from .spool import MigrationCapacityError, MigrationDiskCapacityError
-        from .source_inputs import SourceInputInvalid
 
-        try:
-            if report.get("in_place"):
-                from .in_place_source import freeze_evidence
-
-                for item in selected["workspaces"]:
-                    item["in_place_evidence"] = freeze_evidence(item)
-            semantic = (validator or inventory_discovery)(selected)
-        except MigrationDiskCapacityError:
-            raise
-        except (
-            MigrationCapacityError,
-            SourceInputInvalid,
-            FileNotFoundError,
-        ) as error:
+    mapper = getattr(validator, "map_tenants", None)
+    selected = [select(key) for key in keys]
+    results = (
+        mapper(selected)
+        if mapper is not None
+        else (_tenant_semantic(item, validator) for item in selected)
+    )
+    for key, item, semantic in zip(keys, selected, results):
+        if isinstance(semantic, Exception):
             blocker = {
                 "code": "tenant_input_invalid",
                 "position": json.dumps(key),
-                "detail": str(error),
+                "detail": str(semantic),
             }
             tenants[key].append(blocker)
             report["blockers"].append(blocker)
             continue
         tenants[key].extend(semantic["blockers"])
         report["blockers"].extend(semantic["blockers"])
-        for item, workspace in zip(
-            selected["workspaces"],
+        for mapped, workspace in zip(
+            item["workspaces"],
             semantic["workspaces"],
         ):
-            item["counts"] = {
+            mapped["counts"] = {
                 "sessions": len(workspace["sessions"]),
                 "chats": len(workspace["chats"]),
             }
-            item["empty"] = not any(item["counts"].values())
+            mapped["empty"] = not any(mapped["counts"].values())
     report["tenants"] = [
         {
             "service_unit_id": key[0],

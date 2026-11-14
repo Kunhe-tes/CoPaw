@@ -954,3 +954,82 @@ async def test_review_restored_ticket_owner_rechecks_final_boundaries(
         "eve": "discovered",
     }
     tenant_write_boundaries(revised)
+
+
+def test_review_validator_routes_only_candidates_into_shared_budget_mapper():
+    from unittest.mock import Mock
+
+    def selected(tenant):
+        return {
+            "workspaces": [
+                {
+                    "service_unit_id": "svc",
+                    "tenant_id": tenant,
+                    "position": tenant,
+                    "counts": {"sessions": 2, "chats": 1},
+                },
+            ],
+            "shares": [],
+            "services": [{"service_unit_id": "svc"}],
+        }
+
+    old = selected("published")
+    manifest = SimpleNamespace(data=old)
+    validator = Mock(
+        side_effect=AssertionError("synchronous semantic fallback used"),
+    )
+    candidate = selected("retry")
+    marker = {"blockers": [], "workspaces": [{"sessions": (), "chats": ()}]}
+    validator.map_tenants = Mock(return_value=iter([marker]))
+    validator.map_input_digests = Mock()
+    wrapped = retry._review_validator(
+        manifest,
+        {("svc", "published")},
+        {("svc", "retained")},
+        validator,
+    )
+    results = list(
+        wrapped.map_tenants(
+            [selected("published"), selected("retained"), candidate],
+        ),
+    )
+    assert len(results[0]["workspaces"][0]["sessions"]) == 2
+    assert results[1]["workspaces"][0]["sessions"] == ()
+    assert results[2] is marker
+    validator.map_tenants.assert_called_once_with([candidate])
+    assert wrapped.map_input_digests is validator.map_input_digests
+    validator.assert_not_called()
+
+
+async def test_review_retry_passes_resource_validator_to_thread(
+    tmp_path,
+    monkeypatch,
+):
+    from unittest.mock import Mock
+
+    data = {
+        "tenant_isolation": True,
+        "tenants": [],
+        "services": [],
+        "declared_services": [],
+        "source_shares": [],
+        "workspaces": [],
+        "shares": [],
+    }
+    manifest = SimpleNamespace(
+        data=data,
+        path=tmp_path / "manifest.json",
+        migration_id=JOB,
+    )
+    discover = Mock(return_value=data)
+    validator = object()
+    monkeypatch.setattr(retry, "_discover_review", discover)
+    result = await retry.review_retry(
+        None,
+        manifest,
+        data,
+        eligible=set(),
+        semantic_validator=validator,
+    )
+    assert result["outcome"] == "unchanged"
+    discover.assert_called_once_with(manifest, data, set(), set(), validator)

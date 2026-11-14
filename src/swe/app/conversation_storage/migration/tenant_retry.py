@@ -241,15 +241,30 @@ async def _no_data(db, migration_id, keys, workspaces=(), shares=()):
         after = rows[-1]["id"]
 
 
-def _review_semantic(data, manifest, published):
+def _review_semantic(
+    data,
+    manifest,
+    published,
+    retained_only=(),
+    validator=None,
+):
     from .inventory_v3 import inventory_discovery
 
     keys = {_key(w) for w in data["workspaces"]}
     keys.update(_key(s) for s in data["shares"])
+    if keys and keys.issubset(retained_only):
+        return {
+            "blockers": [],
+            "workspaces": [
+                {"sessions": (), "chats": ()} for _ in data["workspaces"]
+            ],
+        }
     if keys and keys.issubset(published):
         # The immutable frozen mapping must agree, but live tenant bodies
         # are never re-inventoried by a retry of another account.
         for key in keys:
+            if key in retained_only:
+                continue
             if _without_counts(_evidence(data, key)) != _without_counts(
                 _evidence(manifest.data, key),
             ):
@@ -276,12 +291,53 @@ def _review_semantic(data, manifest, published):
                 for w in data["workspaces"]
             ],
         }
-    return inventory_discovery(data)
+    return (validator or inventory_discovery)(data)
 
 
-def _discover_review(manifest, reviewed_report, published):
+def _review_validator(manifest, published, retained_only, validator):
+    def semantic(data):
+        return _review_semantic(
+            data,
+            manifest,
+            published,
+            retained_only,
+            validator,
+        )
+
+    if validator is not None and hasattr(validator, "map_tenants"):
+
+        def map_tenants(items):
+            items = list(items)
+            candidates, slots = [], []
+            results = [None] * len(items)
+            for index, data in enumerate(items):
+                keys = {_key(w) for w in data["workspaces"]}
+                keys.update(_key(s) for s in data["shares"])
+                if keys and keys.issubset(published | set(retained_only)):
+                    results[index] = semantic(data)
+                else:
+                    candidates.append(data)
+                    slots.append(index)
+            for index, result in zip(slots, validator.map_tenants(candidates)):
+                results[index] = result
+            return iter(results)
+
+        semantic.map_tenants = map_tenants
+    if validator is not None and hasattr(validator, "map_input_digests"):
+        semantic.map_input_digests = validator.map_input_digests
+    return semantic
+
+
+def _discover_review(
+    manifest,
+    reviewed_report,
+    published,
+    retained_only=(),
+    semantic_validator=None,
+):
     from contextlib import nullcontext
     from .in_place_review import published_pruning
+    from .tenant_inputs import retained_input_digests
 
     in_place = manifest.data.get("in_place", False)
     published_positions = {
@@ -294,7 +350,7 @@ def _discover_review(manifest, reviewed_report, published):
         if in_place
         else nullcontext()
     )
-    with context:
+    with context, retained_input_digests(manifest.data, published):
         shares = reviewed_report["source_shares"]
         if in_place:
             old_owners = {s["token"]: _key(s) for s in manifest.data["shares"]}
@@ -316,10 +372,11 @@ def _discover_review(manifest, reviewed_report, published):
             overrides=overrides,
             tenant_isolation=True,
             in_place=in_place,
-            semantic_validator=lambda data: _review_semantic(
-                data,
+            semantic_validator=_review_validator(
                 manifest,
                 published,
+                retained_only,
+                semantic_validator,
             ),
         )
     if in_place:
@@ -489,26 +546,54 @@ def _settle_review_boundaries(report, old, protected):
             return failures
 
 
-async def review_retry(db, manifest, reviewed_report):
-    """Revise only failed/discovered zero-data tenants; never rewrite live scopes."""
-    if not manifest.data.get("tenant_isolation"):
-        raise ValueError("tenant review requires isolated migration")
-    if _pending(manifest).exists():
-        raise ValueError("pending tenant review must be recovered first")
+async def _review_owners(db, manifest, eligible):
     states = TenantState(db, manifest.migration_id)
     published = set()
     for tenant in manifest.data["tenants"]:
         row = await states.get(*_key(tenant))
         if row is not None and row["state"] == "published":
             published.add(_key(tenant))
+    preserved = set(published)
+    if eligible is not None:
+        known = {_key(t) for t in manifest.data["tenants"]}
+        if not set(eligible).issubset(known - published):
+            raise ValueError("automatic review tenant eligibility differs")
+        preserved.update(known - set(eligible))
 
-    current = await asyncio.to_thread(
-        _discover_review,
-        manifest,
-        reviewed_report,
-        published,
-    )
-    if not manifest.data.get("in_place") and current != reviewed_report:
+    return published, preserved
+
+
+async def review_retry(
+    db,
+    manifest,
+    reviewed_report,
+    eligible=None,
+    *,
+    semantic_validator=None,
+):
+    """Revise only failed/discovered zero-data tenants; never rewrite live scopes."""
+    if not manifest.data.get("tenant_isolation"):
+        raise ValueError("tenant review requires isolated migration")
+    if _pending(manifest).exists():
+        raise ValueError("pending tenant review must be recovered first")
+    published, preserved = await _review_owners(db, manifest, eligible)
+
+    arguments = (manifest, reviewed_report, preserved)
+    if eligible is not None:
+        arguments += (preserved - published,)
+    if semantic_validator is not None:
+        if eligible is None:
+            arguments += ((),)
+        arguments += (semantic_validator,)
+    current = await asyncio.to_thread(_discover_review, *arguments)
+    if eligible is not None and not manifest.data.get("in_place"):
+        for key in preserved:
+            _restore_tenant(current, manifest.data, key)
+    if (
+        eligible is None
+        and not manifest.data.get("in_place")
+        and current != reviewed_report
+    ):
         raise ValueError(
             "review report differs from current complete discovery",
         )
@@ -527,21 +612,24 @@ async def review_retry(db, manifest, reviewed_report):
     if current["source_shares"] != old["source_shares"]:
         raise ValueError("tenant review cannot change original share records")
     failures = _review_failures(current, published)
-    if old.get("in_place"):
+    retained_keys = []
+    if old.get("in_place") or eligible is not None:
         retained = await _retain_committed_failures(
             db,
             manifest,
             current,
-            published,
+            preserved,
         )
         failures.update(retained)
-        failures.update(
-            _settle_review_boundaries(
-                current,
-                old,
-                published | retained.keys(),
-            ),
-        )
+        retained_keys = [list(key) for key in sorted(retained)]
+        if old.get("in_place"):
+            failures.update(
+                _settle_review_boundaries(
+                    current,
+                    old,
+                    preserved | retained.keys(),
+                ),
+            )
         new_tenants = {_key(t): t for t in current["tenants"]}
     changed = {
         k
@@ -549,11 +637,20 @@ async def review_retry(db, manifest, reviewed_report):
         if _evidence(old, k) != _evidence(current, k)
         or old_tenants[k] != new_tenants[k]
     }
+    if changed & preserved:
+        raise ValueError("protected tenant evidence cannot change")
     if not changed:
         if failures:
             return {
                 "outcome": "unchanged",
                 "failures": list(failures.values()),
+                "retained_keys": retained_keys,
+            }
+        if eligible is not None:
+            return {
+                "outcome": "unchanged",
+                "failures": [],
+                "retained_keys": retained_keys,
             }
         raise ValueError("tenant review contains no changed tenant evidence")
     revision = str(uuid4())
@@ -568,7 +665,11 @@ async def review_retry(db, manifest, reviewed_report):
         revision,
     )
     outcome = await recover_pending_review(db, manifest)
-    return {**outcome, "failures": list(failures.values())}
+    return {
+        **outcome,
+        "failures": list(failures.values()),
+        "retained_keys": retained_keys,
+    }
 
 
 def _review_manifest(old, current, changed, failures, revision):

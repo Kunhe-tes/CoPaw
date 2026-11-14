@@ -724,13 +724,18 @@ def test_partial_freeze_keeps_failed_tenant_evidence(tmp_path):
     assert manifest.data["tenant_isolation"] is True
     assert manifest.data["tenants"] == report["tenants"]
     (broken / "config.json").write_text('{"agents": {"profiles": {}}}')
-    with pytest.raises(ValueError, match="differs"):
-        freeze_discovery(
-            report,
-            tmp_path / "changed.json",
-            boundary,
-            "business",
-        )
+    repaired = freeze_discovery(
+        report,
+        tmp_path / "changed.json",
+        boundary,
+        "business",
+    )
+    assert (
+        next(
+            t for t in repaired.data["tenants"] if t["tenant_id"] == "broken"
+        )["state"]
+        == "failed"
+    )
 
 
 def in_place_fixture(tmp_path):

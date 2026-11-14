@@ -100,6 +100,23 @@ def _semantic_validator(*, workers, io_workers, memory_budget_mib, work_dir):
             ),
         )
 
+    from functools import partial
+    from swe.app.conversation_storage.migration.tenant_discovery import (
+        map_tenant_semantics,
+        map_tenant_calls,
+    )
+
+    validate.map_tenants = partial(
+        map_tenant_semantics,
+        workers=workers,
+        io_workers=io_workers,
+        memory_bytes=memory_budget_mib * 1024 * 1024,
+    )
+    validate.map_input_digests = partial(
+        map_tenant_calls,
+        workers=workers,
+        io_workers=io_workers,
+    )
     return validate
 
 
@@ -215,6 +232,9 @@ def _write_failed_tenants(destination, report):
 
 def register_discovery_commands(group):
     """Attach discover/freeze without initializing business services."""
+    from .conversation_storage_workflow_cmd import register_workflow_commands
+
+    register_workflow_commands(group)
 
     @group.command("discover")
     @_resource_options

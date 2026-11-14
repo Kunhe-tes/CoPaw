@@ -2,6 +2,37 @@
 
 本篇是 **显式 `--tenant-isolation` 模式**的操作增补。未使用该选项的全量严格流程仍按 `2026-11-02-conversation-migration-and-launch-runbook.md` 执行。本篇覆盖的部分发布顺序、预览连接数据库、runtime v3 和分享最终 DDL 与旧流程不同，不能混用。设计依据是 `2026-11-13-conversation-tenant-cutover-design.md` 和 ADR 0046。
 
+## 首选操作：准备、执行两阶段
+
+本分支新增 `prepare` / `migrate`，常规显式租户隔离迁移优先使用本节。下文细分命令保留作诊断与兼容入口；不要将同一个作业反复 prepare，也不要手改 migration ID。先完成第 1、2 节的备份、旧 writer 停止、只读输入、目标库 DDL/DML 权限和独立 NAS 准备，再执行以下命令。
+
+```bash
+# 仅首次准备；原地模式保留 --in-place，冻结副本模式去掉它
+"$SWE_PYTHON" -m swe conversation-storage prepare \
+  --tenant-isolation --in-place \
+  --services "$AUDIT_DIR/services.json" \
+  --boundary "$AUDIT_DIR/boundary.json" \
+  --manifest "$AUDIT_DIR/manifest.json" \
+  --application-schema "$APP_SCHEMA" "${CS_RESOURCES[@]}"
+
+# 首次执行与后续补迁均重跑这条；--apply 授权导入、校验和租户发布
+"$SWE_PYTHON" -m swe conversation-storage migrate \
+  --manifest "$AUDIT_DIR/manifest.json" \
+  --output-dir "$AUDIT_DIR/runtime" --apply "${CS_RESOURCES[@]}"
+```
+
+`prepare` 合并发现、证据固化、盘点和预检，读取目标库，不导入业务行、不发布账号；输出 manifest 及相邻的 `<manifest文件名>.discovery.json`。输出文件必须不存在。可选 `--shares-file`、`--overrides` 使用已审核的完整记录。部分失败仍保留可归属租户和固定作业身份，检查结果后可让正常租户进入 migrate。
+
+`migrate --apply` 对每个可执行账号按依赖顺序完成导入/续跑、完整语义校验、最后源复查和发布；无需再人工运行 verify/finalize 才发布正常账号。已发布账号从 SQL 读取并跳过其旧输入。它不会部署应用、改变外部流量、停止 writer 或自动 chmod。新版服务仍按 SQL published 与凭证动态准入。
+
+每次 migrate 自动重审**进入命令前已失败**的未发布账号，每账号每次至多一次。零业务数据、零迁移票据者才可接受修订后的输入；已有部分提交者保留旧证据和票据，输入未变时核对后续跑，输入改变时报告失败，不自动删除/重绑。准备时正常但执行前发生输入变化的账号，本次隔离并记录失败，下一次执行才进入自动重审，不能在同一次执行静默接纳新输入。
+
+准备、自动重审和执行读取使用作业级有界并发：独立租户的解析、会话正文 IO 和摘要计算可以重叠。执行采用只读 inventory 预取与 owner 导入/校验流水线；所有账号共享 `io-workers` 线程池与总内存预算，`workers=1` 时无跨租户预取。SQL、事务、manifest/journal 权威更新及租户发布仍由单 owner 串行执行；同一账号导入→校验→最后源复查→发布不可乱序，不能用多个命令进程绕过同库命名锁。
+
+退出 `0` 表示该阶段全部完成；退出 `2` 且有效 JSON 为 `status=partial_success` 表示处理完所有可执行独立租户但仍有失败，查看结果中的 `failure_report`，已发布账号不撤销。共享数据库/磁盘/锁故障、取消、提交结果不确定等是致命停止，不能当作坏租户跳过。Click 参数错误也可能退出 2，必须核对结构化结果，不能只判断退出数字。失败报告只含服务、账号、阶段、代码和安全原因；完整审计材料保存在受限目录。
+
+全部账号发布后仍须执行第 6 节专用 schema 收口，由 DBA 执行 DDL；之后可重跑 migrate 核对作业状态，已发布账号不重盘。真实 NAS、停写/备份及固定旧镜像回滚验收仍是现场责任。
+
 ## 1. 边界与上线单位
 
 - `(service_unit_id, tenant_id)` 是发布单位。同账号全部 source、Agent、workspace 和分享必须一起通过，不能跳过坏 Agent 后发布该账号。
@@ -65,6 +96,8 @@ mkdir -p "$AUDIT_DIR" "$MIGRATION_WORK_DIR"
 chmod 700 "$AUDIT_DIR" "$MIGRATION_WORK_DIR"
 CS_RESOURCES=(--workers 4 --io-workers 4 --memory-budget-mib 512
   --work-dir "$MIGRATION_WORK_DIR")
+"$SWE_PYTHON" -m swe conversation-storage prepare --help
+"$SWE_PYTHON" -m swe conversation-storage migrate --help
 "$SWE_PYTHON" -m swe conversation-storage discover --help
 "$SWE_PYTHON" -m swe conversation-storage retry-review --help
 "$SWE_PYTHON" -m swe conversation-storage rollback-tenants --help
@@ -74,9 +107,9 @@ CS_RESOURCES=(--workers 4 --io-workers 4 --memory-budget-mib 512
 
 执行镜像必须安装项目要求的真实 `trace_sdk`。本地无替身的 CLI help 核验仍因缺少该包而失败；测试套件中的 tracing fake 不能代替镜像依赖验收。上述 help 命令必须在实际执行镜像全部退出 0，才可开始停机迁移；不要将 `tests/fakes` 加入生产 `PYTHONPATH`。
 
-`workers/io-workers` 范围为 1–32，内存预算为 128–65536 MiB。并发用于解析/IO，账号仍逐组处理；不保证多个账号同时发布。临时卷须真实可写并与源、NAS 分离。
+`workers/io-workers` 范围为 1–32，内存预算为 128–65536 MiB。首选两阶段命令支持跨账号有界解析/IO与只读预取；SQL和发布保持单 owner 串行。旧细分执行命令保留原有逐组编排。临时卷须真实可写并与源、NAS 分离。
 
-## 3. 首次发现、冻结与导入
+## 3. 旧细分入口：首次发现、冻结与导入
 
 复用旧手册经审核的 `services.json`（真实绝对目录）、`boundary.json`（真实停写/快照/旧镜像证据）。首次 discovery 使用**新文件名**：
 
@@ -210,7 +243,7 @@ mysql --defaults-extra-file="$DBA_CNF" --database="$APP_SCHEMA" \
   < scripts/sql/conversation_tenant_publication_finalize.sql
 ```
 
-此专用脚本**不删除分享**，未全部发布或定位/归属不完整会拒绝 ALTER。不要在部分上线期间执行旧 `conversation_share_service_unit_finalize.sql`（含 DELETE）。之后重跑同一 `finalize --apply`，整体才能进入 ready；已发布账号仍跳过源盘点。
+此专用脚本**不删除分享**，未全部发布或定位/归属不完整会拒绝 ALTER。不要在部分上线期间执行旧 `conversation_share_service_unit_finalize.sql`（含 DELETE）。之后重跑同一 `migrate --apply`（旧细分流程可用 `finalize --apply`），整体才能进入 ready；已发布账号仍跳过源盘点。
 
 ## 7. 部分上线后的整体回滚
 

@@ -697,6 +697,12 @@ def discover_services(
         from .tenant_discovery import isolate_discovery
 
         isolate_discovery(report, shares, semantic_validator)
+        from .tenant_inputs import capture_input_digests
+
+        capture_input_digests(
+            report,
+            mapper=getattr(semantic_validator, "map_input_digests", None),
+        )
     elif not report["blockers"]:
         from .inventory_v3 import inventory_discovery
 
@@ -713,6 +719,62 @@ def discover_services(
             item["empty"] = not any(item["counts"].values())
     report["ready"] = not report["blockers"]
     return report
+
+
+def _freeze_tenant_report(report, current):
+    """Keep identity/coverage fixed while isolating changed tenant inputs."""
+
+    def key(item):
+        return item["service_unit_id"], item["tenant_id"]
+
+    for field in ("services", "declared_services", "source_shares"):
+        if current.get(field) != report.get(field):
+            raise ValueError("freeze service or share ownership changed")
+    old_tenants = {key(t): t for t in report["tenants"]}
+    if set(old_tenants) != {key(t) for t in current["tenants"]}:
+        raise ValueError("freeze tenant identity coverage changed")
+    # These blockers cannot be safely reduced to a changed input payload.
+    global_codes = {
+        "service_invalid",
+        "unregistered_workspace",
+    }
+    old_global = [b for b in report["blockers"] if b["code"] in global_codes]
+    new_global = [b for b in current["blockers"] if b["code"] in global_codes]
+    if old_global != new_global:
+        raise ValueError("freeze coverage or ownership changed")
+    for tenant in current["tenants"]:
+        owner = key(tenant)
+        old = old_tenants[owner]
+        if old["state"] == "failed":
+            # A preparation retry must not silently accept a repaired account.
+            tenant["state"] = "failed"
+            for blocker in old["blockers"]:
+                if blocker not in tenant["blockers"]:
+                    tenant["blockers"].append(deepcopy(blocker))
+                if blocker not in current["blockers"]:
+                    current["blockers"].append(deepcopy(blocker))
+            continue
+        fields = ("workspaces", "shares")
+        changed = (
+            any(
+                [item for item in report[field] if key(item) == owner]
+                != [item for item in current[field] if key(item) == owner]
+                for field in fields
+            )
+            or old != tenant
+        )
+        if changed:
+            blocker = {
+                "code": "source_changed_after_discovery",
+                "position": json.dumps(owner),
+                "detail": "tenant input changed after discovery",
+            }
+            tenant["state"] = "failed"
+            tenant["blockers"].append(blocker)
+            current["blockers"].append(blocker)
+    current["ready"] = not current["blockers"]
+    current["status"] = "success" if current["ready"] else "partial_success"
+    return current
 
 
 def freeze_discovery(
@@ -736,9 +798,11 @@ def freeze_discovery(
         tenant_isolation=report.get("tenant_isolation", False),
         in_place=report.get("in_place", False),
     )
-    if current["fingerprints"] != report["fingerprints"]:
+    if report.get("tenant_isolation"):
+        report = _freeze_tenant_report(report, current)
+    elif current["fingerprints"] != report["fingerprints"]:
         raise ValueError("source changed since discovery")
-    if current != report:
+    elif current != report:
         raise ValueError(
             "discovery report differs from verified source evidence",
         )

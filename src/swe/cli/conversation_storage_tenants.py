@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Tenant-isolated direct migration, retaining the original job and SQL tickets."""
 
+from contextlib import nullcontext, asynccontextmanager
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -24,6 +25,9 @@ from swe.app.conversation_storage.migration.journal import (
     JOBS,
 )
 from swe.app.conversation_storage.migration.parallel import MigrationIO
+from swe.app.conversation_storage.migration.tenant_errors import (
+    TenantInputError,
+)
 from swe.app.conversation_storage.migration.preflight import (
     DMLDatabase,
     check_schema,
@@ -167,6 +171,14 @@ async def _inventory(view, spool, resources):
         SourceInputInvalid,
     )
 
+    async def inspect(function, *args):
+        shared = resources.get("_shared_resources")
+        io = resources.get("_shared_io")
+        async with shared.reserve() if shared else nullcontext():
+            if io is None:
+                return function(*args)
+            return await io.call(function, *args)
+
     if view.data.get("in_place"):
         from swe.app.conversation_storage.in_place_admission import (
             tenant_write_boundaries,
@@ -174,7 +186,12 @@ async def _inventory(view, spool, resources):
         from swe.app.conversation_storage.errors import IntegrityError
 
         try:
-            tenant_write_boundaries(view.parent.data, tenant=view.key)
+            await inspect(
+                lambda: tenant_write_boundaries(
+                    view.parent.data,
+                    tenant=view.key,
+                ),
+            )
         except IntegrityError as error:
             raise TenantFailure("tenant input ownership overlaps") from error
         from swe.app.conversation_storage.migration.in_place_source import (
@@ -187,7 +204,7 @@ async def _inventory(view, spool, resources):
                     tenant["service_unit_id"],
                     tenant["tenant_id"],
                 ) == view.key:
-                    verify_evidence(view.data, tenant)
+                    await inspect(verify_evidence, view.data, tenant)
         except SourceInputInvalid as error:
             raise TenantFailure(
                 "tenant source path is unsafe or invalid",
@@ -198,11 +215,17 @@ async def _inventory(view, spool, resources):
             raise TenantFailure("tenant input is missing") from error
 
     try:
+        from swe.app.conversation_storage.migration.tenant_inputs import (
+            verify_input_digest,
+        )
+
+        await inspect(verify_input_digest, view.data, view.key)
         result = await inventory_v3_spooled(
             view,
             spool,
             record_source_changes=False,
-            **resources,
+            **{k: v for k, v in resources.items() if not k.startswith("_")},
+            shared_resources=resources.get("_shared_resources"),
         )
     except SourceInputInvalid as error:
         raise TenantFailure(
@@ -237,10 +260,13 @@ async def _inventory(view, spool, resources):
         extract_messages,
     )
 
-    try:
+    def validate_messages():
         for workspace in result["workspaces"]:
             for session in workspace["sessions"]:
                 extract_messages(session["legacy"]["root"], context_epoch=0)
+
+    try:
+        await inspect(validate_messages)
     except (KeyError, TypeError, ValueError) as error:
         raise TenantFailure("tenant message data is invalid") from error
     return result
@@ -295,7 +321,11 @@ async def _verify(db, bundles, view, inventory, target, resources, guard):
         migration_id=view.migration_id,
         set_batch_state=lambda *_: None,
     )
-    async with MigrationIO(resources["io_workers"]) as io:
+    async with (
+        nullcontext(resources["_shared_io"])
+        if resources.get("_shared_io")
+        else MigrationIO(resources["io_workers"])
+    ) as io:
         result = await verify_import(
             db,
             bundles,
@@ -304,7 +334,7 @@ async def _verify(db, bundles, view, inventory, target, resources, guard):
             target,
             io=io,
             health_check=guard.check,
-            **resources,
+            **{k: v for k, v in resources.items() if not k.startswith("_")},
         )
     if not result["passed"]:
         raise TenantFailure("tenant semantic verification failed")
@@ -329,10 +359,14 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
         resources["memory_bytes"],
         resources["workers"],
     ) as spool:
-        inventory = await _inventory(view, spool, resources)
+        inventory = resources.get("_prefetched")
+        if inventory is None:
+            inventory = await _inventory(view, spool, resources)
+        else:
+            await _recheck_prefetched(view, resources)
         await _compare_shares(db, view)
         row = await states.get(*view.key)
-        if operation in ("import", "resume"):
+        if operation in ("import", "resume", "migrate"):
             await DirectImporter(
                 db,
                 bundles,
@@ -344,13 +378,14 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
                 workers=resources["workers"],
                 io_workers=resources["io_workers"],
                 health_check=guard.check,
+                io=resources.get("_shared_io"),
             )
         elif row["state"] not in ("imported", "verified"):
             raise TenantFailure("complete tenant import is required")
         else:
             await journal.hydrate(persist=False)
             await journal.validate_ownership()
-        if operation in ("verify", "finalize"):
+        if operation in ("verify", "finalize", "migrate"):
             await _verify(
                 db,
                 bundles,
@@ -373,9 +408,9 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
         await guard.check()
         await check_schema(db, schema, finalized=False)
         await check_tenant_schema(db, schema)
-        if operation in ("verify", "finalize"):
+        if operation in ("verify", "finalize", "migrate"):
             await states.transition(*view.key, "verified")
-        if operation == "finalize":
+        if operation in ("finalize", "migrate"):
             # The receipt is service-local; only this tenant's roots are checked.
             selected = {
                 **view.data,
@@ -414,6 +449,11 @@ def _failure(tenant, stage, code="tenant_data_invalid", error=None):
         str(error),
         "租户会话输入或完整性校验未通过，修复后重试",
     )
+    if isinstance(error, TenantInputError):
+        code, reason = (
+            "tenant_input_invalid",
+            "租户输入无效或准备后发生变化；下次执行将自动重审",
+        )
     if isinstance(error, MigrationCapacityError):
         code, reason = (
             "tenant_capacity_exceeded",
@@ -543,31 +583,7 @@ async def run_tenants(
     )
 
     base = _work_base(work_dir, manifest.data)
-    from swe.app.conversation_storage.migration.discovery import _overlaps
-
-    for online in manifest.data["services"]:
-        for frozen in manifest.data["services"]:
-            if manifest.data.get("in_place") and online is frozen:
-                roots = {
-                    online.get(key)
-                    for key in (
-                        "source_root",
-                        "config_root",
-                        "snapshot_root",
-                        "original_root",
-                    )
-                }
-                if len(roots) != 1 or None in roots:
-                    raise ValueError("in-place roots must be identical")
-                continue
-            if any(
-                _overlaps(Path(online["original_root"]), Path(frozen[key]))
-                for key in ("source_root", "config_root", "snapshot_root")
-                if frozen.get(key)
-            ):
-                raise ValueError(
-                    "partial migration requires isolated frozen inputs",
-                )
+    _validate_tenant_roots(manifest.data)
     resources = {
         "workers": workers,
         "io_workers": io_workers,
@@ -610,7 +626,7 @@ async def run_tenants(
 
             await recover_pending_review(db, manifest)
             # Fix cutoffs under the same lock before first recording SQL binding.
-            if operation in ("import", "resume") and apply:
+            if operation in ("import", "resume", "migrate") and apply:
                 manifest.begin_tenant_syncs(
                     [
                         (t["service_unit_id"], t["tenant_id"])
@@ -618,6 +634,15 @@ async def run_tenants(
                     ],
                 )
             await _check_job_binding(db, manifest, guard.server_uuid)
+            if operation == "migrate":
+                if not apply:
+                    raise ValueError("migrate requires --apply")
+                resources["_retained_attempts"] = await _auto_review(
+                    db,
+                    manifest,
+                    guard,
+                    resources,
+                )
             if operation == "retry-review":
                 if not apply or reviewed_discovery is None:
                     raise ValueError(
@@ -698,6 +723,38 @@ async def _register_tenants(db, manifest, states, guard):
         await binding_journal.prepare()
 
 
+async def _select_registered_tenants(
+    manifest,
+    states,
+    resources,
+    failures,
+    published,
+):
+    tenants = manifest.data["tenants"]
+    selected = []
+    for tenant in tenants:
+        view = TenantManifest(manifest, tenant)
+        row = await states.get(*view.key)
+        if row["state"] == "published":
+            published += 1
+            continue
+        if tenant["state"] == "failed" and view.key not in resources.get(
+            "_retained_attempts",
+            set(),
+        ):
+            failure = _failure(tenant, "discover")
+            await states.fail(
+                *view.key,
+                "discover",
+                failure["code"],
+                failure["reason"],
+            )
+            failures.append(failure)
+            continue
+        selected.append(tenant)
+    return selected, failures, published
+
+
 async def _run_registered(
     operation,
     manifest,
@@ -713,51 +770,56 @@ async def _run_registered(
         raise ValueError("tenant migration has no identifiable tenants")
     await _register_tenants(db, manifest, states, guard)
     failures, published, completed = [], 0, 0
-    for tenant in tenants:
-        view = TenantManifest(manifest, tenant)
-        row = await states.get(*view.key)
-        if row["state"] == "published":
-            published += 1
-            continue
-        if tenant["state"] == "failed":
-            failure = _failure(tenant, "discover")
-            await states.fail(
-                *view.key,
-                "discover",
-                failure["code"],
-                failure["reason"],
-            )
-            failures.append(failure)
-            continue
-        await guard.check()
-        try:
-            await _one_tenant(
-                operation,
-                view,
-                db,
-                states,
-                guard,
-                base,
-                resources,
-            )
-        except MigrationDiskCapacityError:
-            raise
-        except (
-            TenantFailure,
-            MigrationCapacityError,
-        ) as error:
-            failure = _failure(tenant, operation, error=error)
-            await states.fail(
-                *view.key,
-                operation,
-                failure["code"],
-                failure["reason"],
-            )
-            failures.append(failure)
-        else:
-            completed += 1
-            if operation == "finalize":
-                published += 1
+    selected, failures, published = await _select_registered_tenants(
+        manifest,
+        states,
+        resources,
+        failures,
+        published,
+    )
+    from .conversation_storage_pipeline import tenant_pipeline
+
+    context = (
+        tenant_pipeline(selected, base, manifest, resources)
+        if operation == "migrate"
+        else _serial_tenants(selected, resources)
+    )
+    async with context as results:
+        async for tenant, local, error in results:
+            view = TenantManifest(manifest, tenant)
+            local_guard = _pipeline_guard(guard, local)
+            await local_guard.check()
+            try:
+                if error is not None:
+                    raise error
+                await _one_tenant(
+                    operation,
+                    view,
+                    db,
+                    states,
+                    local_guard,
+                    base,
+                    local,
+                )
+            except MigrationDiskCapacityError:
+                raise
+            except (
+                TenantFailure,
+                TenantInputError,
+                MigrationCapacityError,
+            ) as error:
+                failures.append(
+                    await _record_tenant_failure(
+                        states,
+                        tenant,
+                        operation,
+                        error,
+                    ),
+                )
+            else:
+                completed += 1
+                if operation in ("finalize", "migrate"):
+                    published += 1
     # A job may remain partial while the runtime admits individually published tenants.
     pending_schema = False
     if published == len(tenants) and not failures:
@@ -787,7 +849,7 @@ async def _run_registered(
     )
     if changed != 1:
         raise ValueError("migration job completion was not confirmed")
-    if operation == "finalize":
+    if operation in ("finalize", "migrate"):
         _write_runtime(output, manifest)
     return {
         "version": 3,
@@ -804,6 +866,161 @@ async def _run_registered(
         "pending_schema_finalize": pending_schema,
         "failure_report": _write_failures(manifest, operation, failures),
     }
+
+
+@asynccontextmanager
+async def _serial_tenants(tenants, resources):
+    async def results():
+        for tenant in tenants:
+            yield tenant, resources, None
+
+    yield results()
+
+
+async def _record_tenant_failure(states, tenant, operation, error):
+    failure = _failure(tenant, operation, error=error)
+    await states.fail(
+        tenant["service_unit_id"],
+        tenant["tenant_id"],
+        operation,
+        failure["code"],
+        failure["reason"],
+    )
+    return failure
+
+
+def _pipeline_guard(guard, resources):
+    health = resources.get("_pipeline_health")
+    if health is None:
+        return guard
+
+    async def check():
+        await health()
+        await guard.check()
+
+    return SimpleNamespace(check=check, server_uuid=guard.server_uuid)
+
+
+def _validate_tenant_roots(data):
+    from swe.app.conversation_storage.migration.discovery import _overlaps
+
+    for online in data["services"]:
+        for frozen in data["services"]:
+            if data.get("in_place") and online is frozen:
+                roots = {
+                    online.get(k)
+                    for k in (
+                        "source_root",
+                        "config_root",
+                        "snapshot_root",
+                        "original_root",
+                    )
+                }
+                if len(roots) != 1 or None in roots:
+                    raise ValueError("in-place roots must be identical")
+                continue
+            if any(
+                _overlaps(Path(online["original_root"]), Path(frozen[k]))
+                for k in ("source_root", "config_root", "snapshot_root")
+                if frozen.get(k)
+            ):
+                raise ValueError(
+                    "partial migration requires isolated frozen inputs",
+                )
+
+
+async def _recheck_prefetched(view, resources):
+    from swe.app.conversation_storage.migration.tenant_inputs import (
+        verify_input_digest,
+    )
+    from swe.app.conversation_storage.migration.source_inputs import (
+        SourceInputInvalid,
+    )
+
+    try:
+        async with resources["_shared_resources"].reserve():
+            await resources["_shared_io"].call(
+                verify_input_digest,
+                view.data,
+                view.key,
+            )
+    except SourceInputInvalid as error:
+        raise TenantFailure(
+            "tenant source path is unsafe or invalid",
+        ) from error
+    except FileNotFoundError as error:
+        if not _source_roots_available(view.data):
+            raise
+        raise TenantFailure("tenant input is missing") from error
+
+
+async def _auto_review(db, manifest, guard, resources):
+    from swe.app.conversation_storage.migration.tenant_retry import (
+        review_retry,
+    )
+
+    states = TenantState(db, manifest.migration_id)
+    await _register_tenants(db, manifest, states, guard)
+    eligible = set()
+    for tenant in manifest.data["tenants"]:
+        key = tenant["service_unit_id"], tenant["tenant_id"]
+        row = await states.get(*key)
+        if row["state"] != "published" and (
+            row["state"] == "failed" or tenant["state"] == "failed"
+        ):
+            eligible.add(key)
+    if eligible:
+        await guard.check()
+        from .conversation_storage_discovery_cmd import _semantic_validator
+
+        validator = _semantic_validator(
+            workers=resources["workers"],
+            io_workers=resources["io_workers"],
+            memory_budget_mib=resources["memory_bytes"] // (1024 * 1024),
+            work_dir=str(manifest.path.parent),
+        )
+        outcome = await review_retry(
+            db,
+            manifest,
+            manifest.data,
+            eligible=eligible,
+            semantic_validator=validator,
+        )
+        await guard.check()
+        from swe.app.conversation_storage.migration.tenant_inputs import (
+            verify_input_digest,
+        )
+        from swe.app.conversation_storage.migration.source_inputs import (
+            SourceInputInvalid,
+        )
+        from swe.app.conversation_storage.in_place_admission import (
+            tenant_write_boundaries,
+        )
+        from swe.app.conversation_storage.errors import IntegrityError
+
+        allowed = set()
+        for pair in outcome.get("retained_keys", []):
+            key = tuple(pair)
+            tenant = next(
+                t
+                for t in manifest.data["tenants"]
+                if (t["service_unit_id"], t["tenant_id"]) == key
+            )
+            if not tenant.get("input_digest"):
+                continue
+            try:
+                tenant_write_boundaries(manifest.data, tenant=key)
+                verify_input_digest(manifest.data, key)
+            except (
+                TenantInputError,
+                SourceInputInvalid,
+                FileNotFoundError,
+                IntegrityError,
+            ):
+                continue
+            allowed.add(key)
+        return allowed
+    return set()
 
 
 async def _check_job_binding(db, manifest, server_uuid):
@@ -851,7 +1068,11 @@ async def _preview(operation, manifest, base, resources, *, states):
                 await _inventory(view, spool, resources)
         except MigrationDiskCapacityError:
             raise
-        except (TenantFailure, MigrationCapacityError) as error:
+        except (
+            TenantFailure,
+            TenantInputError,
+            MigrationCapacityError,
+        ) as error:
             failures.append(_failure(tenant, operation, error=error))
         else:
             completed += 1

@@ -2,6 +2,7 @@
 """Bounded independent workspace parsing into disposable inventory records."""
 
 from collections import Counter
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,9 +10,9 @@ from ..bundle import MAX_READ_BYTES
 from .inventory_v3 import inventory_workspace
 from .freshness import changed_source, tenant_key
 from .in_place_source import shared_service_roots
-from .parallel import MigrationCoordinator, MigrationIO
+from .parallel import MigrationCoordinator, MigrationResources
 from .progress import current_progress
-from .spool import ByteBudget, MigrationCapacityError
+from .spool import MigrationCapacityError
 from .source_inputs import safe_input_entries, session_input_roots
 
 
@@ -34,6 +35,7 @@ async def spool_workspaces(
     workers=4,
     io_workers=4,
     memory_bytes=512 * 1024 * 1024,
+    shared_resources=None,
 ):
     """Parse and spool with fixed fan-out and no retained conversation bodies.
 
@@ -42,13 +44,9 @@ async def spool_workspaces(
     """
     if not 1 <= workers <= 32:
         raise ValueError("workers must be between 1 and 32")
-    budget = ByteBudget(memory_bytes)
-    allowance = memory_bytes // workers
-    if allowance < 1:
-        raise ValueError("memory budget is smaller than worker count")
     summaries = [None] * len(data["workspaces"])
     progress = current_progress()
-    if progress:
+    if progress and shared_resources is None:
         # These counters describe this inventory pass, including source rechecks.
         progress.data.update(
             inventory_completed_workspaces=0,
@@ -57,14 +55,23 @@ async def spool_workspaces(
             inventoried_source_bytes=0,
             inventory_blocker_count=0,
         )
-    async with MigrationIO(io_workers) as io:
+    async with AsyncExitStack() as stack:
+        if shared_resources is None:
+            shared_resources = await stack.enter_async_context(
+                MigrationResources(
+                    workers=workers,
+                    io_workers=io_workers,
+                    memory_bytes=memory_bytes,
+                ),
+            )
+        io = shared_resources.io
         data = {
             **data,
             "_freshness_cache": await io.call(_shared_freshness, data),
         }
 
         async def parse(index, _request):
-            async with budget.reserve(allowance):
+            async with shared_resources.reserve() as allowance:
                 source_bytes = await io.call(
                     _preflight_workspace,
                     data["workspaces"][index],
@@ -93,7 +100,10 @@ async def spool_workspaces(
                         summary.blockers,
                     )
 
-        await MigrationCoordinator({}, workers=workers).run(
+        await MigrationCoordinator(
+            {},
+            workers=min(workers, shared_resources.workers),
+        ).run(
             range(len(summaries)),
             parse,
         )

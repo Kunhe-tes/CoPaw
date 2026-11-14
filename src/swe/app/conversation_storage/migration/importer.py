@@ -7,6 +7,8 @@ from pathlib import Path
 
 from agentscope.message import Msg
 
+from .tenant_errors import SourceChanged, TenantInputError
+
 
 def validate_inventory(report):
     from .spool_report import WorkspaceRecords
@@ -418,7 +420,7 @@ class ConversationImporter:
                     "cutoff_ns": cutoff,
                 }
                 self._record_source_change(blocker)
-                raise ValueError(
+                raise SourceChanged(
                     "tenant source changed after synchronization started: "
                     + str(path),
                 )
@@ -448,7 +450,7 @@ class ConversationImporter:
                     "cutoff_ns": cutoff,
                 }
                 self._record_source_change(blocker)
-                raise ValueError(
+                raise SourceChanged(
                     "tenant source changed after synchronization started: "
                     + str(path),
                 )
@@ -578,7 +580,7 @@ class ConversationImporter:
                         "settling",
                         "unknown",
                     ):
-                        raise ValueError(
+                        raise TenantInputError(
                             "unsettled legacy Turn blocks offline import",
                         )
             for chat in workspace["chats"]:
@@ -828,7 +830,9 @@ class ConversationImporter:
                 "settling",
                 "unknown",
             ):
-                raise ValueError("unsettled legacy Turn blocks offline import")
+                raise TenantInputError(
+                    "unsettled legacy Turn blocks offline import",
+                )
             internal = {
                 "completed": "succeeded",
                 "stopped": "stopped",
@@ -908,7 +912,7 @@ class ConversationImporter:
                     "settling",
                     "unknown",
                 ):
-                    raise ValueError(
+                    raise TenantInputError(
                         "unsettled legacy Turn blocks offline import",
                     )
                 rows.append(

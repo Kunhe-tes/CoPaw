@@ -599,6 +599,7 @@ def run_v3_command(
         "finalize",
         "retry-review",
         "rollback-tenants",
+        "migrate",
     ):
         raise ValueError("unsupported v3 command")
     if not 1 <= workers <= 32 or not 1 <= io_workers <= 32:
@@ -607,7 +608,7 @@ def run_v3_command(
         raise ValueError("memory budget must be between 128 and 65536 MiB")
     manifest = V3Manifest.load(manifest_path)
     output = None
-    if operation in ("finalize", "rollback-tenants"):
+    if operation in ("finalize", "rollback-tenants", "migrate"):
         if output_dir is None:
             raise ValueError("finalize requires --output-dir")
         output = validate_output(output_dir, manifest.data)
@@ -639,7 +640,7 @@ def run_v3_command(
                 rollback_inputs=rollback_inputs,
             ),
         )
-    if operation in ("retry-review", "rollback-tenants"):
+    if operation in ("retry-review", "rollback-tenants", "migrate"):
         raise ValueError(
             "tenant management command requires a tenant-isolated manifest",
         )

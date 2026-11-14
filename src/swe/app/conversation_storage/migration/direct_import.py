@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Import frozen v3 sources directly into manually prepared application tables."""
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 import re
 
@@ -277,6 +278,7 @@ class DirectImporter(ConversationImporter):
         workers=4,
         io_workers=4,
         health_check=None,
+        io=None,
     ):
         """Run workspace bodies concurrently with SQL in the calling task."""
         from .importer import ParallelWorkspaceImporter, validate_inventory
@@ -332,7 +334,9 @@ class DirectImporter(ConversationImporter):
                 io_workers=io_workers,
                 health_check=health_check,
             )
-            async with MigrationIO(io_workers) as io:
+            async with (
+                MigrationIO(io_workers) if io is None else nullcontext(io)
+            ) as io:
                 self.chat_ids = await runner.run(
                     _workspace_inputs(report),
                     lambda context: ParallelWorkspaceImporter(

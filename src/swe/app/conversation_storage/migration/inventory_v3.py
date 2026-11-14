@@ -410,6 +410,7 @@ async def inventory_v3_spooled(
     memory_bytes=512 * 1024 * 1024,
     begin_sync=False,
     record_source_changes=True,
+    shared_resources=None,
 ):
     """Build the import report from bounded, independently parsed records."""
     from .inventory_parallel import spool_workspaces
@@ -423,13 +424,17 @@ async def inventory_v3_spooled(
         and fingerprints(data["services"]) != data["fingerprints"]
     ):
         raise ValueError("source changed since discovery freeze")
-    _preflight_share_budget(data, memory_bytes)
+    _preflight_share_budget(
+        data,
+        shared_resources.allowance if shared_resources else memory_bytes,
+    )
     summaries = await spool_workspaces(
         data,
         spool,
         workers=workers,
         io_workers=io_workers,
         memory_bytes=memory_bytes,
+        shared_resources=shared_resources,
     )
     if (
         data.get("fingerprints")
@@ -442,7 +447,15 @@ async def inventory_v3_spooled(
         shares=[],
         source_boundary=data["source_boundary"],
     )
-    _inventory_shares(data, report)
+    if shared_resources is None:
+        _inventory_shares(data, report)
+    else:
+        async with shared_resources.reserve():
+            await shared_resources.io.call(
+                isolated_inventory(_inventory_shares),
+                data,
+                report,
+            )
     if (
         data.get("fingerprints")
         and fingerprints(data["services"]) != data["fingerprints"]

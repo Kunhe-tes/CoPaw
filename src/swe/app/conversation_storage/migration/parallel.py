@@ -4,6 +4,7 @@
 import asyncio
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from contextvars import Context, ContextVar
 from dataclasses import dataclass
 from functools import partial
@@ -108,6 +109,44 @@ class MigrationIO:
 
     async def __aexit__(self, *_args):
         await self.close()
+
+
+class MigrationResources:
+    """One job's shared parser, IO and decoded-memory admission limits."""
+
+    def __init__(
+        self,
+        *,
+        workers=4,
+        io_workers=4,
+        memory_bytes=512 * 1024 * 1024,
+        io=None,
+    ):
+        from .spool import ByteBudget
+
+        if not 1 <= workers <= 32:
+            raise ValueError("workers must be between 1 and 32")
+        self.workers = workers
+        self.memory = ByteBudget(memory_bytes)
+        self.allowance = memory_bytes // workers
+        if not self.allowance:
+            raise ValueError("memory budget is smaller than worker count")
+        self._slots = asyncio.Semaphore(workers)
+        self._owns_io = io is None
+        self.io = MigrationIO(io_workers) if io is None else io
+
+    @asynccontextmanager
+    async def reserve(self):
+        async with self._slots:
+            async with self.memory.reserve(self.allowance):
+                yield self.allowance
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        if self._owns_io:
+            await self.io.close()
 
 
 @dataclass
