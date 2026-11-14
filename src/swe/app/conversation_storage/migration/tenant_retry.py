@@ -33,7 +33,45 @@ _FIELDS = (
     "fingerprints",
     "discovery_version",
     "tenant_isolation",
+    "in_place",
 )
+
+
+_REVIEW_REASONS = {
+    "tenant_boundary_invalid": "租户会话目录或配置证据存在边界冲突，修复后重新审核",
+    "config_invalid": "租户配置无效，修复后重新审核",
+    "share_invalid": "租户分享记录或正文未通过校验",
+    "tenant_input_invalid": "租户会话输入未通过校验，修复后重新审核",
+    "tenant_capacity_exceeded": "租户会话输入超过迁移容量或条目预算",
+    "tenant_evidence_locked": "租户已有迁移数据或票据，已保留原迁移证据",
+}
+
+
+def _review_failure(tenant):
+    codes = {item.get("code") for item in tenant.get("blockers", [])}
+    code = next(
+        (key for key in _REVIEW_REASONS if key in codes),
+        "tenant_input_invalid",
+    )
+    return {
+        "service_unit_id": tenant["service_unit_id"],
+        "tenant_id": tenant["tenant_id"],
+        "stage": "retry-review",
+        "code": code,
+        "reason": _REVIEW_REASONS[code],
+    }
+
+
+def _review_failures(report, published):
+    return {
+        _key(tenant): _review_failure(tenant)
+        for tenant in report["tenants"]
+        if tenant["state"] == "failed" and _key(tenant) not in published
+    }
+
+
+class _TenantReviewHasData(ValueError):
+    """The tenant must retain its committed frozen evidence."""
 
 
 def _digest(data):
@@ -178,7 +216,7 @@ async def _no_data(db, migration_id, keys, workspaces=(), shares=()):
                 (service.encode(), tenant.encode()),
             )
             if row:
-                raise ValueError(
+                raise _TenantReviewHasData(
                     "tenant evidence cannot change after business data exists",
                 )
     after = 0
@@ -197,10 +235,258 @@ async def _no_data(db, migration_id, keys, workspaces=(), shares=()):
             if row.get("entry_kind") in ("runtime_id", b"runtime_id"):
                 continue
             if _ticket_owner(row, workspaces, shares) in keys:
-                raise ValueError(
+                raise _TenantReviewHasData(
                     "tenant evidence cannot change after a journal ticket exists",
                 )
         after = rows[-1]["id"]
+
+
+def _review_semantic(data, manifest, published):
+    from .inventory_v3 import inventory_discovery
+
+    keys = {_key(w) for w in data["workspaces"]}
+    keys.update(_key(s) for s in data["shares"])
+    if keys and keys.issubset(published):
+        # The immutable frozen mapping must agree, but live tenant bodies
+        # are never re-inventoried by a retry of another account.
+        for key in keys:
+            if _without_counts(_evidence(data, key)) != _without_counts(
+                _evidence(manifest.data, key),
+            ):
+                raise ValueError("published tenant metadata cannot change")
+        return {
+            "blockers": [],
+            "workspaces": [
+                {
+                    "sessions": range(
+                        next(
+                            old
+                            for old in manifest.data["workspaces"]
+                            if old["position"] == w["position"]
+                        )["counts"]["sessions"],
+                    ),
+                    "chats": range(
+                        next(
+                            old
+                            for old in manifest.data["workspaces"]
+                            if old["position"] == w["position"]
+                        )["counts"]["chats"],
+                    ),
+                }
+                for w in data["workspaces"]
+            ],
+        }
+    return inventory_discovery(data)
+
+
+def _discover_review(manifest, reviewed_report, published):
+    from contextlib import nullcontext
+    from .in_place_review import published_pruning
+
+    in_place = manifest.data.get("in_place", False)
+    published_positions = {
+        item["position"]
+        for item in manifest.data["workspaces"]
+        if _key(item) in published
+    }
+    context = (
+        published_pruning(manifest.data, published)
+        if in_place
+        else nullcontext()
+    )
+    with context:
+        shares = reviewed_report["source_shares"]
+        if in_place:
+            old_owners = {s["token"]: _key(s) for s in manifest.data["shares"]}
+            shares = [
+                s
+                for s in shares
+                if old_owners.get(s["token"]) not in published
+            ]
+        overrides = reviewed_report.get("overrides", [])
+        if in_place:
+            overrides = [
+                entry
+                for entry in overrides
+                if entry.get("position") not in published_positions
+            ]
+        result = discover_services(
+            reviewed_report["declared_services"],
+            shares=shares,
+            overrides=overrides,
+            tenant_isolation=True,
+            in_place=in_place,
+            semantic_validator=lambda data: _review_semantic(
+                data,
+                manifest,
+                published,
+            ),
+        )
+    if in_place:
+        for field in ("workspaces", "shares", "tenants"):
+            result[field].extend(
+                item
+                for item in manifest.data[field]
+                if _key(item) in published
+            )
+        result["workspaces"].sort(
+            key=lambda item: item["position"].encode(),
+        )
+        result["shares"].sort(key=lambda item: item["position"].encode())
+        result["tenants"].sort(key=_key)
+        result["source_shares"] = manifest.data["source_shares"]
+        result["overrides"].extend(
+            entry
+            for entry in manifest.data.get("overrides", [])
+            if entry.get("position") in published_positions
+        )
+        _review_boundaries(result, published, manifest.data)
+    return result
+
+
+def _restore_tenant(report, old, key):
+    from copy import deepcopy
+
+    positions = {
+        item["position"]
+        for data in (report, old)
+        for item in data["workspaces"]
+        if _key(item) == key
+    }
+    for field in ("workspaces", "shares", "tenants"):
+        report[field] = [item for item in report[field] if _key(item) != key]
+        report[field].extend(
+            deepcopy(item) for item in old[field] if _key(item) == key
+        )
+    report["overrides"] = [
+        entry
+        for entry in report.get("overrides", [])
+        if entry.get("position") not in positions
+    ] + [
+        deepcopy(entry)
+        for entry in old.get("overrides", [])
+        if entry.get("position") in positions
+    ]
+
+
+async def _retain_committed_failures(db, manifest, report, published=()):
+    failures = {}
+    old_tenants = {_key(item): item for item in manifest.data["tenants"]}
+    for tenant in list(report["tenants"]):
+        key = _key(tenant)
+        if key in published or (
+            tenant == old_tenants[key]
+            and _evidence(report, key) == _evidence(manifest.data, key)
+        ):
+            continue
+        try:
+            await _no_data(
+                db,
+                manifest.migration_id,
+                {key},
+                manifest.data["workspaces"],
+                manifest.data["shares"],
+            )
+        except _TenantReviewHasData:
+            # Do not revise already committed evidence merely to record a new
+            # failed candidate. The report's top-level blocker remains auditable.
+            failure = (
+                tenant
+                if tenant["state"] == "failed"
+                else {
+                    **tenant,
+                    "blockers": [{"code": "tenant_evidence_locked"}],
+                }
+            )
+            failures[key] = _review_failure(failure)
+            _restore_tenant(report, manifest.data, key)
+    return failures
+
+
+def _review_boundaries(report, published, old):
+    from ..errors import IntegrityError
+    from ..in_place_admission import tenant_write_boundaries
+
+    for tenant in list(report["tenants"]):
+        key = _key(tenant)
+        if key in published:
+            continue
+        try:
+            tenant_write_boundaries(report, tenant=key)
+        except IntegrityError as error:
+            # Check the same candidate against published ownership alone. This
+            # resolves only the candidate's paths, never live published files.
+            if "share mutable" in str(error) and published:
+                scoped = {
+                    **report,
+                    **{
+                        field: [
+                            item
+                            for item in report[field]
+                            if _key(item) in published or _key(item) == key
+                        ]
+                        for field in ("workspaces", "tenants")
+                    },
+                }
+                try:
+                    tenant_write_boundaries(scoped, tenant=key)
+                except IntegrityError:
+                    _restore_tenant(report, old, key)
+                    tenant = next(
+                        item for item in report["tenants"] if _key(item) == key
+                    )
+            blocker = {
+                "code": "tenant_boundary_invalid",
+                "position": json.dumps(key),
+                "detail": str(error),
+            }
+            tenant["state"] = "failed"
+            if blocker not in tenant["blockers"]:
+                tenant["blockers"].append(blocker)
+            if blocker not in report["blockers"]:
+                report["blockers"].append(blocker)
+    if report["blockers"]:
+        report.update(ready=False, status="partial_success")
+
+
+def _settle_review_boundaries(report, old, protected):
+    """Restore conflicting candidates until final ownership is stable."""
+    from ..errors import IntegrityError
+    from ..in_place_admission import tenant_write_boundaries
+
+    protected = set(protected)
+    failures = {}
+    while True:
+        for tenant in list(report["tenants"]):
+            key = _key(tenant)
+            if key in protected:
+                continue
+            try:
+                tenant_write_boundaries(report, tenant=key)
+            except IntegrityError as error:
+                _restore_tenant(report, old, key)
+                restored = next(
+                    item for item in report["tenants"] if _key(item) == key
+                )
+                blocker = {
+                    "code": "tenant_boundary_invalid",
+                    "position": json.dumps(key),
+                    "detail": str(error),
+                }
+                restored["state"] = "failed"
+                if blocker not in restored["blockers"]:
+                    restored["blockers"].append(blocker)
+                if blocker not in report["blockers"]:
+                    report["blockers"].append(blocker)
+                failures[key] = _review_failure(restored)
+                protected.add(key)
+                # Restoring a root can invalidate an earlier candidate. Each
+                # restart protects another tenant, which bounds this loop.
+                break
+        else:
+            if failures:
+                report.update(ready=False, status="partial_success")
+            return failures
 
 
 async def review_retry(db, manifest, reviewed_report):
@@ -216,52 +502,13 @@ async def review_retry(db, manifest, reviewed_report):
         if row is not None and row["state"] == "published":
             published.add(_key(tenant))
 
-    def semantic(data):
-        from .inventory_v3 import inventory_discovery
-
-        keys = {_key(w) for w in data["workspaces"]}
-        keys.update(_key(s) for s in data["shares"])
-        if keys and keys.issubset(published):
-            # The immutable frozen mapping must agree, but live tenant bodies
-            # are never re-inventoried by a retry of another account.
-            for key in keys:
-                if _without_counts(_evidence(data, key)) != _without_counts(
-                    _evidence(manifest.data, key),
-                ):
-                    raise ValueError("published tenant metadata cannot change")
-            return {
-                "blockers": [],
-                "workspaces": [
-                    {
-                        "sessions": range(
-                            next(
-                                old
-                                for old in manifest.data["workspaces"]
-                                if old["position"] == w["position"]
-                            )["counts"]["sessions"],
-                        ),
-                        "chats": range(
-                            next(
-                                old
-                                for old in manifest.data["workspaces"]
-                                if old["position"] == w["position"]
-                            )["counts"]["chats"],
-                        ),
-                    }
-                    for w in data["workspaces"]
-                ],
-            }
-        return inventory_discovery(data)
-
     current = await asyncio.to_thread(
-        discover_services,
-        reviewed_report["declared_services"],
-        shares=reviewed_report["source_shares"],
-        overrides=reviewed_report.get("overrides", []),
-        tenant_isolation=True,
-        semantic_validator=semantic,
+        _discover_review,
+        manifest,
+        reviewed_report,
+        published,
     )
-    if current != reviewed_report:
+    if not manifest.data.get("in_place") and current != reviewed_report:
         raise ValueError(
             "review report differs from current complete discovery",
         )
@@ -279,6 +526,23 @@ async def review_retry(db, manifest, reviewed_report):
         raise ValueError("tenant review cannot add or remove tenants")
     if current["source_shares"] != old["source_shares"]:
         raise ValueError("tenant review cannot change original share records")
+    failures = _review_failures(current, published)
+    if old.get("in_place"):
+        retained = await _retain_committed_failures(
+            db,
+            manifest,
+            current,
+            published,
+        )
+        failures.update(retained)
+        failures.update(
+            _settle_review_boundaries(
+                current,
+                old,
+                published | retained.keys(),
+            ),
+        )
+        new_tenants = {_key(t): t for t in current["tenants"]}
     changed = {
         k
         for k in old_tenants
@@ -286,12 +550,33 @@ async def review_retry(db, manifest, reviewed_report):
         or old_tenants[k] != new_tenants[k]
     }
     if not changed:
+        if failures:
+            return {
+                "outcome": "unchanged",
+                "failures": list(failures.values()),
+            }
         raise ValueError("tenant review contains no changed tenant evidence")
     revision = str(uuid4())
+    new = _review_manifest(old, current, changed, failures, revision)
+    await _commit_review(
+        db,
+        manifest,
+        old,
+        new,
+        changed,
+        new_tenants,
+        revision,
+    )
+    outcome = await recover_pending_review(db, manifest)
+    return {**outcome, "failures": list(failures.values())}
+
+
+def _review_manifest(old, current, changed, failures, revision):
     new = {
         **old,
         **{k: current[k] for k in _FIELDS if k in current},
         "tenant_review_revision": revision,
+        "tenant_review_failures": list(failures.values()),
     }
     from .freshness import tenant_key
 
@@ -305,16 +590,7 @@ async def review_retry(db, manifest, reviewed_report):
         for blocker in old.get("source_change_blockers", [])
         if tuple(blocker.get("scope", [])) not in changed
     ]
-    await _commit_review(
-        db,
-        manifest,
-        old,
-        new,
-        changed,
-        new_tenants,
-        revision,
-    )
-    return await recover_pending_review(db, manifest)
+    return new
 
 
 async def _commit_review(
@@ -348,9 +624,9 @@ async def _commit_review(
                     )
                 if row["evidence_text"] != _json(_evidence(old, key)):
                     raise ValueError("tenant review old evidence differs")
-                if new_tenants[key]["state"] != "discovered":
+                if new_tenants[key]["state"] not in ("discovered", "failed"):
                     raise ValueError(
-                        "reviewed tenant still has discovery blockers",
+                        "invalid reviewed tenant state",
                     )
                 records.append(
                     {
@@ -359,6 +635,12 @@ async def _commit_review(
                         "old": row["evidence_text"],
                         "new": _json(_evidence(new, key)),
                         "old_state": row["state"],
+                        "new_state": new_tenants[key]["state"],
+                        "failure": (
+                            _json(new_tenants[key]["blockers"])
+                            if new_tenants[key]["state"] == "failed"
+                            else None
+                        ),
                     },
                 )
         await _no_data(
@@ -416,9 +698,11 @@ async def _commit_review(
             raise ValueError("tenant review job compare-and-set failed")
         for record in records:
             changed_rows = await db.execute(
-                "UPDATE swe_conversation_migration_tenants SET evidence_text=%s,state='discovered',failure_text=NULL,verification_text='{}',updated_at=UTC_TIMESTAMP(6) WHERE migration_id=%s AND service_unit_key=%s AND tenant_key=%s AND state=%s AND evidence_text=%s",
+                "UPDATE swe_conversation_migration_tenants SET evidence_text=%s,state=%s,failure_text=%s,verification_text='{}',updated_at=UTC_TIMESTAMP(6) WHERE migration_id=%s AND service_unit_key=%s AND tenant_key=%s AND state=%s AND evidence_text=%s",
                 (
                     record["new"],
+                    record["new_state"],
+                    record["failure"],
                     manifest.migration_id.encode(),
                     record["service"].encode(),
                     record["tenant"].encode(),
@@ -472,7 +756,9 @@ async def recover_pending_review(db, manifest):
                 locked=True,
             )
             expected_state = (
-                "discovered" if outcome == "new" else record["old_state"]
+                record.get("new_state", "discovered")
+                if outcome == "new"
+                else record["old_state"]
             )
             if (
                 row is None
@@ -517,4 +803,12 @@ async def recover_pending_review(db, manifest):
             os.link(path, archive)
         path.unlink()
         _sync(path.parent)
-    return {"revision": pending["revision"], "outcome": outcome}
+    return {
+        "revision": pending["revision"],
+        "outcome": outcome,
+        "failures": (
+            manifest.data.get("tenant_review_failures", [])
+            if outcome == "new"
+            else []
+        ),
+    }

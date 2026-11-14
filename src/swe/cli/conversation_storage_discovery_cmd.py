@@ -232,7 +232,12 @@ def register_discovery_commands(group):
     @click.option(
         "--tenant-isolation",
         is_flag=True,
-        help="Isolate tenant data failures; requires independent frozen inputs.",
+        help="Isolate tenant data failures; freeze inputs or select --in-place.",
+    )
+    @click.option(
+        "--in-place",
+        is_flag=True,
+        help="Use identical source and runtime roots with tenant isolation.",
     )
     def discover_command(
         services,
@@ -240,6 +245,7 @@ def register_discovery_commands(group):
         shares_file,
         overrides,
         tenant_isolation,
+        in_place,
         **resources,
     ):
         try:
@@ -259,6 +265,7 @@ def register_discovery_commands(group):
                 overrides=exceptions,
                 semantic_validator=_semantic_validator(**resources),
                 tenant_isolation=tenant_isolation,
+                in_place=in_place,
             )
             destination.parent.mkdir(parents=True, exist_ok=True)
             # Existing evidence is never silently overwritten.

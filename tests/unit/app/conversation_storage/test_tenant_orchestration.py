@@ -346,3 +346,127 @@ def test_failure_report_has_actionable_safe_reason():
     )
     assert report["code"] == "tenant_capacity_exceeded"
     assert "private" not in str(report)
+
+
+async def test_in_place_bad_tenant_continues_to_next_healthy_tenant(
+    orchestration,
+    monkeypatch,
+):
+    orchestration.manifest.data["in_place"] = True
+    visited = []
+
+    async def one(_operation, view, *_args):
+        visited.append(view.key[1])
+        if view.key[1] == "b":
+            raise cli.TenantFailure("tenant input ownership overlaps")
+
+    monkeypatch.setattr(cli, "_one_tenant", one)
+    result = await run(orchestration)
+    assert visited == ["b", "c"]
+    assert result["completed"] == 1
+    assert result["published"] == 1
+    assert result["failed"] == 1
+    report = orchestration.writer.call_args.args[2]
+    assert [entry["tenant_id"] for entry in report] == ["b"]
+    assert "重叠" in report[0]["reason"]
+
+
+async def test_missing_explicit_share_is_tenant_failure_not_shared_disk(
+    monkeypatch,
+    orchestration,
+):
+    root = orchestration.base / "source"
+    root.mkdir()
+    parent = orchestration.manifest
+    parent.data["services"][0]["source_root"] = str(root)
+    missing = root / "bob" / "chat_shares" / "missing.json"
+    parent.data["shares"] = [
+        {
+            "service_unit_id": "svc",
+            "tenant_id": "b",
+            "snapshot_path": str(missing),
+        },
+    ]
+    view = cli.TenantManifest(parent, parent.data["tenants"][1])
+    monkeypatch.setattr(
+        cli,
+        "inventory_v3_spooled",
+        AsyncMock(
+            side_effect=FileNotFoundError(2, "missing input", str(missing)),
+        ),
+    )
+    with pytest.raises(cli.TenantFailure, match="input is missing"):
+        await cli._inventory(view, None, {})
+    root.rmdir()
+    with pytest.raises(FileNotFoundError):
+        await cli._inventory(view, None, {})
+
+
+def test_bad_share_content_and_share_budget_have_tenant_error_types(tmp_path):
+    from swe.app.conversation_storage.migration.inventory_v3 import (
+        _preflight_share_budget,
+        _read_share_snapshot,
+    )
+    from swe.app.conversation_storage.migration.source_inputs import (
+        SourceInputInvalid,
+    )
+
+    snapshot = tmp_path / "share.json"
+    snapshot.write_text("{invalid")
+    with pytest.raises(SourceInputInvalid, match="content is invalid"):
+        _read_share_snapshot(snapshot)
+    with pytest.raises(cli.MigrationCapacityError):
+        _preflight_share_budget(
+            {"shares": [{"snapshot_path": str(snapshot)}]},
+            64,
+        )
+
+
+async def test_missing_share_mount_is_shared_failure(
+    monkeypatch,
+    orchestration,
+):
+    root = orchestration.base / "source"
+    root.mkdir()
+    snapshot_root = orchestration.base / "unmounted-snapshots"
+    parent = orchestration.manifest
+    parent.data["services"][0].update(
+        source_root=str(root),
+        snapshot_root=str(snapshot_root),
+    )
+    missing = snapshot_root / "bob" / "chat_shares" / "share.json"
+    parent.data["shares"] = [
+        {
+            "service_unit_id": "svc",
+            "tenant_id": "b",
+            "snapshot_path": str(missing),
+        },
+    ]
+    view = cli.TenantManifest(parent, parent.data["tenants"][1])
+    monkeypatch.setattr(
+        cli,
+        "inventory_v3_spooled",
+        AsyncMock(
+            side_effect=FileNotFoundError(2, "mount missing", str(missing)),
+        ),
+    )
+    with pytest.raises(FileNotFoundError):
+        await cli._inventory(view, None, {})
+
+
+def test_review_partial_failure_is_reported_without_losing_success(
+    orchestration,
+):
+    failure = cli._failure(
+        orchestration.manifest.data["tenants"][1],
+        "retry-review",
+    )
+    outcome = {
+        "outcome": "new",
+        "revision": "review-id",
+        "failures": [failure],
+    }
+    report = cli._review_report(orchestration.manifest, outcome)
+    assert report["status"] == "partial_success" and report["failed"] == 1
+    assert report["review"]["revision"] == "review-id"
+    assert orchestration.writer.call_args.args[2] == [failure]

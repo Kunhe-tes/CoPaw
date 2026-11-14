@@ -201,6 +201,14 @@ class ConversationRuntime:
             from .tenant_admission import TenantNotPublished
 
             raise TenantNotPublished()
+        if self.admission is not None:
+            from .in_place_admission import require_workspace_boundary
+
+            require_workspace_boundary(
+                self.admission.source_binding,
+                resolved,
+                root,
+            )
         if scope is None:
             require_empty_conversation(root)
             if resolved in self.mappings.values():

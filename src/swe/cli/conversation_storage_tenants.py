@@ -51,6 +51,11 @@ class TenantManifest:
         self.key = tenant["service_unit_id"], tenant["tenant_id"]
         self.data = {
             **parent.data,
+            "tenants": [
+                item
+                for item in parent.data["tenants"]
+                if (item["service_unit_id"], item["tenant_id"]) == self.key
+            ],
             "workspaces": [
                 w
                 for w in parent.data["workspaces"]
@@ -148,10 +153,49 @@ def _spool(base, data, memory_bytes, workers):
     )
 
 
+def _source_roots_available(data):
+    return all(
+        Path(service[key]).is_dir()
+        for service in data["services"]
+        for key in ("source_root", "config_root", "snapshot_root")
+        if service.get(key)
+    )
+
+
 async def _inventory(view, spool, resources):
     from swe.app.conversation_storage.migration.source_inputs import (
         SourceInputInvalid,
     )
+
+    if view.data.get("in_place"):
+        from swe.app.conversation_storage.in_place_admission import (
+            tenant_write_boundaries,
+        )
+        from swe.app.conversation_storage.errors import IntegrityError
+
+        try:
+            tenant_write_boundaries(view.parent.data, tenant=view.key)
+        except IntegrityError as error:
+            raise TenantFailure("tenant input ownership overlaps") from error
+        from swe.app.conversation_storage.migration.in_place_source import (
+            verify_evidence,
+        )
+
+        try:
+            for tenant in view.data["tenants"]:
+                if (
+                    tenant["service_unit_id"],
+                    tenant["tenant_id"],
+                ) == view.key:
+                    verify_evidence(view.data, tenant)
+        except SourceInputInvalid as error:
+            raise TenantFailure(
+                "tenant source path is unsafe or invalid",
+            ) from error
+        except FileNotFoundError as error:
+            if not _source_roots_available(view.data):
+                raise
+            raise TenantFailure("tenant input is missing") from error
 
     try:
         result = await inventory_v3_spooled(
@@ -165,14 +209,24 @@ async def _inventory(view, spool, resources):
             "tenant source path is unsafe or invalid",
         ) from error
     except FileNotFoundError as error:
-        roots = [Path(s["source_root"]) for s in view.data["services"]]
         path = Path(error.filename) if error.filename else None
+        explicit = {
+            Path(share["snapshot_path"]) for share in view.data["shares"]
+        }
+        explicit.update(
+            Path(reference)
+            for tenant in view.data["tenants"]
+            for reference in tenant.get("evidence_refs", [])
+        )
         if (
             path is None
-            or not all(root.is_dir() for root in roots)
-            or not any(
-                path.is_relative_to(Path(w["root"]))
-                for w in view.data["workspaces"]
+            or not _source_roots_available(view.data)
+            or not (
+                path in explicit
+                or any(
+                    path.is_relative_to(Path(w["root"]))
+                    for w in view.data["workspaces"]
+                )
             )
         ):
             raise
@@ -341,6 +395,7 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
 
 
 _TENANT_FAILURE_REASONS = {
+    "tenant input ownership overlaps": "租户输入与其他账号重叠，无法独立发布",
     "tenant source path is unsafe or invalid": "会话路径不安全：检查软链接、越界或特殊文件",
     "tenant input is missing": "冻结会话输入缺失",
     "tenant inventory contains blockers": "会话清单校验失败；查看受限审计清单中的 blockers",
@@ -403,6 +458,18 @@ def _write_runtime(output, manifest):
         }
         name = sha256(service["service_unit_id"].encode()).hexdigest()
         _write_json(output / (name + ".runtime.json"), document)
+
+
+def _review_report(manifest, outcome):
+    failures = outcome.get("failures", [])
+    return {
+        "version": 3,
+        "status": "partial_success" if failures else "success",
+        "review": outcome,
+        "migration_id": manifest.migration_id,
+        "failed": len(failures),
+        "failure_report": _write_failures(manifest, "retry-review", failures),
+    }
 
 
 async def _rollback_command(
@@ -480,6 +547,19 @@ async def run_tenants(
 
     for online in manifest.data["services"]:
         for frozen in manifest.data["services"]:
+            if manifest.data.get("in_place") and online is frozen:
+                roots = {
+                    online.get(key)
+                    for key in (
+                        "source_root",
+                        "config_root",
+                        "snapshot_root",
+                        "original_root",
+                    )
+                }
+                if len(roots) != 1 or None in roots:
+                    raise ValueError("in-place roots must be identical")
+                continue
             if any(
                 _overlaps(Path(online["original_root"]), Path(frozen[key]))
                 for key in ("source_root", "config_root", "snapshot_root")
@@ -553,12 +633,7 @@ async def run_tenants(
                 await guard.check()
                 outcome = await review_retry(db, manifest, report)
                 await guard.check()
-                return {
-                    "version": 3,
-                    "status": "success",
-                    "review": outcome,
-                    "migration_id": manifest.migration_id,
-                }
+                return _review_report(manifest, outcome)
             if operation == "rollback-tenants":
                 return await _rollback_command(
                     control,

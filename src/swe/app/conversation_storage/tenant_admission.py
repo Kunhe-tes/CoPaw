@@ -45,6 +45,7 @@ class TenantAdmission:
             raise IntegrityError("partial migration job is missing")
         binding = json.loads(job["target_binding_text"])
         source = json.loads(job["source_binding_text"])
+        self.source_binding = source
         identity = await self.db.fetch_one(
             "SELECT @@server_uuid AS server_uuid,DATABASE() AS schema_name",
         )
@@ -61,6 +62,12 @@ class TenantAdmission:
     async def require(self, tenant_id):
         await self.validate()
         doc = self.document
+        from .in_place_admission import tenant_write_boundaries
+
+        tenant_write_boundaries(
+            self.source_binding,
+            tenant=(doc["service_unit_id"], tenant_id),
+        )
         row = await self.db.fetch_one(
             "SELECT state,verification_text FROM swe_conversation_migration_tenants "
             "WHERE migration_id=%s AND service_unit_key=%s AND tenant_key=%s",

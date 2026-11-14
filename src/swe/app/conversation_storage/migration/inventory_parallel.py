@@ -8,6 +8,7 @@ from pathlib import Path
 from ..bundle import MAX_READ_BYTES
 from .inventory_v3 import inventory_workspace
 from .freshness import changed_source, tenant_key
+from .in_place_source import shared_service_roots
 from .parallel import MigrationCoordinator, MigrationIO
 from .progress import current_progress
 from .spool import ByteBudget, MigrationCapacityError
@@ -109,6 +110,7 @@ def _shared_freshness(data):
     paths retain their own checks, including the workspace directory mtime.
     """
     references = Counter()
+    shared = shared_service_roots(data)
     for workspace in data["workspaces"]:
         cutoff = data.get("tenant_sync_started_at_ns", {}).get(
             tenant_key(workspace["service_unit_id"], workspace["tenant_id"]),
@@ -117,6 +119,7 @@ def _shared_freshness(data):
             references.update(
                 (str(Path(value).parent), cutoff)
                 for value in workspace.get("evidence_refs", [])
+                if str(Path(value).parent) not in shared
             )
     return {
         key: changed_source([key[0]], key[1], recursive=False)

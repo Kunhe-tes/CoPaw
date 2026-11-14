@@ -5,11 +5,49 @@
 ## 1. 边界与上线单位
 
 - `(service_unit_id, tenant_id)` 是发布单位。同账号全部 source、Agent、workspace 和分享必须一起通过，不能跳过坏 Agent 后发布该账号。
-- `source_root/config_root/snapshot_root` 是冻结输入；`original_root` 是新版实际工作区根；`nas_root` 是新正文存储。冻结输入必须与所有服务的在线 `original_root` 分离，不能把在线目录当快照。`snapshot_root` 是旧分享正文根，不等于“在线工作区根”。
+- `source_root/config_root/snapshot_root` 是冻结输入；`original_root` 是新版实际工作区根；`nas_root` 是新正文存储。默认冻结副本模式要求输入与所有服务的在线 `original_root` 分离。显式原地模式允许四个旧 root 相同，见第 1.1 节。`snapshot_root` 是旧分享正文根，不等于“在线工作区根”。
 - 启动迁移前停止全部旧 writer、定时任务和其他写入口并建立备份；冻结源持续保留。程序接受停写证据引用，不替代停止进程或存储冻结。
 - 新运行时仅放行 SQL 状态为 `published` 且凭证核对通过的账号。失败、未注册账号返回 HTTP 503，错误码 `conversation_tenant_not_published`，不回退旧文件。
 - 已发布 A 可在新版写入，B 的后续普通预检、导入、续跑、校验和发布直接跳过 A，不再读取其冻结正文。多实例从 SQL 动态读取准入，无需为 B 发布重启 A。
 - 无可信账号归属的错误不能随意跳过：会保守阻断受影响服务/账号。MySQL、共享盘 EIO/空间耗尽、锁丢失、提交结果不确定和取消会终止本次命令；不是可忽略的坏租户。
+
+## 1.1 原地迁移：不复制 workspace
+
+如需直接使用原业务目录，首次发现必须同时指定 `--tenant-isolation --in-place`。四个旧 root 必须是同一个已存在、规范、无软链接的绝对目录；`nas_root` 仍须独立且与业务根互不包含：
+
+```json
+{
+  "services": [{
+    "service_unit_id": "SERVICE_A",
+    "source_root": "/mnt/business/service-a",
+    "config_root": "/mnt/business/service-a",
+    "snapshot_root": "/mnt/business/service-a",
+    "original_root": "/mnt/business/service-a",
+    "nas_root": "/mnt/conversation-body/service-a"
+  }]
+}
+```
+
+```bash
+"$SWE_PYTHON" -m swe conversation-storage discover \
+  --tenant-isolation --in-place \
+  --services "$AUDIT_DIR/services.json" \
+  --output "$AUDIT_DIR/discovery.in-place.json" "${CS_RESOURCES[@]}"
+```
+
+后续 freeze 的 `--discovery` 指向这份报告，其余 preflight/import/verify/finalize 命令相同；原地模式随 manifest 固定，后续不重复传 `--in-place`。不能手改已有 manifest 切换模式。尚未正式导入时可用新文件名重做发现和冻结；已有 SQL 数据/票据时不能另建作业继续写同一库。
+
+仍须准备 `boundary.json`：`snapshot_id` 在原地模式填写本次停写/输入固化批次的真实唯一编号，不要求虚构存储快照；`captured_at` 填对应固化完成时间，`evidence_refs` 记录原地未发布输入的只读和停写措施。备份与旧镜像摘要仍需真实保留。
+
+原地不要求复制 workspace，也不要求把整个业务树都设为只读。但所有旧 writer 必须停止，未发布账号的会话输入和精确配置/Agent 证据文件须持续只读、内容不变；必要会话入口目录也保持只读。初次发现前准备这些文件和目录的权限，不能在导入时恢复所有账号的写权限。共享业务根及普通业务目录可以可写。发布 A 后仅恢复 A 的在线配置/业务目录所需权限，B 的未发布输入保持原状。CLI 不自动 chmod 或停止服务。
+
+程序跳过已发布 A 的源盘点；A 更新自己的配置、新建 Agent、写新会话以及共享服务根 mtime 变化，不影响未发布 B 的正常续跑。B 自身会话入口成员变化仍检查，配置/Agent 证据另有 SHA-256 与读取前后文件身份核验，不能用保留 mtime 绕过。任意跨账号共享/嵌套 workspace、配置文件或账号目录会使涉及账号失败，其他独立账号继续。
+
+原地模式同样在各阶段只记录可归属的坏租户并继续正常组；数据库/锁/共享 NAS 故障仍中止本次命令。失败账号没有 legacy 回退。恢复 B 输入后，如原数据已有业务行/票据，不允许随意改内容；遵循第 5 节的原样 resume 或零数据证据重审。
+
+原地重审：将原 discovery 完整报告另存为新的审核输入，保留原 `declared_services`、完整冻结 `source_shares` 和审核 overrides，以该文件传给 `retry-review --reviewed-discovery ... --apply`。该文件用于明确授权重审输入，程序在锁内重新发现未发布组并落完整新证据审计；已发布目录仅按旧可信目录映射剪枝，不再读 A 在线配置/正文。不要在 A 已上线后直接将普通 discover 的在线分享表输出当冻结依据。新增未知账号、服务/root 变化或无法证明已发布账号独占目录等全局证据问题，会使该次重审拒绝。能归属到 B 的候选边界冲突（包括指向已发布 A 的目录）则拒绝 B 的候选修订，恢复 B 原有映射与证据并记录失败，其他独立 D 继续重审；不会改动 A。B 已有业务行/票据时，保留 B 完整旧记录、不修订其证据并报告 B 失败，其他独立组仍可继续。
+
+原地不是独立快照，仍需迁移前数据库和 NAS 备份。上线后的整体回滚必须合成 A 最新状态与 B 保留输入，不能直接让旧版读取混合运行目录。
 
 ## 2. 环境准备
 
@@ -111,9 +149,30 @@ verify/finalize 失败的租户先 resume 恢复完整 imported 状态，再 ver
 
 ### 首次 discovery 的配置/输入需要修正
 
-初次失败组不会因普通 resume 自动恢复。仅当该账号**尚无业务行且尚无迁移票据**时，可以审核修复冻结输入，再重新设置只读并生成新的完整发现报告。服务/root、账号集合和原始分享记录必须保持不变；不得修改已发布账号。修改冻结输入是受控证据修订，记录修复人与理由，不是开放旧 writer：
+初次失败组不会因普通 resume 自动恢复。仅当该账号**尚无业务行且尚无迁移票据**时，可以审核修复冻结输入，再重新设置只读并准备完整审核报告。服务/root、账号集合和原始分享记录必须保持不变；不得修改已发布账号。修改冻结输入是受控证据修订，记录修复人与理由，不是开放旧 writer。
 
-新 discover 仍会盘点全部冻结账号的正文，包括已发布 A 的冻结正文；不会读取 A 的在线新正文。`retry-review` 内部再次发现时则使用已发布组的固定映射与计数，跳过其正文盘点。普通 resume/verify/finalize 也跳过已发布组，不能把这几种不同操作混为一谈。
+**原地模式按第 1.1 节准备原 discovery 的完整副本，直接执行下面的 `retry-review`，跳过本节提取 shares 和重新 `discover` 的命令。** 已发布 A 的原地配置与正文就是在线数据，普通 discover 不知道 SQL 发布状态，仍会读取它们。保留副本中的原 `declared_services`、`source_shares` 和完整审核 overrides，由 `retry-review` 在锁内重发现未发布组。
+
+原地模式的审核副本及重审命令如下；示例首次发现文件名对应第 1.1 节。目标文件必须不存在；审核副本保留完整原报告，修复的是 B 的实际输入及只读措施，不能手改报告伪造新证据：
+
+```bash
+"$SWE_PYTHON" - "$AUDIT_DIR/discovery.in-place.json" "$AUDIT_DIR/discovery.in-place.review-1.json" <<'PYREVIEW'
+import os, sys
+with open(sys.argv[1], "rb") as stream:
+    report = stream.read()
+fd = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "wb") as stream:
+    stream.write(report)
+PYREVIEW
+"$SWE_PYTHON" -m swe conversation-storage retry-review \
+  --manifest "$AUDIT_DIR/manifest.json" \
+  --reviewed-discovery "$AUDIT_DIR/discovery.in-place.review-1.json" \
+  --apply "${CS_RESOURCES[@]}"
+```
+
+检查本次失败清单后，对可继续的账号执行本节开头的 resume/verify/finalize。已发布 A 无需重新恢复权限或冻结，其在线配置和新 Agent 不应复制回 B 的证据。
+
+以下重新生成 discovery 的步骤仅适用于默认冻结副本模式。新 discover 仍会盘点全部冻结账号的正文，包括已发布 A 的冻结正文；不会读取 A 的在线新正文。`retry-review` 内部再次发现时则使用已发布组的固定映射与计数，跳过其正文盘点。普通 resume/verify/finalize 也跳过已发布组，不能把这几种不同操作混为一谈。
 
 重审须使用原 manifest 的完整 `source_shares`，不能默认读取在线分享表：A 上线后新增分享或增加访问计数属于正常业务，不得写回冻结证据。先只读提取原始完整分享集合；以下命令独占创建私有文件，已存在时拒绝覆盖：
 
@@ -140,7 +199,7 @@ PY
 
 接着执行上一节 resume/verify/finalize。重审会重新核对完整配置覆盖，对可修改组更新证据和同步起点，保留已发布组；SQL CAS、只读快照及 pending 文件用于审计和中断恢复。不要删除 `*.review-pending.json` 或修订快照；重跑命令会在命名锁内判断 SQL 已提交还是未提交，未知状态拒绝继续。
 
-已有迁移业务行/票据的账号不支持直接修改输入后 retry-review，也不提供自动删除部分数据的 reset。应保持隔离，另行制定受控数据修复/恢复方案。
+已有迁移业务行/票据的账号不支持直接修改输入后 retry-review，也不提供自动删除部分数据的 reset。该账号保持完整旧证据并记录失败，不阻断其他可重审账号；应保持其隔离，另行制定受控数据修复/恢复方案。
 
 ## 6. 全部账号完成后的分享 schema 收口
 

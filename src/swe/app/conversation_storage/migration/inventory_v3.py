@@ -10,9 +10,14 @@ from ..identity import WorkspaceScope
 from .discovery import fingerprints, source_key, SHARE_FIELDS
 from .freshness import changed_source, tenant_key
 from .inventory import WorkspaceMapping, _workspace
-from .source_inputs import safe_input_entries, workspace_entries
+from .source_inputs import (
+    SourceInputInvalid,
+    safe_input_entries,
+    workspace_entries,
+)
 from .manifest import SourceBoundary
 from .failure_scope import isolated_inventory, raise_shared_failure
+from .in_place_source import evidence_paths, verify_evidence
 
 
 def _source_change(
@@ -64,6 +69,19 @@ def _has_unmapped_structure(mapping, entries):
     )
 
 
+def _read_share_snapshot(path):
+    from swe.app.chat_sharing.models import ChatShareSnapshot
+
+    try:
+        raw = load_metadata_json(path.read_bytes())
+        ChatShareSnapshot.model_validate(raw)
+    except (ValueError, UnicodeError) as error:
+        raise SourceInputInvalid(
+            "share snapshot content is invalid",
+        ) from error
+    return raw
+
+
 def _inventory_shares(data, report):
     # Per-pass only: final source rechecks must never reuse prior evidence.
     parent_freshness = {}
@@ -109,7 +127,7 @@ def _inventory_shares(data, report):
             recursive=False,
         )
         if not snapshot_path.is_file():
-            raise ValueError("share snapshot must be a regular file")
+            raise SourceInputInvalid("share snapshot must be a regular file")
         if snapshot_path.stat().st_size > MAX_READ_BYTES:
             report["blockers"].append(
                 {
@@ -146,7 +164,7 @@ def _inventory_shares(data, report):
                 "scope_kind": "workspace" if matches else "legacy_share",
                 "chat_position": chat_position,
                 "record": record,
-                "snapshot": load_metadata_json(snapshot_path.read_bytes()),
+                "snapshot": _read_share_snapshot(snapshot_path),
                 "snapshot_path": source["snapshot_path"],
             },
         )
@@ -196,9 +214,20 @@ def _workspace_mappings(data):
     return mappings
 
 
+def _verify_tenant_evidence(data):
+    for tenant in data.get("tenants", []):
+        if tenant.get("state") != "failed":
+            verify_evidence(data, tenant)
+
+
+def _workspace_source_paths(data, mapped, entries):
+    return [str(path) for path in entries] + evidence_paths(data, mapped)
+
+
 @isolated_inventory
 def inventory_discovery(data, *, workspace_offset=0):
     """Parse source semantics without manufacturing a frozen source boundary."""
+    _verify_tenant_evidence(data)
     if (
         data.get("fingerprints")
         and fingerprints(
@@ -217,15 +246,14 @@ def inventory_discovery(data, *, workspace_offset=0):
     }
     for index, mapping in enumerate(mappings):
         mapped = data["workspaces"][index]
+        verify_evidence(data, mapped)
         cutoff = data.get("tenant_sync_started_at_ns", {}).get(
             tenant_key(mapping.scope.service_unit_id, mapping.scope.tenant_id),
         )
         entries = workspace_entries(mapping)
         input_files = [path for path in entries if path.is_file()]
-        source_paths = [str(path) for path in entries]
+        source_paths = _workspace_source_paths(data, mapped, entries)
         has_unmapped_structure = _has_unmapped_structure(mapping, entries)
-        for evidence in mapped.get("evidence_refs", []):
-            source_paths.extend((evidence, str(Path(evidence).parent)))
         if cutoff is not None:
             blocker = _source_change(
                 mapped["position"],
@@ -432,6 +460,8 @@ async def inventory_v3_spooled(
 
 def _preflight_share_budget(data, memory_bytes):
     """Bound decoded share snapshots before materializing the share list."""
+    from .spool import MigrationCapacityError
+
     total = 0
     count = 0
     byte_limit = memory_bytes // 64
@@ -439,11 +469,15 @@ def _preflight_share_budget(data, memory_bytes):
     for share in data.get("shares", []):
         size = Path(share["snapshot_path"]).stat().st_size
         if size > MAX_READ_BYTES:
-            raise ValueError("share snapshot exceeds the bounded reader limit")
+            raise MigrationCapacityError(
+                "share snapshot exceeds the bounded reader limit",
+            )
         total += size
         count += 1
         if total > byte_limit or count > count_limit:
-            raise ValueError("share snapshots exceed migration memory budget")
+            raise MigrationCapacityError(
+                "share snapshots exceed migration memory budget",
+            )
 
 
 def inventories_equal(left, right):
@@ -481,10 +515,19 @@ def inventories_equal(left, right):
 
 def inventory_workspace(data, index):
     """Parse one workspace preserving its global artifact positions."""
+    workspace = data["workspaces"][index]
     return inventory_discovery(
         {
             **data,
-            "workspaces": [data["workspaces"][index]],
+            "workspaces": [workspace],
+            "tenants": [
+                tenant
+                for tenant in data.get("tenants", [])
+                if all(
+                    tenant[key] == workspace[key]
+                    for key in ("service_unit_id", "tenant_id")
+                )
+            ],
             "shares": [],
             # Global fingerprint checks belong to the coordinator barriers.
             "fingerprints": [],

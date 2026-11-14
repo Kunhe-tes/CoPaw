@@ -76,17 +76,19 @@ def config_candidates(root):
     result = [root / "config.json"]
     with os.scandir(root) as entries:
         for entry in entries:
+            from .in_place_review import skipped
+
+            if skipped(entry.path):
+                continue
             try:
                 details = entry.stat(follow_symlinks=False)
             except FileNotFoundError:
                 continue
             if stat.S_ISLNK(details.st_mode):
-                from .source_inputs import SourceInputInvalid
-
-                raise SourceInputInvalid(
-                    "config source contains a symlink directory entry",
-                )
-            if stat.S_ISDIR(details.st_mode):
+                # Preserve its lexical identity for a local discovery blocker,
+                # without stat-ing or reading anything through the link.
+                result.append(Path(entry.path) / "config.json")
+            elif stat.S_ISDIR(details.st_mode):
                 candidate = Path(entry.path) / "config.json"
                 try:
                     candidate.lstat()

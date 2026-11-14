@@ -19,7 +19,7 @@ _app → tenant_workspace → conversation_storage.__init__ → chat_repository
 
 ## 当前操作入口与历史说明
 
-当前 v3 全量严格迁移以 [全量手册](../../docs/superpowers/plans/2026-11-02-conversation-migration-and-launch-runbook.md) 为准；显式租户隔离与独立上线以 [租户操作增补](../../docs/superpowers/plans/2026-11-13-conversation-tenant-migration-operations.md) 为准。`discover --tenant-isolation` 的有效 partial_success 报告允许正常账号继续；失败/未登记账号仍不可用。共享 SQL/IO/锁故障不能当作坏租户跳过，verify/finalize 失败先 resume，修改已有导入数据的输入不支持直接 retry-review。
+当前 v3 全量严格迁移以 [全量手册](../../docs/superpowers/plans/2026-11-02-conversation-migration-and-launch-runbook.md) 为准；显式租户隔离与独立上线以 [租户操作增补](../../docs/superpowers/plans/2026-11-13-conversation-tenant-migration-operations.md) 为准。`discover --tenant-isolation` 的有效 partial_success 报告允许正常账号继续；失败/未登记账号仍不可用。共享 SQL/IO/锁故障不能当作坏租户跳过，verify/finalize 失败先 resume，修改已有导入数据的输入不支持直接 retry-review。 原地迁移显式使用 `discover --tenant-isolation --in-place`，四个旧输入/业务 root 完全相同、NAS 新正文根独立；未发布账号的精确会话及身份输入持续只读，已发布账号自己的在线写入不阻断其他账号续跑。跨账号重叠输入仅阻断受影响账号。默认冻结副本模式仍要求输入与在线根分离。
 
 以下 v2 安装/换表内容仅供历史排查，不能用于当前 v3 写入、授权配置或权限准备。v3 CLI 使用预建表与 DML 连接，不要求迁移执行账号拥有 CREATE/ALTER/DROP。
 

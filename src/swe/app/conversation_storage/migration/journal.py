@@ -65,6 +65,7 @@ class MigrationJournal:
                 "shares",
                 "discovery_version",
                 "tenant_isolation",
+                "in_place",
                 "tenant_review_revision",
                 "tenants",
                 "source_shares",

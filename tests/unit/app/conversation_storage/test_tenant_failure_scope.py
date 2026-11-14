@@ -251,8 +251,11 @@ def test_config_symlink_directory_is_rejected_before_external_config_read(
     from swe.app.conversation_storage.migration.failure_scope import (
         config_candidates,
     )
-    from swe.app.conversation_storage.migration.source_inputs import (
-        SourceInputInvalid,
+    from swe.app.conversation_storage.migration.discovery import (
+        _profiles,
+    )
+    from swe.app.conversation_storage.migration.tenant_discovery import (
+        _configs,
     )
 
     root = tmp_path / "config"
@@ -266,8 +269,69 @@ def test_config_symlink_directory_is_rejected_before_external_config_read(
         "read_bytes",
         lambda *_: pytest.fail("must not read external config"),
     )
-    with (
-        strict_tenant_io(),
-        pytest.raises(SourceInputInvalid, match="symlink"),
-    ):
-        config_candidates(root)
+    service = {
+        "config_root": str(root),
+        "service_unit_id": "svc",
+        "tenant_sources": {"tenant-link": "SRC"},
+    }
+    report = {"blockers": []}
+    with strict_tenant_io():
+        assert root / "tenant-link/config.json" in config_candidates(root)
+        assert _profiles(service, report) == []
+        assert list(_configs(service)) == [
+            (root / "tenant-link/config.json", "tenant-link"),
+        ]
+    assert len(report["blockers"]) == 1
+    assert report["blockers"][0]["position"] == str(
+        root / "tenant-link/config.json",
+    )
+    assert report["blockers"][0]["code"] == "source_invalid"
+
+
+@pytest.mark.parametrize("known_owner", [True, False])
+def test_symlink_config_directory_keeps_discovery_report_and_tenant_scope(
+    tmp_path,
+    monkeypatch,
+    known_owner,
+):
+    from swe.app.conversation_storage.migration import discovery
+
+    source = tmp_path / "source"
+    (source / "alice").mkdir(parents=True)
+    (source / "alice" / "config.json").write_text("{}")
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "config.json").write_text('{"private":true}')
+    (source / "bob").symlink_to(external, target_is_directory=True)
+    nas = tmp_path / "nas"
+    nas.mkdir()
+    reader = discovery._read_json
+
+    def read(path):
+        assert not path.is_relative_to(source / "bob")
+        return reader(path)
+
+    monkeypatch.setattr(discovery, "_read_json", read)
+    report = discovery.discover_services(
+        [
+            {
+                "service_unit_id": "svc",
+                "source_root": str(source),
+                "config_root": str(source),
+                "original_root": str(nas),
+                "nas_root": str(nas),
+                "tenant_sources": {
+                    "alice": "SRC",
+                    **({"bob": "SRC"} if known_owner else {}),
+                },
+            },
+        ],
+        tenant_isolation=True,
+    )
+    assert report["blockers"][0]["code"] == "source_invalid"
+    states = {item["tenant_id"]: item["state"] for item in report["tenants"]}
+    if known_owner:
+        assert states == {"alice": "discovered", "bob": "failed"}
+    else:
+        # Without trustworthy ownership, conservatively block this service.
+        assert states == {"alice": "failed"}

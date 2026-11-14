@@ -731,3 +731,465 @@ def test_partial_freeze_keeps_failed_tenant_evidence(tmp_path):
             boundary,
             "business",
         )
+
+
+def in_place_fixture(tmp_path):
+    service = fixture_service(tmp_path)
+    source = Path(service["source_root"])
+    config = source / "default_SRC" / "config.json"
+    config.chmod(0o644)
+    data = json.loads(config.read_text())
+    data["agents"]["profiles"]["agent"]["workspace_dir"] = str(
+        source / "default_SRC" / "workspaces" / "agent",
+    )
+    config.write_text(json.dumps(data))
+    config.chmod(0o444)
+    service.update(original_root=str(source), snapshot_root=str(source))
+    return service
+
+
+def test_explicit_in_place_discovery_and_freeze_bind_mode(tmp_path):
+    from swe.app.conversation_storage.migration.discovery import (
+        discover_services,
+        freeze_discovery,
+    )
+
+    service = in_place_fixture(tmp_path)
+    report = discover_services([service], tenant_isolation=True, in_place=True)
+    assert report["ready"], report["blockers"]
+    assert report["in_place"] is True
+    manifest = freeze_discovery(
+        report,
+        tmp_path / "in-place.json",
+        SourceBoundary(
+            "snapshot",
+            "2026-11-13T00:00:00Z",
+            "old@sha256:" + "a" * 64,
+            ("stop", "readonly"),
+        ),
+        "business",
+    )
+    assert manifest.data["in_place"] is True
+    from swe.app.conversation_storage.migration.journal import MigrationJournal
+
+    assert (
+        json.loads(MigrationJournal(None, manifest)._bindings()[1])["in_place"]
+        is True
+    )
+
+
+def test_in_place_requires_explicit_isolation_and_identical_four_roots(
+    tmp_path,
+):
+    from swe.app.conversation_storage.migration.discovery import (
+        discover_services,
+    )
+
+    service = in_place_fixture(tmp_path)
+    with pytest.raises(ValueError, match="tenant isolation"):
+        discover_services([service], in_place=True)
+    service["snapshot_root"] = service["nas_root"]
+    report = discover_services([service], tenant_isolation=True, in_place=True)
+    assert not report["ready"]
+    assert any(b["code"] == "service_invalid" for b in report["blockers"])
+
+
+def test_published_pruning_never_reads_live_config_and_keeps_unknown_candidates(
+    tmp_path,
+    monkeypatch,
+):
+    from swe.app.conversation_storage.migration.in_place_review import (
+        published_pruning,
+    )
+    from swe.app.conversation_storage.migration.failure_scope import (
+        config_candidates,
+        strict_tenant_io,
+    )
+    from swe.app.conversation_storage.migration.discovery import (
+        discover_services,
+    )
+
+    service = in_place_fixture(tmp_path)
+    report = discover_services([service], tenant_isolation=True, in_place=True)
+    source = Path(service["source_root"])
+    source.chmod(0o755)
+    unknown = source / "unknown"
+    unknown.mkdir()
+    (unknown / "config.json").write_text("{bad")
+    real_scandir = __import__("os").scandir
+
+    def guarded(path):
+        assert Path(path) != source / "default_SRC"
+        return real_scandir(path)
+
+    monkeypatch.setattr("os.scandir", guarded)
+    with (
+        published_pruning(report, {("SERVICE", "default")}),
+        strict_tenant_io(),
+    ):
+        candidates = config_candidates(source)
+    assert source / "default_SRC" / "config.json" not in candidates
+    assert unknown / "config.json" in candidates
+
+
+def test_shared_in_place_tenant_boundary_only_fails_affected_accounts(
+    tmp_path,
+):
+    from swe.app.conversation_storage.migration.tenant_discovery import (
+        isolate_discovery,
+    )
+
+    root = tmp_path / "root"
+    root.mkdir()
+    service = {
+        "service_unit_id": "svc",
+        "source_root": str(root),
+        "config_root": str(root),
+        "snapshot_root": str(root),
+        "original_root": str(root),
+        "nas_root": str(tmp_path / "nas"),
+    }
+    workspaces = []
+    for tenant, relative in (
+        ("bob", "shared"),
+        ("carol", "shared/child"),
+        ("dave", "independent"),
+    ):
+        path = root / relative
+        path.mkdir(parents=True, exist_ok=True)
+        workspaces.append(
+            {
+                "service_unit_id": "svc",
+                "tenant_id": tenant,
+                "root": str(path),
+                "runtime_root": str(path),
+                "position": tenant,
+                "evidence_refs": [],
+            },
+        )
+    report = {
+        "in_place": True,
+        "services": [service],
+        "workspaces": workspaces,
+        "shares": [],
+        "blockers": [],
+    }
+    isolate_discovery(
+        report,
+        [],
+        lambda data: {
+            "blockers": [],
+            "workspaces": [
+                {"sessions": [], "chats": []} for _ in data["workspaces"]
+            ],
+        },
+    )
+    assert {t["tenant_id"]: t["state"] for t in report["tenants"]} == {
+        "bob": "failed",
+        "carol": "failed",
+        "dave": "discovered",
+    }
+
+
+@pytest.mark.parametrize(
+    "attack",
+    ["profile", "nested", "ancestor", "evidence", "session"],
+)
+def test_explicit_retry_candidate_never_touches_published_inputs(
+    tmp_path,
+    monkeypatch,
+    attack,
+):
+    from swe.app.conversation_storage.migration.discovery import (
+        discover_services,
+        source_key,
+    )
+    from swe.app.conversation_storage.migration.in_place_review import (
+        published_pruning,
+    )
+
+    from swe.config.context import encode_scope_id
+
+    root, nas = tmp_path / "root", tmp_path / "nas"
+    root.mkdir()
+    nas.mkdir()
+    configs, workspaces = {}, {}
+    for name in ("alice", "bob", "dave"):
+        tenant = root / encode_scope_id(name, "SRC")
+        workspace = (
+            (root / "external-a")
+            if name == "alice"
+            else tenant / "workspaces" / "agent"
+        )
+        workspace.mkdir(parents=True)
+        (workspace / "agent.json").write_text('{"id":"agent"}')
+        (workspace / "chats.json").write_text('{"version":1,"chats":[]}')
+        tenant.mkdir(exist_ok=True)
+        config = tenant / "config.json"
+        config.write_text(
+            json.dumps(
+                {
+                    "agents": {
+                        "profiles": {
+                            "agent": {
+                                "id": "agent",
+                                "workspace_dir": str(workspace),
+                            },
+                        },
+                    },
+                },
+            ),
+        )
+        configs[name], workspaces[name] = config, workspace
+    for path in root.rglob("*"):
+        path.chmod(0o555 if path.is_dir() else 0o444)
+    root.chmod(0o555)
+    service = {
+        "service_unit_id": "svc",
+        "source_root": str(root),
+        "config_root": str(root),
+        "snapshot_root": str(root),
+        "original_root": str(root),
+        "nas_root": str(nas),
+    }
+    frozen = discover_services([service], tenant_isolation=True, in_place=True)
+    assert frozen["ready"], frozen["blockers"]
+    overrides = []
+    if attack in ("profile", "nested", "ancestor"):
+        value = json.loads(configs["bob"].read_text())
+        value["agents"]["profiles"]["agent"]["workspace_dir"] = str(
+            (
+                (workspaces["alice"] / "child")
+                if attack == "nested"
+                else workspaces["alice"] if attack == "profile" else root
+            ),
+        )
+        configs["bob"].chmod(0o644)
+        configs["bob"].write_text(json.dumps(value))
+        configs["bob"].chmod(0o444)
+    else:
+        overrides = [
+            {
+                "position": source_key(
+                    "workspace",
+                    "svc",
+                    workspaces["bob"].relative_to(root).as_posix(),
+                ),
+                "discovery_version": 1,
+                "reason": "reviewed override",
+                "tenant_id": "bob",
+                "source_id": "SRC",
+                "agent_id": "agent",
+                "evidence_refs": [str(configs["bob"])],
+                "session_paths": [],
+            },
+        ]
+        if attack == "evidence":
+            overrides[0]["evidence_refs"].append(
+                str(workspaces["alice"] / "agent.json"),
+            )
+        else:
+            overrides[0]["session_paths"] = [
+                {
+                    "path": str(workspaces["alice"] / "sessions" / "s.json"),
+                    "user_id": "u",
+                    "channel": "console",
+                    "session_id": "s",
+                },
+            ]
+    protected = (configs["alice"].parent, workspaces["alice"])
+    original_stat, original_open, original_read = (
+        Path.stat,
+        Path.open,
+        Path.read_bytes,
+    )
+
+    def check(path):
+        if any(
+            path == base or path.is_relative_to(base) for base in protected
+        ):
+            pytest.fail(
+                "published filesystem input touched before rejection: "
+                + str(path),
+            )
+
+    def guarded_stat(path, *args, **kwargs):
+        check(path)
+        return original_stat(path, *args, **kwargs)
+
+    def guarded_open(path, *args, **kwargs):
+        check(path)
+        return original_open(path, *args, **kwargs)
+
+    def guarded_read(path):
+        check(path)
+        return original_read(path)
+
+    monkeypatch.setattr(Path, "stat", guarded_stat)
+    monkeypatch.setattr(Path, "open", guarded_open)
+    monkeypatch.setattr(Path, "read_bytes", guarded_read)
+    with published_pruning(frozen, {("svc", "alice")}):
+        report = discover_services(
+            [service],
+            overrides=overrides,
+            tenant_isolation=True,
+            in_place=True,
+        )
+    states = {t["tenant_id"]: t["state"] for t in report["tenants"]}
+    assert states == {"bob": "failed", "dave": "discovered"}
+
+
+def test_share_candidate_rejected_before_stat_of_published_snapshot(
+    tmp_path,
+    monkeypatch,
+):
+    from swe.app.conversation_storage.migration.discovery import _shares
+    from swe.app.conversation_storage.migration.in_place_review import (
+        published_pruning,
+    )
+
+    path = tmp_path / "bob" / "chat_shares" / "token.json"
+    service = {
+        "service_unit_id": "svc",
+        "source_root": str(tmp_path),
+        "snapshot_root": str(tmp_path),
+    }
+    frozen = {
+        "services": [service],
+        "tenants": [],
+        "workspaces": [
+            {
+                "service_unit_id": "svc",
+                "tenant_id": "alice",
+                "root": str(tmp_path / "external-a"),
+                "evidence_refs": [str(tmp_path / "alice" / "config.json")],
+            },
+        ],
+        "shares": [
+            {
+                "service_unit_id": "svc",
+                "tenant_id": "alice",
+                "snapshot_path": str(path),
+                "token": "token",
+            },
+        ],
+    }
+    source = {
+        "token": "token",
+        "chat_id": "chat",
+        "creator_id": "u",
+        "tenant_id": "bob",
+        "snapshot_key": "bob/chat_shares/token.json",
+        "created_at": "2026-11-01T00:00:00+00:00",
+        "access_count": 0,
+        "last_access_at": None,
+    }
+    original_stat = Path.stat
+
+    def guarded_stat(candidate, *args, **kwargs):
+        if candidate == path:
+            pytest.fail("published share snapshot stat before rejection")
+        return original_stat(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", guarded_stat)
+    report = {"shares": [], "blockers": []}
+    with published_pruning(frozen, {("svc", "alice")}):
+        _shares([service], [source], report)
+    assert report["shares"] == []
+    assert len(report["blockers"]) == 1
+    assert report["blockers"][0]["code"] == "share_invalid"
+    assert report["blockers"][0]["position"] == "token"
+    assert "published tenant" in report["blockers"][0]["detail"]
+
+
+@pytest.mark.parametrize("ownership", ["known", "unknown", "ambiguous"])
+def test_review_share_uses_frozen_service_without_probing_published_namesake(
+    tmp_path,
+    monkeypatch,
+    ownership,
+):
+    from swe.app.conversation_storage.migration.discovery import _shares
+    from swe.app.conversation_storage.migration.in_place_review import (
+        published_pruning,
+    )
+
+    services = [
+        {
+            "service_unit_id": name,
+            "source_root": str(tmp_path / name),
+            "snapshot_root": str(tmp_path / name),
+        }
+        for name in ("svcA", "svcB")
+    ]
+    a_root = tmp_path / "svcA" / "alice"
+    b_snapshot = tmp_path / "svcB" / "alice" / "chat_shares" / "token.json"
+    b_snapshot.parent.mkdir(parents=True)
+    b_snapshot.write_text('{"chat_name":"old share","messages":[]}')
+    frozen = {
+        "services": services,
+        "workspaces": [],
+        "tenants": [
+            {
+                "service_unit_id": "svcA",
+                "tenant_id": "alice",
+                "evidence_refs": [str(a_root / "config.json")],
+            },
+        ],
+        "shares": (
+            []
+            if ownership == "unknown"
+            else [
+                {
+                    "token": "token",
+                    "service_unit_id": "svcB",
+                    "tenant_id": "alice",
+                    "snapshot_path": str(b_snapshot),
+                },
+            ]
+        ),
+    }
+    if ownership == "ambiguous":
+        frozen["shares"].append(
+            {
+                "token": "token",
+                "service_unit_id": "svcA",
+                "tenant_id": "alice",
+                "snapshot_path": str(a_root / "chat_shares" / "token.json"),
+            },
+        )
+    source = {
+        "token": "token",
+        "chat_id": "chat",
+        "creator_id": "u",
+        "tenant_id": "alice",
+        "snapshot_key": "alice/chat_shares/token.json",
+        "created_at": "2026-11-01T00:00:00+00:00",
+        "access_count": 0,
+        "last_access_at": None,
+    }
+    original_stat, original_read = Path.stat, Path.read_bytes
+
+    def check(path):
+        if path == a_root or path.is_relative_to(a_root):
+            pytest.fail("published same-name tenant share input touched")
+
+    def guarded_stat(path, *args, **kwargs):
+        check(path)
+        return original_stat(path, *args, **kwargs)
+
+    def guarded_read(path):
+        check(path)
+        return original_read(path)
+
+    monkeypatch.setattr(Path, "stat", guarded_stat)
+    monkeypatch.setattr(Path, "read_bytes", guarded_read)
+    report = {"shares": [], "blockers": []}
+    with published_pruning(frozen, {("svcA", "alice")}):
+        _shares(services, [source], report)
+    if ownership == "known":
+        assert report["blockers"] == []
+        assert report["shares"][0]["service_unit_id"] == "svcB"
+    else:
+        assert report["shares"] == []
+        assert len(report["blockers"]) == 1
+        assert "absent or ambiguous" in report["blockers"][0]["detail"]

@@ -16,7 +16,11 @@ def _configs(service):
 
     candidates = config_candidates(root)
     for path in candidates:
-        if not path.exists() and not path.is_symlink():
+        if (
+            not path.parent.is_symlink()
+            and not path.is_symlink()
+            and not path.exists()
+        ):
             continue
         try:
             tenant, source = _identity(path, service)
@@ -46,20 +50,21 @@ def _path(position, services):
     return None
 
 
-def isolate_discovery(report, shares, validator):
-    """Preserve all blockers and quarantine every affected tenant before parsing."""
+def _collect_config_tenants(report, tenants, paths, evidence):
     from .discovery import _overlaps
-    from .inventory_v3 import inventory_discovery
 
     services = report["services"]
-    tenants, paths, positions = {}, [], {}
     for service in services:
         name = service["service_unit_id"]
         for frozen in services:
             for key in ("source_root", "config_root", "snapshot_root"):
-                if frozen.get(key) and _overlaps(
-                    Path(service["original_root"]),
-                    Path(frozen[key]),
+                if (
+                    not report.get("in_place")
+                    and frozen.get(key)
+                    and _overlaps(
+                        Path(service["original_root"]),
+                        Path(frozen[key]),
+                    )
                 ):
                     raise ValueError(
                         "tenant isolation requires frozen inputs separate from runtime roots",
@@ -67,10 +72,21 @@ def isolate_discovery(report, shares, validator):
         for config, tenant in _configs(service):
             key = (name, tenant)
             tenants.setdefault(key, [])
+            evidence.setdefault(key, []).append(str(config))
             paths.append((config, key))
             relative = config.parent.relative_to(service["config_root"])
             if relative.parts:
                 paths.append((Path(service["source_root"]) / relative, key))
+
+
+def isolate_discovery(report, shares, validator):
+    """Preserve all blockers and quarantine every affected tenant before parsing."""
+    from .inventory_v3 import inventory_discovery
+
+    services = report["services"]
+    tenants, paths, positions = {}, [], {}
+    evidence = {}
+    _collect_config_tenants(report, tenants, paths, evidence)
     for item in report["workspaces"]:
         key = (item["service_unit_id"], item["tenant_id"])
         tenants.setdefault(key, [])
@@ -119,6 +135,11 @@ def isolate_discovery(report, shares, validator):
         from .source_inputs import SourceInputInvalid
 
         try:
+            if report.get("in_place"):
+                from .in_place_source import freeze_evidence
+
+                for item in selected["workspaces"]:
+                    item["in_place_evidence"] = freeze_evidence(item)
             semantic = (validator or inventory_discovery)(selected)
         except MigrationDiskCapacityError:
             raise
@@ -152,9 +173,15 @@ def isolate_discovery(report, shares, validator):
             "tenant_id": key[1],
             "state": "failed" if failures else "discovered",
             "blockers": deepcopy(failures),
+            **(
+                {"evidence_refs": evidence.get(key, [])}
+                if report.get("in_place")
+                else {}
+            ),
         }
         for key, failures in sorted(tenants.items())
     ]
+    _freeze_tenant_boundaries(report)
     report["status"] = "partial_success" if report["blockers"] else "success"
 
 
@@ -188,3 +215,48 @@ def _attribute_blockers(report, services, tenants, paths, positions):
             owners = {k for k in tenants if not affected or k[0] in affected}
         for key in owners:
             tenants[key].append(blocker)
+
+
+def _freeze_tenant_boundaries(report):
+    from .source_inputs import SourceInputInvalid
+    from .spool import MigrationCapacityError
+
+    if report.get("in_place"):
+        from .in_place_source import freeze_evidence
+
+        for tenant in report["tenants"]:
+            if tenant["state"] == "discovered":
+                try:
+                    tenant["in_place_evidence"] = freeze_evidence(tenant)
+                except (
+                    SourceInputInvalid,
+                    MigrationCapacityError,
+                    FileNotFoundError,
+                ) as error:
+                    blocker = {
+                        "code": "tenant_input_invalid",
+                        "position": json.dumps(
+                            (tenant["service_unit_id"], tenant["tenant_id"]),
+                        ),
+                        "detail": str(error),
+                    }
+                    tenant["state"] = "failed"
+                    tenant["blockers"].append(blocker)
+                    report["blockers"].append(blocker)
+    if report.get("in_place"):
+        from ..in_place_admission import tenant_write_boundaries
+        from ..errors import IntegrityError
+
+        for tenant in report["tenants"]:
+            key = tenant["service_unit_id"], tenant["tenant_id"]
+            try:
+                tenant_write_boundaries(report, tenant=key)
+            except IntegrityError as error:
+                blocker = {
+                    "code": "tenant_boundary_invalid",
+                    "position": json.dumps(key),
+                    "detail": str(error),
+                }
+                tenant["state"] = "failed"
+                tenant["blockers"].append(blocker)
+                report["blockers"].append(blocker)

@@ -40,11 +40,7 @@ class V3Manifest(MigrationManifest):
             raise ValueError("unique explicit migration services are required")
         for name in names:
             service_unit_bytes(name)
-        if (
-            "tenant_isolation" in self.data
-            and type(self.data["tenant_isolation"]) is not bool
-        ):
-            raise ValueError("tenant isolation must be an explicit boolean")
+        self._validate_modes(services)
         tenant_scopes = set()
         if self.data.get("tenant_isolation"):
             tenants = self.data.get("tenants")
@@ -61,6 +57,7 @@ class V3Manifest(MigrationManifest):
                 if key in tenant_scopes or scope.service_unit_id not in names:
                     raise ValueError("duplicate or undeclared frozen tenant")
                 tenant_scopes.add(key)
+        self._validate_in_place_evidence()
         for item in self.data["workspaces"]:
             if (
                 self.data.get("tenant_isolation")
@@ -101,6 +98,57 @@ class V3Manifest(MigrationManifest):
             raise ValueError("invalid source change blocker journal")
         if self.data.get("target") is not None:
             self._validate_target(self.data["target"])
+
+    def _validate_modes(self, services):
+        if (
+            "tenant_isolation" in self.data
+            and type(self.data["tenant_isolation"]) is not bool
+        ):
+            raise ValueError("tenant isolation must be an explicit boolean")
+        if "in_place" in self.data and (
+            type(self.data["in_place"]) is not bool
+            or not self.data.get("tenant_isolation")
+        ):
+            raise ValueError(
+                "in-place mode requires explicit tenant isolation",
+            )
+        if self.data.get("in_place"):
+            for service in services:
+                roots = {
+                    service.get(key)
+                    for key in (
+                        "source_root",
+                        "config_root",
+                        "snapshot_root",
+                        "original_root",
+                    )
+                }
+                if len(roots) != 1 or None in roots:
+                    raise ValueError("in-place roots must be identical")
+
+    def _validate_in_place_evidence(self):
+        if self.data.get("in_place"):
+            failed = {
+                (item["service_unit_id"], item["tenant_id"])
+                for item in self.data["tenants"]
+                if item["state"] == "failed"
+            }
+            for item in [*self.data["workspaces"], *self.data["tenants"]]:
+                if (item["service_unit_id"], item["tenant_id"]) in failed:
+                    continue
+                hashes = item.get("in_place_evidence")
+                if (
+                    not isinstance(hashes, dict)
+                    or set(hashes) != set(item.get("evidence_refs", []))
+                    or any(
+                        not isinstance(value, str)
+                        or not re.fullmatch(r"[a-f0-9]{64}", value)
+                        for value in hashes.values()
+                    )
+                ):
+                    raise ValueError(
+                        "in-place frozen identity evidence is missing or invalid",
+                    )
 
     def _validate_target(self, target):
         expected = {"schema", "nas_roots", "migration_id"}
@@ -174,6 +222,7 @@ class V3Manifest(MigrationManifest):
             "shares",
             "discovery_version",
             "tenant_isolation",
+            "in_place",
             "tenants",
             "source_shares",
             "declared_services",

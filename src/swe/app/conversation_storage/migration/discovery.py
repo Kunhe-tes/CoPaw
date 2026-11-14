@@ -62,6 +62,9 @@ def _overlaps(left, right):
 
 
 def _read_json(path):
+    from .in_place_review import require_unpublished
+
+    require_unpublished(path)
     return load_metadata_json(path.read_bytes())
 
 
@@ -197,6 +200,9 @@ def _workspace_path(value, config_path, service):
         raise ValueError("workspace path is outside declared original root")
     relative = path.relative_to(original)
     frozen = source / relative
+    from .in_place_review import require_unpublished
+
+    require_unpublished(frozen, directory=True)
     if (
         frozen.is_symlink()
         or not frozen.is_dir()
@@ -210,7 +216,7 @@ def _profiles(service, report):
     workspaces = []
     configs = config_candidates(service["config_root"])
     for config in configs:
-        if config.is_symlink():
+        if config.parent.is_symlink() or config.is_symlink():
             _block(
                 report,
                 "source_invalid",
@@ -312,6 +318,13 @@ def _apply_override(path, service, overrides, report):
             entry["agent_id"],
             service_unit_id=service["service_unit_id"],
         )
+        from .in_place_review import require_unpublished
+
+        require_unpublished(path, directory=True)
+        for reference in entry["evidence_refs"]:
+            require_unpublished(reference)
+        for item in entry.get("session_paths", []):
+            require_unpublished(path / item["path"])
         if (path / "agent.json").exists() and _read_json(path / "agent.json")[
             "id"
         ] != scope.agent_id:
@@ -358,6 +371,12 @@ def _coverage(service, known, report, overrides):
         onerror=source_walk_error,
     ):
         path = Path(directory)
+        from .in_place_review import skipped
+
+        names[:] = [name for name in names if not skipped(path / name)]
+        if skipped(path):
+            names[:] = []
+            continue
         if path in known:
             names[:] = []
             continue
@@ -390,12 +409,19 @@ def _json_time(value):
     return value
 
 
-def _snapshot_matches(services, expected):
+def _snapshot_matches(services, expected, token=None):
+    from .in_place_review import share_services
+
+    if token is not None:
+        services = share_services(services, token)
     matches = []
     for service in services:
         if not service.get("snapshot_root"):
             continue
         path = Path(service["snapshot_root"]) / expected
+        from .in_place_review import require_unpublished
+
+        require_unpublished(path)
         if not path.exists():
             continue
         if path.is_symlink() or path.resolve() != path:
@@ -433,7 +459,7 @@ def _shares(services, shares, report):
                 raise ValueError(
                     "share snapshot key differs from original safe path",
                 )
-            matches = _snapshot_matches(services, expected)
+            matches = _snapshot_matches(services, expected, token)
             if len(matches) != 1:
                 raise ValueError(
                     "share service ownership is absent or ambiguous",
@@ -558,8 +584,11 @@ def discover_services(
     overrides=(),
     semantic_validator=None,
     tenant_isolation=False,
+    in_place=False,
 ):
     """Return complete discovery evidence without opening a DB or modifying inputs."""
+    if in_place and not tenant_isolation:
+        raise ValueError("in-place migration requires tenant isolation")
     report = {
         "version": 3,
         "discovery_version": 1,
@@ -580,9 +609,26 @@ def discover_services(
                 for row in shares
             ],
         )
+    if in_place:
+        report["in_place"] = True
     for item in services:
         try:
-            report["services"].append(_service(item))
+            service = _service(item)
+            if in_place:
+                roots = {
+                    service.get(key)
+                    for key in (
+                        "source_root",
+                        "config_root",
+                        "snapshot_root",
+                        "original_root",
+                    )
+                }
+                if len(roots) != 1 or None in roots:
+                    raise ValueError(
+                        "in-place migration requires identical source, config, snapshot and original roots",
+                    )
+            report["services"].append(service)
         except (OSError, ValueError, KeyError, TypeError) as error:
             _block(
                 report,
@@ -616,6 +662,16 @@ def discover_services(
                     )
     for index, service in enumerate(report["services"]):
         for other in report["services"][:index]:
+            if in_place and _overlaps(
+                Path(service["source_root"]),
+                Path(other["source_root"]),
+            ):
+                _block(
+                    report,
+                    "service_invalid",
+                    service["service_unit_id"],
+                    "in-place service roots must not overlap",
+                )
             if _overlaps(Path(service["nas_root"]), Path(other["nas_root"])):
                 _block(
                     report,
@@ -678,6 +734,7 @@ def freeze_discovery(
         overrides=report.get("overrides", ()),
         semantic_validator=semantic_validator,
         tenant_isolation=report.get("tenant_isolation", False),
+        in_place=report.get("in_place", False),
     )
     if current["fingerprints"] != report["fingerprints"]:
         raise ValueError("source changed since discovery")
