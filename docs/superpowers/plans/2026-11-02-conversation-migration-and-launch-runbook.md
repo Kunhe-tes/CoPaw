@@ -1,10 +1,10 @@
 # 会话元数据迁移及上线全流程操作方案
 
-更新日期：2026-11-11。核对工作树：`.worktrees/conversation-mysql-nas`，HEAD `9b72c860bc5b73135b8102c5ee6190663dffbf32`，并包含核对时已有的 SQL 与测试未提交修改。
+更新日期：2026-11-12。本次以最近 24 小时提交及当前实现核对，工作树：`.worktrees/conversation-mysql-nas`，HEAD `b8c3f853258eaa6d11f5af3392a005f94875e98d`。本次未读取或运行测试，未以其他文档或历史验收数字作为实现依据；保留核对前本文件已有的数据库环境配置说明。
 正式执行前须固定审核后的完整发布版本；仅记录 HEAD 不能代表本次工作树内容。
 本文只交付方案，没有操作生产数据库、NAS 或 Kubernetes。
 
-## 0. 当前实现分析与执行适用范围（2026-11-11）
+## 0. 当前实现分析与执行适用范围（2026-11-12）
 
 本手册适用于**旧 JSON/NAS 权威首次整体迁移到 MySQL 权威**。以下三个概念必须区分：
 
@@ -43,13 +43,23 @@ Chat 新增投影列 `external_session_key`、40 KiB 的九字段显示元数据
 
 本手册选择保留全部旧分享的迁移路线：第 10 节执行前必须确认 all-null、部分回填、服务不匹配、缺失 publication 均为零。非零时停止，先调查导入和原始分享正文，不能靠 SQL 删除绕过全量校验。即使业务批准废弃旧分享，也必须另行修订发现清单/保留策略与校验契约，不能在已冻结作业中直接删记录。
 
-### 0.4 本次核对结论
+### 0.4 历史核对记录（2026-11-11，非本次验证结论）
 
 本次仅做源码、SQL、文档及本地测试分析；未操作数据库、NAS、Kubernetes。当前工作树还存在未提交 SQL/测试变更，未改动这些实现文件。
 修复前迁移契约回归为 **81 passed、13 failed**，失败全部在 `tests/unit/cli/test_conversation_storage_cmd.py`，主要表现为旧清单测试进入 v3 分派后缺少 `services`，以及不支持的旧命令/报错断言不匹配。不能将旧手册的 88 passed 当成本版本验收。后续诊断已确认这些失败源于旧清单工厂与 direct-v3 路由共用 version=3 的冲突，不能简单归为旧测试过时；见[13项CLI失败专项分析](../reports/2026-11-11-conversation-cli-contract-failure-analysis.md)。
 本地实际执行 `PYTHONPATH=src ../../venv/bin/python -m swe conversation-storage finalize --help` 另因缺少 `trace_sdk` 导致命令加载失败（退出 2）；pytest 的依赖替身不能证明完整 CLI 可运行。执行镜像必须按项目依赖/内部包发布流程补齐该模块，并先让第 4 节全部 help 命令退出 0，不能在此状态开始停机迁移。
 
 这些契约差异随后已通过独立 workflow 标识和向后兼容路由修复；扩大回归 **1087 passed、0 failed**，见第17节。正式放行前仍须补齐发布依赖，使用专用 MySQL 和实际 NAS 完整演练；本手册描述可执行流程，不宣称当前分支已经具备生产放行证据。
+
+### 0.5 最近一天代码变更对操作的影响（2026-11-12）
+
+以当前源码为准，第 0.4、14、17 节的测试数字、依赖故障和旧工作树状态仅为历史记录，本次未重新验证，不据此断言当前通过或失败。正式镜像仍必须执行 help 门禁及现场演练。
+
+- direct-v3 的 inventory/plan/inspect/import/resume/verify/preflight/finalize 已走磁盘 spool；discover/freeze 的语义解析也使用有界 spool。新增资源参数与容量门禁见第 4.1 节。
+- workspace、分享发布、正文校验采用有界 worker/IO；SQL 仍在原命名锁连接所属 owner task 中执行，不能理解为多连接并行提交，也不允许启动多个迁移 CLI 抢同一作业。等待 IO 时会检查原锁健康，失锁后须停止并按同作业对账续跑。
+- import/resume/finalize 不带 --apply 只做源清单解析预览，不连接目标数据库，不核对目标结构、锁或完成状态；finalize 预览仍要求 --output-dir。预览会使用临时盘，但不会登记同步起点或持久化源变化 blocker，不能代替 preflight 或正式执行。
+- verify/finalize 增加有界正文读取及辅助材料覆盖核对；性能优化没有将全量校验降为抽样，也没有消除结束前的源清单重读。停机时间须包含这些重复扫描。
+- 进度和失败报告见第 9.1 节；临时 spool 是可重建解析缓存，不是续跑权威。SQL 控制表、原 manifest 和已发布 NAS 正文仍须保留。
 
 ## 1. 先把结论讲清楚
 
@@ -143,6 +153,11 @@ export AUDIT_DIR=/audit/conversation-20261102
 mkdir -p "$AUDIT_DIR"
 export DBA_CNF=/run/secrets/conversation-dba.cnf
 export MIGRATION_CNF=/run/secrets/conversation-migration.cnf
+# 独立临时卷；必须与所有输入、workspace 和正文根互不包含。
+export MIGRATION_WORK_DIR=/migration-work
+mkdir -p "$MIGRATION_WORK_DIR"
+CS_RESOURCES=(--workers 4 --io-workers 4 --memory-budget-mib 512
+  --work-dir "$MIGRATION_WORK_DIR")
 
 "$SWE_PYTHON" -m swe conversation-storage --help
 "$SWE_PYTHON" -m swe conversation-storage discover --help
@@ -154,7 +169,7 @@ db_read() { mysql --defaults-extra-file="$MIGRATION_CNF" --database="$APP_SCHEMA
 run_cs() {
   local report_name="$1"
   shift
-  "$SWE_PYTHON" -m swe conversation-storage "$@" \
+  "$SWE_PYTHON" -m swe conversation-storage "$@" "${CS_RESOURCES[@]}" \
     > "$AUDIT_DIR/$report_name.json" 2> "$AUDIT_DIR/$report_name.stderr.log"
   "$SWE_PYTHON" -m json.tool "$AUDIT_DIR/$report_name.json"
 }
@@ -169,7 +184,9 @@ run_cs() {
 - DBA 账号：你人工运行建表、扩列、收紧等 SQL 所用。迁移 CLI 不使用这个账号。
 - 迁移账号：只允许本次所需表的 SELECT/INSERT/UPDATE/DELETE 和相关元数据可见性、命名锁访问；无 CREATE/ALTER/DROP/RENAME/TRUNCATE 权限。原分享表只需读取及更新新增字段，可进一步收紧。
 
-CLI 从现有环境读取 `SWE_DB_HOST`、`SWE_DB_PORT`、`SWE_DB_USER`、`SWE_DB_ACCESS`、`SWE_DB_NAME` 等。
+CLI 与应用均在导入 swe 时加载环境默认配置：`SWE_ENV=dev`（未指定时默认）加载 `src/swe/config/envs/dev.json`，`SWE_ENV=prd` 加载 prd.json。已正确配置 JSON 时，无需重复 export SWE_DB_NAME；既有进程环境（包括 .env/部署注入）优先于 JSON 默认值。加载只影响 Python 进程，不会设置父 Shell 的变量。
+
+CLI 从加载后的环境读取 `SWE_DB_HOST`、`SWE_DB_PORT`、`SWE_DB_USER`、`SWE_DB_ACCESS`、`SWE_DB_NAME` 等。
 由 Secret 注入迁移账号，`SWE_DB_NAME` 必须等于 `APP_SCHEMA`，不要指向临时库。
 当前 `SWE_DB_ACCESS` 读取逻辑会去掉前四个字符，沿用部署已有前缀约定，不要直接塞裸密码。
 mysql 客户端的 cnf 使用真实密码，不使用这个前缀规则。两种配置须指向同一个目标。
@@ -177,12 +194,34 @@ mysql 客户端的 cnf 使用真实密码，不使用这个前缀规则。两种
 不要开 `set -x`，不要把密码或原始分享 token 输出到公共日志。
 
 ```bash
-test "$SWE_DB_NAME" = "$APP_SCHEMA"
+# JSON默认配置在Python子进程中加载，不会反向设置当前Shell的变量。
+"$SWE_PYTHON" - <<'PYDB'
+import os
+from swe.database.config import get_database_config
+config = get_database_config()
+print("effective database:", config.host, config.port, config.database)
+assert config.database == os.environ["APP_SCHEMA"], "database differs from APP_SCHEMA"
+PYDB
 db_read -e 'SELECT DATABASE(),@@server_uuid,@@version,@@version_comment,@@innodb_page_size,@@sql_mode;'
 db_read -e 'SHOW GRANTS FOR CURRENT_USER;'
 ```
 
 MySQL 命令使用预先安全分发的 cnf。本文不提供在命令行拼明文密码的做法。
+
+### 4.1 并发、内存和临时盘参数
+
+上面的 run_cs 仅用于本文列出的 direct-v3 阶段及 discover/freeze，统一传资源参数；不要用它调用旧 export/install/recover 等不同接口。
+
+| 参数 | 当前范围与含义 |
+| --- | --- |
+| --workers | 1–32，默认 4；并发任务数，同时影响每 workspace 内存额度 |
+| --io-workers | 1–32，默认 4；阻塞文件 IO 线程池上限，不是 SQL 连接数 |
+| --memory-budget-mib | 128–65536，默认 512；预算用于准入和有界读取，不是进程 RSS 硬上限 |
+| --work-dir | 已存在、规范绝对路径、无软链接；与源/config/snapshot/workspace/nas 根不得相同或互相包含；默认尝试系统临时目录及 /tmp，边界不合法会失败 |
+
+`inventory_parallel._preflight_workspace` 在旧解析器分配对象之前仅枚举会话输入：`chats.json`、`sessions/`、`dialog/`（或清单明确配置的 `registry_path`、`sessions_dir`、`dialog_dir`），以及审核过的 `session_paths` 指定 Session 和对应 generation ledger；附件、代码、技能等业务目录不递归扫描，也不计入容量或 `inventoried_source_bytes`。分享正文按分享记录的明确路径单独读取。对这些会话输入：单文件不得超过 8 MiB，源文件总字节不得超过 `(预算字节 / workers) / 16`，去重后的输入条目数（文件、目录及必要的浅层父目录）不得超过 `(预算字节 / workers) / 512`，枚举过程中立即检查并超限停止；序列化 spool 单记录还受每 worker 额度限制。默认值对应每 workspace 源文件总量约 8 MiB、输入条目数 262144。这是每 workspace 的额度，不是整个迁移作业的 workspace 数量上限；512 是保守准入估算，不是条目的精确内存用量。分享及 native-only 材料也有独立预算门禁。遇 MigrationCapacityError 不应删除输入绕过：先按报告定位，适当降低 workers 或提高预算并核对 Pod 内存；单文件 8 MiB 硬上限不会随预算提高，超限须先评估代码/数据处理方案。
+
+CLI 磁盘索引预算取可用空间的 1/4，inventory spool 上限取当时可用空间的 3/4；结束前源重查还会创建另一份 spool，这些不是整个 Pod 的统一磁盘配额或峰值保证。独立卷须实测索引、spool、旧解析工作副本同时存在的峰值，并监控剩余空间；临时盘和 RSS 指标也不能替代容器/卷监控。正常退出会清理 spool，强杀后可能遗留 migration-* 目录；仅在确认没有迁移进程后清理确认属于本作业的临时产物，不能清理 manifest、控制表或 bundle。
 
 ## 5. 你提前建表：两次 DBA 操作，程序不建表
 
@@ -478,6 +517,16 @@ db_read -e "SELECT CONVERT(migration_id USING utf8mb4) AS migration_id,manifest_
 db_read -e "SELECT entry_kind,state,COUNT(*) AS n FROM swe_conversation_migration_entries GROUP BY entry_kind,state;"
 ```
 
+### 9.1 进度、失败证据与中断
+
+direct-v3 命令 stdout 保持最终 JSON 报告；stderr 约每 5 秒和退出时输出进度 JSON，异常时还可能混有错误文字。本文 run_cs 已分别保存，不要把 stderr 整份按单一 JSON 解析。discover/freeze 不承诺同样的周期报告。
+
+关注 stage、position/failure_position、completed/task_total、counter_unit、SQL 排队/执行耗时、IO 活跃/峰值及 RSS/临时盘峰值。inventory_completed_workspaces、inventoried_sessions/chats/source_bytes、inventory_blocker_count 描述本次扫描 pass；源重查时会重置，completed 也随阶段重置，不能当作全作业单调百分比。
+
+进入进度上下文后的异常会尝试原子写 `<manifest路径>.failure.json`（0600），包含 error_type、失败位置、阶段、计数及 io_drained；完整错误另见 stderr。初始化前失败、磁盘满或强杀可能没有该文件，旧失败文件也不会因后续成功自动消失。每次失败先另存证据，再续跑；不能以失败报告存在与否判断最终 SQL 状态。
+
+取消/异常处理会停止派发并等待已启动 IO 收尾。发出终止信号不等于可立即重启；等待旧进程退出并确认原锁释放。io_drained=unknown 时先查残留进程及 IO；即使为 true，也只表示本进程已知 IO 已收尾，不证明提交成功或可以清空数据。COMMIT 回应丢失时保留所有产物，以原作业 resume 对账，不凭客户端报错认定回滚。
+
 ## 10. DBA 收紧分享归属，再生成上线凭证
 
 全量 verify 通过后，DBA 先检查分享定位缺失和服务错误必须为 0。当前 finalize SQL 含 DELETE，执行前额外核对 all-null 行数为 0，确保不会删除任何历史分享：
@@ -611,6 +660,8 @@ kubectl -n "$NAMESPACE" logs "deployment/$DEPLOYMENT" -c "$APP_CONTAINER" --sinc
 | 旧分享 | token 原值可用，原 Chat 已删的分享也可读，计数按原规则增加 |
 | 服务/租户/来源隔离 | 使用相同外部会话 ID 的不同服务和用户不会串数据；错误服务请求被拒绝 |
 | 多实例 | 扩到至少两个实例，在不同 Pod 间读到相同正文；并发和停止路由正确 |
+| 共享 Session 并发 | 一端修剪/替换上下文时另一 Chat 读取历史不能返回已失效的在线消息；允许冲突后刷新重读，归档仍按权限可读 |
+| 陈旧更新与删除 | 两端并发更新 Chat 元数据、归属或删除时，旧授权/旧快照请求应被拒绝（相关 API 返回 409），不能覆盖新值或删掉归属已变化的 Chat；正常无冲突操作仍成功 |
 | 重启 | 产生新写后重启可通过完成证明，仍能读到新增记录 |
 
 健康探针 `/api/health/health` 只作存活参考，不能代替以上业务验收。
