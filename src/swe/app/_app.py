@@ -855,6 +855,18 @@ async def _shutdown_lifespan_resources_impl(
         logger.warning("Error closing AgentTraceSDK global tracer: %s", e)
 
     try:
+        from ..observability.emitter import shutdown_default_emitter
+
+        remaining = shutdown_default_emitter()
+        if remaining:
+            logger.warning(
+                "Agent observability output shutdown left %s events unconfirmed",
+                remaining,
+            )
+    except Exception as e:
+        logger.warning("Error closing independent agent observability output: %s", e)
+
+    try:
         await stop_service_heartbeat()
     except Exception as e:
         logger.warning("Error stopping service heartbeat: %s", e)

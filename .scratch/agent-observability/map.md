@@ -92,6 +92,10 @@ Q1–Q25已确认。没有新增必须用户选择的产品前沿；以下按已
 - 已定全局开关+新Run快照 → 配置入口最终确认 → 审批上下文保持/跨进程上下文/关闭不串写。
 - 上述确认后 → 日Run/Span量、峰值、节点上限/查询时延预算、TTFT与分位口径 → UI取舍和验收 → 词汇/必要ADR → 用户确认共同理解后实施。
 
+## Implementation Progress
+
+- 01 已完成并由子代理检视：独立事件/上下文/埋点内核、元数据白名单writer和埋点矩阵。详见 [ticket 01](issues/01-instrumentation-core.md) 与 [instrumentation matrix](instrumentation-matrix.md)。后续首个可领取票为 02；其余票仍按现有依赖阻塞。
+
 ## Facts resolved after Round 3
 
 - 等审批会让业务Turn正常completed；批准创建新业务Turn，因此Run必须独立结算，业务Turn计数不等于逻辑Run数。
