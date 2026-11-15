@@ -44,3 +44,11 @@
 - 预取完成后保留最后一个解码 workspace 缓存；交给 owner 前释放该缓存，消费时仍可从 spool 重读。分享列表及摘要仍驻内存，解析预算不代表进程 RSS 硬上限，操作手册已说明。
 
 最终稳定代码完整子系统与 CLI 回归：**1604 passed in 55.72s**，日志 `/private/tmp/conversation-review-final.log`。本轮修复文件全部 pre-commit 检查通过，日志 `/private/tmp/conversation-review-hooks-final.log`。本轮检视和修复仅使用本地测试，未重新连接或修改数据库，也未执行生产迁移。
+
+## 并发缺口补齐
+
+预检/预览改用有界租户管线，SQL 状态筛选仍在原 owner，排除已发布和发现失败账号后并发盘点；共享 IO 池和总解析预算，单租户输入错误继续隔离。租户较少时预检将 workspace parser 额度分摊给这些租户。
+
+migrate 当前账号获得总 workers 扣除待消费预读账号后的剩余额度，同步传给导入、分享、验证与最终盘点。每个待消费预读账号（包括已完成 spool）保留一份预算，防止额度重算超配；分配在当前账号开始时固定。单账号任务的初次预读也使用全部 parser。多账号预读每账号仍为一个 parser，当前账号执行途中预读结束不会即时抢占重分配；SQL、事务与发布仍保持单 owner。
+
+新增测试覆盖预检真实任务重叠、owner 中 SQL 状态读取、已发布/发现失败跳过、坏账号后续继续、单账号 parser、尾部 owner 额度 1→2→3→4 及每槽预算不变。完整回归 **1610 passed in 55.36s**，日志 `/private/tmp/migration-concurrency-delivered.log`。本轮不访问数据库，不做真实 NAS 或性能验收。操作手册明确外部只有 prepare/migrate 两阶段，细分命令为兼容入口。

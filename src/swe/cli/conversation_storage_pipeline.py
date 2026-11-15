@@ -14,24 +14,18 @@ from swe.app.conversation_storage.migration.spool_report import (
 )
 
 
-def _resource_views(resources, shared, io, allowance):
-    common = {
+def _owner_resources(resources, io, allowance, workers):
+    return {
         **resources,
-        "workers": 1,
-        "memory_bytes": allowance,
+        "workers": workers,
+        "memory_bytes": allowance * workers,
         "_shared_io": io,
+        "_shared_resources": MigrationResources(
+            workers=workers,
+            memory_bytes=allowance * workers,
+            io=io,
+        ),
     }
-    return (
-        {**common, "_shared_resources": shared},
-        {
-            **common,
-            "_shared_resources": MigrationResources(
-                workers=1,
-                memory_bytes=allowance,
-                io=io,
-            ),
-        },
-    )
 
 
 async def _close_pipeline(stream, tasks, live):
@@ -50,8 +44,21 @@ async def _close_pipeline(stream, tasks, live):
                 spool.__exit__(None, None, None)
 
 
+def _pipeline_limits(resources, tenants, preview):
+    count = resources["workers"]
+    allowance = resources["memory_bytes"] // count
+    width = min(count, max(1, len(tenants))) if preview else max(1, count - 1)
+    parser_workers = (
+        max(1, count // width)
+        if preview
+        else count if len(tenants) == 1 else 1
+    )
+    shared_workers = count if preview else max(width, parser_workers)
+    return count, allowance, width, parser_workers, shared_workers
+
+
 @asynccontextmanager
-async def tenant_pipeline(tenants, base, data, resources):
+async def tenant_pipeline(tenants, base, data, resources, *, preview=False):
     from .conversation_storage_tenants import (
         TenantManifest,
         TenantFailure,
@@ -62,23 +69,36 @@ async def tenant_pipeline(tenants, base, data, resources):
         TenantInputError,
     )
 
-    count = resources["workers"]
-    allowance = resources["memory_bytes"] // count
-    width = max(1, count - 1)
+    count, allowance, width, parser_workers, shared_workers = _pipeline_limits(
+        resources,
+        tenants,
+        preview,
+    )
     pending = []
     tasks = set()
     iterator = iter(tenants)
     live = {}
     async with MigrationIO(resources["io_workers"]) as io:
         async with MigrationResources(
-            workers=width,
+            workers=shared_workers,
             io=io,
-            memory_bytes=allowance * width,
+            memory_bytes=allowance * shared_workers,
         ) as shared:
-            parser, owner = _resource_views(resources, shared, io, allowance)
+            parser = {
+                **resources,
+                "workers": parser_workers,
+                "memory_bytes": allowance * parser_workers,
+                "_shared_io": io,
+                "_shared_resources": shared,
+            }
 
             async def read(tenant):
-                spool = _spool(base, data.data, allowance, 1)
+                spool = _spool(
+                    base,
+                    data.data,
+                    allowance * parser_workers,
+                    parser_workers,
+                )
                 spool.__enter__()
                 live[id(tenant)] = spool
                 try:
@@ -128,18 +148,27 @@ async def tenant_pipeline(tenants, base, data, resources):
                         )
                         await health()
                     tenant, inventory, error = task.result()
-                    if count > 1:
+                    if count > 1 and not preview:
                         fill()
+                    # Pending readers retain one allowance each, including
+                    # completed spools. The owner borrows the remainder.
+                    owner_workers = max(1, count - len(pending))
+                    local_owner = _owner_resources(
+                        resources,
+                        io,
+                        allowance,
+                        owner_workers,
+                    )
                     try:
                         yield tenant, {
-                            **owner,
+                            **local_owner,
                             "_prefetched": inventory,
                             "_pipeline_health": health,
                         }, error
                     finally:
                         live.pop(id(tenant)).__exit__(None, None, None)
                         tasks.discard(task)
-                    if count == 1:
+                    if count == 1 or preview:
                         fill()
 
             stream = results()

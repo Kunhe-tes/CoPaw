@@ -1051,6 +1051,7 @@ async def _check_job_binding(db, manifest, server_uuid):
 
 async def _preview(operation, manifest, base, resources, *, states):
     failures, completed = [], 0
+    selected = []
     for tenant in manifest.data["tenants"]:
         row = await states.get(tenant["service_unit_id"], tenant["tenant_id"])
         if row and row["state"] == "published":
@@ -1059,25 +1060,21 @@ async def _preview(operation, manifest, base, resources, *, states):
         if tenant["state"] == "failed":
             failures.append(_failure(tenant, "discover"))
             continue
-        view = TenantManifest(manifest, tenant)
-        try:
-            with _spool(
-                base,
-                view.data,
-                resources["memory_bytes"],
-                resources["workers"],
-            ) as spool:
-                await _inventory(view, spool, resources)
-        except MigrationDiskCapacityError:
-            raise
-        except (
-            TenantFailure,
-            TenantInputError,
-            MigrationCapacityError,
-        ) as error:
-            failures.append(_failure(tenant, operation, error=error))
-        else:
-            completed += 1
+        selected.append(tenant)
+    from .conversation_storage_pipeline import tenant_pipeline
+
+    async with tenant_pipeline(
+        selected,
+        base,
+        manifest,
+        resources,
+        preview=True,
+    ) as results:
+        async for tenant, _local, error in results:
+            if error is not None:
+                failures.append(_failure(tenant, operation, error=error))
+            else:
+                completed += 1
     return {
         "version": 3,
         "migration_id": manifest.migration_id,
