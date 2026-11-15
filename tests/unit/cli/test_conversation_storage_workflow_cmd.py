@@ -337,3 +337,70 @@ def test_prepare_option_defaults_use_readonly_share_reader(
     result = CliRunner().invoke(command(), args)
     assert result.exit_code == 0, result.output
     shares.assert_awaited_once_with()
+
+
+def test_prepare_audit_report_uses_frozen_review(inputs, monkeypatch):
+    from swe.cli import conversation_storage_discovery_cmd as discovery
+    from swe.cli import conversation_storage_v3_cmd as v3
+
+    freeze = discovery.freeze_discovery
+
+    def changed_before_freeze(*args, **kwargs):
+        registry = inputs["workspace"] / "chats.json"
+        registry.chmod(0o644)
+        registry.write_text(
+            json.dumps({"version": 1, "chats": [], "changed": True}),
+        )
+        registry.chmod(0o444)
+        return freeze(*args, **kwargs)
+
+    monkeypatch.setattr(discovery, "freeze_discovery", changed_before_freeze)
+    monkeypatch.setattr(
+        v3,
+        "run_v3_command",
+        Mock(return_value={"status": "partial_success", "passed": False}),
+    )
+    result = CliRunner().invoke(command(), prepare_args(inputs))
+    assert result.exit_code == 2, result.output
+    output = json.loads(result.output)
+    audit = json.loads(Path(output["discovery"]).read_text())
+    frozen = json.loads(inputs["manifest"].read_text())
+    assert audit["tenants"][0]["state"] == "failed"
+    assert any(
+        item["code"] == "source_changed_after_discovery"
+        for item in audit["blockers"]
+    )
+    assert all(value == frozen[key] for key, value in audit.items())
+
+
+def test_prepare_rejects_empty_tenant_job(inputs, monkeypatch):
+    from swe.cli import conversation_storage_discovery_cmd as discovery
+    from swe.cli import conversation_storage_v3_cmd as v3
+
+    monkeypatch.setattr(
+        discovery,
+        "discover_services",
+        Mock(return_value={"tenants": []}),
+    )
+    freeze = Mock()
+    preflight = Mock()
+    monkeypatch.setattr(discovery, "freeze_discovery", freeze)
+    monkeypatch.setattr(v3, "run_v3_command", preflight)
+    result = CliRunner().invoke(command(), prepare_args(inputs))
+    assert result.exit_code == 1
+    assert "at least one discovered tenant" in result.output
+    freeze.assert_not_called()
+    preflight.assert_not_called()
+    assert not inputs["manifest"].exists()
+
+
+@pytest.mark.asyncio
+async def test_register_rejects_empty_tenant_job_before_database_access():
+    from swe.cli.conversation_storage_tenants import _register_tenants
+
+    db, states = Mock(), Mock()
+    manifest = SimpleNamespace(data={"tenants": []})
+    with pytest.raises(ValueError, match="at least one discovered tenant"):
+        await _register_tenants(db, manifest, states, Mock())
+    assert not db.mock_calls
+    assert not states.mock_calls

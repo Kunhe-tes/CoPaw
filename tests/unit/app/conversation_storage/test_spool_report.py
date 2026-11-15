@@ -126,6 +126,25 @@ async def test_corrupt_record_refused_on_access(tmp_path):
         assert report["workspaces"]._cached_record is None
 
 
+async def test_workspace_cache_can_be_released_and_reloaded(tmp_path):
+    data = source_data(tmp_path)
+    with InventorySpool(
+        tmp_path,
+        max_bytes=1024 * 1024,
+        record_limit=128 * 1024,
+    ) as spool:
+        summaries = await spool_workspaces(data, spool)
+        report = spool_report(spool, summaries, shares=[], source_boundary={})
+        workspaces = report["workspaces"]
+        expected = workspaces[0]
+        spool.read = Mock(wraps=spool.read)
+        workspaces.clear_cache()
+        assert workspaces._cached_index is None
+        assert workspaces._cached_record is None
+        assert workspaces[0] == expected
+        assert spool.read.call_count == 1
+
+
 async def test_blockers_aggregate_and_uncontrolled_sequence_rejected(tmp_path):
     data = source_data(tmp_path)
     from dataclasses import replace

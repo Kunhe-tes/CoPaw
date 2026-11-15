@@ -138,10 +138,15 @@ def _entry(
 
 
 def extract_messages(state, *, context_epoch):
-    memory = state.get("agent", {}).get("memory", {})
+    agent = state.get("agent", {})
+    if not isinstance(agent, dict):
+        raise TenantInputError("legacy Agent state is invalid")
+    memory = agent.get("memory", {})
+    if not isinstance(memory, dict):
+        raise TenantInputError("legacy memory state is invalid")
     raw = memory.get("content", [])
     if not isinstance(raw, list):
-        raise ValueError("legacy memory content is invalid")
+        raise TenantInputError("legacy memory content is invalid")
     messages = []
     for index, value in enumerate(raw):
         # AgentScope versions store either raw Msg dictionaries or [Msg, mark].
@@ -149,11 +154,13 @@ def extract_messages(state, *, context_epoch):
             value[0] if isinstance(value, (list, tuple)) and value else value
         )
         if not isinstance(payload, dict):
-            raise ValueError("legacy memory message is invalid")
+            raise TenantInputError("legacy memory message is invalid")
         try:
             Msg.from_dict(payload)
         except (KeyError, TypeError, ValueError) as error:
-            raise ValueError("legacy memory message is invalid") from error
+            raise TenantInputError(
+                "legacy memory message is invalid",
+            ) from error
         messages.append(_entry(payload, "memory", index, context_epoch))
     for key, layer in (
         ("task_messages", "task"),
@@ -163,7 +170,9 @@ def extract_messages(state, *, context_epoch):
         if not isinstance(values, list) or not all(
             isinstance(value, dict) for value in values
         ):
-            raise ValueError("legacy supplemental message list is invalid")
+            raise TenantInputError(
+                "legacy supplemental message list is invalid",
+            )
         for index, payload in enumerate(values):
             messages.append(_entry(payload, layer, index, context_epoch))
     messages.extend(_turn_anchors(state, context_epoch))
@@ -193,14 +202,14 @@ def _turn_anchors(state, context_epoch):
     messages = []
     turns = state.get("turn_states", {})
     if not isinstance(turns, dict):
-        raise ValueError("legacy Turn states are invalid")
+        raise TenantInputError("legacy Turn states are invalid")
     for index, (key, turn) in enumerate(turns.items()):
         if not isinstance(turn, dict):
-            raise ValueError("legacy Turn state is invalid")
+            raise TenantInputError("legacy Turn state is invalid")
         payload = turn.get("message")
         if payload is not None:
             if not isinstance(payload, dict):
-                raise ValueError("legacy Turn question is invalid")
+                raise TenantInputError("legacy Turn question is invalid")
             messages.append(
                 _entry(
                     payload,
@@ -222,7 +231,7 @@ def archive_batches(archive):
         for batch in epoch["batches"]:
             key = batch["boundary"]["id"]
             if key in merged and merged[key] != batch:
-                raise ValueError(
+                raise TenantInputError(
                     "retained archive boundary content changed across epochs",
                 )
             merged[key] = batch
@@ -243,7 +252,7 @@ def archive_batches(archive):
             for index, message in enumerate(batch["messages"])
         }
         if len(epochs) != 1:
-            raise ValueError(
+            raise TenantInputError(
                 "archive boundary has mixed unsupported evidence epochs",
             )
         result.append({**batch, "epoch": epochs.pop()})
@@ -283,7 +292,7 @@ def task_projections(messages, state):
             continue
         final = candidates[-1]
         if len(converted[final]) != 1:
-            raise ValueError(
+            raise TenantInputError(
                 "task run final source expands to multiple messages; projection unsupported",
             )
         for offset, item in enumerate(memory[start:end]):
@@ -567,11 +576,13 @@ class ConversationImporter:
         for workspace in report["workspaces"]:
             for session in workspace["sessions"]:
                 state = session["legacy"]["state"]
+                _session_revision(state)
                 _block("recovery", "recovery", state)
-                extract_messages(
+                for message in extract_messages(
                     state,
                     context_epoch=state.get("context_epoch", 0),
-                )
+                ):
+                    _timestamp(message["payload"].get("timestamp"))
                 for turn in state.get("turn_states", {}).values():
                     if turn.get("status") in (
                         "admitted",
@@ -880,9 +891,7 @@ class ConversationImporter:
 
         sid = self.session_ids[session["position"]]
         state = deepcopy(session["legacy"]["state"])
-        revision = state.get("revision", 0)
-        if type(revision) is not int or revision < 0:
-            raise ValueError("legacy Session revision is invalid")
+        revision = _session_revision(state)
         root_position = session["position"] + "/recovery"
         turns = list(state.get("turn_states", {}).items())
         for start in range(0, len(turns), self.batch_size):
@@ -1407,7 +1416,7 @@ def _read_source_artifact(workspace, item):
     root = Path(workspace["root"]).resolve(strict=True)
     relative = Path(item["path"])
     if relative.is_absolute() or ".." in relative.parts:
-        raise ValueError(
+        raise TenantInputError(
             "legacy artifact path escapes bound source root",
         )
     path = root / relative
@@ -1416,22 +1425,22 @@ def _read_source_artifact(workspace, item):
         for part in (path, *path.parents)
         if part.is_relative_to(root)
     ):
-        raise ValueError("legacy artifact path contains symlink")
+        raise TenantInputError("legacy artifact path contains symlink")
     if (
         not path.resolve(strict=True).is_relative_to(root)
         or stat.S_IMODE(path.stat().st_mode) & 0o222
     ):
-        raise ValueError(
+        raise TenantInputError(
             "legacy artifact is not inside frozen read-only source",
         )
     if path.stat().st_size > MAX_READ_BYTES:
-        raise ValueError(
+        raise TenantInputError(
             "legacy artifact exceeds supported migration reader limit; split-file migration required",
         )
     with path.open("rb") as stream:
         raw = stream.read(MAX_READ_BYTES + 1)
     if len(raw) != item["bytes"]:
-        raise ValueError(
+        raise TenantInputError(
             "legacy artifact size changed after inventory",
         )
     return raw
@@ -1440,12 +1449,15 @@ def _read_source_artifact(workspace, item):
 def _json(value):
     import json
 
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except ValueError as error:
+        raise TenantInputError("legacy JSON payload is invalid") from error
 
 
 def _block(name, kind, value):
@@ -1453,10 +1465,17 @@ def _block(name, kind, value):
 
     raw = _json(value).encode()
     if len(raw) > MAX_READ_BYTES:
-        raise ValueError(
+        raise TenantInputError(
             "legacy object exceeds supported migration reader limit; projection required",
         )
     return BundleBlock(name, kind, raw)
+
+
+def _session_revision(state):
+    revision = state.get("revision", 0)
+    if type(revision) is not int or revision < 0:
+        raise TenantInputError("legacy Session revision is invalid")
+    return revision
 
 
 def _timestamp(value):
@@ -1464,10 +1483,12 @@ def _timestamp(value):
 
     if value is None:
         return None
+    if not isinstance(value, str):
+        raise TenantInputError("legacy message timestamp is invalid")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
-        raise ValueError("legacy message timestamp is invalid") from None
+        raise TenantInputError("legacy message timestamp is invalid") from None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.isoformat()

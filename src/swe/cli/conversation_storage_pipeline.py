@@ -9,6 +9,9 @@ from swe.app.conversation_storage.migration.parallel import (
     MigrationResources,
     _drain,
 )
+from swe.app.conversation_storage.migration.spool_report import (
+    WorkspaceRecords,
+)
 
 
 def _resource_views(resources, shared, io, allowance):
@@ -92,6 +95,9 @@ async def tenant_pipeline(tenants, base, data, resources):
                     MigrationCapacityError,
                 ) as error:
                     return tenant, None, error
+                workspaces = result.get("workspaces")
+                if isinstance(workspaces, WorkspaceRecords):
+                    workspaces.clear_cache()
                 return tenant, result, None
 
             def fill():

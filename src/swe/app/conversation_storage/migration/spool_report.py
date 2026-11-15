@@ -24,6 +24,10 @@ class WorkspaceRecords(Sequence):
     def __len__(self):
         return len(self._summaries)
 
+    def clear_cache(self):
+        self._cached_index = None
+        self._cached_record = None
+
     def _record(self, index):
         if type(index) is not int:
             raise TypeError("workspace index must be an integer")

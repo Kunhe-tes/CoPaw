@@ -702,6 +702,8 @@ async def run_tenants(
 
 async def _register_tenants(db, manifest, states, guard):
     tenants = manifest.data["tenants"]
+    if not tenants:
+        raise ValueError("migration requires at least one discovered tenant")
     registrations = []
     for tenant in tenants:
         view = TenantManifest(manifest, tenant)

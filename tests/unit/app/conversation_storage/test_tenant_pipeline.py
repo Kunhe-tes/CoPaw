@@ -9,6 +9,9 @@ import pytest
 
 from swe.cli import conversation_storage_tenants as cli
 from swe.cli.conversation_storage_pipeline import tenant_pipeline
+from swe.app.conversation_storage.migration.spool_report import (
+    WorkspaceRecords,
+)
 
 
 @pytest.mark.asyncio
@@ -60,6 +63,36 @@ async def test_pipeline_overlaps_next_tenant_with_owner_and_closes_spools(
                 await asyncio.wait_for(second.wait(), 1)
     assert visited == ["a", "b", "c"]
     assert sorted(opened) == sorted(closed)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_releases_prefetched_workspace_body_cache(monkeypatch):
+    workspaces = WorkspaceRecords(None, [])
+    workspaces._cached_index = 0
+    workspaces._cached_record = {"body": "prefetched session"}
+
+    @contextmanager
+    def spool(*_args):
+        yield None
+
+    async def inventory(*_args):
+        return {"workspaces": workspaces}
+
+    monkeypatch.setattr(cli, "_spool", spool)
+    monkeypatch.setattr(cli, "_inventory", inventory)
+    monkeypatch.setattr(cli, "TenantManifest", lambda *_: None)
+    resources = {"workers": 2, "io_workers": 2, "memory_bytes": 256}
+    async with tenant_pipeline(
+        [{"tenant_id": "a"}],
+        None,
+        SimpleNamespace(data={}),
+        resources,
+    ) as results:
+        async for _tenant, local, error in results:
+            assert error is None
+            assert local["_prefetched"]["workspaces"] is workspaces
+            assert workspaces._cached_index is None
+            assert workspaces._cached_record is None
 
 
 @pytest.mark.asyncio

@@ -63,6 +63,8 @@ def prepare_workflow(
         in_place=in_place,
         semantic_validator=_semantic_validator(**resources),
     )
+    if not report.get("tenants"):
+        raise ValueError("prepare requires at least one discovered tenant")
     frozen = freeze_discovery(
         report,
         path,
@@ -70,7 +72,10 @@ def prepare_workflow(
         schema,
         semantic_validator=_semantic_validator(**resources),
     )
-    _write_discovery(discovery_path, report)
+    _write_discovery(
+        discovery_path,
+        {key: frozen.data[key] for key in report},
+    )
     result = run_v3_command(
         "preflight",
         frozen.path,

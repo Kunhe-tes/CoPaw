@@ -33,3 +33,14 @@
 全部租户发布后仍须 DBA 执行专用 schema 收口；等待收口可返回 partial_success，即使 failed 为 0。共享数据库/锁/EIO/空间耗尽/未知提交/程序错误仍停止调用，保留断点。
 
 本机真实包启动历史上缺少 trace_sdk；测试环境使用既有测试替身。实际发布镜像必须独立通过无测试替身的 CLI help 与启动验收，不能将测试替身加入生产 PYTHONPATH。
+
+## 提交后独立代码检视
+
+以 `b511f1d6e` 为基线启动三路子代理，分别核查租户失败隔离、并发资源生命周期和 CLI/审计契约。检视发现并修复：
+
+- 非法 Session revision、消息时间戳等明确旧输入错误仍可能以普通异常退出整批；改为 SQL 前明确校验和 `TenantInputError`，保留共享 SQL、权威及程序错误的致命语义。新增坏租户失败后后续正常租户继续执行的回归。
+- prepare 的相邻 discovery 副件此前保存首次发现结果，可能与冻结复核后的失败状态矛盾；改为保存冻结报告字段。
+- 空服务能产生零租户作业，随后注册访问首租户触发 IndexError；prepare 及注册入口均明确拒绝空租户任务。
+- 预取完成后保留最后一个解码 workspace 缓存；交给 owner 前释放该缓存，消费时仍可从 spool 重读。分享列表及摘要仍驻内存，解析预算不代表进程 RSS 硬上限，操作手册已说明。
+
+最终稳定代码完整子系统与 CLI 回归：**1604 passed in 55.72s**，日志 `/private/tmp/conversation-review-final.log`。本轮修复文件全部 pre-commit 检查通过，日志 `/private/tmp/conversation-review-hooks-final.log`。本轮检视和修复仅使用本地测试，未重新连接或修改数据库，也未执行生产迁移。
