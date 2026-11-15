@@ -53,6 +53,7 @@
 | [tool-result-truncation.md](tool-result-truncation.md) | MCP / read_file 工具返回出现 `<<<TRUNCATED>>>` 时的截断点和临时调大配置 |
 | [tracing-bounded-writer.md](tracing-bounded-writer.md) | Tracing 写入确认、背压、分块、关闭超时及取消回滚异常的排查边界 |
 | [agent-trace-sdk-capture.md](agent-trace-sdk-capture.md) | AgentTraceSDK chat I/O 缺口、operation 必填、测试替身盲区与 0.2.2 升级设计入口 |
+| [agent-observability-design-review.md](agent-observability-design-review.md) | 双轨追踪、模型/工具计数、身份/权限与 Span 增强设计的核查入口 |
 | [troubleshooting-order.md](troubleshooting-order.md) | 从复现、取证、收敛到验证的推荐顺序 |
 
 ## 使用建议

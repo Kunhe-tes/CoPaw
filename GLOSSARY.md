@@ -4,6 +4,30 @@ This context defines the domain language for Swe's agent orchestration runtime, 
 
 ## Language
 
+**Independent Agent Observability (独立 Agent 可观测)**:
+The separately governed view of Agent execution, evidence, assets, failures, and performance. Its execution records and lifecycle are independent of the existing Agent Trace and tracing SDK concepts.
+_Avoid_: SDK upgrade, legacy trace migration, merged tracing pipeline
+
+**Observability Run (可观测 Run)**:
+One user question's logical processing from acceptance to its terminal outcome within Independent Agent Observability. Retries and approval continuation before that outcome retain the Run; execution after a terminal outcome creates a new Run, while reconnecting creates none.
+_Avoid_: conversation run, Goal lifetime, SDK trace, Execution Trace ID
+
+**Observability Attempt (可观测 Attempt)**:
+One continuous execution within an Observability Run. Agent-level re-execution or continuation after approval starts a new Attempt; model-request retries remain within their current Attempt, and reconnecting creates none.
+_Avoid_: model retry, HTTP request, conversation turn, new Run
+
+**Observability Approval Wait (可观测审批等待)**:
+The non-terminal state of an Observability Run while its user question awaits an approval decision, even when the business Answer Turn carrying the approval prompt has completed. Approval continuation belongs to a new Observability Attempt in the same Run.
+_Avoid_: successful Run, completed task, model retry
+
+**Observability Metadata Event (可观测元数据事件)**:
+A fact about an Observability Run or one of its operations, containing identity, relationships, lifecycle, measurements, or evidence references. Conversation text, model messages, tool arguments and results, and free-form exception text are not Observability Metadata.
+_Avoid_: raw prompt event, body preview, SDK span export
+
+**Observability Content Evidence (可观测正文证据)**:
+An existing persisted conversation fragment that an authorized operator can inspect in relation to an Observability Run. It proves only the content actually retained and available at inspection time, not the model's entire input or internal reasoning.
+_Avoid_: complete prompt reconstruction, deterministic replay, log body
+
 **当日失败补跑**:
 外部按来源触发、针对当日实际确认失败的最新调度尝试进行的补偿执行。人工执行不参与这条筛选链；新失败可在后续扫描中继续补跑，但不能绕过停用、暂停、成功覆盖和在途执行等约束。
 _Avoid_: 按原计划日期扫全部历史失败、强制复活停用任务、一次调用无限循环补跑、把来源标识当授权凭据

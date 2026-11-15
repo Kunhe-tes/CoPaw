@@ -338,3 +338,13 @@ venv/bin/python -m pytest -m "not slow"
 - 对简单问题或者 bugfix，直接进行开发和修复
 - 对于较复杂的问题，使用 brainstorm 和 superpowers 工具进行规划和开发
 - 对于横跨多个模块的特性开发和问题处理，请先使用 openspec 工具进行深入分析和指定计划，再使用 TDD 的范式进行开发和实现
+
+## Agent skills
+
+### Issue tracker
+
+事项与规格使用本地 Markdown，存放于 `.scratch/<feature>/`。详见 `docs/agents/issue-tracker.md`。
+
+### Domain docs
+
+采用 single-context：根目录 `GLOSSARY.md` 与 `docs/adr/`。详见 `docs/agents/domain.md`。
