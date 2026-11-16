@@ -14,8 +14,9 @@ single SQL owner and shared I/O budgets. Source-level failures remain isolated;
 loss of database identity or lock, unknown commit outcome, and shared I/O
 failure remain globally fatal.
 
-This decision supersedes only the requirement in ADR 0045 to run full
-post-import body-level semantic comparison before routine source publication.
+For verification, this decision supersedes the requirement in ADR 0045 to run
+full post-import body-level semantic comparison before routine source
+publication.
 Import-time commit validation, durable NAS-before-MySQL publication,
 writer shutdown, immutable source capture, final source freshness checking,
 source-isolated publication, backups, and rollback guarantees remain in force.
