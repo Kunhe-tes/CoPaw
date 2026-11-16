@@ -182,7 +182,9 @@ def _validate_protocol(event: dict[str, Any]) -> None:
         "entity_id",
         "phase_key",
     ):
-        if not isinstance(event.get(key), str) or not _TOKEN.fullmatch(event[key]):
+        if not isinstance(event.get(key), str) or not _TOKEN.fullmatch(
+            event[key],
+        ):
             raise ValueError("invalid_protocol_value")
     if any(
         len(event[key].encode("utf-8")) > limit
@@ -244,9 +246,14 @@ def _validate_entity_identity(event: dict[str, Any]) -> None:
         expected_entity = ("span", "obs_span_id")
     elif event["event_name"] == "asset.used":
         expected_entity = ("asset", "entity_id")
-    if expected_entity is None or event.get("entity_kind") != expected_entity[0]:
+    if (
+        expected_entity is None
+        or event.get("entity_kind") != expected_entity[0]
+    ):
         raise ValueError("invalid_entity_kind")
-    if expected_entity[1] != "entity_id" and event.get("entity_id") != event.get(
+    if expected_entity[1] != "entity_id" and event.get(
+        "entity_id",
+    ) != event.get(
         expected_entity[1],
     ):
         raise ValueError("invalid_entity_identity")
@@ -321,7 +328,11 @@ def _validate_lifecycle_values(event: dict[str, Any]) -> None:
             raise ValueError("invalid_metric")
     if (
         len(
-            json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode(
+            json.dumps(
+                event,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode(
                 "utf-8",
             ),
         )
@@ -331,7 +342,9 @@ def _validate_lifecycle_values(event: dict[str, Any]) -> None:
 
 
 def _semantic_json(event: dict[str, Any]) -> str:
-    semantic = {k: v for k, v in event.items() if k not in {"event_id", "producer_id"}}
+    semantic = {
+        k: v for k, v in event.items() if k not in {"event_id", "producer_id"}
+    }
     return json.dumps(
         semantic,
         sort_keys=True,
@@ -341,7 +354,12 @@ def _semantic_json(event: dict[str, Any]) -> str:
 
 
 class InboxProjector:
-    def __init__(self, store: ObservabilityStore, *, poll_seconds: float = 1.0) -> None:
+    def __init__(
+        self,
+        store: ObservabilityStore,
+        *,
+        poll_seconds: float = 1.0,
+    ) -> None:
         self.store = store
         self.connection = store.connection
         self.poll_seconds = poll_seconds
@@ -355,7 +373,10 @@ class InboxProjector:
     async def start(self) -> None:
         if self._task is None:
             self._stopping.clear()
-            self._task = asyncio.create_task(self._run(), name="agentobs-projector")
+            self._task = asyncio.create_task(
+                self._run(),
+                name="agentobs-projector",
+            )
 
     async def stop(self) -> None:
         if self._task is None:
@@ -424,10 +445,20 @@ class InboxProjector:
         await session.execute(
             "UPDATE swe_agentobs_inbox SET processing_state = %s, processed_at = UTC_TIMESTAMP(6), "
             "reason_code = %s, event_id = %s, payload_text = NULL WHERE ingest_id = %s",
-            (state, reason, event.get("event_id") if event else None, ingest_id),
+            (
+                state,
+                reason,
+                event.get("event_id") if event else None,
+                ingest_id,
+            ),
         )
 
-    async def _store_event(self, session, event: dict[str, Any], ingest_id: int) -> int:
+    async def _store_event(
+        self,
+        session,
+        event: dict[str, Any],
+        ingest_id: int,
+    ) -> int:
         semantic = _semantic_json(event)
         slot = (
             event["entity_kind"],
@@ -475,7 +506,8 @@ class InboxProjector:
             if existing_span and (
                 existing_span["run_id"] != run_id
                 or existing_span["attempt_id"] != event.get("obs_attempt_id")
-                or existing_span["parent_span_id"] != event.get("parent_obs_span_id")
+                or existing_span["parent_span_id"]
+                != event.get("parent_obs_span_id")
             ):
                 return 3
         attempt_id = event.get("obs_attempt_id")
@@ -641,11 +673,19 @@ class InboxProjector:
                     business.get("root_question_msgid", "").encode(),
                     int(bool(event["capture_enabled"])),
                     started,
-                    _timestamp(event["ended_at"]) if event.get("ended_at") else None,
+                    (
+                        _timestamp(event["ended_at"])
+                        if name == "run.ended" and event.get("ended_at")
+                        else None
+                    ),
                     event.get("status") if is_run_fact else None,
                     "observed" if name == "run.ended" else "partial",
                     event.get("terminal_fact_source") if is_run_fact else None,
-                    (event.get("metrics") or {}).get("duration_us"),
+                    (
+                        (event.get("metrics") or {}).get("duration_us")
+                        if name == "run.ended"
+                        else None
+                    ),
                     metadata,
                 ),
             )
@@ -705,7 +745,9 @@ class InboxProjector:
                     event.get("kind") or "INTERNAL",
                     event.get("name") or "unknown",
                     event.get("step_index"),
-                    _timestamp(event.get("started_at") or event["occurred_at"]),
+                    _timestamp(
+                        event.get("started_at") or event["occurred_at"],
+                    ),
                     (
                         _timestamp(event["ended_at"])
                         if is_end and event.get("ended_at")
@@ -713,7 +755,11 @@ class InboxProjector:
                     ),
                     event.get("status") if is_end else "running",
                     event.get("technical_status"),
-                    int(bool(event["has_error"])) if "has_error" in event else None,
+                    (
+                        int(bool(event["has_error"]))
+                        if "has_error" in event
+                        else None
+                    ),
                     event.get("error_type"),
                     (event.get("metrics") or {}).get("duration_us"),
                     (event.get("metrics") or {}).get("input_tokens"),
