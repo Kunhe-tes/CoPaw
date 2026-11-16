@@ -2,6 +2,18 @@
 
 本篇是 **显式 `--tenant-isolation` 模式**的操作增补。未使用该选项的全量严格流程仍按 `2026-11-02-conversation-migration-and-launch-runbook.md` 执行。本篇覆盖的部分发布顺序、预览连接数据库、runtime v3 和分享最终 DDL 与旧流程不同，不能混用。设计依据是 `2026-11-13-conversation-tenant-cutover-design.md` 和 ADR 0046。
 
+## 2026-11-16：新作业按 source 独立迁移与上线
+
+新版 `prepare --tenant-isolation` 固定 `source_isolation=true`，发布、失败记录和自动重审单位细化为 `(service_unit_id, tenant_id, source_id)`。同 tenant 的 source=A、B、C 中，B 输入损坏仅记录 B，A、C 继续导入、验证和独立上线。一个 source 内全部 Agent、workspace 和可归属分享仍须一起通过。操作仍为 prepare、migrate 两条主命令，资源参数及四个旧 root 同路径、nas_root 独立的原地模式保持不变。下文“账号/租户”在新作业中均指该三元隔离单位。
+
+新作业须由 DBA 预建 `swe_conversation_migration_sources`：新环境执行最新 `scripts/sql/conversation_migration_control_tables.sql`；已有控制表环境可增量执行 `scripts/sql/conversation_migration_source_tables.sql`。CLI 不执行 DDL。所有 source 发布后，分享字段收口使用 `scripts/sql/conversation_source_publication_finalize.sql`；只有部分 source 发布时不执行全库收口，正常 source 可先上线。
+
+旧 manifest 未声明 `source_isolation=true` 时保持 `(service_unit_id, tenant_id)` 语义，不能手改 manifest 或切换控制表。已有 SQL 票据或业务行的作业不可重建身份来绕过。历史细分 discover/freeze 入口保持兼容，不自动升级粒度；新 source 作业使用首选 prepare。
+
+失败 JSON 增加 `source_id`；阶段结果包含 `source_isolation=true`、`counter_unit=sources`。兼容字段 `tenants`、`published`、`completed`、`failed` 在此模式均按 source 计数。共享 DB、EIO、磁盘耗尽、锁丢失、提交结果不确定仍停止整个命令。无法唯一确定归属的旧分享保守阻断所有可能受影响的 source；已删除 Chat 的孤立旧分享只在唯一可信 source 时归属。
+
+运行时逐次检查 SQL source published 状态；同 tenant 的未发布 source 返回 503，已发布 source 可正常读写。Chat/Session 元数据 CRUD 使用完整可信 `(service, tenant, source, agent)` scope。孤立旧分享保留 legacy_share 的空 source 存储契约，访问时按不可变迁移证据中的 token 唯一归属做 source 准入。详见 ADR 0049。本节覆盖本页历史租户粒度描述，旧作业继续原粒度。
+
 ## 首选操作：准备、执行两阶段
 
 本分支新增 `prepare` / `migrate`，常规显式租户隔离迁移优先使用本节。下文细分命令保留作诊断与兼容入口；不要将同一个作业反复 prepare，也不要手改 migration ID。先完成第 1、2 节的备份、旧 writer 停止、只读输入、目标库 DDL/DML 权限和独立 NAS 准备，再执行以下命令。
@@ -39,7 +51,7 @@ prepare 的最终预检（以及独立 preflight/预览）在排除已发布和�
 
 ## 1. 边界与上线单位
 
-- `(service_unit_id, tenant_id)` 是发布单位。同账号全部 source、Agent、workspace 和分享必须一起通过，不能跳过坏 Agent 后发布该账号。
+- 新 prepare 作业以 `(service_unit_id, tenant_id, source_id)` 为发布单位，同 source 的 Agent、workspace 和分享一起通过；旧 manifest 仍以 `(service_unit_id, tenant_id)` 为单位。
 - `source_root/config_root/snapshot_root` 是冻结输入；`original_root` 是新版实际工作区根；`nas_root` 是新正文存储。默认冻结副本模式要求输入与所有服务的在线 `original_root` 分离。显式原地模式允许四个旧 root 相同，见第 1.1 节。`snapshot_root` 是旧分享正文根，不等于“在线工作区根”。
 - 启动迁移前停止全部旧 writer、定时任务和其他写入口并建立备份；冻结源持续保留。程序接受停写证据引用，不替代停止进程或存储冻结。
 - 新运行时仅放行 SQL 状态为 `published` 且凭证核对通过的账号。失败、未注册账号返回 HTTP 503，错误码 `conversation_tenant_not_published`，不回退旧文件。
@@ -240,11 +252,11 @@ PY
 
 ## 6. 全部账号完成后的分享 schema 收口
 
-DBA 确认全部登记账号均 published，并安排元数据锁维护窗口后，用 fail-fast 客户端执行：
+DBA 确认全部登记 source 均 published，并安排元数据锁维护窗口后，用 fail-fast 客户端执行。旧 tenant 粒度 manifest 则仍用 `conversation_tenant_publication_finalize.sql`，不要混用：
 
 ```bash
 mysql --defaults-extra-file="$DBA_CNF" --database="$APP_SCHEMA" \
-  < scripts/sql/conversation_tenant_publication_finalize.sql
+  < scripts/sql/conversation_source_publication_finalize.sql
 ```
 
 此专用脚本**不删除分享**，未全部发布或定位/归属不完整会拒绝 ALTER。不要在部分上线期间执行旧 `conversation_share_service_unit_finalize.sql`（含 DELETE）。之后重跑同一 `migrate --apply`（旧细分流程可用 `finalize --apply`），整体才能进入 ready；已发布账号仍跳过源盘点。

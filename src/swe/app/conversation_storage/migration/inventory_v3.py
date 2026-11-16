@@ -88,7 +88,12 @@ def _inventory_shares(data, report):
     ownership = {}
     for workspace in report["workspaces"] if data["shares"] else ():
         for chat in workspace["chats"]:
-            key = (*workspace["scope"][:2], chat["spec"]["id"])
+            owner = (
+                workspace["scope"][:3]
+                if data.get("source_isolation")
+                else workspace["scope"][:2]
+            )
+            key = (*owner, chat["spec"]["id"])
             count, _position = ownership.get(key, (0, None))
             ownership[key] = (count + 1, chat["position"])
     for source in data["shares"]:
@@ -96,7 +101,18 @@ def _inventory_shares(data, report):
         cutoffs = data.get("tenant_sync_started_at_ns", {})
         cutoff = (
             cutoffs.get(
-                tenant_key(source["service_unit_id"], source["tenant_id"]),
+                (
+                    tenant_key(
+                        source["service_unit_id"],
+                        source["tenant_id"],
+                        source["source_id"],
+                    )
+                    if data.get("source_isolation")
+                    else tenant_key(
+                        source["service_unit_id"],
+                        source["tenant_id"],
+                    )
+                ),
             )
             if cutoffs
             else None
@@ -112,7 +128,12 @@ def _inventory_shares(data, report):
                 )
             blocker = _source_change(
                 source["position"],
-                (source["service_unit_id"], source["tenant_id"]),
+                (source["service_unit_id"], source["tenant_id"])
+                + (
+                    (source["source_id"],)
+                    if data.get("source_isolation")
+                    else ()
+                ),
                 [str(snapshot_path), parent],
                 cutoff,
                 cached=parent_freshness,
@@ -144,6 +165,11 @@ def _inventory_shares(data, report):
             (
                 source["service_unit_id"],
                 source["tenant_id"],
+                *(
+                    (source["source_id"],)
+                    if data.get("source_isolation")
+                    else ()
+                ),
                 source["chat_id"],
             ),
             (0, None),
@@ -166,6 +192,11 @@ def _inventory_shares(data, report):
                 "record": record,
                 "snapshot": _read_share_snapshot(snapshot_path),
                 "snapshot_path": source["snapshot_path"],
+                **(
+                    {"source_id": source["source_id"]}
+                    if data.get("source_isolation")
+                    else {}
+                ),
             },
         )
 
@@ -248,7 +279,11 @@ def inventory_discovery(data, *, workspace_offset=0):
         mapped = data["workspaces"][index]
         verify_evidence(data, mapped)
         cutoff = data.get("tenant_sync_started_at_ns", {}).get(
-            tenant_key(mapping.scope.service_unit_id, mapping.scope.tenant_id),
+            (
+                tenant_key(*mapping.scope.values[:3])
+                if data.get("source_isolation")
+                else tenant_key(*mapping.scope.values[:2])
+            ),
         )
         entries = workspace_entries(mapping)
         input_files = [path for path in entries if path.is_file()]
@@ -257,7 +292,13 @@ def inventory_discovery(data, *, workspace_offset=0):
         if cutoff is not None:
             blocker = _source_change(
                 mapped["position"],
-                (mapping.scope.service_unit_id, mapping.scope.tenant_id),
+                tuple(
+                    (
+                        mapping.scope.values[:3]
+                        if data.get("source_isolation")
+                        else mapping.scope.values[:2]
+                    ),
+                ),
                 source_paths,
                 cutoff,
                 cached=data.get("_freshness_cache"),

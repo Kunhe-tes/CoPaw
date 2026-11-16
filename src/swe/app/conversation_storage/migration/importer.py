@@ -409,7 +409,17 @@ class ConversationImporter:
         checked_by_cutoff = {}
         for workspace in report["workspaces"]:
             service_unit_id, tenant_id = workspace["scope"][:2]
-            cutoff = timestamps.get(tenant_key(service_unit_id, tenant_id))
+            cutoff = timestamps.get(
+                (
+                    tenant_key(
+                        service_unit_id,
+                        tenant_id,
+                        workspace["scope"][2],
+                    )
+                    if self.manifest.data.get("source_isolation")
+                    else tenant_key(service_unit_id, tenant_id)
+                ),
+            )
             if cutoff is None:
                 continue
             changed = changed_source(
@@ -423,7 +433,12 @@ class ConversationImporter:
                 blocker = {
                     "code": "source_modified_after_sync_started",
                     "position": workspace["position"],
-                    "scope": [service_unit_id, tenant_id],
+                    "scope": [service_unit_id, tenant_id]
+                    + (
+                        [workspace["scope"][2]]
+                        if self.manifest.data.get("source_isolation")
+                        else []
+                    ),
                     "path": str(path),
                     "mtime_ns": modified_at_ns,
                     "cutoff_ns": cutoff,
@@ -436,7 +451,13 @@ class ConversationImporter:
         for share in report["shares"]:
             service_unit_id = share["service_unit_id"]
             tenant_id = share["record"]["tenant_id"]
-            cutoff = timestamps.get(tenant_key(service_unit_id, tenant_id))
+            cutoff = timestamps.get(
+                (
+                    tenant_key(service_unit_id, tenant_id, share["source_id"])
+                    if self.manifest.data.get("source_isolation")
+                    else tenant_key(service_unit_id, tenant_id)
+                ),
+            )
             if cutoff is None or not share.get("snapshot_path"):
                 continue
             changed = changed_source(
@@ -453,7 +474,12 @@ class ConversationImporter:
                 blocker = {
                     "code": "source_modified_after_sync_started",
                     "position": share["position"],
-                    "scope": [service_unit_id, tenant_id],
+                    "scope": [service_unit_id, tenant_id]
+                    + (
+                        [share["source_id"]]
+                        if self.manifest.data.get("source_isolation")
+                        else []
+                    ),
                     "path": str(path),
                     "mtime_ns": modified_at_ns,
                     "cutoff_ns": cutoff,

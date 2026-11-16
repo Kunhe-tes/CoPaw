@@ -11,8 +11,13 @@ def _walk_error(error):
     raise error
 
 
-def tenant_key(service_unit_id, tenant_id):
-    return service_unit_id + "\x00" + tenant_id
+def tenant_key(service_unit_id, tenant_id, source_id=None):
+    parts = (
+        (service_unit_id, tenant_id)
+        if source_id is None
+        else (service_unit_id, tenant_id, source_id)
+    )
+    return "\x00".join(parts)
 
 
 def changed_source(paths, cutoff_ns, *, checked=None, recursive=True):

@@ -18,6 +18,17 @@ from .disk_manifest import iter_json
 from .journal import BUSINESS_TABLES, JOBS, ENTRIES, MigrationJournal
 from .tenant_state import TenantState, _json
 from .v3_manifest import V3Manifest
+from .isolation import state_store
+from contextvars import ContextVar
+
+_SOURCE_MODE = ContextVar("source_review_mode", default=False)
+
+
+def _states(db, manifest):
+    if not manifest.data.get("source_isolation"):
+        return TenantState(db, manifest.migration_id)
+    return state_store(db, manifest)
+
 
 _FIELDS = (
     "services",
@@ -33,6 +44,7 @@ _FIELDS = (
     "fingerprints",
     "discovery_version",
     "tenant_isolation",
+    "source_isolation",
     "in_place",
 )
 
@@ -56,6 +68,7 @@ def _review_failure(tenant):
     return {
         "service_unit_id": tenant["service_unit_id"],
         "tenant_id": tenant["tenant_id"],
+        **({"source_id": tenant["source_id"]} if _SOURCE_MODE.get() else {}),
         "stage": "retry-review",
         "code": code,
         "reason": _REVIEW_REASONS[code],
@@ -104,7 +117,8 @@ def _pending(manifest):
 
 
 def _key(item):
-    return item["service_unit_id"], item["tenant_id"]
+    key = item["service_unit_id"], item["tenant_id"]
+    return (*key, item["source_id"]) if _SOURCE_MODE.get() else key
 
 
 def _evidence(data, key):
@@ -141,17 +155,43 @@ def _source(data):
 
 def _ticket_owner(row, workspaces=(), shares=()):
     details = row.get("details_text")
+    raw_position = row["source_key"]
+    if isinstance(raw_position, bytes):
+        raw_position = raw_position.decode()
+    if _SOURCE_MODE.get():
+        owners = {_key(s) for s in shares if s.get("position") == raw_position}
+        if len(owners) == 1:
+            return owners.pop()
+        if len(owners) > 1:
+            raise ValueError("journal share ownership is ambiguous")
     if details:
         value = json.loads(details)
         if row.get("entry_kind") in ("retention", b"retention"):
+            if (
+                _SOURCE_MODE.get()
+                and value.get("scope_kind") == "legacy_share"
+            ):
+                raise ValueError(
+                    "legacy retention requires publication ownership check",
+                )
             if isinstance(value.get("service_unit_key"), str) and isinstance(
                 value.get("tenant_key"),
                 str,
             ):
-                return value["service_unit_key"], value["tenant_key"]
+                return (
+                    (
+                        value["service_unit_key"],
+                        value["tenant_key"],
+                        value["source_key"],
+                    )
+                    if _SOURCE_MODE.get()
+                    else (value["service_unit_key"], value["tenant_key"])
+                )
         scope = value.get("scope")
+        if _SOURCE_MODE.get() and value.get("scope_kind") == "legacy_share":
+            raise ValueError("journal legacy share ownership cannot be proved")
         if isinstance(scope, list) and len(scope) == 4:
-            return tuple(scope[:2])
+            return tuple(scope[:3] if _SOURCE_MODE.get() else scope[:2])
     raw = row["source_key"]
     if isinstance(raw, bytes):
         raw = raw.decode()
@@ -180,12 +220,14 @@ def _ticket_owner(row, workspaces=(), shares=()):
         and value[0] in ("session", "chat")
         and len(value) >= 5
     ):
-        return tuple(value[1:3])
+        return tuple(value[1:4] if _SOURCE_MODE.get() else value[1:3])
     raise ValueError("journal ticket ownership cannot be proved")
 
 
 async def _no_data(db, migration_id, keys, workspaces=(), shares=()):
-    for service, tenant in keys:
+    for key in keys:
+        service, tenant = key[:2]
+        source = key[2] if len(key) == 3 else None
         for table in BUSINESS_TABLES:
             if table in (
                 "swe_conversation_turns",
@@ -211,18 +253,38 @@ async def _no_data(db, migration_id, keys, workspaces=(), shares=()):
                     + table
                     + " WHERE service_unit_key=%s AND tenant_key=%s LIMIT 1"
                 )
-            row = await db.fetch_one(
-                query,
-                (service.encode(), tenant.encode()),
-            )
+            values = (service.encode(), tenant.encode())
+            if source is not None:
+                prefix = (
+                    "s."
+                    if table
+                    in ("swe_conversation_turns", "swe_conversation_messages")
+                    else ""
+                )
+                query = query.replace(
+                    " LIMIT 1",
+                    " AND " + prefix + "source_key=%s LIMIT 1",
+                )
+                values += (source.encode(),)
+                if table in (
+                    "swe_conversation_publications",
+                    "swe_conversation_retentions",
+                ):
+                    query = query.replace(
+                        " LIMIT 1",
+                        " AND scope_kind<>'legacy_share' LIMIT 1",
+                    )
+            row = await db.fetch_one(query, values)
             if row:
                 raise _TenantReviewHasData(
                     "tenant evidence cannot change after business data exists",
                 )
+        if source is not None:
+            await _no_legacy_data(db, migration_id, key, shares)
     after = 0
     while True:
         rows = await db.fetch_all(
-            "SELECT id,entry_kind,source_key,details_text FROM "
+            "SELECT id,entry_kind,source_key,target_id,details_text FROM "
             + ENTRIES
             + " WHERE migration_id=%s AND id>%s ORDER BY id LIMIT 1000",
             (migration_id.encode(), after),
@@ -234,11 +296,118 @@ async def _no_data(db, migration_id, keys, workspaces=(), shares=()):
             # tenant business rows above remain the authority for zero-data review.
             if row.get("entry_kind") in ("runtime_id", b"runtime_id"):
                 continue
-            if _ticket_owner(row, workspaces, shares) in keys:
+            if _SOURCE_MODE.get() and row.get("entry_kind") in (
+                "retention",
+                b"retention",
+            ):
+                owner = await _retention_owner(db, migration_id, row, shares)
+            else:
+                owner = _ticket_owner(row, workspaces, shares)
+            if owner in keys:
                 raise _TenantReviewHasData(
                     "tenant evidence cannot change after a journal ticket exists",
                 )
         after = rows[-1]["id"]
+
+
+async def _legacy_publication_owner(db, migration_id, publication_id, shares):
+    ticket = await db.fetch_one(
+        "SELECT entry_kind,source_key,details_text FROM "
+        + ENTRIES
+        + " WHERE migration_id=%s AND entry_kind='publication' AND target_id=%s AND id=target_id",
+        (migration_id.encode(), publication_id),
+    )
+    if ticket is None:
+        raise ValueError("legacy publication has no migration ticket")
+    return _ticket_owner(ticket, shares=shares)
+
+
+async def _retention_owner(db, migration_id, ticket, shares):
+    details = json.loads(ticket["details_text"])
+    if details.get("scope_kind") != "legacy_share":
+        return _ticket_owner(ticket, shares=shares)
+    if details.get("source_key") or details.get("agent_key"):
+        raise ValueError("legacy retention scope differs")
+    if details.get("publication_id") is not None:
+        owner = await _legacy_publication_owner(
+            db,
+            migration_id,
+            details["publication_id"],
+            shares,
+        )
+        if owner[:2] != (details["service_unit_key"], details["tenant_key"]):
+            raise ValueError("legacy retention publication tenant differs")
+        return owner
+    # A shared guard is not owned by the real empty-source unit. Validate its
+    # immutable SQL identity instead of attributing it to any one source.
+    current = await db.fetch_one(
+        "SELECT * FROM swe_conversation_retentions WHERE id=%s",
+        (ticket["target_id"],),
+    )
+    if (
+        details.get("kind") != "gc_guard"
+        or current is None
+        or any(
+            (
+                current.get(key).decode()
+                if isinstance(current.get(key), bytes)
+                else current.get(key)
+            )
+            != value
+            for key, value in details.items()
+        )
+    ):
+        raise ValueError("shared legacy retention guard differs")
+    return None
+
+
+async def _no_legacy_data(db, migration_id, key, shares):
+    service, tenant, _source = key
+    for table in ("publications", "retentions"):
+        after = -1
+        while True:
+            rows = await db.fetch_all(
+                "SELECT * FROM swe_conversation_"
+                + table
+                + " WHERE service_unit_key=%s AND tenant_key=%s AND scope_kind='legacy_share' AND source_key='' AND id>%s ORDER BY id LIMIT 1000",
+                (service.encode(), tenant.encode(), after),
+            )
+            for row in rows:
+                publication_id = (
+                    row["id"]
+                    if table == "publications"
+                    else row.get("publication_id")
+                )
+                if publication_id is None:
+                    if row.get("kind") != "gc_guard" or row.get("agent_key"):
+                        raise ValueError("unknown shared legacy retention")
+                    ticket = await db.fetch_one(
+                        "SELECT entry_kind,source_key,target_id,details_text FROM "
+                        + ENTRIES
+                        + " WHERE migration_id=%s AND entry_kind='retention' AND target_id=%s",
+                        (migration_id.encode(), row["id"]),
+                    )
+                    if ticket is None:
+                        raise ValueError(
+                            "shared legacy retention guard has no ticket",
+                        )
+                    await _retention_owner(db, migration_id, ticket, shares)
+                    continue
+                owner = await _legacy_publication_owner(
+                    db,
+                    migration_id,
+                    publication_id,
+                    shares,
+                )
+                if owner[:2] != key[:2]:
+                    raise ValueError("legacy publication tenant differs")
+                if owner == key:
+                    raise _TenantReviewHasData(
+                        "source evidence cannot change after legacy share data exists",
+                    )
+            if len(rows) < 1000:
+                break
+            after = rows[-1]["id"]
 
 
 def _review_semantic(
@@ -371,6 +540,7 @@ def _discover_review(
             shares=shares,
             overrides=overrides,
             tenant_isolation=True,
+            source_isolation=manifest.data.get("source_isolation", False),
             in_place=in_place,
             semantic_validator=_review_validator(
                 manifest,
@@ -547,7 +717,7 @@ def _settle_review_boundaries(report, old, protected):
 
 
 async def _review_owners(db, manifest, eligible):
-    states = TenantState(db, manifest.migration_id)
+    states = _states(db, manifest)
     published = set()
     for tenant in manifest.data["tenants"]:
         row = await states.get(*_key(tenant))
@@ -563,7 +733,7 @@ async def _review_owners(db, manifest, eligible):
     return published, preserved
 
 
-async def review_retry(
+async def _review_retry(
     db,
     manifest,
     reviewed_report,
@@ -705,7 +875,7 @@ async def _commit_review(
 ):
     old_tenants = {_key(t): t for t in old["tenants"]}
     old_source, new_source = _source(old), _source(new)
-    states = TenantState(db, manifest.migration_id)
+    states = _states(db, manifest)
     async with db.transaction():
         job = await db.fetch_one(
             "SELECT * FROM " + JOBS + " WHERE migration_id=%s FOR UPDATE",
@@ -733,6 +903,7 @@ async def _commit_review(
                     {
                         "service": key[0],
                         "tenant": key[1],
+                        **({"source": key[2]} if len(key) == 3 else {}),
                         "old": row["evidence_text"],
                         "new": _json(_evidence(new, key)),
                         "old_state": row["state"],
@@ -799,7 +970,15 @@ async def _commit_review(
             raise ValueError("tenant review job compare-and-set failed")
         for record in records:
             changed_rows = await db.execute(
-                "UPDATE swe_conversation_migration_tenants SET evidence_text=%s,state=%s,failure_text=%s,verification_text='{}',updated_at=UTC_TIMESTAMP(6) WHERE migration_id=%s AND service_unit_key=%s AND tenant_key=%s AND state=%s AND evidence_text=%s",
+                "UPDATE "
+                + (
+                    "swe_conversation_migration_sources"
+                    if _SOURCE_MODE.get()
+                    else "swe_conversation_migration_tenants"
+                )
+                + " SET evidence_text=%s,state=%s,failure_text=%s,verification_text='{}',updated_at=UTC_TIMESTAMP(6) WHERE migration_id=%s AND service_unit_key=%s AND tenant_key=%s"
+                + (" AND source_key=%s" if _SOURCE_MODE.get() else "")
+                + " AND state=%s AND evidence_text=%s",
                 (
                     record["new"],
                     record["new_state"],
@@ -807,6 +986,11 @@ async def _commit_review(
                     manifest.migration_id.encode(),
                     record["service"].encode(),
                     record["tenant"].encode(),
+                    *(
+                        (record["source"].encode(),)
+                        if "source" in record
+                        else ()
+                    ),
                     record["old_state"],
                     record["old"],
                 ),
@@ -817,7 +1001,7 @@ async def _commit_review(
                 )
 
 
-async def recover_pending_review(db, manifest):
+async def _recover_pending_review(db, manifest):
     """Resolve only provable old/new SQL outcomes; leave unknown outcomes intact."""
     path = _pending(manifest)
     if not path.exists():
@@ -849,11 +1033,12 @@ async def recover_pending_review(db, manifest):
             outcome = "old"
         else:
             raise ValueError("tenant review SQL outcome is unknown")
-        states = TenantState(db, manifest.migration_id)
+        states = _states(db, manifest)
         for record in pending["tenants"]:
             row = await states.get(
                 record["service"],
                 record["tenant"],
+                *((record["source"],) if "source" in record else ()),
                 locked=True,
             )
             expected_state = (
@@ -913,3 +1098,32 @@ async def recover_pending_review(db, manifest):
             else []
         ),
     }
+
+
+async def review_retry(
+    db,
+    manifest,
+    reviewed_report,
+    eligible=None,
+    *,
+    semantic_validator=None,
+):
+    token = _SOURCE_MODE.set(manifest.data.get("source_isolation", False))
+    try:
+        return await _review_retry(
+            db,
+            manifest,
+            reviewed_report,
+            eligible,
+            semantic_validator=semantic_validator,
+        )
+    finally:
+        _SOURCE_MODE.reset(token)
+
+
+async def recover_pending_review(db, manifest):
+    token = _SOURCE_MODE.set(manifest.data.get("source_isolation", False))
+    try:
+        return await _recover_pending_review(db, manifest)
+    finally:
+        _SOURCE_MODE.reset(token)

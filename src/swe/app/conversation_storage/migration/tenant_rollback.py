@@ -10,6 +10,7 @@ from ..identity import WorkspaceScope
 from .exporter import OldFormatTarget
 from .manifest import SourceBoundary
 from .source_inputs import safe_input_entries
+from .isolation import unit_key, belongs
 
 
 @dataclass(frozen=True)
@@ -122,6 +123,94 @@ def validate_current_config(mapping, services):
     return bindings
 
 
+def _scope_key(data, scope):
+    return tuple(scope[:3] if data.get("source_isolation") else scope[:2])
+
+
+async def _publication_states(database, manifest):
+    source_mode = manifest.data.get("source_isolation", False)
+    fields = ("service_unit_key", "tenant_key", "source_key")[
+        : 3 if source_mode else 2
+    ]
+    table = (
+        "swe_conversation_migration_sources"
+        if source_mode
+        else "swe_conversation_migration_tenants"
+    )
+    selected = (
+        (*fields, "state", "evidence_text", "verification_text")
+        if source_mode
+        else (*fields, "state")
+    )
+    rows = await database.fetch_all(
+        "SELECT "
+        + ",".join(selected)
+        + " FROM "
+        + table
+        + " WHERE migration_id=%s",
+        (manifest.migration_id.encode(),),
+    )
+    states = {
+        tuple(_text(row[key]) for key in fields): row["state"] for row in rows
+    }
+    if len(states) != len(rows):
+        raise IntegrityError("rollback publication state is duplicated")
+    if source_mode:
+        for row in rows:
+            _validate_source_state(manifest, row)
+    return states
+
+
+def _validate_source_state(manifest, row):
+    from .authority import validate_receipt
+    from .source_state import SourceState
+
+    key = tuple(
+        _text(row[field])
+        for field in ("service_unit_key", "tenant_key", "source_key")
+    )
+    data = manifest.data
+    service = next(
+        (s for s in data["services"] if s["service_unit_id"] == key[0]),
+        None,
+    )
+    expected = {
+        "service": service,
+        "workspaces": [
+            w for w in data.get("workspaces", []) if belongs(w, key)
+        ],
+        "shares": [s for s in data.get("shares", []) if belongs(s, key)],
+    }
+    try:
+        if service is None or json.loads(row["evidence_text"]) != expected:
+            raise ValueError("source frozen evidence differs")
+        if row["state"] == "published":
+            proof = validate_receipt(json.loads(row["verification_text"]))
+            if proof["migration_id"] != manifest.migration_id or set(
+                proof["services"],
+            ) != {key[0]}:
+                raise ValueError("source publication job differs")
+            SourceState._validate_evidence(row, *key, proof)
+    except (ValueError, TypeError, KeyError) as error:
+        raise IntegrityError(
+            "rollback source frozen or publication evidence differs",
+        ) from error
+
+
+def _frozen_configs(data, service):
+    from .tenant_discovery import _source_configs
+
+    for config, tenant, source in _source_configs(service):
+        yield config, unit_key(
+            data,
+            {
+                "service_unit_id": service["service_unit_id"],
+                "tenant_id": tenant,
+                "source_id": source,
+            },
+        )
+
+
 async def plan_tenant_rollback(
     database,
     manifest,
@@ -186,26 +275,12 @@ async def plan_tenant_rollback(
         raise IntegrityError(
             "current config scope or workspace mapping is duplicated",
         )
-    rows = await database.fetch_all(
-        "SELECT service_unit_key,tenant_key,state FROM swe_conversation_migration_tenants WHERE migration_id=%s",
-        (manifest.migration_id.encode(),),
-    )
-
-    def text(value):
-        return value.decode() if isinstance(value, bytes) else value
-
-    states = {
-        (text(row["service_unit_key"]), text(row["tenant_key"])): row["state"]
-        for row in rows
-    }
-    registered = {
-        (item["service_unit_id"], item["tenant_id"])
-        for item in data["tenants"]
-    }
+    states = await _publication_states(database, manifest)
+    registered = {unit_key(data, item) for item in data["tenants"]}
     blockers = []
     if set(states) != registered:
         blockers.append("tenant_state_coverage_differs")
-    mapped = {scope[:2] for scope in scopes}
+    mapped = {_scope_key(data, scope) for scope in scopes}
     for key, state in states.items():
         if state == "published" and key not in mapped:
             blockers.append("published_tenant_current_config_missing")
@@ -284,7 +359,7 @@ async def validate_backup_authorization(authorization, database, scope):
         raise IntegrityError("rollback backup job authority differs")
     # Published state is mandatory, but the current Agent scope may be newer than
     # the immutable migration receipt. Only the reviewed mapping permits that.
-    await admission.require(scope.tenant_id)
+    await admission.require(scope.tenant_id, scope.source_id)
 
 
 def _copy_exact(source, destination):
@@ -340,22 +415,24 @@ def _copy_workspace_inputs(workspace, destination):
 def _rollback_input_digest(data, published, current_configs):
     import hashlib
     from .source_inputs import session_input_roots
-    from .tenant_discovery import _configs
 
     paths = set()
     for workspace in data["workspaces"]:
-        if (workspace["service_unit_id"], workspace["tenant_id"]) in published:
+        if unit_key(data, workspace) in published:
             continue
         root = Path(workspace["root"])
         entrances = session_input_roots(
             root,
             [item["path"] for item in workspace.get("session_paths", [])],
+            registry_path=workspace.get("registry_path", "chats.json"),
+            sessions_dir=workspace.get("sessions_dir", "sessions"),
+            dialog_dir=workspace.get("dialog_dir", "dialog"),
         )
         paths.update(safe_input_entries(root, entrances))
         paths.update(safe_input_entries(root, ["agent.json"], recursive=False))
     for service in data["services"]:
-        for config, tenant in _configs(service):
-            if (service["service_unit_id"], tenant) not in published:
+        for config, key in _frozen_configs(data, service):
+            if key not in published:
                 paths.update(
                     safe_input_entries(
                         Path(service["config_root"]),
@@ -363,11 +440,24 @@ def _rollback_input_digest(data, published, current_configs):
                         recursive=False,
                     ),
                 )
-    for row in data.get("source_shares", data.get("shares", [])):
+    shares = (
+        data["shares"]
+        if data.get("source_isolation")
+        else data.get("source_shares", data.get("shares", []))
+    )
+    for row in shares:
         candidates = [
             service
             for service in data["services"]
-            if (service["service_unit_id"], row["tenant_id"]) not in published
+            if (
+                not data.get("source_isolation")
+                or service["service_unit_id"] == row["service_unit_id"]
+            )
+            and unit_key(
+                data,
+                {**row, "service_unit_id": service["service_unit_id"]},
+            )
+            not in published
             and service.get("snapshot_root")
         ]
         for service in candidates:
@@ -404,6 +494,19 @@ def _text(value):
     return value.decode() if isinstance(value, bytes) else value
 
 
+def _share_owner(data, row, frozen_owners):
+    key = _text(row.get("service_unit_key")), row["tenant_id"]
+    if not data.get("source_isolation"):
+        return key
+    source = _text(row.get("source_key"))
+    if row.get("scope_kind") == "legacy_share":
+        owner = frozen_owners.get(row["token"])
+        if source != "" or owner is None or owner[:2] != key:
+            raise IntegrityError("legacy share source ownership is unproven")
+        return owner
+    return (*key, source)
+
+
 def _select_share_records(context, actual):
     from .discovery import SHARE_FIELDS
     from swe.cli.conversation_storage_v3_cmd import _stamp
@@ -411,7 +514,7 @@ def _select_share_records(context, actual):
     owners = {}
     for share in context.data["shares"]:
         token = share["token"]
-        owner = share["service_unit_id"], share["tenant_id"]
+        owner = unit_key(context.data, share)
         if token in owners:
             raise IntegrityError(
                 "frozen share token service ownership is ambiguous",
@@ -422,8 +525,7 @@ def _select_share_records(context, actual):
         for share in context.data.get("source_shares", context.data["shares"])
     }
     actual_owners = {
-        row["token"]: (_text(row.get("service_unit_key")), row["tenant_id"])
-        for row in actual
+        row["token"]: _share_owner(context.data, row, owners) for row in actual
     }
     if len(actual_owners) != len(actual):
         raise IntegrityError("SQL share tokens are duplicated")
@@ -437,7 +539,7 @@ def _select_share_records(context, actual):
     merged = {service: {} for service in context.service_roots}
     for row in actual:
         service = _text(row.get("service_unit_key"))
-        key = service, row["tenant_id"]
+        key = actual_owners[row["token"]]
         if key in context.published:
             if row["token"] in owners and owners[row["token"]] != key:
                 raise IntegrityError(
@@ -453,7 +555,11 @@ def _select_share_records(context, actual):
             raise IntegrityError("SQL share has unexplained service ownership")
         if owner in context.published or owner not in context.registered:
             raise IntegrityError("SQL share has unexplained service ownership")
-        if service not in (None, owner[0]) or row["tenant_id"] != owner[1]:
+        if (
+            service not in (None, owner[0])
+            or row["tenant_id"] != owner[1]
+            or (len(owner) == 3 and key[2] not in (None, owner[2]))
+        ):
             raise IntegrityError("SQL share has unexplained service ownership")
         if any(
             (
@@ -473,11 +579,22 @@ async def _merge_shares(context):
     from ..backup import _atomic_json
     from .discovery import SHARE_FIELDS
 
-    actual = await context.database.fetch_all(
-        "SELECT "
-        + ",".join((*SHARE_FIELDS, "service_unit_key"))
-        + " FROM swe_chat_shares",
-    )
+    if context.data.get("source_isolation"):
+        query = (
+            "SELECT "
+            + ",".join("s." + field for field in SHARE_FIELDS)
+            + ",s.service_unit_key,p.source_key,p.scope_kind FROM swe_chat_shares s "
+            + "LEFT JOIN swe_conversation_publications p ON p.id=s.publication_id "
+            + "AND p.service_unit_key=s.service_unit_key AND p.tenant_key=s.tenant_id"
+            + " AND p.state='committed' AND p.gc_state='live'"
+        )
+    else:
+        query = (
+            "SELECT "
+            + ",".join((*SHARE_FIELDS, "service_unit_key"))
+            + " FROM swe_chat_shares"
+        )
+    actual = await context.database.fetch_all(query)
     from swe.cli.conversation_storage_v3_cmd import _stamp
 
     owners, merged = _select_share_records(context, actual)
@@ -517,7 +634,7 @@ async def _merge_shares(context):
             scope = binding["scope"]
             if (
                 scope[0] != service
-                or tuple(scope[:2]) not in context.published
+                or _scope_key(context.data, scope) not in context.published
             ):
                 continue
             declared = next(
@@ -556,12 +673,10 @@ async def _merge_shares(context):
 
 def _copy_unpublished(context):
     copied = []
-    from .tenant_discovery import _configs
 
     frozen_configs = set()
     for service in context.data["services"]:
-        for config, tenant in _configs(service):
-            key = (service["service_unit_id"], tenant)
+        for config, key in _frozen_configs(context.data, service):
             if key in context.registered and key not in context.published:
                 if not config.is_relative_to(service["source_root"]):
                     raise IntegrityError(
@@ -590,7 +705,7 @@ def _copy_unpublished(context):
     ):
         raise IntegrityError("unpublished tenant has no trusted frozen config")
     for workspace in context.data["workspaces"]:
-        key = (workspace["service_unit_id"], workspace["tenant_id"])
+        key = unit_key(context.data, workspace)
         if key in context.published:
             continue
         service = next(
@@ -632,7 +747,7 @@ async def _export_published(context):
 
     reports = []
     for scope_values, binding in context.by_scope.items():
-        if scope_values[:2] not in context.published:
+        if _scope_key(context.data, scope_values) not in context.published:
             continue
         scope = WorkspaceScope.from_values(scope_values)
         service = next(
@@ -702,19 +817,9 @@ async def _select_authorities(context):
         raise IntegrityError(
             "unassigned source evidence prevents complete rollback",
         )
-    rows = await context.database.fetch_all(
-        "SELECT service_unit_key,tenant_key,state FROM swe_conversation_migration_tenants WHERE migration_id=%s",
-        (context.manifest.migration_id.encode(),),
-    )
-    states = {
-        (_text(row["service_unit_key"]), _text(row["tenant_key"])): row[
-            "state"
-        ]
-        for row in rows
-    }
+    states = await _publication_states(context.database, context.manifest)
     registered = {
-        (item["service_unit_id"], item["tenant_id"])
-        for item in context.data["tenants"]
+        unit_key(context.data, item) for item in context.data["tenants"]
     }
     if set(states) != registered:
         raise IntegrityError("rollback tenant coverage differs")
@@ -730,6 +835,12 @@ async def _select_authorities(context):
             validate_current_config(mapping, context.data["services"]),
         )
     by_scope = {tuple(item["scope"]): item for item in bindings}
+    if any(
+        _scope_key(context.data, scope) not in registered for scope in by_scope
+    ):
+        raise IntegrityError(
+            "current config publication unit is not registered",
+        )
     published = {key for key, state in states.items() if state == "published"}
     sql_scopes = set()
     for table in ("sessions", "chats", "publications"):
@@ -754,7 +865,7 @@ async def _select_authorities(context):
                 )
             )
             if (
-                scope[:2] in published
+                _scope_key(context.data, scope) in published
                 and row.get("scope_kind", "workspace") == "workspace"
             ):
                 sql_scopes.add(scope)
@@ -763,7 +874,10 @@ async def _select_authorities(context):
             "published SQL scope lacks reviewed current config",
         )
     if any(
-        (key not in {scope[:2] for scope in by_scope} for key in published)
+        (
+            key not in {_scope_key(context.data, scope) for scope in by_scope}
+            for key in published
+        )
     ):
         raise IntegrityError("published tenant lacks current config")
     return (registered, by_scope, published)
@@ -826,7 +940,7 @@ async def compose_tenant_rollback(
     context.destination, context.service_roots = destination, service_roots
     reports = await _export_published(context)
     for mapping in current_configs:
-        key = mapping["service_unit_id"], mapping["tenant_id"]
+        key = unit_key(data, mapping)
         if key in published:
             service = next(
                 item

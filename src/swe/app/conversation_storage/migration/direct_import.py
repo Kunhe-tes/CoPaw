@@ -292,11 +292,25 @@ class DirectImporter(ConversationImporter):
 
         cutoff_map = self.manifest.data.get("tenant_sync_started_at_ns", {})
         tenants = {
-            (workspace["scope"][0], workspace["scope"][1])
+            tuple(
+                (
+                    workspace["scope"][:3]
+                    if self.manifest.data.get("source_isolation")
+                    else workspace["scope"][:2]
+                ),
+            )
             for workspace in report["workspaces"]
         }
         tenants.update(
-            (share["service_unit_id"], share["record"]["tenant_id"])
+            (
+                (
+                    share["service_unit_id"],
+                    share["record"]["tenant_id"],
+                    share["source_id"],
+                )
+                if self.manifest.data.get("source_isolation")
+                else (share["service_unit_id"], share["record"]["tenant_id"])
+            )
             for share in report["shares"]
         )
         if any(

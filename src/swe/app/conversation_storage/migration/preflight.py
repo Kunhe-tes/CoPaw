@@ -284,9 +284,16 @@ TENANT_CONTROL_COLUMNS = {
 }
 
 
-async def check_tenant_schema(database, schema):
+async def check_tenant_schema(database, schema, *, source_isolation=False):
     """Explicit opt-in contract; legacy control schemas remain supported."""
-    table = "swe_conversation_migration_tenants"
+    table = (
+        "swe_conversation_migration_sources"
+        if source_isolation
+        else "swe_conversation_migration_tenants"
+    )
+    expected_columns = dict(TENANT_CONTROL_COLUMNS)
+    if source_isolation:
+        expected_columns["source_key"] = ("varbinary(256)", "NO", "")
     rows = await _columns(database, schema, table)
     actual = {
         row["COLUMN_NAME"]: (
@@ -296,7 +303,7 @@ async def check_tenant_schema(database, schema):
         )
         for row in rows
     }
-    if actual != TENANT_CONTROL_COLUMNS:
+    if actual != expected_columns:
         raise ValueError("precreated tenant migration columns differ")
     for row in rows:
         kind = row["COLUMN_TYPE"].lower()
@@ -314,7 +321,11 @@ async def check_tenant_schema(database, schema):
         ):
             raise ValueError("precreated tenant migration definition differs")
     if await _indexes(database, schema, table) != {
-        "PRIMARY": (0, ("migration_id", "service_unit_key", "tenant_key")),
+        "PRIMARY": (
+            0,
+            ("migration_id", "service_unit_key", "tenant_key")
+            + (("source_key",) if source_isolation else ()),
+        ),
     }:
         raise ValueError("precreated tenant migration indexes differ")
     info = await database.fetch_one(

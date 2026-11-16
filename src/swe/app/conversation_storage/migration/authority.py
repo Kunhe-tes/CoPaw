@@ -156,7 +156,7 @@ async def backup_authority(database, scope):
 
     partial = await partial_admission(database, scope)
     if partial is not None:
-        workspaces = await partial.require(scope.tenant_id)
+        workspaces = await partial.require(scope.tenant_id, scope.source_id)
         selected = [
             item for item in workspaces if item["scope"] == list(scope.values)
         ]

@@ -633,6 +633,50 @@ class ShareStorage:
         await publications.commit(operation)
         return await self.store.get(token)
 
+    async def _require_snapshot_admission(self, record, token):
+        if self.admission is None:
+            return
+        await self.admission.validate()
+        if not self.admission.source_binding.get("source_isolation"):
+            await self.admission.require(record.tenant_id)
+            return
+        owner = await self.db.fetch_one(
+            "SELECT source_key,scope_kind FROM swe_conversation_publications WHERE id=%s AND service_unit_key=%s AND tenant_key=%s",
+            (
+                record.publication_id,
+                self.service_unit_key,
+                record.tenant_id.encode(),
+            ),
+        )
+        if owner is None:
+            raise IntegrityError("share publication ownership is missing")
+        if owner["scope_kind"] == "legacy_share":
+            rows = await self.db.fetch_all(
+                "SELECT source_key,evidence_text FROM swe_conversation_migration_sources "
+                "WHERE migration_id=%s AND service_unit_key=%s AND tenant_key=%s",
+                (
+                    self.admission.document["migration_id"].encode(),
+                    self.service_unit_key,
+                    record.tenant_id.encode(),
+                ),
+            )
+            owners = {
+                row["source_key"].decode()
+                for row in rows
+                if any(
+                    share["token"] == token
+                    for share in json.loads(row["evidence_text"])["shares"]
+                )
+            }
+            if len(owners) != 1:
+                raise IntegrityError(
+                    "legacy share source ownership is ambiguous",
+                )
+            source = owners.pop()
+        else:
+            source = owner["source_key"].decode()
+        await self.admission.require(record.tenant_id, source)
+
     async def read_snapshot(self, token, *, record_access):
         batch = None
         retentions = None
@@ -643,8 +687,7 @@ class ShareStorage:
                 if record is None:
                     missing_token = True
                     raise KeyError("Share not found")
-                if self.admission is not None:
-                    await self.admission.require(record.tenant_id)
+                await self._require_snapshot_admission(record, token)
                 if any(
                     value is None
                     for value in (

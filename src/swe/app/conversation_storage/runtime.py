@@ -174,11 +174,11 @@ class ConversationRuntime:
             admission=self.admission,
         )
 
-    async def admit(self, tenant_id):
+    async def admit(self, tenant_id, source_id=None):
         if self.admission is None:
             return
-        mappings = await self.admission.require(tenant_id)
-        self._admitted_tenants.add(tenant_id)
+        mappings = await self.admission.require(tenant_id, source_id)
+        self._admitted_tenants.add((tenant_id, source_id))
         for item in mappings:
             root = existing_root(item["root"])
             scope = WorkspaceScope.from_values(item["scope"])
@@ -196,7 +196,17 @@ class ConversationRuntime:
         )
         if (
             self.admission is not None
-            and resolved.tenant_id not in self._admitted_tenants
+            and (
+                resolved.tenant_id,
+                (
+                    resolved.source_id
+                    if getattr(self.admission, "source_binding", {}).get(
+                        "source_isolation",
+                    )
+                    else None
+                ),
+            )
+            not in self._admitted_tenants
         ):
             from .tenant_admission import TenantNotPublished
 
@@ -278,8 +288,16 @@ async def configure_runtime(database):
         from .migration.preflight import check_tenant_schema
 
         identity = await database.fetch_one("SELECT DATABASE() AS schema_name")
-        await check_tenant_schema(database, identity["schema_name"])
-        await TenantAdmission(database, document).validate()
+        admission = TenantAdmission(database, document)
+        await admission.validate()
+        await check_tenant_schema(
+            database,
+            identity["schema_name"],
+            source_isolation=admission.source_binding.get(
+                "source_isolation",
+                False,
+            ),
+        )
         authority = None
     else:
         authority = await validate_authority(database, document)
@@ -325,7 +343,17 @@ async def require_tenant_published(tenant_id):
             from ...config.context import decode_scope_id
 
             try:
-                tenant_id, _source = decode_scope_id(tenant_id)
+                tenant_id, source_id = decode_scope_id(tenant_id)
             except ValueError:
-                pass
-            await _runtime.admit(tenant_id)
+                source_id = ""
+            await _runtime.admission.validate()
+            await _runtime.admit(
+                tenant_id,
+                (
+                    source_id
+                    if _runtime.admission.source_binding.get(
+                        "source_isolation",
+                    )
+                    else None
+                ),
+            )

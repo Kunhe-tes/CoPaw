@@ -65,6 +65,7 @@ class MigrationJournal:
                 "shares",
                 "discovery_version",
                 "tenant_isolation",
+                "source_isolation",
                 "in_place",
                 "tenant_review_revision",
                 "tenants",
@@ -130,9 +131,9 @@ class MigrationJournal:
             return
         if self.active_tenant is None:
             raise ValueError("tenant isolation requires an active tenant")
-        from .tenant_state import TenantState
+        from .isolation import state_store
 
-        row = await TenantState(self.db, self.manifest.migration_id).get(
+        row = await state_store(self.db, self.manifest).get(
             *self.active_tenant,
         )
         if row is None or row["state"] == "published":
@@ -149,7 +150,12 @@ class MigrationJournal:
             + prefix
             + "service_unit_key=%s AND "
             + prefix
-            + "tenant_key=%s",
+            + "tenant_key=%s"
+            + (
+                (" AND " + prefix + "source_key=%s")
+                if len(self.active_tenant) == 3
+                else ""
+            ),
             tuple(value.encode() for value in self.active_tenant),
         )
 
@@ -170,7 +176,13 @@ class MigrationJournal:
                 owned_clause = (
                     " AND EXISTS (SELECT 1 FROM swe_conversation_sessions ts"
                     " WHERE ts.id=b.session_id AND ts.service_unit_key=b.service_unit_key"
-                    " AND ts.service_unit_key=%s AND ts.tenant_key=%s)"
+                    " AND ts.service_unit_key=%s AND ts.tenant_key=%s"
+                    + (
+                        " AND ts.source_key=%s"
+                        if len(self.active_tenant) == 3
+                        else ""
+                    )
+                    + ")"
                 )
             unknown = await self.db.fetch_one(
                 "SELECT b.id FROM "
@@ -217,7 +229,11 @@ class MigrationJournal:
             and any(
                 item["service_unit_id"].encode() == scope[0]
                 and item.get("record", item)["tenant_id"].encode() == scope[1]
-                for item in self.manifest.data.get("shares", [])
+                for item in getattr(
+                    self.manifest,
+                    "parent",
+                    self.manifest,
+                ).data.get("shares", [])
             )
         )
         if scope not in self._known_scopes and not legacy:
@@ -743,6 +759,14 @@ class MigrationJournal:
     async def _retention_rows(self):
         last_id = None
         clause, scope_values = self._tenant_filter()
+        source_mode = (
+            self.active_tenant is not None and len(self.active_tenant) == 3
+        )
+        if source_mode:
+            clause = (
+                " AND service_unit_key=%s AND tenant_key=%s"
+                " AND (source_key=%s OR (scope_kind='legacy_share' AND source_key=''))"
+            )
         while True:
             if last_id is None:
                 rows = await self.db.fetch_all(
@@ -763,10 +787,38 @@ class MigrationJournal:
                     (last_id, *scope_values, HYDRATE_PAGE_SIZE),
                 )
             for row in rows:
+                if source_mode and row.get("scope_kind") == "legacy_share":
+                    if not await self._source_owns_legacy_retention(row):
+                        continue
                 yield row
             if len(rows) < HYDRATE_PAGE_SIZE:
                 return
             last_id = rows[-1]["id"]
+
+    async def _source_owns_legacy_retention(self, row):
+        # The tenant-level guard is shared; every source still validates and
+        # journals it rather than inventing a source-specific guard namespace.
+        if row.get("publication_id") is None:
+            return True
+        entry = await self.db.fetch_one(
+            "SELECT source_key FROM "
+            + ENTRIES
+            + " WHERE migration_id=%s AND entry_kind='publication' AND target_id=%s AND id=target_id",
+            (self.migration_id, row["publication_id"]),
+        )
+        position = _text(entry["source_key"]) if entry else None
+        frozen = getattr(self.manifest, "parent", self.manifest).data
+        owners = {
+            (share["service_unit_id"], share["tenant_id"], share["source_id"])
+            for share in frozen.get("shares", [])
+            if share.get("position") == position
+        }
+        if len(owners) != 1:
+            raise ValueError("legacy retention publication source is unproven")
+        owner = owners.pop()
+        if owner[:2] != self.active_tenant[:2]:
+            raise ValueError("legacy retention publication tenant differs")
+        return owner == self.active_tenant
 
     async def capture_retentions(self):
         async for row in self._retention_rows():
@@ -774,15 +826,12 @@ class MigrationJournal:
 
     async def mark_state(self, state, verification=None):
         if self.manifest.data.get("tenant_isolation"):
-            from .tenant_state import TenantState
+            from .isolation import state_store
 
             if self.active_tenant is None:
                 raise ValueError("tenant isolation requires an active tenant")
             states = {"blocked": "failed", "ready": "published"}
-            return await TenantState(
-                self.db,
-                self.manifest.migration_id,
-            ).transition(
+            return await state_store(self.db, self.manifest).transition(
                 *self.active_tenant,
                 states.get(state, state),
                 verification,
