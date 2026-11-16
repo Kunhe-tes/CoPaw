@@ -32,6 +32,23 @@ from tests.unit.app.conversation_storage.test_offline_confirm_stages import (
 
 
 class Database(PublicationDatabase):
+    async def fetch_all(self, query, params=None):
+        if query.startswith("SELECT archive_chat_id,archive_order,"):
+            keys = (
+                "id",
+                "service_unit_key",
+                "session_id",
+                "publication_id",
+                "byte_offset",
+                "byte_length",
+            )
+            return [
+                dict(zip(keys, values))
+                for values in self.messages
+                if values[0] in params[1:] and values[1] == params[0]
+            ]
+        return await super().fetch_all(query, params)
+
     async def fetch_one(self, query, params=None):
         if "SELECT DATABASE()" in query:
             return {"schema_name": "test_conversation_evidence"}
