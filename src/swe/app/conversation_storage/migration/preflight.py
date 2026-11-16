@@ -3,6 +3,7 @@
 
 from contextlib import asynccontextmanager
 import re
+import time
 
 from ....database.prepared import PreparedInsert
 from ..schema_contract import COLUMNS, DEFAULTS, EXTRAS, CHARSETS, INDEXES
@@ -46,33 +47,50 @@ class DMLDatabase:
         return query
 
     async def fetch_one(self, query, params=None):
-        return await self._database.fetch_one(self.check(query), params)
+        return await self._query("fetch_one", query, params)
 
     async def fetch_all(self, query, params=None):
-        return await self._database.fetch_all(self.check(query), params)
+        return await self._query("fetch_all", query, params)
 
     async def execute(self, query, params=None):
-        return await self._database.execute(self.check(query), params)
+        return await self._query("execute", query, params)
 
     async def execute_result(self, query, params=None):
-        return await self._database.execute_result(self.check(query), params)
+        return await self._query("execute_result", query, params)
 
     async def insert(self, query, params=None):
-        return await self._database.insert(self.check(query), params)
+        return await self._query("insert", query, params)
+
+    async def _query(self, method, query, params, **options):
+        from .progress import current_progress
+
+        if method == "insert_prepared" and isinstance(query, PreparedInsert):
+            self.check(query.prefix + query.row_template + query.suffix)
+        else:
+            query = self.check(query)
+        progress = current_progress()
+        started = time.monotonic()
+        try:
+            return await getattr(self._database, method)(
+                query,
+                params,
+                **options,
+            )
+        finally:
+            if progress is not None:
+                progress.data["db_calls"] += 1
+                progress.data["db_seconds"] += time.monotonic() - started
 
     async def execute_many(self, query, params_list):
-        return await self._database.execute_many(
-            self.check(query),
-            params_list,
-        )
+        return await self._query("execute_many", query, params_list)
 
     async def insert_prepared(self, template, rows, **options):
         if not isinstance(template, PreparedInsert):
             raise ValueError(
                 "direct migration requires a fixed prepared insert",
             )
-        self.check(template.prefix + template.row_template + template.suffix)
-        return await self._database.insert_prepared(
+        return await self._query(
+            "insert_prepared",
             template,
             rows,
             **options,
@@ -82,6 +100,83 @@ class DMLDatabase:
     async def transaction(self):
         async with self._owner.transaction() as transaction:
             yield DMLDatabase(transaction, owner=self._owner)
+
+
+class _SchemaMetadata:
+    """One short-lived metadata read per check, never cached across sources."""
+
+    def __init__(self, schema, rows):
+        self.schema, self.rows = schema, rows
+
+    @classmethod
+    async def load(cls, database, schema):
+        names = (
+            *COLUMNS,
+            "swe_chat_shares",
+            *CONTROL_COLUMNS,
+            "swe_conversation_migration_tenants",
+            "swe_conversation_migration_sources",
+        )
+        condition = " WHERE TABLE_SCHEMA=%s AND TABLE_NAME IN ("
+        condition += ",".join("%s" for _ in names) + ")"
+        specs = {
+            "COLUMNS": (
+                "TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE,"
+                "COLUMN_DEFAULT,EXTRA,GENERATION_EXPRESSION,"
+                "CHARACTER_SET_NAME,COLLATION_NAME,ORDINAL_POSITION",
+                "TABLE_NAME,ORDINAL_POSITION",
+            ),
+            "STATISTICS": (
+                "TABLE_NAME,INDEX_NAME,NON_UNIQUE,COLUMN_NAME,"
+                "SEQ_IN_INDEX,SUB_PART,IS_VISIBLE",
+                "TABLE_NAME,INDEX_NAME,SEQ_IN_INDEX",
+            ),
+            "TABLES": ("TABLE_NAME,ENGINE,ROW_FORMAT", "TABLE_NAME"),
+        }
+        rows = {}
+        for table, (columns, order) in specs.items():
+            rows[table] = await database.fetch_all(
+                "SELECT "
+                + columns
+                + " FROM information_schema."
+                + table
+                + condition
+                + " ORDER BY "
+                + order,
+                (schema, *names),
+            )
+        return cls(schema, rows)
+
+    async def fetch_all(self, query, params):
+        if not params or params[0] != self.schema:
+            raise ValueError("metadata schema differs from checked schema")
+        for table, rows in self.rows.items():
+            if "FROM information_schema." + table in query:
+                return [
+                    row
+                    for row in rows
+                    if len(params) == 1 or row["TABLE_NAME"] == params[1]
+                ]
+        raise ValueError("only schema metadata queries are supported")
+
+    async def fetch_one(self, query, params):
+        rows = await self.fetch_all(query, params)
+        return rows[0] if rows else None
+
+
+async def check_migration_schema(
+    database,
+    schema,
+    *,
+    source_isolation=False,
+):
+    metadata = await _SchemaMetadata.load(database, schema)
+    await check_schema(metadata, schema, finalized=False)
+    await check_tenant_schema(
+        metadata,
+        schema,
+        source_isolation=source_isolation,
+    )
 
 
 async def check_schema(database, schema, *, finalized=False):

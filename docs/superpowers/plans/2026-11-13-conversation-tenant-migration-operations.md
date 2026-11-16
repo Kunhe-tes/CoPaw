@@ -51,6 +51,12 @@ prepare 的最终预检（以及独立 preflight/预览）在排除已发布和�
 
 ## 1. 边界与上线单位
 
+### 性能诊断
+
+用户数不等于迁移数据量，需同时记录 source/workspace、Session、消息数及会话输入字节。进度 `db_calls` 与 `db_seconds` 统计 DML 门面的数据库调用次数和累计等待时间，包含结构检查、状态/票据查询、失败调用和批量 prepared insert；批量操作计为一次门面调用，不含连接建立和事务 COMMIT/ROLLBACK。原 `sql_seconds` 仅覆盖协调器中的操作，不能代表整个命令的数据库耗时；两项有重叠，不可相加。`io_seconds` 是并发 IO 累计时间，也不能直接当墙钟占比。
+
+命令入口和每个 source 发布前仍完整检查结构，使用三次批量 information_schema 查询代替逐表往返，不跨 source 缓存结构。全量 journal 恢复仅在同一命令、同一 SQL owner 和同一映射对象内复用；每个 source 的作业绑定、业务归属、最终源复查和发布校验仍执行。新命令、映射重载或任一 source 失败后重新从 SQL 恢复，不跨命令复用恢复凭据。这些优化不改变锁丢失的致命停止语义。
+
 ### migrate 报 database identity or named lock lost
 
 此错误表示原 SQL owner 的连接 ID、命名锁持有者、server UUID 或当前库名至少一项不再匹配，是全局保护停止，不是可跳过的 source 输入错误。新版本错误中的 `mismatches` 指明失败项；只输出连接编号，不输出凭据、实例 UUID 或库名。`lock_owner` 表示锁不再由原连接持有（NULL 表示当前后端未持有）；`connection_id` 表示 SQL 会话变化；`server_uuid` 表示后端实例变化；`schema_name` 表示选库变化。

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """DML-only authoritative mappings in DBA-precreated control tables."""
 
+import asyncio
 import json
 from ..bundle import BundleStore, new_operation_key
 from ..identity import WorkspaceScope
@@ -36,8 +37,47 @@ def _json(value):
     )
 
 
+class JournalRecovery:
+    """Reuse a recovered mirror only inside one locked SQL owner run."""
+
+    def __init__(self, database, manifest):
+        self.database = database
+        self.manifest = getattr(manifest, "parent", manifest)
+        self.owner = asyncio.current_task()
+        self.confirmed = None
+
+    def check(self, database, manifest):
+        parent = getattr(manifest, "parent", manifest)
+        if (
+            database is not self.database
+            or parent is not self.manifest
+            or asyncio.current_task() is not self.owner
+        ):
+            raise ValueError("SQL journal recovery owner changed")
+        return self.confirmed is not None and all(
+            manifest.data[name] is mapping
+            for name, mapping in zip(
+                ("assignments", "batches"),
+                self.confirmed,
+            )
+        )
+
+    def confirm(self, manifest):
+        self.confirmed = (
+            manifest.data["assignments"],
+            manifest.data["batches"],
+        )
+
+
 class MigrationJournal:
-    def __init__(self, database, manifest, *, server_uuid=None):
+    def __init__(
+        self,
+        database,
+        manifest,
+        *,
+        server_uuid=None,
+        recovery=None,
+    ):
         if manifest.data.get("version") != 3:
             raise ValueError("SQL journal requires manifest version 3")
         self.db, self.manifest = database, manifest
@@ -47,6 +87,7 @@ class MigrationJournal:
         self._known_scopes = None
         self.active_tenant = None
         self.frozen_bindings_data = None
+        self.recovery = recovery
 
     def _bindings(self):
         data = self.frozen_bindings_data or self.manifest.data
@@ -573,6 +614,11 @@ class MigrationJournal:
     async def hydrate(self, *, persist=True):
         from .disk_manifest import DiskMap
 
+        if self.recovery is not None and self.recovery.check(
+            self.db,
+            self.manifest,
+        ):
+            return
         assignments, batches = {}, DiskMap()
         async for row in self._hydration_entries():
             kind, key = _text(row["entry_kind"]), _text(row["source_key"])
@@ -620,6 +666,8 @@ class MigrationJournal:
         )
         if persist:
             self.manifest._persist()
+        if self.recovery is not None:
+            self.recovery.confirm(self.manifest)
 
     async def refresh_batch(self, position):
         """Mirror only this committed SQL batch, never scan all tickets."""

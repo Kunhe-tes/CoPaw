@@ -42,6 +42,8 @@ class MigrationProgress:
             "inventory_blocker_count": 0,
             "sql_wait_seconds": 0.0,
             "sql_seconds": 0.0,
+            "db_calls": 0,
+            "db_seconds": 0.0,
             "sql_queue_depth": 0,
             "sql_queue_peak": 0,
             "io_active": 0,

@@ -144,6 +144,27 @@ async def test_sql_ticket_is_committed_before_manifest_mirror():
     )
 
 
+async def test_source_views_do_not_rehydrate_growing_job_tickets():
+    from swe.app.conversation_storage.migration.journal import (
+        MigrationJournal,
+        JournalRecovery,
+    )
+    from swe.cli.conversation_storage_tenants import TenantManifest
+
+    db, frozen = Database(), manifest()
+    frozen.path = None
+    frozen.data.update(tenants=[], shares=[], tenant_isolation=True)
+    recovery = JournalRecovery(db, frozen)
+    for index in range(30):
+        tenant = {"service_unit_id": "svc", "tenant_id": str(index)}
+        view = TenantManifest(frozen, tenant)
+        journal = MigrationJournal(db, view, recovery=recovery)
+        await journal.hydrate()
+        await journal.allocate("session", str(index))
+    assert len(db.hydration_pages) == 1
+    assert len(frozen.data["assignments"]["session"]) == 30
+
+
 async def test_hydrate_rebuilds_lost_external_mirror():
     from swe.app.conversation_storage.migration.journal import MigrationJournal
     from swe.app.conversation_storage.identity import WorkspaceScope
@@ -157,6 +178,60 @@ async def test_hydrate_rebuilds_lost_external_mirror():
     frozen.data["assignments"] = {}
     await MigrationJournal(db, frozen).hydrate()
     assert frozen.data["assignments"]["publication"]["svc/body"] == assigned
+
+
+async def test_owner_recovery_reuses_only_the_same_confirmed_mirror():
+    from swe.app.conversation_storage.migration.journal import (
+        MigrationJournal,
+        JournalRecovery,
+    )
+
+    db, frozen = Database(), manifest()
+    recovery = JournalRecovery(db, frozen)
+    first = MigrationJournal(db, frozen, recovery=recovery)
+    await first.hydrate()
+    assigned = await first.allocate("session", "first-session")
+    for _ in range(5):
+        await MigrationJournal(db, frozen, recovery=recovery).hydrate()
+    assert len(db.hydration_pages) == 1
+    assert frozen.data["assignments"]["session"]["first-session"] == assigned
+    # A replaced or reloaded mirror must be checked against SQL again.
+    frozen.data["assignments"] = {}
+    await MigrationJournal(db, frozen, recovery=recovery).hydrate()
+    assert len(db.hydration_pages) == 2
+    assert frozen.data["assignments"]["session"]["first-session"] == assigned
+    # A new command never inherits an earlier command's recovery proof.
+    await MigrationJournal(
+        db,
+        frozen,
+        recovery=JournalRecovery(db, frozen),
+    ).hydrate()
+    assert len(db.hydration_pages) == 3
+
+
+async def test_owner_recovery_rejects_other_database_and_task():
+    import asyncio
+    from swe.app.conversation_storage.migration.journal import (
+        MigrationJournal,
+        JournalRecovery,
+    )
+
+    db, frozen = Database(), manifest()
+    recovery = JournalRecovery(db, frozen)
+    with pytest.raises(ValueError, match="recovery owner"):
+        await MigrationJournal(
+            Database(),
+            frozen,
+            recovery=recovery,
+        ).hydrate()
+    with pytest.raises(ValueError, match="recovery owner"):
+        await asyncio.create_task(
+            MigrationJournal(
+                db,
+                frozen,
+                recovery=recovery,
+            ).hydrate(),
+        )
 
 
 @pytest.mark.parametrize(

@@ -22,6 +22,7 @@ from swe.app.conversation_storage.migration.inventory_v3 import (
 from swe.app.conversation_storage.migration.journal import (
     BUSINESS_TABLES,
     MigrationJournal,
+    JournalRecovery,
     JOBS,
 )
 from swe.app.conversation_storage.migration.parallel import MigrationIO
@@ -31,7 +32,7 @@ from swe.app.conversation_storage.migration.tenant_errors import (
 from swe.app.conversation_storage.migration.preflight import (
     DMLDatabase,
     check_schema,
-    check_tenant_schema,
+    check_migration_schema,
 )
 from swe.app.conversation_storage.migration.spool import (
     InventorySpool,
@@ -379,7 +380,12 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
 
     schema = view.data["offline"]["application_schema"]
     target = DirectTarget(schema, schema, view.migration_id)
-    journal = MigrationJournal(db, view, server_uuid=guard.server_uuid)
+    journal = MigrationJournal(
+        db,
+        view,
+        server_uuid=guard.server_uuid,
+        recovery=resources.get("_journal_recovery"),
+    )
     journal.active_tenant = view.key
     journal.frozen_bindings_data = view.parent.data
     bundles = {
@@ -439,8 +445,7 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
                 raise TenantFailure("tenant source changed during operation")
         await _compare_shares(db, view)
         await guard.check()
-        await check_schema(db, schema, finalized=False)
-        await check_tenant_schema(
+        await check_migration_schema(
             db,
             schema,
             source_isolation=view.data.get("source_isolation", False),
@@ -657,8 +662,7 @@ async def run_tenants(
                 schema=schema,
                 server_uuid=identity["server_uuid"],
             )
-            await check_schema(db, schema, finalized=False)
-            await check_tenant_schema(
+            await check_migration_schema(
                 db,
                 schema,
                 source_isolation=manifest.data.get("source_isolation", False),
@@ -813,6 +817,10 @@ async def _run_registered(
         raise ValueError("tenant migration has no identifiable tenants")
     await _register_tenants(db, manifest, states, guard)
     failures, published, completed = [], 0, 0
+    resources = {
+        **resources,
+        "_journal_recovery": JournalRecovery(db, manifest),
+    }
     selected, failures, published = await _select_registered_tenants(
         manifest,
         states,
@@ -851,6 +859,9 @@ async def _run_registered(
                 TenantInputError,
                 MigrationCapacityError,
             ) as error:
+                # A failed source may have committed SQL before mirroring it.
+                # Reconcile durable tickets before processing the next source.
+                resources["_journal_recovery"].confirmed = None
                 failures.append(
                     await _record_tenant_failure(
                         states,

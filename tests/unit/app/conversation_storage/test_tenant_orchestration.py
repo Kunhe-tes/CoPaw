@@ -125,6 +125,26 @@ async def test_published_a_skips_all_old_input_b_failure_does_not_stop_c(
     assert failures[0]["tenant_id"] == "b" and "bad input" not in str(failures)
 
 
+async def test_source_failure_invalidates_owner_recovery(
+    monkeypatch,
+    orchestration,
+):
+    visited = []
+
+    async def one(operation, view, *args):
+        recovery = args[-1]["_journal_recovery"]
+        visited.append(view.key[1])
+        if view.key[1] == "b":
+            recovery.confirmed = (object(), object())
+            raise cli.TenantFailure("partial source failed")
+        assert recovery.confirmed is None
+
+    monkeypatch.setattr(cli, "_one_tenant", one)
+    result = await run(orchestration)
+    assert visited == ["b", "c"]
+    assert result["failed"] == result["completed"] == 1
+
+
 @pytest.mark.parametrize(
     "exception",
     [
