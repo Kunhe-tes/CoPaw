@@ -40,6 +40,19 @@ async def test_offline_set_locks_block_conflicting_turn_write_until_rollback(
     }
     if existing:
         await insert_row(db, "swe_conversation_turns", values)
+    else:
+        # Use an existing primary-key probe in EXPLAIN so MySQL cannot
+        # replace the missing-row lookup with an impossible-WHERE plan.
+        await insert_row(
+            db,
+            "swe_conversation_turns",
+            {
+                **values,
+                "id": 101,
+                "question_msg_key": b"unrelated",
+                "turn_order": 2,
+            },
+        )
     request = PublicationRequest(
         operation_key="a" * 64,
         scope=WorkspaceScope(
@@ -82,22 +95,22 @@ async def test_offline_set_locks_block_conflicting_turn_write_until_rollback(
     try:
         async with db.acquire() as holder:
             try:
-                async with holder.transaction():
+                async with db.transaction():
                     await store._lock_associations(request)
                     assert (cache["turns"][100] is not None) == existing
                     explain = await holder.fetch_all(
-                        "EXPLAIN SELECT * FROM swe_conversation_turns WHERE id IN (100) ORDER BY id FOR UPDATE",
+                        "EXPLAIN SELECT * FROM swe_conversation_turns WHERE id IN (%s) ORDER BY id FOR UPDATE",
+                        (100 if existing else 101,),
                     )
                     record_property("association_lock_explain", explain)
-                    assert all(
-                        row["key"] in (None, "PRIMARY") for row in explain
-                    )
+                    assert explain
+                    assert all(row["key"] == "PRIMARY" for row in explain)
                     async with other.acquire() as contender:
                         await contender.execute(
                             "SET SESSION innodb_lock_wait_timeout=1",
                         )
                         with pytest.raises(DatabaseError) as error:
-                            async with contender.transaction():
+                            async with other.transaction():
                                 await write(contender)
                         assert error.value.errno == 1205
                     raise RuntimeError("rollback lock holder")
