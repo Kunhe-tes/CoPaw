@@ -42,6 +42,7 @@ class IndexedQuery:
         self.runtime = None
         self.observability_context = None
         self.observability_attempt = None
+        self.observability_attempt_ref = {"value": None}
         self.semantic_publisher = None
         self.question_key = None
         self.chat = None
@@ -153,6 +154,9 @@ class IndexedQuery:
             )
             self.observability_attempt = start_query_attempt(
                 self.observability_context,
+            )
+            self.observability_attempt_ref["value"] = (
+                self.observability_attempt
             )
             async with self.session.bind_authority(self.authority):
                 yield self
@@ -309,7 +313,7 @@ class IndexedQuery:
         pending = getattr(runtime_agent, "_tool_guard_pending_info", None)
         finish_query_run(
             self.observability_context,
-            self.observability_attempt,
+            self.observability_attempt_ref["value"],
             status,
             waiting_for_approval=bool(
                 isinstance(pending, dict) and pending.get("request_id"),
@@ -666,6 +670,8 @@ async def _stream_admitted(
         session_id=request.session_id,
         preflight=preflight,
         session_execution=execution,
+        observability_context=indexed.observability_context,
+        observability_attempt_ref=indexed.observability_attempt_ref,
     ):
         yield frame
 

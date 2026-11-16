@@ -30,6 +30,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+class _RetryableAgentExecutionError(RuntimeError):
+    status_code = 429
+
+
 def _config() -> DatabaseConfig:
     database = os.getenv("SWE_AGENTOBS_TEST_DB_NAME", "")
     if not database.endswith("_test"):
@@ -160,28 +164,14 @@ async def _assert_projected_run_available(
         assert row["ended_at"] is None
         assert row["duration_us"] is None
 
-    attempt_id = next(
-        record["obs_attempt_id"]
-        for record in records
-        if record["event_name"] == "attempt.ended"
+    attempt_ids = await _assert_attempt_projection(
+        connection,
+        run_id,
+        records,
+        expected_status,
+        run_end_event,
+        row["ended_at"],
     )
-    async with connection.acquire() as session:
-        attempts = await session.fetch_all(
-            "SELECT ended_at,status FROM swe_agentobs_attempts WHERE attempt_id = %s",
-            (attempt_id,),
-        )
-    assert len(attempts) == 1
-    assert attempts[0]["status"] == expected_status
-    expected_attempt_end = datetime.fromisoformat(
-        next(
-            record["ended_at"]
-            for record in records
-            if record["event_name"] == "attempt.ended"
-        ).replace("Z", "+00:00"),
-    ).replace(tzinfo=None)
-    assert attempts[0]["ended_at"] == expected_attempt_end
-    if run_end_event:
-        assert attempts[0]["ended_at"] < row["ended_at"]
 
     llm_span = await _assert_llm_span_projection(store, records, run_id)
 
@@ -213,7 +203,7 @@ async def _assert_projected_run_available(
         attempt_detail_response = await client.get(
             f"/agent-observability/runs/{run_id}",
             headers={"X-User-Role": "manager"},
-            params={"attempt_id": attempt_id},
+            params={"attempt_id": attempt_ids[-1]},
         )
     api_row = next(
         item for item in response.json()["items"] if item["run_id"] == run_id
@@ -232,10 +222,102 @@ async def _assert_projected_run_available(
         assert api_llm_span["input_tokens"] == llm_span["input_tokens"]
         assert api_llm_span["output_tokens"] == llm_span["output_tokens"]
         assert api_llm_span["quality"] == "observed"
-        assert attempt_detail_response.status_code == 200 and all(
-            span["attempt_id"] == attempt_id
-            for span in attempt_detail_response.json()["spans"]
+    assert attempt_detail_response.status_code == 200 and all(
+        span["attempt_id"] == attempt_ids[-1]
+        for span in attempt_detail_response.json()["spans"]
+    )
+
+
+async def _assert_attempt_projection(
+    connection,
+    run_id,
+    records,
+    expected_status,
+    run_end_event,
+    run_ended_at,
+):
+    attempt_ends = [
+        record for record in records if record["event_name"] == "attempt.ended"
+    ]
+    attempt_ids = [record["obs_attempt_id"] for record in attempt_ends]
+    async with connection.acquire() as session:
+        attempts = await session.fetch_all(
+            "SELECT attempt_id,attempt_index,predecessor_attempt_id,ended_at,status "
+            "FROM swe_agentobs_attempts WHERE run_id = %s ORDER BY attempt_index",
+            (run_id,),
         )
+    assert len(attempts) == len(attempt_ends)
+    assert [
+        _identity_text(row["attempt_id"]) for row in attempts
+    ] == attempt_ids
+    assert [row["attempt_index"] for row in attempts] == list(
+        range(1, len(attempts) + 1),
+    )
+    for index, (row, attempt_end) in enumerate(zip(attempts, attempt_ends)):
+        assert row["status"] == attempt_end["status"]
+        predecessor = row["predecessor_attempt_id"]
+        predecessor_id = _identity_text(predecessor) if predecessor else None
+        assert predecessor_id == (attempt_ids[index - 1] if index else None)
+    expected_attempt_end = datetime.fromisoformat(
+        attempt_ends[-1]["ended_at"].replace("Z", "+00:00"),
+    ).replace(tzinfo=None)
+    assert attempts[-1]["ended_at"] == expected_attempt_end
+    assert attempts[-1]["status"] == expected_status
+    if run_end_event:
+        assert attempts[-1]["ended_at"] < run_ended_at
+    return attempt_ids
+
+
+def _identity_text(value):
+    return value.decode() if isinstance(value, bytes) else value
+
+
+def _assert_agent_retry_lifecycle(records):
+    starts = [
+        record
+        for record in records
+        if record["event_name"] == "attempt.started"
+    ]
+    ends = [
+        record for record in records if record["event_name"] == "attempt.ended"
+    ]
+    assert len(starts) == len(ends) == 2
+    assert starts[1]["attempt_index"] == 2
+    assert starts[1]["predecessor_attempt_id"] == starts[0]["obs_attempt_id"]
+    assert ends[0]["obs_attempt_id"] == starts[0]["obs_attempt_id"]
+    assert ends[0]["status"] == "failed"
+    assert ends[1]["obs_attempt_id"] == starts[1]["obs_attempt_id"]
+    assert ends[1]["status"] == "succeeded"
+
+
+def _inject_agent_retry(runner):
+    original_stream = runner._stream_single_query_attempt
+    retry_state = {"calls": 0}
+
+    async def fail_first_agent_execution(**kwargs):
+        retry_state["calls"] += 1
+        if retry_state["calls"] == 1:
+            raise _RetryableAgentExecutionError("transient status only")
+        async for item in original_stream(**kwargs):
+            yield item
+
+    runner._stream_single_query_attempt = fail_first_agent_execution
+    runner._load_query_retry_settings = lambda _config=None: (2, 1, 0, 0)
+    return retry_state
+
+
+def _assert_runner_lifecycle_records(records, *, agent_retry):
+    event_names = [record["event_name"] for record in records]
+    assert event_names[:3] == [
+        "run.accepted",
+        "run.state",
+        "attempt.started",
+    ]
+    if agent_retry:
+        _assert_agent_retry_lifecycle(records)
+    assert event_names[-2:] == ["attempt.ended", "run.ended"]
+    assert event_names.count("span.started") == 1
+    assert event_names.count("span.ended") == 1
 
 
 async def _assert_llm_span_projection(store, records, run_id):
@@ -597,14 +679,18 @@ async def test_runner_admission_settlement_emits_and_projects_one_run(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "expert_main",
-    [False, True],
-    ids=["standard", "expert-main"],
+    "expert_main,agent_retry",
+    [
+        pytest.param(False, False, id="standard"),
+        pytest.param(True, False, id="expert-main"),
+        pytest.param(False, True, id="agent-retry"),
+    ],
 )
 async def test_real_agent_runner_question_emits_and_projects_one_run(
     monkeypatch,
     tmp_path,
     expert_main,
+    agent_retry,
 ):
     monkeypatch.setenv("SWE_ALLOW_MISSING_TRACE_SDK", "true")
     monkeypatch.setenv("SWE_AGENTOBS_ENABLED", "true")
@@ -652,6 +738,8 @@ async def test_real_agent_runner_question_emits_and_projects_one_run(
         answer_turn_coordinator=coordinator,
     )
     coordinator.runner = runner
+    if agent_retry:
+        retry_state = _inject_agent_retry(runner)
     question_id = str(uuid4())
     chat_id = str(uuid4())
     identity = TurnIdentity.create(chat_id=chat_id, msgid=question_id)
@@ -692,20 +780,13 @@ async def test_real_agent_runner_question_emits_and_projects_one_run(
         assert (
             outputs
             and model.calls
+            and (retry_state["calls"] == 2 if agent_retry else True)
             and not runner._agent_observability_contexts
         )
 
         assert emitter.close(timeout=1) == 0
         records = [json.loads(line) for line in sink.getvalue().splitlines()]
-        event_names = [record["event_name"] for record in records]
-        assert event_names[:3] == [
-            "run.accepted",
-            "run.state",
-            "attempt.started",
-        ]
-        assert event_names[-2:] == ["attempt.ended", "run.ended"]
-        assert event_names.count("span.started") == 1
-        assert event_names.count("span.ended") == 1
+        _assert_runner_lifecycle_records(records, agent_retry=agent_retry)
         if expert_main:
             assert any(
                 getattr(message, "metadata", {})

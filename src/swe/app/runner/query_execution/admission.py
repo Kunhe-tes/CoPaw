@@ -89,13 +89,15 @@ async def stream_admission(
             else:
                 run_context = None
             attempt_context = start_query_attempt(run_context)
+            attempt_context_ref = {"value": attempt_context}
             identity_getter = getattr(owner, "_answer_turn_identity", None)
             identity = (
                 identity_getter(request) if callable(identity_getter) else None
             )
             deferred_settlement = (
                 identity is not None
-                and getattr(owner, "_answer_turn_coordinator", None) is not None
+                and getattr(owner, "_answer_turn_coordinator", None)
+                is not None
             )
             if deferred_settlement:
                 defer_query_run_settlement(
@@ -114,6 +116,8 @@ async def stream_admission(
                 user_id=user_id,
                 session_execution=session_execution,
                 is_command=bool(is_command),
+                observability_context=run_context,
+                observability_attempt_ref=attempt_context_ref,
             )
             with bind_query_context(attempt_context or run_context):
                 try:
@@ -130,11 +134,12 @@ async def stream_admission(
                             owner,
                             identity,
                             waiting_for_approval=waiting_for_approval,
+                            attempt=attempt_context_ref["value"],
                         )
                     else:
                         finish_query_run(
                             run_context,
-                            attempt_context,
+                            attempt_context_ref["value"],
                             terminal_turn_status(session_execution, turn_id),
                             waiting_for_approval=waiting_for_approval,
                         )
@@ -150,6 +155,8 @@ async def _stream_admitted_query(
     user_id,
     session_execution,
     is_command,
+    observability_context=None,
+    observability_attempt_ref=None,
 ):
     preflight_args = {
         "session_id": session_id,
@@ -211,6 +218,9 @@ async def _stream_admitted_query(
     }
     if session_execution is not None:
         query_args["session_execution"] = session_execution
+    if observability_context is not None:
+        query_args["observability_context"] = observability_context
+        query_args["observability_attempt_ref"] = observability_attempt_ref
     async for message, last in owner._stream_query_after_preflight(
         msgs,
         **query_args,

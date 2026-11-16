@@ -3267,7 +3267,9 @@ class AgentRunner(Runner):
             outcome,
             terminal_status,
         ):
-            from ...observability.runner_lifecycle import finish_deferred_query_run
+            from ...observability.runner_lifecycle import (
+                finish_deferred_query_run,
+            )
 
             finish_deferred_query_run(
                 self,
@@ -6526,6 +6528,8 @@ class AgentRunner(Runner):
         session_id: str,
         preflight: _QueryPreflight,
         session_execution: Any = None,
+        observability_context=None,
+        observability_attempt_ref=None,
     ):
         """Coordinate retry and attempt execution after preflight."""
         async for item in query_attempt.stream_query_after_preflight(
@@ -6536,6 +6540,8 @@ class AgentRunner(Runner):
             session_id=session_id,
             preflight=preflight,
             session_execution=session_execution,
+            observability_context=observability_context,
+            observability_attempt_ref=observability_attempt_ref,
         ):
             yield item
 

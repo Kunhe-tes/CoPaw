@@ -9,7 +9,7 @@ import asyncio
 import copy
 import logging
 import math
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from typing import Any, AsyncGenerator, Protocol, cast
 
 from agentscope.message import Msg, TextBlock
@@ -498,18 +498,7 @@ async def _stream_retry_attempt(
     request: AgentRequest,
     session_execution: Any,
     session_id: str,
-    backoff_base: float,
-    backoff_cap: float,
 ) -> AsyncGenerator[tuple[Msg, bool], None]:
-    async for item in owner._stream_retry_backoff_notice(
-        retry_attempt=retry_attempt,
-        max_retries=max_retries,
-        backoff_base=backoff_base,
-        backoff_cap=backoff_cap,
-        session_id=session_id,
-        retry_state=retry_state,
-    ):
-        yield item
     try:
         async with start_child_span(
             "agent.attempt",
@@ -613,9 +602,46 @@ async def _stream_retry_attempts(
     session_execution: Any,
     session_id: str,
     retry_settings: tuple[int, int, float, float],
+    observability_context=None,
+    observability_attempt_ref=None,
 ) -> AsyncGenerator[tuple[Msg, bool], None]:
     max_retry_attempts, max_retries, backoff_base, backoff_cap = retry_settings
     for retry_attempt in range(max_retry_attempts):
+        if retry_attempt:
+            async for item in owner._stream_retry_backoff_notice(
+                retry_attempt=retry_attempt,
+                max_retries=max_retries,
+                backoff_base=backoff_base,
+                backoff_cap=backoff_cap,
+                session_id=session_id,
+                retry_state=retry_state,
+            ):
+                yield item
+            if observability_attempt_ref is not None:
+                from ...observability.runner_lifecycle import (
+                    end_query_attempt,
+                    start_query_retry_attempt,
+                )
+
+                previous = observability_attempt_ref["value"]
+                end_query_attempt(previous, status="failed")
+                next_attempt = start_query_retry_attempt(previous)
+                observability_attempt_ref["value"] = next_attempt
+            if observability_context is not None:
+                from ...observability.runner_lifecycle import (
+                    bind_query_context,
+                )
+
+                attempt_context = (
+                    observability_attempt_ref["value"]
+                    if observability_attempt_ref is not None
+                    else observability_context
+                )
+                attempt_binding = bind_query_context(attempt_context)
+            else:
+                attempt_binding = nullcontext()
+        else:
+            attempt_binding = nullcontext()
         retry_state.prev_agent = retry_state.agent
         retry_state.prev_session_state_loaded = (
             retry_state.session_state_loaded
@@ -624,23 +650,22 @@ async def _stream_retry_attempts(
         retry_state.session_state_loaded = False
         attempt_state = owner._new_query_attempt_state()
         attempt_state_ref["value"] = attempt_state
-        async for item in _stream_retry_attempt(
-            owner,
-            retry_attempt=retry_attempt,
-            max_retry_attempts=max_retry_attempts,
-            max_retries=max_retries,
-            retry_state=retry_state,
-            attempt_state=attempt_state,
-            attempt_input=attempt_input,
-            outcome=outcome,
-            trace_id=trace_id,
-            request=request,
-            session_execution=session_execution,
-            session_id=session_id,
-            backoff_base=backoff_base,
-            backoff_cap=backoff_cap,
-        ):
-            yield item
+        with attempt_binding:
+            async for item in _stream_retry_attempt(
+                owner,
+                retry_attempt=retry_attempt,
+                max_retry_attempts=max_retry_attempts,
+                max_retries=max_retries,
+                retry_state=retry_state,
+                attempt_state=attempt_state,
+                attempt_input=attempt_input,
+                outcome=outcome,
+                trace_id=trace_id,
+                request=request,
+                session_execution=session_execution,
+                session_id=session_id,
+            ):
+                yield item
         if attempt_state.should_return or attempt_state.succeeded:
             return
 
@@ -1095,6 +1120,8 @@ async def stream_query_after_preflight(
     session_id: str,
     preflight: _QueryPreflight,
     session_execution: Any = None,
+    observability_context=None,
+    observability_attempt_ref=None,
 ) -> AsyncGenerator[tuple[Msg, bool], None]:
     """Run retry attempts and final cleanup after preflight succeeds."""
     cleanup_runtime: _QueryRuntime | None = None
@@ -1149,6 +1176,8 @@ async def stream_query_after_preflight(
                     session_execution=session_execution,
                     session_id=session_id,
                     retry_settings=_query_retry_settings(owner, preflight),
+                    observability_context=observability_context,
+                    observability_attempt_ref=observability_attempt_ref,
                 ):
                     yield item
             finally:

@@ -46,3 +46,5 @@ Priority: P0
 2026-11-16：轮询仅在 Run/Attempt/span 有已知活动状态时运行；Run 与所有已知执行终结后自动停止，手动刷新仍可查迟到事实。Console fake-timer 回归覆盖活动刷新、隐藏暂停、终态停止和手动刷新，页面测试 9 passed。
 
 2026-11-16：只读前端与后端复审未发现未解决 P1/P2；目标 pre-commit、Console production build 通过。Chromium 108.0.5359.29 实际浏览器 smoke 已在 360×800 下验证树/Inspector、时间条和偏差提示；精确现场 Chromium 108.0.5359.95/360 及连续多 Attempt 业务链路仍未验收。
+
+2026-11-16：将真实 query retry 循环接入 Attempt 链：每次退避完成、即将重建 Agent runtime 时结束前一 Attempt 并在同 Run 下创建带 predecessor 的新 Attempt；模型层 retry、SSE 重连不创建新 Attempt；普通 admission、deferred AnswerTurn settlement 与 SQL/IndexedQuery 结算均关闭最新 Attempt。真实 `AgentRunner` 确定性首轮失败/次轮成功在隔离 MySQL 验证通过，投影/API 返回两个顺序 Attempt（failed → succeeded），同一 Run 单次终结；标准与专家 Runner 场景回归通过。精确 Chromium 108.0.5359.95/360 基线仍未取得，因此本票继续保持 open。

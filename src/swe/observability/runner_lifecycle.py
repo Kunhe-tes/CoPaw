@@ -53,13 +53,19 @@ def prepare_query_run(
         or "default"
     )
     if not tenant_id:
-        tenant_id = getattr(owner, "tenant_id", None) or resolve_runtime_tenant_id(
+        tenant_id = getattr(
+            owner,
+            "tenant_id",
+            None,
+        ) or resolve_runtime_tenant_id(
             "default",
             str(source_id),
         )
     if chat_id is None:
         candidate = meta.get("chat_id")
-        chat_id = candidate if isinstance(candidate, str) and candidate else None
+        chat_id = (
+            candidate if isinstance(candidate, str) and candidate else None
+        )
     business_ref = {"root_question_msgid": question_id}
     if chat_id:
         business_ref["chat_id"] = chat_id
@@ -69,7 +75,9 @@ def prepare_query_run(
                 service_unit_id="swe",
                 source_id=str(source_id),
                 tenant_id=str(tenant_id or "default"),
-                agent_id=str(getattr(owner, "agent_id", "default") or "default"),
+                agent_id=str(
+                    getattr(owner, "agent_id", "default") or "default",
+                ),
             ),
             business_ref=business_ref,
         )
@@ -108,6 +116,30 @@ def start_query_attempt(
         return _OBSERVABILITY.start_attempt(context)
     except Exception:
         return None
+
+
+def start_query_retry_attempt(
+    previous: ObservabilityContext | None,
+) -> ObservabilityContext | None:
+    if previous is None:
+        return None
+    try:
+        return _OBSERVABILITY.start_attempt(previous)
+    except Exception:
+        return None
+
+
+def end_query_attempt(
+    context: ObservabilityContext | None,
+    *,
+    status: str,
+) -> None:
+    if context is None:
+        return
+    try:
+        _OBSERVABILITY.end_attempt(context, status=status)
+    except Exception:
+        return
 
 
 def bind_query_context(context: ObservabilityContext | None):
@@ -167,13 +199,18 @@ def update_deferred_query_run_approval(
     identity: Any,
     *,
     waiting_for_approval: bool,
+    attempt: ObservabilityContext | None = None,
 ) -> None:
     pending = getattr(owner, "_agent_observability_contexts", None)
     current = pending.get(identity) if isinstance(pending, dict) else None
     if current is not None:
-        context, attempt, _ = current
+        context, current_attempt, _ = current
         if isinstance(pending, dict):
-            pending[identity] = (context, attempt, waiting_for_approval)
+            pending[identity] = (
+                context,
+                attempt if attempt is not None else current_attempt,
+                waiting_for_approval,
+            )
 
 
 def take_query_run_settlement(owner: Any, identity: Any):
@@ -183,7 +220,11 @@ def take_query_run_settlement(owner: Any, identity: Any):
     return pending.pop(identity, None)
 
 
-def finish_deferred_query_run(owner: Any, identity: Any, business_status: str) -> None:
+def finish_deferred_query_run(
+    owner: Any,
+    identity: Any,
+    business_status: str,
+) -> None:
     observation = take_query_run_settlement(owner, identity)
     if observation is None:
         return
@@ -196,11 +237,17 @@ def finish_deferred_query_run(owner: Any, identity: Any, business_status: str) -
     )
 
 
-def query_waiting_for_approval(owner: Any, request: Any, execution: Any) -> bool:
+def query_waiting_for_approval(
+    owner: Any,
+    request: Any,
+    execution: Any,
+) -> bool:
     runtime = getattr(execution, "runtime", None)
     if runtime is None:
         identity_getter = getattr(owner, "_answer_turn_identity", None)
-        identity = identity_getter(request) if callable(identity_getter) else None
+        identity = (
+            identity_getter(request) if callable(identity_getter) else None
+        )
         entries = getattr(owner, "_answer_turn_runtimes", {})
         entry = entries.get(identity) if identity is not None else None
         runtime = entry[0] if isinstance(entry, tuple) and entry else None
@@ -210,5 +257,9 @@ def query_waiting_for_approval(owner: Any, request: Any, execution: Any) -> bool
         return True
     lease_getter = getattr(owner, "_get_expert_main_execution", None)
     lease = lease_getter(request) if callable(lease_getter) else None
-    pending = getattr(getattr(lease, "agent", None), "_tool_guard_pending_info", None)
+    pending = getattr(
+        getattr(lease, "agent", None),
+        "_tool_guard_pending_info",
+        None,
+    )
     return bool(isinstance(pending, dict) and pending.get("request_id"))
