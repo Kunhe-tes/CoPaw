@@ -46,6 +46,13 @@ from swe.app.conversation_storage.migration.isolation import (
     state_store,
 )
 from swe.app.conversation_storage.migration.verify import verify_import
+from swe.app.conversation_storage.migration.progress import current_progress
+
+
+def _stage(name):
+    progress = current_progress()
+    if progress is not None:
+        progress.stage(name)
 
 
 def _states(db, manifest):
@@ -398,6 +405,7 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
         resources["memory_bytes"],
         resources["workers"],
     ) as spool:
+        _stage("inventory")
         inventory = resources.get("_prefetched")
         if inventory is None:
             inventory = await _inventory(view, spool, resources)
@@ -406,6 +414,7 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
         await _compare_shares(db, view)
         row = await states.get(*view.key)
         if operation in ("import", "resume", "migrate"):
+            _stage("import")
             await DirectImporter(
                 db,
                 bundles,
@@ -425,6 +434,7 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
             await journal.hydrate(persist=False)
             await journal.validate_ownership()
         if operation in ("verify", "finalize", "migrate"):
+            _stage("verify")
             await _verify(
                 db,
                 bundles,
@@ -434,6 +444,7 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
                 resources,
                 guard,
             )
+        _stage("final_source_check")
         with _spool(
             base,
             view.data,
@@ -453,6 +464,7 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
         if operation in ("verify", "finalize", "migrate"):
             await states.transition(*view.key, "verified")
         if operation in ("finalize", "migrate"):
+            _stage("publish")
             # The receipt is service-local; only this tenant's roots are checked.
             selected = {
                 **view.data,
@@ -642,6 +654,7 @@ async def run_tenants(
         config.model_copy(update={"time_zone": "+00:00"}),
     )
     try:
+        _stage("database_setup")
         await control.connect()
         async with control.named_lock(
             "conversation-migration:" + schema,
@@ -685,6 +698,7 @@ async def run_tenants(
             if operation == "migrate":
                 if not apply:
                     raise ValueError("migrate requires --apply")
+                _stage("automatic_review")
                 resources["_retained_attempts"] = await _auto_review(
                     db,
                     manifest,
@@ -749,6 +763,7 @@ async def run_tenants(
 
 
 async def _register_tenants(db, manifest, states, guard):
+    _stage("registration")
     tenants = manifest.data["tenants"]
     if not tenants:
         raise ValueError("migration requires at least one discovered tenant")

@@ -14,6 +14,8 @@ import threading
 
 import psutil
 
+from swe.database.observation import observe_operations
+
 _CURRENT = ContextVar("migration_progress", default=None)
 
 
@@ -26,6 +28,8 @@ class MigrationProgress:
         self.stream = stream if stream is not None else sys.stderr
         self.interval = interval
         self.started = time.monotonic()
+        self._stage_started = self.started
+        self._stage_seconds = {}
         self.data = {
             "operation": operation,
             "migration_id": migration_id,
@@ -44,6 +48,15 @@ class MigrationProgress:
             "sql_seconds": 0.0,
             "db_calls": 0,
             "db_seconds": 0.0,
+            "db_statement_attempts": 0,
+            "db_statement_seconds": 0.0,
+            "db_executemany_calls": 0,
+            "db_executemany_seconds": 0.0,
+            "db_transaction_begins": 0,
+            "db_transaction_commits": 0,
+            "db_transaction_rollbacks": 0,
+            "bundle_opens": 0,
+            "bundle_index_parses": 0,
             "sql_queue_depth": 0,
             "sql_queue_peak": 0,
             "io_active": 0,
@@ -67,9 +80,34 @@ class MigrationProgress:
             )
 
     def stage(self, name):
+        now = time.monotonic()
+        previous = self.data["stage"]
+        self._stage_seconds[previous] = (
+            self._stage_seconds.get(previous, 0.0) + now - self._stage_started
+        )
+        self._stage_started = now
         self.data.update(stage=name, position=None, completed=0)
 
+    def record_operation(self, kind, seconds):
+        counters = {
+            "db_statement": "db_statement_attempts",
+            "db_executemany": "db_executemany_calls",
+            "db_transaction_begin": "db_transaction_begins",
+            "db_transaction_commit": "db_transaction_commits",
+            "db_transaction_rollback": "db_transaction_rollbacks",
+            "bundle_open": "bundle_opens",
+            "bundle_index_parse": "bundle_index_parses",
+        }
+        with self._disk_lock:
+            self.data[counters[kind]] += 1
+            if kind in ("db_statement", "db_executemany"):
+                self.data[kind + "_seconds"] += seconds
+
     def snapshot(self):
+        now = time.monotonic()
+        stages = dict(self._stage_seconds)
+        stage = self.data["stage"]
+        stages[stage] = stages.get(stage, 0.0) + now - self._stage_started
         try:
             self.data["rss_peak_bytes"] = max(
                 self.data["rss_peak_bytes"],
@@ -79,7 +117,10 @@ class MigrationProgress:
             pass
         return {
             **self.data,
-            "elapsed_seconds": round(time.monotonic() - self.started, 3),
+            "elapsed_seconds": round(now - self.started, 3),
+            "stage_wall_seconds": {
+                name: round(seconds, 3) for name, seconds in stages.items()
+            },
             "io_drained": (
                 "unknown" if self.open_io or self.uncertain_io else True
             ),
@@ -108,7 +149,8 @@ class MigrationProgress:
     def activate(self):
         token = _CURRENT.set(self)
         try:
-            yield self
+            with observe_operations(self.record_operation):
+                yield self
         finally:
             _CURRENT.reset(token)
 
