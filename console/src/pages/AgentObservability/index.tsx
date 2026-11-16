@@ -999,6 +999,43 @@ export default function AgentObservabilityPage() {
                             </div>
                           </>
                         )}
+                        {span.span_type === "Tool" && (
+                          <>
+                            <div>
+                              <dt>工具</dt>
+                              <dd>{span.tool?.tool_key ?? "未知"}</dd>
+                            </div>
+                            <div>
+                              <dt>Tool Call / Execution</dt>
+                              <dd>
+                                {span.tool?.tool_call_id ?? "未知"} ·{" "}
+                                {span.tool?.tool_execution_id ?? "未知"}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt>执行器 / 超时预算</dt>
+                              <dd>
+                                {span.tool?.executor_kind ?? "未知"} ·{" "}
+                                {span.tool?.timeout_budget_ms == null
+                                  ? "未知"
+                                  : `${span.tool.timeout_budget_ms} ms`}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt>Retry / Exit Code</dt>
+                              <dd>
+                                {span.tool?.retry_index ?? "未知"} ·{" "}
+                                {span.tool?.exit_code ?? "未知"}
+                              </dd>
+                            </div>
+                            {span.error_type && (
+                              <div>
+                                <dt>错误类型</dt>
+                                <dd>{span.error_type}</dd>
+                              </div>
+                            )}
+                          </>
+                        )}
                       </dl>
                     </section>
                   );

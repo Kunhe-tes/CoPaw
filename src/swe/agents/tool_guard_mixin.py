@@ -85,6 +85,26 @@ _DEFAULT_LOCAL_TOOL_EXECUTION_HARD_TIMEOUT = min(
     QUERY_TIMEOUT_SECONDS,
     max(AGENT_WATCHDOG_TIMEOUT * 2.0, AGENT_WATCHDOG_TIMEOUT + 60.0),
 )
+_TOOL_FAILURE_TYPES = frozenset(
+    {
+        "approval_required",
+        "hook_denied",
+        "invalid_arguments",
+        "mcp_tool_error",
+        "mcp_transport_error",
+        "not_found",
+        "permission_denied",
+        "process_limit_exceeded",
+        "shell_command_failed",
+        "shell_concurrency_limit_exceeded",
+        "tool_timeout",
+        "tool_guard_denied",
+        "unexpected_tool_error",
+    },
+)
+_TECHNICAL_TOOL_FAILURE_TYPES = frozenset(
+    {"mcp_transport_error", "tool_timeout", "unexpected_tool_error"},
+)
 try:
     LOCAL_TOOL_EXECUTION_HARD_TIMEOUT = max(
         float(
@@ -403,15 +423,41 @@ class ToolGuardMixin:
         tool_input: dict[str, Any],
     ) -> dict | None:
         from ..observability.instrumentation import Observability
+        from ..observability.context import current_context
 
-        span = Observability().span(
-            "Tool",
-            "execute",
-            name="registered.tool",
-            tool_key=tool_name,
-            tool_call_id=str(tool_call.get("id") or ""),
-            executor_kind="agent_tool",
-        )
+        context = current_context()
+        if context is None or not context.capture_enabled:
+            return await self._run_tool_call_with_hard_timeout_raw(
+                tool_call,
+                tool_name,
+                tool_input,
+            )
+        tool_call_id = str(tool_call.get("id") or "")
+        try:
+            tool_metadata = {
+                "tool_key": tool_name,
+                "tool_call_id": tool_call_id,
+                "tool_execution_id": str(_uuid.uuid4()),
+                "executor_kind": (
+                    "mcp_tool"
+                    if self._resolve_mcp_server(tool_name)
+                    else "agent_tool"
+                ),
+            }
+            timeout_budget_ms = LOCAL_TOOL_EXECUTION_HARD_TIMEOUT * 1000
+            if (
+                not self._tool_has_specific_timeout(tool_name)
+                and 1 <= timeout_budget_ms <= 0xFFFFFFFF
+            ):
+                tool_metadata["timeout_budget_ms"] = int(timeout_budget_ms)
+            span = Observability().span(
+                "Tool",
+                "execute",
+                name="registered.tool",
+                tool=tool_metadata,
+            )
+        except Exception:
+            span = None
         try:
             result = await self._run_tool_call_with_hard_timeout_raw(
                 tool_call,
@@ -420,7 +466,7 @@ class ToolGuardMixin:
             )
         except asyncio.CancelledError:
             if span is not None:
-                span.end(status="cancelled", technical_status="ERROR")
+                span.end(status="cancelled")
             raise
         except Exception as exc:
             if span is not None:
@@ -429,14 +475,41 @@ class ToolGuardMixin:
                     technical_status="ERROR",
                     has_error=True,
                     error_type=type(exc).__name__,
+                    phase="tool_execution",
                 )
             raise
         if span is not None:
+            terminal_output = result
+            if terminal_output is None:
+                terminal_output = self._extract_current_tool_response(
+                    tool_call_id,
+                    include_structured_failure=True,
+                )
+            structured_failure = (
+                isinstance(terminal_output, dict)
+                and terminal_output.get("isError") is True
+            )
+            failure_type = (
+                terminal_output.get("error_type")
+                if structured_failure
+                else None
+            )
+            if structured_failure and failure_type not in _TOOL_FAILURE_TYPES:
+                failure_type = "tool_failure"
+            failed = failure_type is not None
+            technical_failure = failure_type in _TECHNICAL_TOOL_FAILURE_TYPES
             span.end(
-                status="succeeded" if result is not None else "failed",
-                technical_status="OK" if result is not None else "ERROR",
-                has_error=result is None,
-                error_type=None if result is not None else "tool_failure",
+                status="failed" if failed else "succeeded",
+                technical_status=("ERROR" if technical_failure else "OK"),
+                has_error=technical_failure,
+                **(
+                    {
+                        "error_type": failure_type,
+                        "phase": "tool_execution",
+                    }
+                    if failure_type
+                    else {}
+                ),
             )
         return result
 

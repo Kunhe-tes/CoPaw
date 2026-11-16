@@ -30,3 +30,5 @@ Priority: P0
 2026-11-15：用户已确认15张票的拆分及阻塞关系，现发布为本地实施事项。尚未领取或开工；本次发布不构成功能开发授权。
 
 2026-11-16：预备接入独立 Tool Span：在 `ToolGuardMixin` 的真实 hard-timeout 工具执行边界包裹 `registered.tool`，携带受控 tool_key、tool_call_id、executor_kind，按实际返回、结构化空结果、异常和取消分别结束，不记录参数/结果正文。既有工具相关回归 135 passed；本票仍保持 `open`，等待 Ticket 04 详情闭环后补投影/API/Inspector 及 Chromium 108 验收。
+
+2026-11-16：已补充 Tool Span 的 timeout budget 与 execution id，按结构化 `isError` 区分业务失败和技术错误；取消不标成技术 ERROR。工具标识与白名单元数据已贯通 JSONL、MySQL span 投影、manager 授权 Run Detail API 和 Console Inspector。最终验证：相关 Python 单测 107 passed；真实 MySQL `_test` schema observability 集成 9 passed；Inspector Vitest 10 passed；TypeScript、目标 ESLint、生产构建和 pre-commit 均通过。没有连接或写入业务库。工单保持 `open`：Ticket 04 尚未关闭，且真实 Chromium 108.0.5359.95/360 验收环境不可用。

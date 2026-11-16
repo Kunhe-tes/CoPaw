@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import timezone
 from typing import Any
 
@@ -93,6 +94,7 @@ REQUIRED_COLUMNS = {
             "kind",
             "name",
             "step_index",
+            "tool_key",
             "model_key",
             "provider_key",
             "request_model_key",
@@ -160,6 +162,10 @@ REQUIRED_INDEXES = {
         "ix_agentobs_spans_parent": (
             False,
             ("run_id", "parent_span_id", "started_at", "span_id"),
+        ),
+        "ix_agentobs_spans_tool": (
+            False,
+            ("tool_key", "started_at", "run_id"),
         ),
     },
 }
@@ -315,11 +321,11 @@ class ObservabilityStore:
     ) -> list[dict[str, Any]]:
         query = (
             "SELECT span_id,run_id,attempt_id,parent_span_id,span_type,operation,"
-            "kind,name,step_index,started_at,ended_at,status,technical_status,"
+            "kind,name,step_index,tool_key,started_at,ended_at,status,technical_status,"
             "has_error,error_type,quality,duration_us,time_to_first_chunk_us,"
             "time_to_first_visible_text_us,input_tokens,output_tokens,model_key,"
             "provider_key,request_model_key,response_model_key,model_key_source,"
-            "streaming,finish_reason "
+            "streaming,finish_reason,metadata_text "
             "FROM swe_agentobs_spans WHERE run_id=%s"
         )
         params: list[Any] = [run_id]
@@ -334,7 +340,8 @@ class ObservabilityStore:
         query += " ORDER BY started_at ASC,span_id ASC LIMIT %s"
         params.append(limit)
         async with self.connection.acquire() as session:
-            return await session.fetch_all(query, tuple(params))
+            rows = await session.fetch_all(query, tuple(params))
+        return [_span_for_api(row) for row in rows]
 
     async def list_events(
         self,
@@ -364,3 +371,43 @@ class ObservabilityStore:
         params.append(limit)
         async with self.connection.acquire() as session:
             return await session.fetch_all(query, tuple(params))
+
+
+_TOOL_API_FIELDS = (
+    "tool_call_id",
+    "tool_execution_id",
+    "executor_kind",
+    "timeout_budget_ms",
+    "retry_index",
+    "exit_code",
+)
+
+
+def _span_for_api(row: dict[str, Any]) -> dict[str, Any]:
+    result = dict(row)
+    metadata_text = result.pop("metadata_text", None)
+    if isinstance(metadata_text, bytes):
+        metadata_text = metadata_text.decode("utf-8", errors="replace")
+    if result.get("span_type") != "Tool" or not isinstance(metadata_text, str):
+        return result
+    try:
+        metadata = json.loads(metadata_text)
+    except (TypeError, ValueError):
+        return result
+    tool = metadata.get("tool") if isinstance(metadata, dict) else None
+    if not isinstance(tool, dict):
+        return result
+    projected = {
+        key: tool[key]
+        for key in _TOOL_API_FIELDS
+        if key in tool
+        and (isinstance(tool[key], str) or type(tool[key]) is int)
+    }
+    tool_key = result.get("tool_key")
+    if isinstance(tool_key, bytes):
+        tool_key = tool_key.decode("utf-8")
+    if isinstance(tool_key, str):
+        projected["tool_key"] = tool_key
+    if projected:
+        result["tool"] = projected
+    return result

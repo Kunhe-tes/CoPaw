@@ -68,6 +68,17 @@ export interface AgentObservabilitySpan {
   model_key_source: string | null;
   streaming: number | null;
   finish_reason: string | null;
+  tool?: AgentObservabilityTool | null;
+}
+
+export interface AgentObservabilityTool {
+  tool_key?: string;
+  tool_call_id?: string;
+  tool_execution_id?: string;
+  executor_kind?: string;
+  timeout_budget_ms?: number;
+  retry_index?: number;
+  exit_code?: number;
 }
 
 export interface AgentObservabilityRunDetail {

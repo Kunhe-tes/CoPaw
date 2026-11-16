@@ -17,6 +17,7 @@ from swe.observability.query import (
     capabilities,
     health,
 )
+from swe.observability.store import _span_for_api
 
 
 def test_observability_database_does_not_fallback_to_application_database(
@@ -193,6 +194,12 @@ def test_ingest_validation_rejects_sql_width_overflow_and_bad_attempt_ids():
         "kind": "INTERNAL",
         "name": "registered.tool",
         "started_at": context.run_started_at,
+        "tool": {
+            "tool_key": "read_file",
+            "tool_call_id": "call-1",
+            "tool_execution_id": str(uuid4()),
+            "executor_kind": "agent_tool",
+        },
     }
     event["entity_id"] = event["obs_span_id"]
     event["name"] = "registered.tool"
@@ -227,6 +234,81 @@ def test_ingest_validation_rejects_sql_width_overflow_and_bad_attempt_ids():
     event["terminal_fact_source"] = "x" * 33
     with pytest.raises(ValueError, match="field_too_long"):
         _validate_payload(json.dumps(event))
+
+
+def test_ingest_validation_requires_bounded_tool_execution_identity():
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("svc", "source", "tenant", "agent"),
+    )
+    event = {
+        "schema_version": 1,
+        "event_id": str(uuid4()),
+        "event_name": "span.ended",
+        "occurred_at": context.run_started_at,
+        "producer_id": "host:123:boot",
+        "entity_kind": "span",
+        "entity_id": str(uuid4()),
+        "phase_key": "ended",
+        "local_seq": 0,
+        "obs_run_id": context.obs_run_id,
+        "obs_attempt_id": str(uuid4()),
+        "obs_span_id": None,
+        "run_started_at": context.run_started_at,
+        "attempt_index": 1,
+        "capture_enabled": True,
+        "scope": context.scope.to_dict(),
+        "span_type": "Tool",
+        "operation": "execute",
+        "kind": "INTERNAL",
+        "name": "registered.tool",
+        "started_at": context.run_started_at,
+        "ended_at": context.run_started_at,
+        "status": "succeeded",
+        "metrics": {"duration_us": 1},
+        "quality": {"start_observed": True, "end_observed": True},
+        "tool": {
+            "tool_key": "read_file",
+            "tool_call_id": "call-1",
+            "tool_execution_id": str(uuid4()),
+            "executor_kind": "agent_tool",
+            "timeout_budget_ms": 2500,
+        },
+    }
+    event["entity_id"] = event["obs_span_id"] = str(uuid4())
+    validated = _validate_payload(json.dumps(event))
+    assert validated["tool"]["tool_execution_id"]
+    assert validated["tool"]["timeout_budget_ms"] == 2500
+
+    event["tool"]["retry_index"] = True
+    with pytest.raises(ValueError, match="invalid_tool_metadata"):
+        _validate_payload(json.dumps(event))
+
+
+def test_span_api_exposes_only_whitelisted_tool_metadata():
+    span = _span_for_api(
+        {
+            "span_type": "Tool",
+            "tool_key": b"read_file",
+            "metadata_text": json.dumps(
+                {
+                    "tool": {
+                        "tool_key": "read_file",
+                        "tool_call_id": "call-1",
+                        "tool_execution_id": str(uuid4()),
+                        "executor_kind": "agent_tool",
+                        "timeout_budget_ms": 2500,
+                        "tool_input": "private body",
+                    },
+                    "prompt": "private prompt",
+                },
+            ).encode("utf-8"),
+        },
+    )
+    assert span["tool"]["tool_key"] == "read_file"
+    assert span["tool"]["tool_call_id"] == "call-1"
+    assert "tool_input" not in span["tool"]
+    assert "metadata_text" not in span
 
 
 @pytest.mark.asyncio

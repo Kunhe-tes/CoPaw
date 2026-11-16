@@ -318,6 +318,15 @@ def _validate_lifecycle_values(event: dict[str, Any]) -> None:
         "request_fallback",
     }:
         raise ValueError("invalid_model_key_source")
+    tool = event.get("tool")
+    if (
+        event.get("span_type") == "Tool"
+        and event.get("event_name") in {"span.started", "span.ended"}
+        and tool is None
+    ):
+        raise ValueError("invalid_tool_metadata")
+    if tool is not None:
+        _validate_tool_fields(event, tool)
     _timestamp(event.get("occurred_at"))
     _timestamp(event.get("run_started_at"))
     for key in ("attempt_index", "step_index"):
@@ -353,6 +362,40 @@ def _validate_lifecycle_values(event: dict[str, Any]) -> None:
         > 24 * 1024
     ):
         raise ValueError("event_too_large")
+
+
+def _validate_tool_fields(event: dict[str, Any], tool: Any) -> None:
+    if not isinstance(tool, dict):
+        raise ValueError("invalid_tool_metadata")
+    if event.get("span_type") != "Tool":
+        raise ValueError("tool_metadata_on_non_tool_span")
+    if not isinstance(tool.get("tool_key"), str) or not _TOKEN.fullmatch(
+        tool["tool_key"],
+    ):
+        raise ValueError("invalid_tool_identity")
+    if not isinstance(tool.get("tool_call_id"), str) or not _TOKEN.fullmatch(
+        tool["tool_call_id"],
+    ):
+        raise ValueError("invalid_tool_identity")
+    try:
+        if str(UUID(tool["tool_execution_id"])) != tool["tool_execution_id"]:
+            raise ValueError("invalid_tool_identity")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("invalid_tool_identity") from exc
+    if tool.get("executor_kind") not in {"agent_tool", "mcp_tool"}:
+        raise ValueError("invalid_tool_executor")
+    for key, minimum, maximum in (
+        ("timeout_budget_ms", 1, 0xFFFFFFFF),
+        ("retry_index", 0, 0xFFFFFFFF),
+        ("exit_code", -(2**31), 2**31 - 1),
+    ):
+        value = tool.get(key)
+        if value is not None and (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not minimum <= value <= maximum
+        ):
+            raise ValueError("invalid_tool_metadata")
 
 
 def _semantic_json(event: dict[str, Any]) -> str:
@@ -744,8 +787,8 @@ class InboxProjector:
                 "INSERT INTO swe_agentobs_spans (span_id,run_id,attempt_id,parent_span_id,span_type,operation,kind,name,step_index,"
                 "started_at,ended_at,status,technical_status,has_error,error_type,quality,duration_us,time_to_first_chunk_us,"
                 "time_to_first_visible_text_us,input_tokens,output_tokens,model_key,provider_key,request_model_key,"
-                "response_model_key,model_key_source,streaming,finish_reason,metadata_text) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "response_model_key,model_key_source,streaming,finish_reason,tool_key,metadata_text) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON DUPLICATE KEY UPDATE status=IF(VALUES(ended_at) IS NOT NULL,COALESCE(VALUES(status),status),"
                 "IF(ended_at IS NULL,COALESCE(VALUES(status),status),status)),"
                 "ended_at=COALESCE(ended_at,VALUES(ended_at)),"
@@ -764,6 +807,7 @@ class InboxProjector:
                 "model_key_source=COALESCE(VALUES(model_key_source),model_key_source),"
                 "streaming=COALESCE(VALUES(streaming),streaming),"
                 "finish_reason=COALESCE(VALUES(finish_reason),finish_reason),"
+                "tool_key=COALESCE(VALUES(tool_key),tool_key),"
                 "metadata_text=VALUES(metadata_text)",
                 (
                     event["obs_span_id"],
@@ -815,6 +859,7 @@ class InboxProjector:
                         else None
                     ),
                     event.get("finish_reason"),
+                    (event.get("tool") or {}).get("tool_key"),
                     metadata,
                 ),
             )

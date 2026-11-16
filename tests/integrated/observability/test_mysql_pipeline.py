@@ -199,6 +199,143 @@ async def _verify_partial_run_ordering(store, ingest, started, ended):
     return running_ingest_id, late_accepted_ingest_id
 
 
+async def _ingest_tool_span(connection, ingest, run_id, started, ended):
+    span_id = str(uuid4())
+    tool_metadata = {
+        "tool_key": "read_file",
+        "tool_call_id": "call-integration-1",
+        "tool_execution_id": str(uuid4()),
+        "executor_kind": "agent_tool",
+        "timeout_budget_ms": 2500,
+    }
+    common = {
+        "entity_kind": "span",
+        "entity_id": span_id,
+        "obs_span_id": span_id,
+        "span_type": "Tool",
+        "operation": "execute",
+        "kind": "INTERNAL",
+        "name": "registered.tool",
+        "tool": tool_metadata,
+    }
+    started_event = _event(
+        run_id=run_id,
+        event_name="span.started",
+        phase="started",
+        status="running",
+        occurred_at=started,
+        started_at=started,
+        ended_at=None,
+    )
+    started_event.update(common)
+    started_ingest_id = await ingest(started_event)
+    ended_event = _event(
+        run_id=run_id,
+        event_name="span.ended",
+        phase="ended",
+        status="failed",
+        occurred_at=ended,
+        started_at=started,
+        ended_at=ended,
+    )
+    ended_event.update(
+        {
+            **common,
+            "quality": {"start_observed": True, "end_observed": True},
+            "technical_status": "OK",
+            "has_error": False,
+            "error_type": "permission_denied",
+            "phase": "tool_execution",
+        },
+    )
+    ended_ingest_id = await ingest(ended_event)
+    async with connection.acquire() as session:
+        rows = await session.fetch_all(
+            "SELECT ingest_id,event_id,processing_state,reason_code "
+            "FROM swe_agentobs_inbox WHERE ingest_id IN (%s,%s)",
+            (started_ingest_id, ended_ingest_id),
+        )
+    assert len(rows) == 2
+    assert all(row["processing_state"] == 1 for row in rows), rows
+    return span_id, tool_metadata
+
+
+async def _assert_authorized_run_list(api, run_id, started, ended):
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=api),
+        base_url="http://agentobs.test",
+    ) as client:
+        response = await client.get(
+            "/agent-observability/runs",
+            headers={
+                "X-User-Role": "manager",
+                "X-Source-Id": "agentobs-integration",
+            },
+            params={
+                "start": (started - timedelta(seconds=1)).isoformat(),
+                "end": (ended + timedelta(seconds=1)).isoformat(),
+            },
+        )
+    assert response.status_code == 200
+    run = next(
+        item for item in response.json()["items"] if item["run_id"] == run_id
+    )
+    assert run["status"] == "succeeded"
+
+
+async def _assert_authorized_tool_detail(api, run_id, span_id, tool_metadata):
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=api),
+        base_url="http://agentobs.test",
+    ) as client:
+        response = await client.get(
+            f"/agent-observability/runs/{run_id}",
+            headers={
+                "X-User-Role": "manager",
+                "X-Source-Id": "agentobs-integration",
+            },
+        )
+    assert response.status_code == 200
+    span = next(
+        item for item in response.json()["spans"] if item["span_id"] == span_id
+    )
+    assert span["tool"] == tool_metadata
+    assert span["status"] == "failed"
+    assert span["technical_status"] == "OK"
+    assert span["has_error"] == 0
+    assert "metadata_text" not in span
+
+
+async def _ingest_partial_span(store, ingest, started):
+    run_id = str(uuid4())
+    span_id = str(uuid4())
+    event = _event(
+        run_id=run_id,
+        event_name="span.started",
+        phase="started",
+        status="running",
+        occurred_at=started,
+        started_at=started,
+        ended_at=None,
+    )
+    event.update(
+        {
+            "entity_kind": "span",
+            "entity_id": span_id,
+            "obs_span_id": span_id,
+            "span_type": "Agent",
+            "operation": "execute",
+            "kind": "SERVER",
+            "name": "agent.execute",
+        },
+    )
+    await ingest(event)
+    rows = await store.list_spans(run_id=run_id)
+    assert len(rows) == 1
+    assert rows[0]["quality"] == "partial"
+    assert rows[0]["ended_at"] is None
+
+
 @pytest.mark.asyncio
 async def test_manual_inbox_to_mysql_projection_and_authorized_run_list(
     monkeypatch,
@@ -226,7 +363,17 @@ async def test_manual_inbox_to_mysql_projection_and_authorized_run_list(
                     "INSERT INTO swe_agentobs_inbox (payload_text) VALUES (%s)",
                     (json.dumps(event, separators=(",", ":")),),
                 )
-            assert await projector.project_batch() == 1
+            for _ in range(10):
+                await projector.project_batch()
+                async with connection.acquire() as session:
+                    state = await session.fetch_one(
+                        "SELECT processing_state FROM swe_agentobs_inbox "
+                        "WHERE ingest_id=%s",
+                        (ingest_id,),
+                    )
+                if state and state["processing_state"] != 0:
+                    break
+            assert state and state["processing_state"] != 0
             return int(ingest_id)
 
         ended_ingest_id = await ingest(
@@ -260,35 +407,15 @@ async def test_manual_inbox_to_mysql_projection_and_authorized_run_list(
             )
         )
 
-        partial_span_run_id = str(uuid4())
-        partial_span_id = str(uuid4())
-        partial_span = _event(
-            run_id=partial_span_run_id,
-            event_name="span.started",
-            phase="started",
-            status="running",
-            occurred_at=started,
-            started_at=started,
-            ended_at=None,
+        await _ingest_partial_span(store, ingest, started)
+
+        tool_span_id, tool_metadata = await _ingest_tool_span(
+            connection,
+            ingest,
+            run_id,
+            started,
+            ended,
         )
-        partial_span.update(
-            {
-                "entity_kind": "span",
-                "entity_id": partial_span_id,
-                "obs_span_id": partial_span_id,
-                "span_type": "Agent",
-                "operation": "execute",
-                "kind": "SERVER",
-                "name": "agent.execute",
-            },
-        )
-        await ingest(partial_span)
-        partial_span_rows = await store.list_spans(
-            run_id=partial_span_run_id,
-        )
-        assert len(partial_span_rows) == 1
-        assert partial_span_rows[0]["quality"] == "partial"
-        assert partial_span_rows[0]["ended_at"] is None
 
         malformed_terminal = _event(
             run_id=str(uuid4()),
@@ -322,29 +449,12 @@ async def test_manual_inbox_to_mysql_projection_and_authorized_run_list(
             return await call_next(request)
 
         api.include_router(observability_router)
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=api),
-            base_url="http://agentobs.test",
-        ) as client:
-            response = await client.get(
-                "/agent-observability/runs",
-                headers={
-                    "X-User-Role": "manager",
-                    "X-Source-Id": "agentobs-integration",
-                },
-                params={
-                    "start": (started - timedelta(seconds=1)).isoformat(),
-                    "end": (ended + timedelta(seconds=1)).isoformat(),
-                },
-            )
-        assert response.status_code == 200
-        assert (
-            next(
-                item
-                for item in response.json()["items"]
-                if item["run_id"] == run_id
-            )["status"]
-            == "succeeded"
+        await _assert_authorized_run_list(api, run_id, started, ended)
+        await _assert_authorized_tool_detail(
+            api,
+            run_id,
+            tool_span_id,
+            tool_metadata,
         )
 
         async with connection.acquire() as session:

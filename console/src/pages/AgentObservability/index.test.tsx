@@ -326,6 +326,89 @@ describe("AgentObservabilityPage", () => {
     await vi.waitFor(() => expect(mocks.getDetail).toHaveBeenCalledTimes(3));
   });
 
+  it("shows safe Tool execution metadata in the Inspector", async () => {
+    mocks.listRuns.mockResolvedValueOnce({
+      items: [
+        {
+          run_id: "run-a",
+          source_key: "source-a",
+          tenant_key: "tenant-a",
+          agent_key: "agent-a",
+          chat_key: "chat-a",
+          root_question_key: "question-a",
+          started_at: "2026-11-15T00:00:00Z",
+          ended_at: null,
+          status: "succeeded",
+          quality: "observed",
+          duration_us: 1,
+          llm_calls: 0,
+          tool_calls: 1,
+          input_tokens: 0,
+          output_tokens: 0,
+          span_count: 1,
+          error_span_count: 0,
+        },
+      ],
+      next_cursor: null,
+      generated_at: "2026-11-15T00:00:00Z",
+      window_start: "2026-11-14T00:00:00Z",
+      window_end: "2026-11-15T00:00:00Z",
+    });
+    mocks.getDetail.mockResolvedValueOnce({
+      run: { run_id: "run-a" },
+      attempts: [],
+      generated_at: "2026-11-15T00:00:02Z",
+      spans: [
+        {
+          span_id: "tool-span",
+          run_id: "run-a",
+          attempt_id: null,
+          parent_span_id: null,
+          span_type: "Tool",
+          operation: "execute",
+          kind: "INTERNAL",
+          name: "registered.tool",
+          step_index: null,
+          started_at: "2026-11-15T00:00:00Z",
+          ended_at: "2026-11-15T00:00:01Z",
+          status: "failed",
+          technical_status: "OK",
+          has_error: false,
+          error_type: "permission_denied",
+          quality: "observed",
+          duration_us: 1000000,
+          time_to_first_chunk_us: null,
+          time_to_first_visible_text_us: null,
+          input_tokens: null,
+          output_tokens: null,
+          model_key: null,
+          provider_key: null,
+          request_model_key: null,
+          response_model_key: null,
+          model_key_source: null,
+          streaming: null,
+          finish_reason: null,
+          tool: {
+            tool_key: "read_file",
+            tool_call_id: "call-1",
+            tool_execution_id: "execution-1",
+            executor_kind: "agent_tool",
+            timeout_budget_ms: 2500,
+          },
+        },
+      ],
+      spans_has_more: false,
+      spans_next_cursor: null,
+    });
+    render(<AgentObservabilityPage />);
+    fireEvent.click(await screen.findByText("question-a"));
+    fireEvent.click(await screen.findByRole("button", { name: /registered.tool/ }));
+    expect(await screen.findByText("read_file")).toBeInTheDocument();
+    expect(screen.getByText("call-1 · execution-1")).toBeInTheDocument();
+    expect(screen.getByText("agent_tool · 2500 ms")).toBeInTheDocument();
+    expect(screen.getByText("permission_denied")).toBeInTheDocument();
+  });
+
   it("filters spans by Attempt and opens the selected Span Inspector", async () => {
     mocks.listRuns.mockResolvedValueOnce({
       items: [
