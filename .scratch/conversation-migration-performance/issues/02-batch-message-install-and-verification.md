@@ -11,7 +11,7 @@
 - [x] 不任意重排 Session、Chat、Turn、Message 或更新记录；一条错误导致当前事务回滚，数据错误与共享数据库错误继续按既有规则分类。
 - [x] 已提交记录按表及有界 ID 集合查询，再逐条比较不可变字段；缺失、重复身份及不一致明确失败，不做抽样。
 - [x] 覆盖空、单条、满块、跨块、不同字段集合、Unicode/二进制/空值、大字段与单行 packet 超限。
-- [ ] 通过现有迁移入口验证成功发布、重复执行幂等、坏 source 跳过及已发布 source 新数据保护；SQL 计数证明插入和核对由逐行变为按块。
+- [x] 通过现有迁移入口验证成功发布、重复执行幂等、坏 source 跳过及已发布 source 新数据保护；SQL 计数证明插入和核对由逐行变为按块。
 
 ## Answer
 
@@ -22,3 +22,5 @@
 - 官方 mysql.connector prepared cursor 协议测试确认：513 条消息为 6 次 execute，513 条已提交核对为 3 次 SELECT；覆盖空、单条、100/101/256/257/513、字段集合切换、Unicode/二进制/空值、packet 分块、单行超限和 publication 失败回滚。
 - 回归命令：`PYTHONPATH=src /Users/shixiangyi/code/Swe/venv/bin/python -m pytest tests/unit/app/conversation_storage tests/unit/database/test_prepared.py tests/integrated/conversation_storage/test_legacy_roundtrip.py -q --basetemp=/private/tmp/migration-perf-02-full2`；结果 `1634 passed, 5 skipped`。所有提交 hooks 通过（含 mypy、black、flake8、pylint）。
 - 限制：5 项真实 MySQL roundtrip 因未配置隔离数据库而跳过；未访问远程数据库。真实 MySQL 中的迁移入口、坏 source 隔离、已发布 source 新写保护和提交故障验收由集成验收执行，不能以本地协议计数替代；未测真实 NAS 或墙钟收益。最后一项验收保留未勾选以明确此边界。
+
+- 2026-11-16 中央最终组合验收补齐最后一项：同租户source CLI `c5f52b4a1` 1 passed/35.47 s，修复坏source不重读已发布兄弟输入且保留线上新增；同环境性能 `ce182a17f` 2 passed/255.95 s。正常首次execute 2922→2421、事务358→231，混合首轮2723→2218、329→202；按块业务INSERT与核对具体形态仍由513行→6 INSERT/3 SELECT协议回归证明。远程墙钟波动不构成倍数保证；详见组合验收报告。
