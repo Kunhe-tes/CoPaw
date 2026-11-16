@@ -3,7 +3,7 @@
 
 import asyncio
 
-from ..bundle import BlockExtent
+from ..bundle import BlockExtent, MAX_READ_BYTES
 from ..chat_repository import MySQLChatRepository
 from ..chat_mutations import (
     load_metadata_json,
@@ -462,10 +462,14 @@ async def _verify_artifact(
 
 
 async def _read_extents(bundles, relative_path, extents, *, io):
+    if len(extents) > 2:
+        raise ValueError("verification reads at most two extents")
     arguments = (relative_path, extents)
+    # Verification reads at most an artifact body and its metadata together.
+    kwargs = {"max_bytes": 2 * MAX_READ_BYTES}
     if io is None:
-        return bundles.read_extents(*arguments)
-    return await io.call(bundles.read_extents, *arguments)
+        return bundles.read_extents(*arguments, **kwargs)
+    return await io.call(bundles.read_extents, *arguments, **kwargs)
 
 
 async def _checked(report, position, check):

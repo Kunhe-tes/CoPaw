@@ -931,6 +931,13 @@
 历史正文 pin 只保护物理数据，在线历史返回前还须核对 Session.context_epoch；仅核对发起读取的 Chat 版本会漏掉另一 Chat 的 reset。删除授权时读取的归属必须传到持有 Chat 行锁的 tombstone 事务内重验，候选查询后的 Session 关联检查不能覆盖授权到候选查询之间的合法所有权转移。参见 `docs/superpowers/reports/2026-11-11-conversation-storage-fix-and-crud-review.md`。
 
 
+## 会话迁移验证在合法 8MiB 源文件上报 multi-read exceeds byte budget
+
+- 现象：原始保留文件正好 8MiB，inventory 与 publication 成功，验证合读 artifact metadata 和正文时失败。
+- 原因：单 extent 的 8MiB 限制被误用为 metadata 加正文的合计限制。
+- 处理：`migration/verify.py` 的 `_read_extents()` 使用固定 16MiB 调用方总额，覆盖最多两个合法 extent；底层每 extent 8MiB 限制、共享 IO 并发、单次打开/索引及文件状态复查保持有效，不按输入长度生成无界总额。
+- 回归：`test_migration_verify_extents.py` 覆盖直接、共享 IO 和预取证据路径的 8MiB 正文加 metadata、超单块限制及超两块数量限制。
+
 ## 会话迁移被无关附件触发容量限制
 
 - 输入范围采用明确包含规则：`chats.json`、`sessions/`、`dialog/`（或清单明确配置的对应入口），以及审核过的 `session_paths` 文件和对应 generation ledger。附件、代码、技能目录不递归枚举、不计入 `inventoried_source_bytes`；分享按记录指定路径读取。
