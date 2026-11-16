@@ -20,7 +20,7 @@ import struct
 import stat
 from typing import BinaryIO, Iterator
 
-from swe.database.observation import record_operation
+from swe.database.observation import record_measurement, record_operation
 
 from .errors import IntegrityError
 from .identity import SCOPE_COLUMNS, WorkspaceScope, identity_bytes
@@ -538,6 +538,7 @@ class BundleStore:
         record_operation("bundle_index_parse")
         size = os.fstat(source.fileno()).st_size
         header = source.read(HEADER.size)
+        record_measurement("bundle_bytes_read", len(header))
         if len(header) != HEADER.size:
             raise IntegrityError("truncated bundle header")
         magic, version, meta_size, table_size, payload_size = HEADER.unpack(
@@ -564,9 +565,13 @@ class BundleStore:
                 "runtime index exceeds workspace memory allowance",
             )
         try:
-            metadata = _load_json(source.read(meta_size))
+            metadata_bytes = source.read(meta_size)
+            record_measurement("bundle_bytes_read", len(metadata_bytes))
+            metadata = _load_json(metadata_bytes)
             _validate_metadata(metadata)
-            table = _load_json(source.read(table_size))
+            table_bytes = source.read(table_size)
+            record_measurement("bundle_bytes_read", len(table_bytes))
+            table = _load_json(table_bytes)
             if (
                 not isinstance(metadata, dict)
                 or not isinstance(table, dict)
@@ -651,6 +656,7 @@ class BundleStore:
                 chunk = source.read(min(remaining, CHUNK_BYTES))
                 if not chunk:
                     raise IntegrityError("truncated bundle extent")
+                record_measurement("bundle_bytes_read", len(chunk))
                 remaining -= len(chunk)
                 yield chunk
 
@@ -728,6 +734,7 @@ class BundleReader:
         for extent in extents:
             self.source.seek(extent.offset)
             body = self.source.read(extent.length)
+            record_measurement("bundle_bytes_read", len(body))
             if len(body) != extent.length:
                 raise IntegrityError("truncated bundle extent")
             bodies.append(body)

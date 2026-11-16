@@ -24,7 +24,7 @@ Use `swe conversation-storage verify --manifest ...` for fast verification, or a
 
 Failed full-audit results are also stored separately, including blockers in protected SQL evidence; the operator failure report exposes only the level and blocker count. A later fast pass remains the publication level and does not erase the audit result.
 
-The database-backed same-fixture mismatch comparison remains pending because this environment has no configured migration test database; unit coverage verifies CLI selection, evidence separation, and existing full-verifier behavior.
+An isolated-MySQL CLI regression now mutates a Session recovery bundle body without changing its index, then expects fast verification to pass and full audit to fail for that source. It is collected locally but remains unexecuted because this environment has no configured migration test database. Unit coverage verifies CLI selection, evidence separation, and existing full-verifier behavior.
 
 ## Comments
 

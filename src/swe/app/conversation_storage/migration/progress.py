@@ -56,6 +56,7 @@ class MigrationProgress:
             "db_transaction_commits": 0,
             "db_transaction_rollbacks": 0,
             "bundle_opens": 0,
+            "bundle_bytes_read": 0,
             "binding_serializations": 0,
             "binding_serialized_bytes": 0,
             "binding_serialization_seconds": 0.0,
@@ -95,7 +96,7 @@ class MigrationProgress:
         self._stage_started = now
         self.data.update(stage=name, position=None, completed=0)
 
-    def record_operation(self, kind, seconds):
+    def record_operation(self, kind, value):
         counters = {
             "db_statement": "db_statement_attempts",
             "db_executemany": "db_executemany_calls",
@@ -106,9 +107,12 @@ class MigrationProgress:
             "bundle_index_parse": "bundle_index_parses",
         }
         with self._disk_lock:
+            if kind == "bundle_bytes_read":
+                self.data[kind] += int(value)
+                return
             self.data[counters[kind]] += 1
             if kind in ("db_statement", "db_executemany"):
-                self.data[kind + "_seconds"] += seconds
+                self.data[kind + "_seconds"] += value
 
     def record_persistence(self, kind, size, seconds, *, succeeded=True):
         """Count completed UTF-8 output and attempted wall time, never values."""

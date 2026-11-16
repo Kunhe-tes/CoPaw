@@ -2,6 +2,7 @@
 """Fast verification proves committed structure without reading bodies."""
 
 import json
+import io
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from uuid import uuid4
@@ -17,6 +18,7 @@ from swe.app.conversation_storage.migration.verify_fast import (
     verify_fast_publications,
 )
 from swe.app.conversation_storage.migration.parallel import MigrationIO
+from swe.app.conversation_storage.migration.progress import MigrationProgress
 
 
 def _inputs(
@@ -206,22 +208,36 @@ async def test_fast_verification_checks_bundle_structure_without_reading_body(
         raise AssertionError("fast verification read a conversation body")
 
     monkeypatch.setattr(bundles, "read_extent", reject_body_read)
-    result = await verify_import(
-        database,
-        bundles,
-        manifest,
-        inventory,
-        SimpleNamespace(
-            schema="test_fast_verify",
-            migration_id=manifest.migration_id,
-        ),
-        verification_level="fast",
+    progress = MigrationProgress(
+        "verify",
+        manifest.migration_id,
+        stream=io.StringIO(),
     )
+    with progress.activate():
+        result = await verify_import(
+            database,
+            bundles,
+            manifest,
+            inventory,
+            SimpleNamespace(
+                schema="test_fast_verify",
+                migration_id=manifest.migration_id,
+            ),
+            verification_level="fast",
+        )
 
     assert result["passed"] is True
     assert result["verification_level"] == "fast"
     assert result["excluded_scopes"] == ["historical_shares"]
     assert not any("swe_chat_shares" in query for query in database.queries)
+    assert (
+        progress.snapshot()["bundle_bytes_read"]
+        < bundles.inspect(
+            next(bundles.root.rglob("*.bundle"))
+            .relative_to(bundles.root)
+            .as_posix(),
+        ).byte_length
+    )
 
 
 @pytest.mark.asyncio

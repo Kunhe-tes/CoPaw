@@ -23,6 +23,12 @@ def record_operation(kind, seconds=0.0):
         observer(kind, seconds)
 
 
+def record_measurement(kind, value):
+    observer = _OBSERVER.get()
+    if observer is not None:
+        observer(kind, value)
+
+
 @contextmanager
 def timed_operation(kind):
     started = time.perf_counter()

@@ -16,7 +16,7 @@
 
 对于当前 source 隔离作业，操作入口以 [租户迁移手册](2026-11-13-conversation-tenant-migration-operations.md) 的 `prepare → migrate --apply` 为准；之后由 DBA 完成适用的 schema 检查，再按本文部署和验收。本文保留的旧分阶段命令不应与新作业混合使用。
 
-- `discovery.py` 用配置和磁盘证据确定服务/租户/source/Agent/workspace，读取全库旧分享，异常阻断；不是仅扫描 chats.json。
+- `discovery.py` 用配置和磁盘证据确定服务/租户/source/Agent/workspace；历史分享不属于本次迁移输入，不连接分享表；不是仅扫描 chats.json。
 - `v3_manifest.py` 固定源、目标应用库及每服务正文根；`inventory_v3.py` 重新解析输入，并按已记录的租户同步起点做 mtime 变化检查。当前新 discovery 不持久化全源内容哈希，不能证明从 discovery 起字节始终不变；强冻结须由停写和存储措施保证。
 - `conversation_storage_v3_cmd.py` 连接配置指定的**原应用库**，校验 `DATABASE()` 与 `@@server_uuid`，取得逻辑名 `conversation-migration:<schema>` 对应的命名锁（连接层默认哈希为实际锁 key，不能直接把逻辑名用于 IS_USED_LOCK 排查）；`DMLDatabase` 限定迁移 SQL。无 staging、无 RENAME、无自动 DDL。
 - `journal.py` 两张控制表持久化 ID 分配、批次票据及来源/目标绑定；导入是多批提交，不是全库一个事务。中断使用同作业续跑。
@@ -407,7 +407,7 @@ run_cs 01-discover discover --services "$AUDIT_DIR/services.json" \
 | profile 中 workspace_dir 是相对路径 | 填旧进程真实 `original_cwd`，不能按迁移进程当前目录解析 |
 | 孤立 workspace / Session 身份缺失 | 使用证据绑定的 `--overrides`；不能把所有孤立数据归到 default |
 
-必须检查 `discovery.json` 的 `ready=true`、`blockers=[]`，并由业务/运维核对服务、租户、来源、Agent、workspace 和分享覆盖。
+必须检查 `discovery.json` 的 `ready=true`、`blockers=[]`，并由业务/运维核对服务、租户、来源、Agent、workspace 覆盖。历史分享明确排除，不作为迁移覆盖项。
 自动发现不是自动证明输入清单包含了所有生产服务；服务清单需要与部署及存储资产清单核对。
 
 遇到 blocker 时，保留报告，处理原因后输出新文件名重新扫描，工具不会覆盖现有 discovery 文件：
@@ -546,7 +546,7 @@ run_cs 10-finalize finalize --manifest "$AUDIT_DIR/manifest.json" \
   --output-dir "$AUDIT_DIR/runtime" --apply
 ```
 
-`finalize` 这个名字不代表程序 ALTER 表：它重新做最终结构检查和全量语义校验，写 SQL ready 状态并输出完成证明。
+`finalize` 这个名字不代表程序 ALTER 表：它重新做最终结构检查和快速结构验证，写 SQL ready 状态并输出完成证明；正文级完整语义审计仍需显式 `verify --full-audit`。
 第一个 finalize 没有 `--apply` 只是预览，不替代正式验收。
 
 成功后应有：
