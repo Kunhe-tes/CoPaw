@@ -108,6 +108,7 @@ def workspace():
 class Recorder:
     def __init__(self):
         self.assignments, self.allocations, self.rows = {}, [], {}
+        self.batch_allocations = []
         self.publications, self.blocks, self.finished = [], {}, []
         self.chat_sessions = {}
         self.verifications, self.commit_verifications, self.writes = [], [], []
@@ -118,7 +119,10 @@ class Recorder:
         key = kind, position
         if key not in self.assignments:
             self.assignments[key] = {
-                "target_id": len(self.assignments) + 1,
+                "target_id": int(
+                    sha256((kind + position).encode()).hexdigest()[:12],
+                    16,
+                ),
                 "operation_key": sha256(
                     (kind + position).encode(),
                 ).hexdigest(),
@@ -175,12 +179,16 @@ class Recorder:
 
     async def journal(self, name, *args, **kwargs):
         if name == "allocate":
-            assert (
-                args[0] != "message"
-            ), "message tickets must use bounded batches"
+            assert args[0] not in {
+                "message",
+                "session",
+                "chat",
+                "turn",
+            }, "message tickets must use bounded batches"
             return self.allocate(*args, **kwargs)
         if name == "allocate_many":
             kind, positions = args
+            self.batch_allocations.append((kind, tuple(positions)))
             return {
                 position: self.allocate(kind, position)
                 for position in positions
@@ -245,7 +253,7 @@ async def test_workspace_domain_publications_match_serial(tmp_path, frozen):
         parallel.manifest_data = _freeze(parallel.manifest_data)
     importer = ParallelWorkspaceImporter(parallel, target, batch_size=1)
     await importer.run_workspace(_freeze(source) if frozen else source)
-    assert parallel.allocations == serial.allocations
+    assert set(parallel.allocations) == set(serial.allocations)
     assert parallel.publications == serial.publications
     assert parallel.blocks == serial.blocks
     assert parallel.finished == serial.finished
@@ -333,3 +341,125 @@ async def test_workspace_retry_preserves_original_blocks(tmp_path, state):
         assert tuple(blocks) == originals[request.operation_key]
         assert load_metadata_json(blocks[0].content) == expected
         assert (request, publication_id, plan.serialize()) in publications
+
+
+async def test_workspace_batches_identity_and_publication_tickets(tmp_path):
+    source = workspace()
+    source["sessions"][0]["legacy"]["state"]["turn_states"]["second"] = {
+        "chat_id": "chat",
+        "status": "completed",
+    }
+    target = SimpleNamespace(
+        schema="test_conversation_fixture",
+        migration_id="migration",
+    )
+    record = Recorder()
+    await ParallelWorkspaceImporter(
+        record,
+        target,
+        batch_size=2,
+    ).run_workspace(source)
+    assert {kind for kind, _ in record.batch_allocations} >= {
+        "session",
+        "chat",
+        "turn",
+        "publication",
+    }
+    assert all(
+        len(positions) <= 2 for _, positions in record.batch_allocations
+    )
+    turn_batches = [
+        positions
+        for kind, positions in record.batch_allocations
+        if kind == "turn"
+    ]
+    assert turn_batches == [("session/turn:question", "session/turn:second")]
+    assert any(
+        len(positions) == 2
+        for kind, positions in record.batch_allocations
+        if kind == "publication"
+    )
+
+
+async def test_multiple_session_chat_batches_preserve_associations_and_retry():
+    source = workspace()
+    for number in range(1, 4):
+        session = deepcopy(source["sessions"][0])
+        session["position"] = f"session:{number}"
+        session["identity"][6] = f"session:{number}"
+        session["chat_positions"] = [number]
+        session["legacy"]["state"]["turn_states"]["question"][
+            "chat_id"
+        ] = f"chat:{number}"
+        chat = deepcopy(source["chats"][0])
+        chat["position"] = chat["spec"]["id"] = f"chat:{number}"
+        chat["spec"]["session_id"] = f"session:{number}"
+        chat["registry_order"] = number + 1
+        source["sessions"].append(session)
+        source["chats"].append(chat)
+    record = Recorder()
+    target = SimpleNamespace(
+        schema="test_conversation_fixture",
+        migration_id="migration",
+    )
+    importer = ParallelWorkspaceImporter(record, target, batch_size=2)
+    await importer.run_workspace(source)
+    expected = dict(record.chat_sessions)
+    assert len(expected) == len(set(expected.values())) == 4
+    assert [
+        len(positions)
+        for kind, positions in record.batch_allocations
+        if kind == "session"
+    ] == [2, 2]
+    for number in range(1, 4):
+        assert (
+            expected[importer.chat_ids[f"chat:{number}"]]
+            == importer.session_ids[f"session:{number}"]
+        )
+    original = dict(record.assignments)
+    await ParallelWorkspaceImporter(
+        record,
+        target,
+        batch_size=2,
+    ).run_workspace(source)
+    assert record.assignments == original
+    assert record.chat_sessions == expected
+
+
+async def test_legacy_identity_allocation_keeps_first_use_order(tmp_path):
+    source = workspace()
+    session = deepcopy(source["sessions"][0])
+    session.update(position="another-session", chat_positions=[])
+    source["sessions"].append(session)
+    record = Recorder()
+    target = SimpleNamespace(
+        schema="test_conversation_fixture",
+        migration_id="migration",
+    )
+    importer = ConversationImporter.__new__(ConversationImporter)
+    importer.target, importer.batch_size = target, 2
+    importer.db = record
+    importer.bundle_stores = {"svc": SimpleNamespace(root=tmp_path)}
+    importer.stores = {"svc": record}
+    importer.session_ids, importer.chat_ids, importer.turn_ids = {}, {}, {}
+    importer.manifest = SimpleNamespace(
+        migration_id=target.migration_id,
+        data=record.manifest_data,
+        allocate=record.allocate,
+        set_batch_state=lambda *_args: None,
+    )
+
+    async def finished(_position):
+        return None
+
+    importer._batch_finished = finished
+    await importer._identities(
+        source,
+        WorkspaceScope.from_values(source["scope"]),
+    )
+    assert record.allocations[:4] == [
+        ("session", "session"),
+        ("chat", "chat"),
+        ("publication", "session/identities"),
+        ("session", "another-session"),
+    ]
