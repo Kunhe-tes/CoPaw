@@ -3,6 +3,7 @@ import io
 import json
 import threading
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +17,7 @@ from swe.observability import (
 from swe.observability.config import EmitterConfig
 from swe.observability.emitter import JsonlEmitter
 from swe.observability.instrumentation import (
+    ObservabilityModelWrapper,
     Observability as ObservabilityFacade,
 )
 
@@ -153,6 +155,91 @@ def test_run_end_omits_uncomparable_cross_process_duration():
     emitter.close()
     ended = json.loads(stream.getvalue().splitlines()[-1])
     assert "metrics" not in ended
+
+
+@pytest.mark.asyncio
+async def test_model_wrapper_records_usage_without_payload(monkeypatch):
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+
+    class Model:
+        stream = False
+
+        async def __call__(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                content=[{"type": "text", "text": "private answer"}],
+                usage=SimpleNamespace(input_tokens=3, output_tokens=4),
+            )
+
+    context = Observability().admit_run(
+        scope=Scope("svc", "src", "tenant", "agent"),
+        enabled=True,
+    )
+    with bind_context(context):
+        await ObservabilityModelWrapper(
+            Model(),
+            provider_key="provider",
+            model_key="model",
+        )([])
+    emitter.close()
+    payload = stream.getvalue()
+    assert "private answer" not in payload
+    ended = next(
+        json.loads(line)
+        for line in payload.splitlines()
+        if '"event_name":"span.ended"' in line
+    )
+    assert ended["span_type"] == "LLM"
+    assert ended["metrics"]["input_tokens"] == 3
+    assert ended["metrics"]["output_tokens"] == 4
+
+
+@pytest.mark.asyncio
+async def test_model_wrapper_records_first_nonempty_stream_chunk(monkeypatch):
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+
+    class Model:
+        stream = True
+
+        async def __call__(self, *_args, **_kwargs):
+            async def chunks():
+                yield SimpleNamespace(content=[])
+                yield SimpleNamespace(
+                    content=[{"type": "text", "text": "visible"}],
+                    usage=SimpleNamespace(input_tokens=2, output_tokens=1),
+                )
+
+            return chunks()
+
+    context = Observability().admit_run(
+        scope=Scope("svc", "src", "tenant", "agent"),
+        enabled=True,
+    )
+    with bind_context(context):
+        chunks = await ObservabilityModelWrapper(
+            Model(),
+            provider_key="provider",
+            model_key="model",
+        )([])
+        async for _chunk in chunks:
+            pass
+    emitter.close()
+    ended = next(
+        json.loads(line)
+        for line in stream.getvalue().splitlines()
+        if '"event_name":"span.ended"' in line
+    )
+    assert ended["metrics"]["first_chunk_us"] >= 0
+    assert ended["metrics"]["usage_known"] is True
 
 
 def test_cancellation_is_recorded_and_propagated():

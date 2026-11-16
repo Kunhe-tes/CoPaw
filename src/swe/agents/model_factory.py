@@ -1354,6 +1354,13 @@ def create_model_and_formatter(
             agent_id=resolved_agent_id,
             on_retry=None,  # 模型层重试回调，后续可通过上下文变量传递事件
         )
+        from ..observability.instrumentation import ObservabilityModelWrapper
+
+        wrapped_model = ObservabilityModelWrapper(
+            wrapped_model,
+            provider_key=provider_id,
+            model_key=resolved_slot.model,
+        )
 
         return wrapped_model, formatter
     finally:

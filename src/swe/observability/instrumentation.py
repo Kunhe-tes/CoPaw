@@ -97,6 +97,11 @@ class SpanHandle:
             0,
             (time.monotonic_ns() - self._started_clock) // 1000,
         )
+        supplied_metrics = attributes.get("metrics")
+        metrics = {"duration_us": elapsed_us}
+        if isinstance(supplied_metrics, dict):
+            metrics.update(supplied_metrics)
+        metrics["duration_us"] = elapsed_us
         optional = {
             key: value
             for key, value in attributes.items()
@@ -131,7 +136,7 @@ class SpanHandle:
                     "started_at": self._started_at,
                     "ended_at": ended_at,
                     "status": status,
-                    "metrics": {"duration_us": elapsed_us},
+                    "metrics": metrics,
                     "quality": {"start_observed": True, "end_observed": True},
                     **optional,
                 },
@@ -177,6 +182,129 @@ class SpanHandle:
             self._context_binding.__exit__(exc_type, exc, _tb)
             self._context_binding = None
         return False
+
+
+class ObservabilityModelWrapper:
+    """Record one logical model call without retaining model payloads."""
+
+    def __init__(
+        self,
+        model: Any,
+        *,
+        provider_key: str,
+        model_key: str,
+    ) -> None:
+        self._model = model
+        self._provider_key = provider_key
+        self._model_key = model_key
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._model, name)
+
+    @property
+    def stream(self):
+        return self._model.stream
+
+    @stream.setter
+    def stream(self, value):
+        self._model.stream = value
+
+    async def __call__(self, messages, *args, **kwargs):
+        context = current_context()
+        if context is None or not context.capture_enabled:
+            return await self._model(messages, *args, **kwargs)
+        handle = Observability().span(
+            "LLM",
+            "chat",
+            name="model.call",
+            provider_key=self._provider_key,
+            request_model_key=self._model_key,
+            streaming=bool(getattr(self._model, "stream", False)),
+        )
+        if handle is None:
+            return await self._model(messages, *args, **kwargs)
+        started = time.monotonic_ns()
+        try:
+            result = await self._model(messages, *args, **kwargs)
+            if _is_async_iterable(result):
+                return self._consume_stream(result, handle, started)
+            handle.end(
+                status="succeeded",
+                metrics=_usage_metrics(result),
+            )
+            return result
+        except asyncio.CancelledError:
+            handle.end(status="cancelled", technical_status="cancelled")
+            raise
+        except Exception as exc:
+            handle.end(
+                status="failed",
+                technical_status="error",
+                has_error=True,
+                error_type=type(exc).__name__,
+            )
+            raise
+
+    async def _consume_stream(self, stream, handle: SpanHandle, started: int):
+        first_chunk_us = None
+        latest_metrics: dict[str, Any] = {}
+        try:
+            async for chunk in stream:
+                if first_chunk_us is None and _has_model_output(chunk):
+                    first_chunk_us = max(
+                        0,
+                        (time.monotonic_ns() - started) // 1000,
+                    )
+                latest_metrics = _usage_metrics(chunk) or latest_metrics
+                yield chunk
+            metrics = dict(latest_metrics)
+            if first_chunk_us is not None:
+                metrics["first_chunk_us"] = first_chunk_us
+            handle.end(status="succeeded", metrics=metrics)
+        except asyncio.CancelledError:
+            handle.end(status="cancelled", technical_status="cancelled")
+            raise
+        except Exception as exc:
+            handle.end(
+                status="failed",
+                technical_status="error",
+                has_error=True,
+                error_type=type(exc).__name__,
+            )
+            raise
+
+
+def _has_model_output(value: Any) -> bool:
+    content = getattr(value, "content", None)
+    if content is None and isinstance(value, dict):
+        content = value.get("content")
+    return bool(content)
+
+
+def _is_async_iterable(value: Any) -> bool:
+    try:
+        return hasattr(value, "__aiter__")
+    except Exception:
+        return False
+
+
+def _usage_metrics(value: Any) -> dict[str, Any]:
+    usage = getattr(value, "usage", None)
+    if usage is None and isinstance(value, dict):
+        usage = value.get("usage")
+    if usage is None:
+        return {}
+    metrics = {"usage_known": True}
+    for output_key, input_key in (
+        ("input_tokens", "input_tokens"),
+        ("output_tokens", "output_tokens"),
+    ):
+        token_value = getattr(usage, input_key, None)
+        if token_value is None and isinstance(usage, dict):
+            token_value = usage.get(input_key)
+        if isinstance(token_value, int) and token_value >= 0:
+            metrics[output_key] = token_value
+    return metrics
 
 
 class Observability:

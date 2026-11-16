@@ -78,6 +78,7 @@ _REGISTERED_LABELS = {
     "agent.execute",
     "chat",
     "execute",
+    "model.call",
     "registered.tool",
     "tool",
 }
@@ -152,7 +153,9 @@ class JsonlEmitter:
 
     def emit(self, event: MetadataEvent | dict[str, Any]) -> bool:
         try:
-            raw = event.to_dict() if isinstance(event, MetadataEvent) else event
+            raw = (
+                event.to_dict() if isinstance(event, MetadataEvent) else event
+            )
             projected = _project(raw)
             if not isinstance(projected, dict):
                 raise ValueError("event must be an object")
@@ -225,7 +228,8 @@ class JsonlEmitter:
             if (
                 self._closed
                 or self._outstanding_events >= self.config.max_queue_events
-                or self._outstanding_bytes + len(payload) > self.config.max_queue_bytes
+                or self._outstanding_bytes + len(payload)
+                > self.config.max_queue_bytes
             ):
                 self._dropped += 1
                 return False
@@ -261,7 +265,9 @@ class JsonlEmitter:
 
     def close(self, timeout: float | None = None) -> int:
         wait_for = (
-            self.config.shutdown_timeout if timeout is None else min(timeout, 1.0)
+            self.config.shutdown_timeout
+            if timeout is None
+            else min(timeout, 1.0)
         )
         deadline = time.monotonic() + min(wait_for, 1.0)
         with self._condition:
