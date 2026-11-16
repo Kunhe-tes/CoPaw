@@ -22,6 +22,8 @@ from .store import ObservabilityStore
 
 router = APIRouter(prefix="/agent-observability", tags=["agent-observability"])
 _MAX_PAGE_SIZE = 200
+_MAX_EVENT_PAGE_SIZE = 500
+_MAX_EVENT_RESPONSE_BYTES = 1_000_000
 _MAX_WINDOW = timedelta(days=31)
 
 
@@ -56,6 +58,12 @@ class RunDetailResponse(BaseModel):
     attempts: list[dict[str, Any]]
     spans: list[dict[str, Any]]
     spans_has_more: bool
+
+
+class EventListResponse(BaseModel):
+    items: list[dict[str, Any]]
+    next_cursor: str | None
+    generated_at: datetime
 
 
 def _require_observability_reader(request: Request) -> str:
@@ -397,4 +405,106 @@ async def run_detail(
         attempts=_serialize_rows(attempts),
         spans=_serialize_rows(spans[:span_limit]),
         spans_has_more=len(spans) > span_limit,
+    )
+
+
+@router.get("/runs/{run_id}/events", response_model=EventListResponse)
+async def run_events(
+    run_id: str,
+    request: Request,
+    span_id: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=_MAX_EVENT_PAGE_SIZE),
+    cursor: str | None = Query(None, max_length=2048),
+) -> EventListResponse:
+    role = _require_observability_reader(request)
+    try:
+        UUID(run_id)
+        if span_id is not None:
+            UUID(span_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid event identity",
+        ) from exc
+    sources = _authorized_sources(request, None)
+    authority = {
+        "role": role,
+        "sources": sources,
+        "run_id": run_id,
+        "span_id": span_id,
+    }
+    _cursor_secret()
+    decoded = _decode_cursor(cursor, authority) if cursor else None
+    store = getattr(request.app.state, "agent_observability_store", None)
+    if not isinstance(store, ObservabilityStore):
+        raise HTTPException(
+            status_code=503,
+            detail="Agent observability storage unavailable",
+        )
+    try:
+        run = await store.get_run(
+            service_unit_id=os.environ.get("SWE_SERVICE_UNIT_ID", "swe"),
+            run_id=run_id,
+            source_ids=sources,
+        )
+        if run is None:
+            raise HTTPException(status_code=404, detail="Run not found")
+        rows = await store.list_events(
+            run_id=run_id,
+            source_ids=sources,
+            span_id=span_id,
+            before=decoded[:2] if decoded else None,
+            limit=limit + 1,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Agent observability query unavailable",
+        ) from exc
+
+    serialized = _serialize_rows(rows)
+    items: list[dict[str, Any]] = []
+    for row in serialized[:limit]:
+        try:
+            metadata = json.loads(row.pop("metadata_text"))
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Agent observability event unavailable",
+            ) from exc
+        if not isinstance(metadata, dict):
+            raise HTTPException(
+                status_code=503,
+                detail="Agent observability event unavailable",
+            )
+        candidate = {**row, "metadata": metadata}
+        projected = json.dumps(
+            [*items, candidate],
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=lambda value: (
+                value.isoformat()
+                if isinstance(value, datetime)
+                else str(value)
+            ),
+        ).encode("utf-8")
+        if len(projected) > _MAX_EVENT_RESPONSE_BYTES:
+            break
+        items.append(candidate)
+
+    has_more = len(serialized) > len(items)
+    next_cursor = None
+    if has_more and items:
+        last = items[-1]
+        next_cursor = _encode_cursor(
+            last["occurred_at"],
+            str(last["event_id"]),
+            authority,
+        )
+    return EventListResponse(
+        items=items,
+        next_cursor=next_cursor,
+        generated_at=datetime.now(timezone.utc),
     )

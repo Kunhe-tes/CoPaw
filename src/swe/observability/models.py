@@ -248,6 +248,8 @@ class MetadataEvent:
             for key, value in self.attributes.items()
             if key not in reserved
         )
+        if self.entity_kind == "span":
+            result["obs_span_id"] = self.entity_id
         return result
 
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timedelta, timezone
+from io import StringIO
 from uuid import uuid4
 
 import pytest
@@ -13,6 +14,8 @@ import httpx
 from fastapi import FastAPI, Request
 
 from swe.database import DatabaseConfig, DatabaseConnection
+from swe.observability import Observability, Scope, bind_context
+from swe.observability.emitter import JsonlEmitter
 from swe.observability.projector import InboxProjector
 from swe.observability.query import router as observability_router
 from swe.observability.store import ObservabilityStore
@@ -27,7 +30,9 @@ pytestmark = pytest.mark.skipif(
 def _test_db_config() -> DatabaseConfig:
     database = os.getenv("SWE_AGENTOBS_TEST_DB_NAME", "")
     if not database.endswith("_test"):
-        raise RuntimeError("Agent observability integration DB name must end in _test")
+        raise RuntimeError(
+            "Agent observability integration DB name must end in _test",
+        )
     return DatabaseConfig(
         host=_DB_HOST or "",
         port=int(os.getenv("SWE_AGENTOBS_TEST_DB_PORT", "3306")),
@@ -56,8 +61,14 @@ def _event(
     started_at: datetime,
     ended_at: datetime | None,
 ) -> dict:
-    occurred = occurred_at.isoformat(timespec="microseconds").replace("+00:00", "Z")
-    started = started_at.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    occurred = occurred_at.isoformat(timespec="microseconds").replace(
+        "+00:00",
+        "Z",
+    )
+    started = started_at.isoformat(timespec="microseconds").replace(
+        "+00:00",
+        "Z",
+    )
     return {
         "schema_version": 1,
         "event_id": str(uuid4()),
@@ -84,8 +95,11 @@ def _event(
         "started_at": started,
         **(
             {
-                "ended_at": ended_at.isoformat(timespec="microseconds").replace(
-                    "+00:00", "Z",
+                "ended_at": ended_at.isoformat(
+                    timespec="microseconds",
+                ).replace(
+                    "+00:00",
+                    "Z",
                 ),
                 "status": status,
                 "terminal_fact_source": "business_settlement",
@@ -186,9 +200,12 @@ async def _verify_partial_run_ordering(store, ingest, started, ended):
 
 
 @pytest.mark.asyncio
-async def test_manual_inbox_to_mysql_projection_and_authorized_run_list(monkeypatch):
+async def test_manual_inbox_to_mysql_projection_and_authorized_run_list(
+    monkeypatch,
+):
     monkeypatch.setenv(
-        "SWE_AGENTOBS_CURSOR_SECRET", "integration-cursor-secret-at-least-32",
+        "SWE_AGENTOBS_CURSOR_SECRET",
+        "integration-cursor-secret-at-least-32",
     )
     connection = DatabaseConnection(_test_db_config())
     await connection.connect()
@@ -234,11 +251,13 @@ async def test_manual_inbox_to_mysql_projection_and_authorized_run_list(monkeypa
                 ended_at=None,
             ),
         )
-        running_ingest_id, late_accepted_ingest_id = await _verify_partial_run_ordering(
-            store,
-            ingest,
-            started,
-            ended,
+        running_ingest_id, late_accepted_ingest_id = (
+            await _verify_partial_run_ordering(
+                store,
+                ingest,
+                started,
+                ended,
+            )
         )
 
         malformed_terminal = _event(
@@ -274,7 +293,8 @@ async def test_manual_inbox_to_mysql_projection_and_authorized_run_list(monkeypa
 
         api.include_router(observability_router)
         async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=api), base_url="http://agentobs.test",
+            transport=httpx.ASGITransport(app=api),
+            base_url="http://agentobs.test",
         ) as client:
             response = await client.get(
                 "/agent-observability/runs",
@@ -289,9 +309,11 @@ async def test_manual_inbox_to_mysql_projection_and_authorized_run_list(monkeypa
             )
         assert response.status_code == 200
         assert (
-            next(item for item in response.json()["items"] if item["run_id"] == run_id)[
-                "status"
-            ]
+            next(
+                item
+                for item in response.json()["items"]
+                if item["run_id"] == run_id
+            )["status"]
             == "succeeded"
         )
 
@@ -311,5 +333,156 @@ async def test_manual_inbox_to_mysql_projection_and_authorized_run_list(monkeypa
         assert sum(row["processing_state"] == 1 for row in inbox_rows) == 4
         assert sum(row["processing_state"] == 2 for row in inbox_rows) == 1
         assert all(row["payload_text"] is None for row in inbox_rows)
+    finally:
+        await connection.close()
+
+
+def _emit_retry_events():
+    sink = StringIO()
+    emitter = JsonlEmitter(stream=sink)
+    observability = Observability(emitter)
+    context = observability.admit_run(
+        scope=Scope(
+            "swe",
+            "agentobs-integration",
+            "integration-user",
+            "default",
+        ),
+        enabled=True,
+    )
+    attempt = observability.start_attempt(context)
+    with bind_context(attempt):
+        span = observability.span(
+            "LLM",
+            "chat",
+            name="model.call",
+            kind="CLIENT",
+        )
+        assert span is not None
+        with span:
+            for index in range(40):
+                span.event("retry", retries=index + 1, loop_count=40)
+    assert emitter.close(timeout=1) == 0
+    return context.obs_run_id, [
+        json.loads(line) for line in sink.getvalue().splitlines()
+    ]
+
+
+async def _assert_events_projected(connection, run_id, records):
+    async with connection.acquire() as session:
+        projected_rows = await session.fetch_all(
+            "SELECT event_id FROM swe_agentobs_events WHERE run_id=%s",
+            (run_id,),
+        )
+        inbox_rows = await session.fetch_all(
+            "SELECT event_id,processing_state,reason_code "
+            "FROM swe_agentobs_inbox WHERE event_id IN ("
+            + ",".join(["%s"] * len(records))
+            + ")",
+            tuple(record["event_id"] for record in records),
+        )
+    projected_ids = {row["event_id"] for row in projected_rows}
+    inbox_by_id = {row["event_id"]: row for row in inbox_rows}
+    missing_records = [
+        record for record in records if record["event_id"] not in projected_ids
+    ]
+    assert not missing_records, [
+        (
+            record["event_name"],
+            inbox_by_id.get(record["event_id"], {}).get("processing_state"),
+            inbox_by_id.get(record["event_id"], {}).get("reason_code"),
+        )
+        for record in missing_records
+    ]
+    assert len(inbox_rows) == len(records)
+
+
+@pytest.mark.asyncio
+async def test_mysql_event_api_pages_more_than_one_event_array(monkeypatch):
+    monkeypatch.setenv(
+        "SWE_AGENTOBS_CURSOR_SECRET",
+        "integration-cursor-secret-at-least-32",
+    )
+    connection = DatabaseConnection(_test_db_config())
+    await connection.connect()
+    try:
+        store = ObservabilityStore(connection)
+        assert (await store.readiness())["ready"]
+        run_id, records = _emit_retry_events()
+        async with connection.transaction() as session:
+            for record in records:
+                await session.insert(
+                    "INSERT INTO swe_agentobs_inbox (payload_text) VALUES (%s)",
+                    (json.dumps(record, separators=(",", ":")),),
+                )
+        projector = InboxProjector(store, poll_seconds=0.01)
+        while await projector.project_batch():
+            pass
+        await _assert_events_projected(connection, run_id, records)
+
+        api = FastAPI()
+        api.state.agent_observability_store = store
+
+        @api.middleware("http")
+        async def bind_source(request: Request, call_next):
+            request.state.source_id = request.headers.get("X-Source-Id")
+            return await call_next(request)
+
+        api.include_router(observability_router)
+        pages = []
+        cursor = None
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=api),
+            base_url="http://agentobs.test",
+        ) as client:
+            for _ in range(4):
+                response = await client.get(
+                    f"/agent-observability/runs/{run_id}/events",
+                    headers={
+                        "X-User-Role": "manager",
+                        "X-Source-Id": "agentobs-integration",
+                    },
+                    params={
+                        "limit": 17,
+                        **({"cursor": cursor} if cursor else {}),
+                    },
+                )
+                assert response.status_code == 200, response.text
+                page = response.json()
+                pages.extend(page["items"])
+                cursor = page["next_cursor"]
+                if cursor is None:
+                    break
+            hidden = await client.get(
+                f"/agent-observability/runs/{run_id}/events",
+                headers={
+                    "X-User-Role": "manager",
+                    "X-Source-Id": "different-source",
+                },
+            )
+            forbidden = await client.get(
+                f"/agent-observability/runs/{run_id}/events",
+                headers={"X-User-Role": "user"},
+            )
+        assert len({item["event_id"] for item in pages}) == len(pages)
+        assert len(pages) == len(records)
+        assert (
+            sum(
+                item["metadata"].get("event_kind") == "retry" for item in pages
+            )
+            == 40
+        )
+        span_id = next(
+            record["entity_id"]
+            for record in records
+            if record["event_name"] == "span.started"
+        )
+        assert all(
+            item["entity_id"] == span_id
+            for item in pages
+            if item["event_name"] == "span.event"
+        )
+        assert hidden.status_code == 404
+        assert forbidden.status_code == 403
     finally:
         await connection.close()

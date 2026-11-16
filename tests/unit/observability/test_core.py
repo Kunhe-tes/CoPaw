@@ -105,6 +105,7 @@ def test_span_emits_self_contained_end_and_preserves_exception():
     ended = next(
         record for record in records if record["event_name"] == "span.ended"
     )
+    assert ended["obs_span_id"] == ended["entity_id"]
     assert ended["started_at"]
     assert ended["ended_at"]
     assert ended["status"] == "failed"

@@ -19,7 +19,9 @@ from swe.observability.query import (
 )
 
 
-def test_observability_database_does_not_fallback_to_application_database(monkeypatch):
+def test_observability_database_does_not_fallback_to_application_database(
+    monkeypatch,
+):
     monkeypatch.setenv("SWE_DB_HOST", "business-db")
     monkeypatch.setenv("SWE_DB_NAME", "business")
     monkeypatch.delenv("SWE_AGENTOBS_DB_HOST", raising=False)
@@ -68,7 +70,9 @@ def test_cursor_is_signed_and_bound_to_authorized_filters(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_capabilities_are_scoped_and_do_not_expose_database_secrets(monkeypatch):
+async def test_capabilities_are_scoped_and_do_not_expose_database_secrets(
+    monkeypatch,
+):
     monkeypatch.delenv("SWE_AGENTOBS_ENABLED", raising=False)
     app = SimpleNamespace(
         state=SimpleNamespace(
@@ -192,10 +196,15 @@ def test_ingest_validation_rejects_sql_width_overflow_and_bad_attempt_ids():
     }
     event["entity_id"] = event["obs_span_id"]
     event["name"] = "registered.tool"
+    event["producer_id"] = "host:123:boot"
+    event["error_type"] = None
+    assert _validate_payload(json.dumps(event))["error_type"] is None
+    event.pop("error_type")
+    event["producer_id"] = "p" * 129
     with pytest.raises(ValueError, match="field_too_long"):
         _validate_payload(json.dumps(event))
-    event["producer_id"] = "host:123:boot"
     event["obs_attempt_id"] = "bad-id"
+    event["producer_id"] = "host:123:boot"
     with pytest.raises(ValueError, match="invalid_identity"):
         _validate_payload(json.dumps(event))
     event["obs_attempt_id"] = str(uuid4())
@@ -252,7 +261,11 @@ async def test_optional_database_configuration_errors_do_not_abort_app_startup(
     def invalid_config():
         raise ValueError("invalid optional port")
 
-    monkeypatch.setattr(db_config, "get_observability_database_config", invalid_config)
+    monkeypatch.setattr(
+        db_config,
+        "get_observability_database_config",
+        invalid_config,
+    )
     app = SimpleNamespace(state=SimpleNamespace())
     await _app._initialize_agent_observability_storage(app)
     assert app.state.agent_observability_connection is None
@@ -274,7 +287,9 @@ async def test_readiness_rejects_existing_tables_with_missing_schema_parts():
                     {"TABLE_NAME": table, "COLUMN_NAME": column}
                     for table, columns in REQUIRED_COLUMNS.items()
                     for column in columns
-                    if not (table == "swe_agentobs_runs" and column == "status")
+                    if not (
+                        table == "swe_agentobs_runs" and column == "status"
+                    )
                 ]
             return [
                 {
@@ -283,7 +298,9 @@ async def test_readiness_rejects_existing_tables_with_missing_schema_parts():
                     "NON_UNIQUE": int(not unique),
                     "SEQ_IN_INDEX": position,
                     "COLUMN_NAME": (
-                        "wrong_column" if name == "uq_agentobs_event_slot" else column
+                        "wrong_column"
+                        if name == "uq_agentobs_event_slot"
+                        else column
                     ),
                 }
                 for table, definitions in REQUIRED_INDEXES.items()

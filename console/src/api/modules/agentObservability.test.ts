@@ -7,6 +7,7 @@ import {
   getAgentObservabilityCapabilities,
   getAgentObservabilityHealth,
   getAgentObservabilityRunDetail,
+  getAgentObservabilityRunEvents,
   listAgentObservabilityRuns,
 } from "./agentObservability";
 
@@ -53,6 +54,19 @@ describe("agent observability API", () => {
     });
     expect(mocks.request).toHaveBeenCalledWith(
       "/agent-observability/runs/run%2Fone?attempt_id=attempt-one&span_limit=120",
+      { signal: undefined },
+    );
+  });
+
+  it("loads a bounded event page with an optional Span filter and cursor", async () => {
+    mocks.request.mockResolvedValue({ items: [], next_cursor: null });
+    await getAgentObservabilityRunEvents("run/one", {
+      spanId: "span-one",
+      cursor: "signed+cursor",
+      limit: 100,
+    });
+    expect(mocks.request).toHaveBeenCalledWith(
+      "/agent-observability/runs/run%2Fone/events?span_id=span-one&cursor=signed%2Bcursor&limit=100",
       { signal: undefined },
     );
   });

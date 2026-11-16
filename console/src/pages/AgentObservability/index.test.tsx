@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   listRuns: vi.fn(),
   getCapabilities: vi.fn(),
   getHealth: vi.fn(),
+  getEvents: vi.fn(),
   iframeState: {
     manager: true,
     isSuperManager: false,
@@ -17,6 +18,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../../api/modules/agentObservability", () => ({
   getAgentObservabilityCapabilities: mocks.getCapabilities,
   getAgentObservabilityHealth: mocks.getHealth,
+  getAgentObservabilityRunEvents: mocks.getEvents,
   listAgentObservabilityRuns: mocks.listRuns,
 }));
 
@@ -48,6 +50,7 @@ describe("AgentObservabilityPage", () => {
       dropped_events: null,
       generated_at: "2026-11-15T00:00:00Z",
     });
+    mocks.getEvents.mockResolvedValue({ items: [], next_cursor: null });
     mocks.listRuns.mockResolvedValue({
       items: [],
       next_cursor: null,

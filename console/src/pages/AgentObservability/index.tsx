@@ -6,12 +6,14 @@ import {
   getAgentObservabilityCapabilities,
   getAgentObservabilityHealth,
   getAgentObservabilityRunDetail,
+  getAgentObservabilityRunEvents,
   listAgentObservabilityRuns,
   type AgentObservabilityCapabilities,
   type AgentObservabilityHealth,
   type AgentObservabilityRun,
   type AgentObservabilityRunPage,
   type AgentObservabilityRunDetail,
+  type AgentObservabilityEvent,
 } from "../../api/modules/agentObservability";
 import { useIframeStore } from "../../stores/iframeStore";
 import styles from "./index.module.less";
@@ -49,6 +51,11 @@ export default function AgentObservabilityPage() {
   const [selectedRun, setSelectedRun] = useState<AgentObservabilityRun | null>(null);
   const [detail, setDetail] = useState<AgentObservabilityRunDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [events, setEvents] = useState<AgentObservabilityEvent[]>([]);
+  const [eventCursor, setEventCursor] = useState<string | null>(null);
+  const [eventSpanId, setEventSpanId] = useState<string | undefined>();
+  const [eventsLoading, setEventsLoading] = useState(false);
+  const eventRequestRef = useRef<AbortController | null>(null);
   const activeScope = `${isAdmin ? "admin" : "manager"}:${source ?? ""}:${(sources ?? []).join(",")}`;
   const visiblePage = pageScope === activeScope ? page : null;
 
@@ -105,11 +112,18 @@ export default function AgentObservabilityPage() {
     setPage(null);
     setCursor(undefined);
     setHistory([undefined]);
+    eventRequestRef.current?.abort();
+    setSelectedRun(null);
+    setDetail(null);
+    setEvents([]);
+    setEventCursor(null);
+    setEventSpanId(undefined);
     windowRef.current = null;
     void load();
     return () => {
       controller.abort();
       requestRef.current?.abort();
+      eventRequestRef.current?.abort();
     };
   }, [isAdmin, isManager, load, source]);
 
@@ -121,15 +135,48 @@ export default function AgentObservabilityPage() {
   };
 
   const openRun = async (run: AgentObservabilityRun) => {
+    eventRequestRef.current?.abort();
     setSelectedRun(run);
     setDetail(null);
+    setEvents([]);
+    setEventCursor(null);
+    setEventSpanId(undefined);
     setDetailLoading(true);
+    void loadEvents(run.run_id);
     try {
       setDetail(await getAgentObservabilityRunDetail(run.run_id));
     } catch {
       setDetail(null);
     } finally {
       setDetailLoading(false);
+    }
+  };
+
+  const loadEvents = async (
+    runId: string,
+    options: { spanId?: string; cursor?: string; append?: boolean } = {},
+  ) => {
+    eventRequestRef.current?.abort();
+    const controller = new AbortController();
+    eventRequestRef.current = controller;
+    setEventsLoading(true);
+    try {
+      const result = await getAgentObservabilityRunEvents(
+        runId,
+        { spanId: options.spanId, cursor: options.cursor, limit: 100 },
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      setEvents((current) => options.append ? [...current, ...result.items] : result.items);
+      setEventCursor(result.next_cursor);
+      setEventSpanId(options.spanId);
+    } catch {
+      if (!controller.signal.aborted) {
+        setEvents([]);
+        setEventCursor(null);
+      }
+    } finally {
+      if (!controller.signal.aborted) setEventsLoading(false);
     }
   };
 
@@ -245,7 +292,10 @@ export default function AgentObservabilityPage() {
       <Drawer
         title={selectedRun ? `Run ${selectedRun.run_id}` : "Run Inspector"}
         open={selectedRun !== null}
-        onClose={() => setSelectedRun(null)}
+        onClose={() => {
+          eventRequestRef.current?.abort();
+          setSelectedRun(null);
+        }}
         width={Math.min(760, window.innerWidth - 24)}
       >
         <Spin spinning={detailLoading}>
@@ -279,12 +329,56 @@ export default function AgentObservabilityPage() {
                       <Text type="secondary">
                         {span.duration_us == null ? "进行中/未知" : `${Math.round(span.duration_us / 1000)} ms`}
                       </Text>
+                      <Button
+                        size="small"
+                        type={eventSpanId === span.span_id ? "primary" : "default"}
+                        onClick={() => selectedRun && void loadEvents(selectedRun.run_id, { spanId: span.span_id })}
+                      >
+                        事件
+                      </Button>
                     </div>
                   </div>
                 ))}
               </div>
               {detail.spans_has_more && (
                 <Text type="secondary">已加载部分 Span；更多节点需要分页加载。</Text>
+              )}
+              <div className={styles.eventHeader}>
+                <Text strong>{eventSpanId ? "Span 事件" : "Run 事件"}</Text>
+                {eventSpanId && (
+                  <Button size="small" onClick={() => selectedRun && void loadEvents(selectedRun.run_id)}>
+                    全部事件
+                  </Button>
+                )}
+              </div>
+              <Spin spinning={eventsLoading}>
+                <div className={styles.eventList}>
+                  {events.map((event) => (
+                    <div className={styles.eventRow} key={event.event_id}>
+                      <div>
+                        <Text strong>{String(event.metadata.event_kind ?? event.event_name)}</Text>
+                        <Text type="secondary"> · {event.phase_key} · {event.local_seq}</Text>
+                      </div>
+                      <Text type="secondary">{new Date(event.occurred_at).toLocaleString()}</Text>
+                    </div>
+                  ))}
+                  {!eventsLoading && events.length === 0 && (
+                    <Text type="secondary">没有已投影的事件</Text>
+                  )}
+                </div>
+              </Spin>
+              {eventCursor && selectedRun && (
+                <Button
+                  size="small"
+                  loading={eventsLoading}
+                  onClick={() => void loadEvents(selectedRun.run_id, {
+                    spanId: eventSpanId,
+                    cursor: eventCursor,
+                    append: true,
+                  })}
+                >
+                  加载更多事件
+                </Button>
               )}
             </div>
           ) : (

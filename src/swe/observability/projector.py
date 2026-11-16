@@ -186,12 +186,12 @@ def _validate_protocol(event: dict[str, Any]) -> None:
             event[key],
         ):
             raise ValueError("invalid_protocol_value")
-    if any(
-        len(event[key].encode("utf-8")) > limit
-        for key, limit in _FIELD_BYTES.items()
-        if key in event
-    ):
-        raise ValueError("field_too_long")
+    for key, limit in _FIELD_BYTES.items():
+        value = event.get(key)
+        if value is not None and (
+            not isinstance(value, str) or len(value.encode("utf-8")) > limit
+        ):
+            raise ValueError("field_too_long")
     if (
         isinstance(event["local_seq"], bool)
         or not isinstance(event["local_seq"], int)

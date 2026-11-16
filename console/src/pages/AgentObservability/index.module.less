@@ -96,6 +96,50 @@
   gap: 8px;
 }
 
+.eventHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 12px;
+  border-top: 1px solid #e8eaee;
+}
+
+.eventList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.eventRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 34px;
+  padding: 4px 8px;
+  border-bottom: 1px solid #f0f1f3;
+
+  > span {
+    flex-shrink: 0;
+  }
+}
+
+.eventList::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.eventList::-webkit-scrollbar-thumb {
+  background: #b8bec8;
+  border-radius: 4px;
+}
+
+.eventList::-webkit-scrollbar-track {
+  background: #f1f2f4;
+}
+
 @media (max-width: 640px) {
   .page {
     padding: 16px 12px;

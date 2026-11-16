@@ -43,6 +43,7 @@ class SpanHandle:
             "span_type": span_type,
             "operation": operation,
             "name": name,
+            "kind": "INTERNAL",
             **{
                 key: value
                 for key, value in attributes.items()
@@ -242,6 +243,7 @@ class ObservabilityModelWrapper:
             "LLM",
             "chat",
             name="model.call",
+            kind="CLIENT",
             provider_key=self._provider_key,
             request_model_key=self._model_key,
             streaming=bool(getattr(self._model, "stream", False)),

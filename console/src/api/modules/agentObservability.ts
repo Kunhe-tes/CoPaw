@@ -67,6 +67,23 @@ export interface AgentObservabilityRunDetail {
   spans_has_more: boolean;
 }
 
+export interface AgentObservabilityEvent {
+  event_id: string;
+  event_name: string;
+  entity_kind: string;
+  entity_id: string;
+  phase_key: string;
+  local_seq: number;
+  occurred_at: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface AgentObservabilityEventPage {
+  items: AgentObservabilityEvent[];
+  next_cursor: string | null;
+  generated_at: string;
+}
+
 export interface RunQuery {
   sources?: string[];
   cursor?: string;
@@ -137,6 +154,21 @@ export function getAgentObservabilityRunDetail(
   const suffix = params.toString() ? `?${params.toString()}` : "";
   return request<AgentObservabilityRunDetail>(
     `/agent-observability/runs/${encodeURIComponent(runId)}${suffix}`,
+    { signal },
+  );
+}
+
+export function getAgentObservabilityRunEvents(
+  runId: string,
+  query: { spanId?: string; cursor?: string; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<AgentObservabilityEventPage> {
+  const params = new URLSearchParams();
+  if (query.spanId) params.set("span_id", query.spanId);
+  if (query.cursor) params.set("cursor", query.cursor);
+  params.set("limit", String(query.limit ?? 100));
+  return request<AgentObservabilityEventPage>(
+    `/agent-observability/runs/${encodeURIComponent(runId)}/events?${params.toString()}`,
     { signal },
   );
 }

@@ -316,3 +316,32 @@ class ObservabilityStore:
         params.append(limit)
         async with self.connection.acquire() as session:
             return await session.fetch_all(query, tuple(params))
+
+    async def list_events(
+        self,
+        *,
+        run_id: str,
+        source_ids: list[str],
+        limit: int,
+        span_id: str | None = None,
+        before: tuple[Any, str] | None = None,
+    ) -> list[dict[str, Any]]:
+        if not source_ids:
+            return []
+        placeholders = ",".join(["%s"] * len(source_ids))
+        query = (
+            "SELECT event_id,event_name,entity_kind,entity_id,phase_key,"
+            "local_seq,occurred_at,metadata_text FROM swe_agentobs_events "
+            f"WHERE run_id=%s AND source_key IN ({placeholders})"
+        )
+        params: list[Any] = [run_id, *[item.encode() for item in source_ids]]
+        if span_id:
+            query += " AND span_id=%s"
+            params.append(span_id)
+        if before:
+            query += " AND (occurred_at < %s OR (occurred_at = %s AND event_id < %s))"
+            params.extend([before[0], before[0], before[1]])
+        query += " ORDER BY occurred_at DESC,event_id DESC LIMIT %s"
+        params.append(limit)
+        async with self.connection.acquire() as session:
+            return await session.fetch_all(query, tuple(params))
