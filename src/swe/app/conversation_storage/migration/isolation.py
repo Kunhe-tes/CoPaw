@@ -20,3 +20,43 @@ def state_store(database, manifest):
 
     cls = SourceState if manifest.data.get("source_isolation") else TenantState
     return cls(database, manifest.migration_id)
+
+
+async def iter_states(states, keys, *, table, fields):
+    """Read advisory states in bounded groups; transitions still lock SQL rows."""
+    from itertools import islice
+
+    iterator = iter(keys)
+    while chunk := list(islice(iterator, 256)):
+        encoded = [states._keys(*key)[1:] for key in chunk]
+        placeholders = ",".join(
+            ["(" + ",".join(["%s"] * len(fields)) + ")"] * len(chunk),
+        )
+        rows = await states.db.fetch_all(
+            "SELECT "
+            + ",".join(fields)
+            + ",state FROM "
+            + table
+            + " WHERE migration_id=%s AND ("
+            + ",".join(fields)
+            + ") IN ("
+            + placeholders
+            + ")",
+            (
+                states.migration_id,
+                *(value for key in encoded for value in key),
+            ),
+        )
+        found = {
+            tuple(
+                (
+                    row[field].decode()
+                    if isinstance(row[field], bytes)
+                    else row[field]
+                )
+                for field in fields
+            ): row
+            for row in rows
+        }
+        for key in chunk:
+            yield key, found.get(key)

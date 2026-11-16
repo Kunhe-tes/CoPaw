@@ -51,6 +51,12 @@ def orchestration(monkeypatch, tmp_path):
         transition=AsyncMock(),
         publish=AsyncMock(),
     )
+
+    async def get_many(keys):
+        for key in keys:
+            yield key, await states.get(*key)
+
+    states.get_many = get_many
     monkeypatch.setattr(cli, "TenantState", lambda *_: states)
     journal = SimpleNamespace(
         _bindings=lambda: ("target", "source"),
@@ -83,6 +89,113 @@ def orchestration(monkeypatch, tmp_path):
         writer=writer,
         base=tmp_path,
     )
+
+
+async def test_unchanged_automatic_review_registers_only_once(
+    orchestration,
+    monkeypatch,
+):
+    fixture = orchestration
+    fixture.rows["a"]["state"] = "discovered"
+    resources = {"workers": 1, "io_workers": 1, "memory_bytes": 1024 * 1024}
+    await cli._auto_review(
+        fixture.db,
+        fixture.manifest,
+        fixture.guard,
+        resources,
+    )
+    monkeypatch.setattr(cli, "_one_tenant", AsyncMock())
+    await cli._run_registered(
+        "resume",
+        fixture.manifest,
+        fixture.base,
+        fixture.db,
+        fixture.guard,
+        fixture.base,
+        resources,
+    )
+    assert fixture.states.register.await_count == 1
+
+
+async def test_post_review_binding_conflict_still_stops_before_import(
+    orchestration,
+    monkeypatch,
+):
+    fixture = orchestration
+    fixture.rows["a"]["state"] = "discovered"
+    resources = {"workers": 1, "io_workers": 1, "memory_bytes": 1024 * 1024}
+    await cli._auto_review(
+        fixture.db,
+        fixture.manifest,
+        fixture.guard,
+        resources,
+    )
+    fixture.db.fetch_all.return_value[0]["source_binding_text"] = "conflict"
+    one = AsyncMock()
+    monkeypatch.setattr(cli, "_one_tenant", one)
+    with pytest.raises(ValueError, match="binding changed"):
+        await cli._run_registered(
+            "resume",
+            fixture.manifest,
+            fixture.base,
+            fixture.db,
+            fixture.guard,
+            fixture.base,
+            resources,
+        )
+    assert one.await_count == 0
+
+
+async def test_reviewed_manifest_reuses_atomic_evidence_registration(
+    orchestration,
+    monkeypatch,
+):
+    from swe.app.conversation_storage.migration import tenant_retry
+
+    fixture = orchestration
+    fixture.rows["b"]["state"] = "failed"
+
+    async def review(*args, **kwargs):
+        fixture.manifest.data = {
+            **fixture.manifest.data,
+            "tenant_review_revision": "accepted",
+            "workspaces": [
+                *fixture.manifest.data["workspaces"],
+                {
+                    "service_unit_id": "svc",
+                    "tenant_id": "b",
+                    "root": "/repaired",
+                },
+            ],
+        }
+        return {}
+
+    monkeypatch.setattr(tenant_retry, "review_retry", review)
+    resources = {"workers": 1, "io_workers": 1, "memory_bytes": 1024 * 1024}
+    await cli._auto_review(
+        fixture.db,
+        fixture.manifest,
+        fixture.guard,
+        resources,
+    )
+    roots = []
+
+    async def one(operation, view, *_args):
+        if view.key[1] == "b":
+            roots.extend(w["root"] for w in view.data["workspaces"])
+
+    monkeypatch.setattr(cli, "_one_tenant", one)
+    await cli._run_registered(
+        "resume",
+        fixture.manifest,
+        fixture.base,
+        fixture.db,
+        fixture.guard,
+        fixture.base,
+        resources,
+    )
+    assert roots == ["/frozen/b", "/repaired"]
+    assert fixture.states.register.await_count == 1
 
 
 async def run(fixture, operation="resume"):
