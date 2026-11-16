@@ -168,6 +168,17 @@ class PublicationDatabase:
 
     async def fetch_all(self, query, params=None):
         self.queries.append(query)
+        if " WHERE id IN (" in query and query.endswith(
+            "ORDER BY id FOR UPDATE",
+        ):
+            candidates = {
+                "sessions": self.session,
+                "chats": self.chat,
+                "turns": self.turn,
+            }
+            for table, row in candidates.items():
+                if "swe_conversation_" + table in query:
+                    return [deepcopy(row)] if row["id"] in params else []
         if "service_unit_key=%s AND id IN (" in query:
             assert query.count("%s") == len(params)
             if "swe_conversation_messages" in query:

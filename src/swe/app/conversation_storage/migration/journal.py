@@ -345,13 +345,28 @@ class MigrationJournal:
             )
         return kind.encode(), position.encode()
 
-    async def allocate_many(self, kind, positions):
-        """按有界事务分配消息票据；仅在提交确认后更新镜像。"""
+    async def allocate_many(
+        self,
+        kind,
+        positions,
+        *,
+        scope=None,
+        scope_kind="workspace",
+    ):
+        """按有界事务分配身份票据；仅在提交确认后更新镜像。"""
         from .batch_tickets import chunks, allocate_chunk
         from .disk_manifest import DiskMap
 
-        if kind != "message":
-            raise ValueError("batch ticket allocation supports message only")
+        if kind not in TICKET_KINDS:
+            raise ValueError(
+                "only five entity kinds may allocate integer tickets",
+            )
+        if kind == "publication":
+            if scope is None:
+                raise ValueError("publication assignment requires its scope")
+            BundleStore.path_for("0" * 64, scope, scope_kind=scope_kind)
+        elif scope is not None:
+            raise ValueError("only publication assignments have bundle scope")
         owner = asyncio.current_task()
         if self._allocation_owner is None:
             self._allocation_owner = owner
@@ -369,8 +384,15 @@ class MigrationJournal:
         async with self.db.acquire() as session:
             packet_limit = session.max_allowed_packet
         result = {}
-        for chunk in chunks(packet_limit, keys):
-            assignments = await allocate_chunk(self, kind, chunk)
+        extra = len(_json(list(scope.values)).encode()) + 1024 if scope else 0
+        for chunk in chunks(packet_limit, keys, extra_bytes=extra):
+            assignments = await allocate_chunk(
+                self,
+                kind,
+                chunk,
+                scope=scope,
+                scope_kind=scope_kind,
+            )
             if kind not in self.manifest.data["assignments"]:
                 self.manifest.data["assignments"][kind] = (
                     DiskMap()
@@ -513,7 +535,12 @@ class MigrationJournal:
 
     @staticmethod
     def _assignment(row, kind, *, scope=None, scope_kind="workspace"):
-        if row["id"] != row["target_id"] or not row["target_id"]:
+        if (
+            type(row["id"]) is not int
+            or type(row["target_id"]) is not int
+            or row["id"] != row["target_id"]
+            or row["target_id"] <= 0
+        ):
             raise ValueError("SQL journal integer ticket mapping is invalid")
         operation = _text(row["operation_key"])
         assignment = {

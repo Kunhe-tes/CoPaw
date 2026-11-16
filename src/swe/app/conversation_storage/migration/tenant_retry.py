@@ -14,14 +14,29 @@ from pathlib import Path
 from uuid import uuid4
 
 from .discovery import discover_services
-from .disk_manifest import iter_json
+from .disk_manifest import DiskMap, iter_json
 from .journal import BUSINESS_TABLES, JOBS, ENTRIES, MigrationJournal
 from .tenant_state import TenantState, _json
 from .v3_manifest import V3Manifest
 from .isolation import state_store
 from contextvars import ContextVar
+from contextlib import contextmanager
 
 _SOURCE_MODE = ContextVar("source_review_mode", default=False)
+_REVIEW_TICKETS = ContextVar("review_ticket_ownership", default=None)
+
+
+@contextmanager
+def _ticket_analysis():
+    # Reuse only during read-only retention. The final transaction rereads SQL.
+    analysis = {"task": asyncio.current_task()}
+    token = _REVIEW_TICKETS.set(analysis)
+    try:
+        yield
+    finally:
+        _REVIEW_TICKETS.reset(token)
+        if "owners" in analysis:
+            analysis["owners"].close()
 
 
 def _states(db, manifest):
@@ -225,6 +240,9 @@ def _ticket_owner(row, workspaces=(), shares=()):
 
 
 async def _no_data(db, migration_id, keys, workspaces=(), shares=()):
+    analysis = _REVIEW_TICKETS.get()
+    if analysis is not None and analysis["task"] is not asyncio.current_task():
+        raise RuntimeError("review ownership proof requires original SQL task")
     for key in keys:
         service, tenant = key[:2]
         source = key[2] if len(key) == 3 else None
@@ -281,6 +299,10 @@ async def _no_data(db, migration_id, keys, workspaces=(), shares=()):
                 )
         if source is not None:
             await _no_legacy_data(db, migration_id, key, shares)
+    await _no_tickets(db, migration_id, keys, workspaces, shares)
+
+
+async def _ticket_rows(db, migration_id):
     after = 0
     while True:
         rows = await db.fetch_all(
@@ -291,23 +313,68 @@ async def _no_data(db, migration_id, keys, workspaces=(), shares=()):
         )
         if not rows:
             return
-        for row in rows:
-            # Runtime ID tickets are allocated only by published runtime writers;
-            # tenant business rows above remain the authority for zero-data review.
-            if row.get("entry_kind") in ("runtime_id", b"runtime_id"):
-                continue
-            if _SOURCE_MODE.get() and row.get("entry_kind") in (
-                "retention",
-                b"retention",
-            ):
-                owner = await _retention_owner(db, migration_id, row, shares)
-            else:
-                owner = _ticket_owner(row, workspaces, shares)
-            if owner in keys:
-                raise _TenantReviewHasData(
-                    "tenant evidence cannot change after a journal ticket exists",
-                )
+        yield rows
         after = rows[-1]["id"]
+
+
+async def _ticket_ownership(db, migration_id, row, workspaces, shares):
+    # Runtime-ID tickets are unrelated reservations by published writers.
+    if row.get("entry_kind") in ("runtime_id", b"runtime_id"):
+        return None
+    if _SOURCE_MODE.get() and row.get("entry_kind") in (
+        "retention",
+        b"retention",
+    ):
+        return await _retention_owner(db, migration_id, row, shares)
+    return _ticket_owner(row, workspaces, shares)
+
+
+async def _no_tickets(db, migration_id, keys, workspaces, shares):
+    analysis = _REVIEW_TICKETS.get()
+    if analysis is None:
+        async for rows in _ticket_rows(db, migration_id):
+            for row in rows:
+                owner = await _ticket_ownership(
+                    db,
+                    migration_id,
+                    row,
+                    workspaces,
+                    shares,
+                )
+                if owner in keys:
+                    raise _TenantReviewHasData(
+                        "tenant evidence cannot change after a journal ticket exists",
+                    )
+        return
+    identity = (
+        id(db),
+        migration_id,
+        id(workspaces),
+        id(shares),
+        _SOURCE_MODE.get(),
+    )
+    if analysis.get("identity") != identity:
+        if "owners" in analysis:
+            analysis.pop("owners").close()
+        owners = DiskMap()
+        analysis["owners"] = owners
+        # Mark complete only after every ticket has a proven owner.
+        async for rows in _ticket_rows(db, migration_id):
+            for row in rows:
+                owner = await _ticket_ownership(
+                    db,
+                    migration_id,
+                    row,
+                    workspaces,
+                    shares,
+                )
+                if owner is not None:
+                    owners[_json(owner)] = True
+        analysis["identity"] = identity
+    if any(_json(key) in analysis["owners"] for key in keys):
+        raise _TenantReviewHasData(
+            "tenant evidence cannot change after a journal ticket exists",
+        )
 
 
 async def _legacy_publication_owner(db, migration_id, publication_id, shares):
@@ -599,34 +666,35 @@ def _restore_tenant(report, old, key):
 async def _retain_committed_failures(db, manifest, report, published=()):
     failures = {}
     old_tenants = {_key(item): item for item in manifest.data["tenants"]}
-    for tenant in list(report["tenants"]):
-        key = _key(tenant)
-        if key in published or (
-            tenant == old_tenants[key]
-            and _evidence(report, key) == _evidence(manifest.data, key)
-        ):
-            continue
-        try:
-            await _no_data(
-                db,
-                manifest.migration_id,
-                {key},
-                manifest.data["workspaces"],
-                manifest.data["shares"],
-            )
-        except _TenantReviewHasData:
-            # Do not revise already committed evidence merely to record a new
-            # failed candidate. The report's top-level blocker remains auditable.
-            failure = (
-                tenant
-                if tenant["state"] == "failed"
-                else {
-                    **tenant,
-                    "blockers": [{"code": "tenant_evidence_locked"}],
-                }
-            )
-            failures[key] = _review_failure(failure)
-            _restore_tenant(report, manifest.data, key)
+    with _ticket_analysis():
+        for tenant in list(report["tenants"]):
+            key = _key(tenant)
+            if key in published or (
+                tenant == old_tenants[key]
+                and _evidence(report, key) == _evidence(manifest.data, key)
+            ):
+                continue
+            try:
+                await _no_data(
+                    db,
+                    manifest.migration_id,
+                    {key},
+                    manifest.data["workspaces"],
+                    manifest.data["shares"],
+                )
+            except _TenantReviewHasData:
+                # Do not revise already committed evidence merely to record a new
+                # failed candidate. The report's top-level blocker remains auditable.
+                failure = (
+                    tenant
+                    if tenant["state"] == "failed"
+                    else {
+                        **tenant,
+                        "blockers": [{"code": "tenant_evidence_locked"}],
+                    }
+                )
+                failures[key] = _review_failure(failure)
+                _restore_tenant(report, manifest.data, key)
     return failures
 
 

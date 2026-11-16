@@ -3,6 +3,10 @@
 
 from types import SimpleNamespace
 
+import pytest
+
+from swe.app.conversation_storage.identity import WorkspaceScope
+
 from swe.app.conversation_storage.migration.journal import MigrationJournal
 from swe.app.conversation_storage.migration.preflight import DMLDatabase
 from tests.integrated.conversation_storage.conftest import (
@@ -20,8 +24,13 @@ def frozen_manifest():
     )
 
 
+@pytest.mark.parametrize(
+    "kind",
+    ["message", "turn", "session", "chat", "publication"],
+)
 async def test_mysql_mixed_tickets_preserve_real_noncontiguous_identities(
     conversation_test_database,
+    kind,
 ):
     db = conversation_test_database
     await apply_sql_script(
@@ -29,11 +38,24 @@ async def test_mysql_mixed_tickets_preserve_real_noncontiguous_identities(
         SQL_ROOT / "conversation_migration_control_tables.sql",
     )
     frozen = frozen_manifest()
+    options = (
+        {
+            "scope": WorkspaceScope(
+                "tenant",
+                "source",
+                "agent",
+                service_unit_id="svc",
+            ),
+        }
+        if kind == "publication"
+        else {}
+    )
     async with db.acquire() as session:
         journal = MigrationJournal(DMLDatabase(session, owner=db), frozen)
         first = await journal.allocate(
-            "message",
+            kind,
             "svc/source/session/message:0",
+            **options,
         )
     await db.execute(
         "INSERT INTO swe_conversation_migration_entries "
@@ -53,15 +75,17 @@ async def test_mysql_mixed_tickets_preserve_real_noncontiguous_identities(
             facade,
             frozen_manifest(),
         ).allocate_many(
-            "message",
+            kind,
             ["svc/source/session/message:0", "svc/source/session/message:1"],
+            **options,
         )
         repeated = await MigrationJournal(
             facade,
             frozen_manifest(),
         ).allocate_many(
-            "message",
+            kind,
             list(resumed),
+            **options,
         )
     assert resumed["svc/source/session/message:0"] == first
     assert resumed["svc/source/session/message:1"]["target_id"] > 10001
@@ -69,7 +93,7 @@ async def test_mysql_mixed_tickets_preserve_real_noncontiguous_identities(
     rows = await db.fetch_all(
         "SELECT id,target_id,source_key,operation_key FROM swe_conversation_migration_entries "
         "WHERE migration_id=%s AND entry_kind=%s",
-        (frozen.migration_id.encode(), b"message"),
+        (frozen.migration_id.encode(), kind.encode()),
     )
     assert len(rows) == 2
     for row in rows:
