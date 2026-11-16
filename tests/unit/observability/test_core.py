@@ -268,6 +268,275 @@ async def test_model_wrapper_records_first_nonempty_stream_chunk(monkeypatch):
     assert ended["finish_reason"] == "stop"
 
 
+@pytest.mark.asyncio
+async def test_model_wrapper_preserves_latest_stream_usage_snapshot(
+    monkeypatch,
+):
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+
+    class Model:
+        stream = True
+
+        async def __call__(self, *_args, **_kwargs):
+            async def chunks():
+                yield SimpleNamespace(
+                    content=[],
+                    usage=SimpleNamespace(input_tokens=2, output_tokens=1),
+                )
+                yield SimpleNamespace(
+                    content=[],
+                    usage=SimpleNamespace(input_tokens=3, output_tokens=4),
+                    metadata={"model": "actual-model"},
+                )
+
+            return chunks()
+
+    context = Observability().admit_run(
+        scope=Scope("svc", "src", "tenant", "agent"),
+        enabled=True,
+    )
+    with bind_context(context):
+        chunks = await ObservabilityModelWrapper(
+            Model(),
+            provider_key="provider",
+            model_key="requested-model",
+        )([])
+        async for _chunk in chunks:
+            pass
+    emitter.close()
+    ended = next(
+        json.loads(line)
+        for line in stream.getvalue().splitlines()
+        if '"event_name":"span.ended"' in line
+    )
+    assert ended["metrics"]["input_tokens"] == 3
+    assert ended["metrics"]["output_tokens"] == 4
+    assert "first_chunk_us" not in ended["metrics"]
+    assert "first_visible_text_us" not in ended["metrics"]
+    assert ended["response_model_key"] == "actual-model"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stream_chunks",
+    [[], [SimpleNamespace(content=[])]],
+)
+async def test_model_wrapper_keeps_empty_stream_usage_unknown(
+    monkeypatch,
+    stream_chunks,
+):
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+
+    class Model:
+        stream = True
+
+        async def __call__(self, *_args, **_kwargs):
+            async def chunks():
+                for chunk in stream_chunks:
+                    yield chunk
+
+            return chunks()
+
+    context = Observability().admit_run(
+        scope=Scope("svc", "src", "tenant", "agent"),
+        enabled=True,
+    )
+    with bind_context(context):
+        chunks = await ObservabilityModelWrapper(
+            Model(),
+            provider_key="provider",
+            model_key="requested-model",
+        )([])
+        async for _chunk in chunks:
+            pass
+    emitter.close()
+    ended = next(
+        json.loads(line)
+        for line in stream.getvalue().splitlines()
+        if '"event_name":"span.ended"' in line
+    )
+    assert ended["status"] == "succeeded"
+    assert "input_tokens" not in ended["metrics"]
+    assert "output_tokens" not in ended["metrics"]
+    assert "usage_known" not in ended["metrics"]
+    assert "first_chunk_us" not in ended["metrics"]
+    assert "first_visible_text_us" not in ended["metrics"]
+
+
+@pytest.mark.asyncio
+async def test_model_wrapper_records_stream_cancellation_and_closes_source(
+    monkeypatch,
+):
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+    source_closed = asyncio.Event()
+    stream_waiting = asyncio.Event()
+
+    class Model:
+        stream = True
+
+        async def __call__(self, *_args, **_kwargs):
+            async def chunks():
+                try:
+                    stream_waiting.set()
+                    yield SimpleNamespace(
+                        content=[{"type": "text", "text": "private output"}],
+                    )
+                    await asyncio.Event().wait()
+                finally:
+                    source_closed.set()
+
+            return chunks()
+
+    context = Observability().admit_run(
+        scope=Scope("svc", "src", "tenant", "agent"),
+        enabled=True,
+    )
+    with bind_context(context):
+        chunks = await ObservabilityModelWrapper(
+            Model(),
+            provider_key="provider",
+            model_key="model",
+        )([])
+
+    async def consume():
+        async for _chunk in chunks:
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(stream_waiting.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    emitter.close()
+    ended = next(
+        json.loads(line)
+        for line in stream.getvalue().splitlines()
+        if '"event_name":"span.ended"' in line
+    )
+    assert ended["status"] == "cancelled"
+    assert source_closed.is_set()
+    assert "private output" not in stream.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_model_wrapper_records_aclose_and_closes_source(monkeypatch):
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+    source_closed = asyncio.Event()
+
+    class Model:
+        stream = True
+
+        async def __call__(self, *_args, **_kwargs):
+            async def chunks():
+                try:
+                    yield SimpleNamespace(
+                        content=[{"type": "text", "text": "private output"}],
+                    )
+                    await asyncio.Event().wait()
+                finally:
+                    source_closed.set()
+
+            return chunks()
+
+    context = Observability().admit_run(
+        scope=Scope("svc", "src", "tenant", "agent"),
+        enabled=True,
+    )
+    with bind_context(context):
+        chunks = await ObservabilityModelWrapper(
+            Model(),
+            provider_key="provider",
+            model_key="model",
+        )([])
+        iterator = chunks.__aiter__()
+        assert (await anext(iterator)).content
+        await iterator.aclose()
+    emitter.close()
+    ended = next(
+        json.loads(line)
+        for line in stream.getvalue().splitlines()
+        if '"event_name":"span.ended"' in line
+    )
+    assert ended["status"] == "cancelled"
+    assert source_closed.is_set()
+    assert "private output" not in stream.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_model_wrapper_keeps_concurrent_run_spans_isolated(monkeypatch):
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+
+    class Model:
+        stream = False
+
+        async def __call__(self, messages, *_args, **_kwargs):
+            await asyncio.sleep(0)
+            call_id = messages[0]["call_id"]
+            return SimpleNamespace(
+                content=[{"type": "text", "text": f"private-{call_id}"}],
+                metadata={"model": f"response-{call_id}"},
+            )
+
+    observer = Observability()
+    contexts = {
+        call_id: observer.admit_run(
+            scope=Scope("svc", "src", call_id, "agent"),
+            enabled=True,
+        )
+        for call_id in ("first", "second")
+    }
+    wrapper = ObservabilityModelWrapper(
+        Model(),
+        provider_key="provider",
+        model_key="requested-model",
+    )
+
+    async def invoke(call_id):
+        with bind_context(contexts[call_id]):
+            return await wrapper([{"call_id": call_id}])
+
+    await asyncio.gather(invoke("first"), invoke("second"))
+    emitter.close()
+    records = [json.loads(line) for line in stream.getvalue().splitlines()]
+    ended = [
+        record for record in records if record["event_name"] == "span.ended"
+    ]
+    run_to_response = {
+        record["obs_run_id"]: record["response_model_key"] for record in ended
+    }
+    assert run_to_response == {
+        context.obs_run_id: f"response-{call_id}"
+        for call_id, context in contexts.items()
+    }
+    assert "private-first" not in stream.getvalue()
+    assert "private-second" not in stream.getvalue()
+
+
 def test_cancellation_is_recorded_and_propagated():
     stream = io.StringIO()
     emitter = JsonlEmitter(EmitterConfig(), stream=stream)

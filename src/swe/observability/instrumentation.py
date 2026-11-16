@@ -317,6 +317,9 @@ class ObservabilityModelWrapper:
         except asyncio.CancelledError:
             handle.end(status="cancelled", technical_status="cancelled")
             raise
+        except GeneratorExit:
+            handle.end(status="cancelled", technical_status="cancelled")
+            raise
         except Exception as exc:
             handle.end(
                 status="failed",
@@ -326,6 +329,12 @@ class ObservabilityModelWrapper:
             )
             raise
         finally:
+            close = getattr(stream, "aclose", None)
+            if close is not None:
+                try:
+                    await close()
+                except Exception:
+                    pass
             _current_model_span.reset(token)
 
 

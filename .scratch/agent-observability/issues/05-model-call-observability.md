@@ -32,3 +32,5 @@ Priority: P0
 2026-11-16：预备实现独立 `ObservabilityModelWrapper`，位于 RetryChatModel 外层，记录逻辑 LLM Span、受控 provider/request model、非流式最终 Usage、流式首个有效 chunk 和取消/异常状态；metrics 合并保留实测 duration，正文和 prompt 不进入事件。确定性单测 26 passed，真实普通 Runner MySQL 链路已验证主执行，但该票仍保持 `open`，等待 Ticket 04 完成树/Inspector，并需补齐模型 Span 的真实投影/API/UI验收及 Chromium 108 基线。
 
 2026-11-16：使用独立 `swe_agentobs_codex_20261116_test` MySQL 库完成真实 Runner 验证：生命周期/结算与普通、专家主执行共 6 passed；Inbox 投影、授权 Run 查询和事件分页 2 passed；observability 单测 36 passed；Console typecheck、页面 Vitest 6 passed、相关 ESLint 通过。MySQL readiness 返回 `ready=true`，无缺表、列或索引。真实 Runner 断言覆盖 LLM Span 的 request/response model、来源、streaming、finish reason、Usage、API 查询及非流式首输出保持 null。未连接或写入业务库。Chromium 108.0.5359.95、当前浏览器及 `hideMenu=true` 下新增 LLM Inspector 展示仍未验收；流式取消、无输出、Usage 未知及并发上下文的端到端边界也未全部覆盖，因此本票继续保持 `open`。
+
+2026-11-16：补充模型包装器边界回归：流式 Usage 使用最终累计快照而非逐帧相加；空输出/无 Usage 保持 token 与首输出延迟未知；Task cancel 与 async generator `aclose()` 均以 cancelled 结束 Span 并关闭源流；并发 Run 共用包装器时身份隔离，正文不入日志。`tests/unit/observability` 与 Runner 生命周期集成入口合计 41 passed、6 skipped（该次未提供真实 MySQL 环境变量）；Ticket 04/05 真实 MySQL 集成此前另行实测通过。目标 pre-commit 通过。Ticket 仍保持 open，浏览器及完整 UI 验收尚未完成。
