@@ -324,6 +324,7 @@ class ImportBatch:
     commit_plan: object | None = None
     kind: str = "offline_import"
     epoch: int | None = None
+    legacy_locks: dict | None = None
 
 
 class ConversationImporter:
@@ -551,6 +552,8 @@ class ConversationImporter:
         if current["state"] == "committed":
             from ..chat_mutations import load_metadata_json
 
+            body = await self._retained_message_plan(current, body, rows, spec)
+
             await self.store.verify_batch(
                 request,
                 assignment["target_id"],
@@ -561,19 +564,40 @@ class ConversationImporter:
             await self._batch_finished(position)
             return current
         await self._set_batch_state(position, "importing")
+        resumed = bool(current.get("durable_at"))
         if not current.get("durable_at"):
             path = self.bundles.root / assignment["relative_path"]
             if path.exists():
+                resumed = True
                 await self.store.confirm_bundle(operation)
             else:
                 await self.store.write_bundle(operation, [body, *blocks])
+        current = await self.store.get(operation)
+        if resumed:
+            body = await self._retained_message_plan(current, body, rows, spec)
         await self.store.verify_blocks(
-            await self.store.get(operation),
+            current,
             [body, *blocks],
         )
         result = await self.store.commit(operation)
         await self._batch_finished(position)
         return result
+
+    async def _retained_message_plan(self, row, body, rows, spec):
+        if spec.legacy_locks is None:
+            return body
+        from .install_records import plan_block
+        from .plan_compatibility import retained_plan
+
+        legacy = plan_block(self.target, rows, spec.updates, spec.legacy_locks)
+        return await self.store._nas_io(
+            row["operation_key"].decode(),
+            retained_plan,
+            self.store.bundles,
+            row,
+            body,
+            legacy,
+        )
 
     def _batch_committed(self, position):
         state = self.manifest.data["batches"].get(position, "planned")
@@ -846,13 +870,34 @@ class ConversationImporter:
                 rows,
                 blocks,
                 spec=ImportBatch(
-                    locks={
+                    legacy_locks={
                         "sessions": [sid],
                         "chats": list(chats.values()),
-                        "turns": list(
-                            self.turn_ids.get((sid, key))
+                        "turns": [
+                            self.turn_ids[(sid, key)]
                             for key in turns
                             if (sid, key) in self.turn_ids
+                        ],
+                    },
+                    locks={
+                        "sessions": [sid],
+                        "chats": sorted(
+                            {
+                                item["values"][key]
+                                for item in rows
+                                for key in (
+                                    "origin_chat_id",
+                                    "archive_chat_id",
+                                )
+                                if item["values"].get(key) is not None
+                            },
+                        ),
+                        "turns": sorted(
+                            {
+                                item["values"]["turn_id"]
+                                for item in rows
+                                if item["values"].get("turn_id") is not None
+                            },
                         ),
                     },
                     session_id=sid,
@@ -1305,6 +1350,14 @@ class ConversationImporter:
 class ParallelWorkspaceImporter(ConversationImporter):
     """Import identities, Sessions and archives for one isolated workspace."""
 
+    async def _retained_message_plan(self, row, body, rows, spec):
+        if spec.legacy_locks is None:
+            return body
+        from .install_records import plan_block
+
+        legacy = plan_block(self.target, rows, spec.updates, spec.legacy_locks)
+        return await self.context.retained_plan(row, body, legacy)
+
     def __init__(self, context, target, *, batch_size=128):
         from types import SimpleNamespace
 
@@ -1398,6 +1451,9 @@ class ParallelWorkspaceImporter(ConversationImporter):
             position=position,
         )
         if current["state"] == "committed":
+            body = await self._retained_message_plan(current, body, rows, spec)
+            expected = load_metadata_json(body.content)
+            expected_blocks = [body, *blocks]
             await self.context.verify_batch(
                 request,
                 assignment["target_id"],
@@ -1408,16 +1464,23 @@ class ParallelWorkspaceImporter(ConversationImporter):
             await self._batch_finished(position)
             return current
         await self._set_batch_state(position, "importing")
+        resumed = bool(current.get("durable_at"))
         if not current.get("durable_at"):
             if await self.context.bundle_exists(current):
+                resumed = True
                 await self.context.confirm_bundle(request.operation_key)
             else:
                 await self.context.write_bundle(
                     request.operation_key,
                     expected_blocks,
                 )
+        current = await self.context.store("get", request.operation_key)
+        if resumed:
+            body = await self._retained_message_plan(current, body, rows, spec)
+        expected = load_metadata_json(body.content)
+        expected_blocks = [body, *blocks]
         await self.context.verify_blocks(
-            await self.context.store("get", request.operation_key),
+            current,
             expected_blocks,
         )
         result = await self.context.commit(

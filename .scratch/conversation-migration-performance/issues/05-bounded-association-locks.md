@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 - [ ] 消息批次只声明必要 Session 与本批实际引用的 Chat、Turn，避免每批传入整个 Session 的 Turn 集合。
 - [ ] 集合查询保持固定表顺序和确定 ID 组织，受行数和参数预算限制；缺失 ID 在结果中显式处理。
