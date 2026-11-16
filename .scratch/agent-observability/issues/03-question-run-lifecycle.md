@@ -49,3 +49,5 @@ Priority: P0
 2026-11-16：新增真实普通主对话集成用例：本地确定性 Provider 驱动真实 `AgentRunner.query_handler`、SWEAgent/RetryChatModel 和 admission，随后验证独立 JSONL、白名单脱敏、隔离 MySQL 投影及 manager API；该用例与 lease 分类用例合计通过 observability 集成回归。真实 Provider 网络调用、专家主 Agent 完整执行和指定 Chromium 108.0.5359.95 仍未验收。
 
 2026-11-16：将真实 Runner 用例扩展为普通与专家主执行两种模式。专家模式由服务端 ExpertMain Registry 注册受限快照并校验请求身份，实际 SWEAgent 在确定性 Provider 上完成问题；输出携带 `execution_identity.kind=expert_main`，Run/Attempt 生命周期经 JSONL、隔离 MySQL 投影及 manager API 验证。两种模式均通过。Ticket 继续保持 claimed：指定 Chromium 108.0.5359.95/360 极速模式与真实外网 Provider 尚未验收。
+
+2026-11-16：进一步让生命周期与模型 Span 共用生产同款的模块级 default emitter，在真实标准/专家 Runner MySQL 用例验证同一 JSONL 同时包含 Run/Attempt 和 LLM Span；投影后数据库与 Run 详情 API 的 input/output Token 均与 Span 结束事件一致。此断言发现并修复 span UPSERT 未合并结束事件 Token 的缺陷。两种模式 2 passed，observability 单元/模型关键路径 39 passed，相关 pre-commit 全部通过。仍待指定 Chromium 108.0.5359.95/360 验收和真实外网 Provider 验收。

@@ -734,7 +734,10 @@ class InboxProjector:
                 "IF(ended_at IS NULL,COALESCE(VALUES(status),status),status)),"
                 "ended_at=COALESCE(ended_at,VALUES(ended_at)),"
                 "technical_status=COALESCE(VALUES(technical_status),technical_status),has_error=COALESCE(VALUES(has_error),has_error),"
-                "error_type=COALESCE(VALUES(error_type),error_type),duration_us=COALESCE(VALUES(duration_us),duration_us),metadata_text=VALUES(metadata_text)",
+                "error_type=COALESCE(VALUES(error_type),error_type),duration_us=COALESCE(VALUES(duration_us),duration_us),"
+                "input_tokens=COALESCE(VALUES(input_tokens),input_tokens),"
+                "output_tokens=COALESCE(VALUES(output_tokens),output_tokens),"
+                "metadata_text=VALUES(metadata_text)",
                 (
                     event["obs_span_id"],
                     run_id,

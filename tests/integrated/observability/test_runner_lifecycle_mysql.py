@@ -174,6 +174,8 @@ async def _assert_projected_run_available(
     if run_end_event:
         assert attempts[0]["ended_at"] < row["ended_at"]
 
+    llm_span = await _assert_llm_span_projection(store, records, run_id)
+
     api = FastAPI()
     api.state.agent_observability_store = store
 
@@ -195,11 +197,45 @@ async def _assert_projected_run_available(
                 "end": window_end,
             },
         )
+        detail_response = await client.get(
+            f"/agent-observability/runs/{run_id}",
+            headers={"X-User-Role": "manager"},
+        )
     assert response.status_code == 200
     api_row = next(
         item for item in response.json()["items"] if item["run_id"] == run_id
     )
     assert api_row["status"] == expected_status
+    if llm_span is not None:
+        assert detail_response.status_code == 200
+        api_llm_span = next(
+            span
+            for span in detail_response.json()["spans"]
+            if span["span_type"] == "LLM"
+        )
+        assert api_llm_span["input_tokens"] == llm_span["input_tokens"]
+        assert api_llm_span["output_tokens"] == llm_span["output_tokens"]
+
+
+async def _assert_llm_span_projection(store, records, run_id):
+    model_end = next(
+        (
+            record
+            for record in records
+            if record["event_name"] == "span.ended"
+            and record["span_type"] == "LLM"
+        ),
+        None,
+    )
+    if model_end is None:
+        return None
+    projected_spans = await store.list_spans(run_id=run_id, limit=50)
+    llm_span = next(
+        span for span in projected_spans if span["span_type"] == "LLM"
+    )
+    assert llm_span["input_tokens"] == model_end["metrics"]["input_tokens"]
+    assert llm_span["output_tokens"] == model_end["metrics"]["output_tokens"]
+    return llm_span
 
 
 def _make_runner_case(
@@ -447,7 +483,11 @@ async def test_runner_admission_settlement_emits_and_projects_one_run(
     monkeypatch.setattr(
         runner_lifecycle,
         "_OBSERVABILITY",
-        Observability(emitter),
+        Observability(),
+    )
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
     )
     connection = DatabaseConnection(_config())
     await connection.connect()
@@ -549,7 +589,11 @@ async def test_real_agent_runner_question_emits_and_projects_one_run(
     monkeypatch.setattr(
         runner_lifecycle,
         "_OBSERVABILITY",
-        Observability(emitter),
+        Observability(),
+    )
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
     )
     connection = DatabaseConnection(_config())
     await connection.connect()
@@ -624,6 +668,8 @@ async def test_real_agent_runner_question_emits_and_projects_one_run(
             "attempt.started",
         ]
         assert event_names[-2:] == ["attempt.ended", "run.ended"]
+        assert event_names.count("span.started") == 1
+        assert event_names.count("span.ended") == 1
         if expert_main:
             assert any(
                 getattr(message, "metadata", {})
