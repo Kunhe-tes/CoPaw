@@ -24,11 +24,11 @@ from tests.integrated.conversation_storage.conftest import (
 )
 
 
-def _tenant(root, tenant):
+def _tenant(root, tenant, source_id="SRC"):
     from swe.app.runner.models import ChatSpec, ChatsFile
     from uuid import uuid4
 
-    folder = root / encode_scope_id(tenant, "SRC")
+    folder = root / encode_scope_id(tenant, source_id)
     workspace = folder / "workspaces" / "agent"
     workspace.mkdir(parents=True)
     (workspace / "sessions").mkdir()
