@@ -43,6 +43,14 @@ function statusColor(status: string | null) {
   return "default";
 }
 
+function isActiveStatus(status: string | null | undefined) {
+  return (
+    status === "accepted" ||
+    status === "running" ||
+    status === "waiting_approval"
+  );
+}
+
 function spanStatusLabel(span: AgentObservabilitySpan) {
   return span.ended_at ? span.status ?? "终态未知" : "未观察到结束";
 }
@@ -422,6 +430,12 @@ export default function AgentObservabilityPage() {
         if (!current || current.run.run_id !== refreshed.run.run_id) {
           return current;
         }
+        const refreshedSpanIds = new Set(
+          refreshed.spans.map((span) => span.span_id),
+        );
+        const hasLoadedLaterPages = current.spans.some(
+          (span) => !refreshedSpanIds.has(span.span_id),
+        );
         const spans = new Map(
           current.spans.map((span) => [span.span_id, span]),
         );
@@ -436,8 +450,9 @@ export default function AgentObservabilityPage() {
               left.span_id.localeCompare(right.span_id),
           ),
           spans_has_more: current.spans_has_more || refreshed.spans_has_more,
-          spans_next_cursor:
-            refreshed.spans_next_cursor ?? current.spans_next_cursor,
+          spans_next_cursor: hasLoadedLaterPages
+            ? current.spans_next_cursor
+            : refreshed.spans_next_cursor,
         };
       });
     } catch {
@@ -449,8 +464,20 @@ export default function AgentObservabilityPage() {
     }
   }, [detailLoading, selectedAttemptId, selectedRun, spansLoading]);
 
+  const rootStatus = detail?.run.status ?? selectedRun?.status;
+  const hasKnownActiveExecution = Boolean(
+    selectedRun &&
+      (isActiveStatus(rootStatus) ||
+        detail?.attempts.some(
+          (attempt) => !attempt.ended_at && isActiveStatus(attempt.status),
+        ) ||
+        detail?.spans.some(
+          (span) => !span.ended_at && isActiveStatus(span.status),
+        )),
+  );
+
   useEffect(() => {
-    if (!selectedRun) return;
+    if (!selectedRun || !hasKnownActiveExecution) return;
     const timer = window.setInterval(() => {
       void refreshRunDetail();
     }, 5000);
@@ -464,7 +491,7 @@ export default function AgentObservabilityPage() {
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [refreshRunDetail, selectedRun]);
+  }, [hasKnownActiveExecution, refreshRunDetail, selectedRun]);
 
   const columns: ColumnsType<AgentObservabilityRun> = [
     {

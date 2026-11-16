@@ -485,6 +485,109 @@ describe("AgentObservabilityPage", () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
     expect(mocks.getDetail).toHaveBeenCalledTimes(2);
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "visible",
+    });
+  });
+
+  it("stops polling after all known execution is terminal but keeps manual refresh", async () => {
+    mocks.listRuns.mockResolvedValueOnce({
+      items: [
+        {
+          run_id: "run-a",
+          source_key: "source-a",
+          tenant_key: "tenant-a",
+          agent_key: "agent-a",
+          chat_key: "chat-a",
+          root_question_key: "question-a",
+          started_at: "2026-11-15T00:00:00Z",
+          ended_at: "2026-11-15T00:00:02Z",
+          status: "succeeded",
+          quality: "observed",
+          duration_us: 2000000,
+          llm_calls: 0,
+          tool_calls: 0,
+          input_tokens: null,
+          output_tokens: null,
+          span_count: 1,
+          error_span_count: 0,
+        },
+      ],
+      next_cursor: null,
+      generated_at: "2026-11-15T00:00:03Z",
+      window_start: "2026-11-14T00:00:00Z",
+      window_end: "2026-11-15T00:00:00Z",
+    });
+    mocks.getDetail.mockResolvedValueOnce({
+      run: { run_id: "run-a", status: "succeeded" },
+      attempts: [
+        {
+          attempt_id: "attempt-a",
+          run_id: "run-a",
+          attempt_index: 1,
+          predecessor_attempt_id: null,
+          started_at: "2026-11-15T00:00:00Z",
+          ended_at: "2026-11-15T00:00:02Z",
+          status: "succeeded",
+          duration_us: 2000000,
+        },
+      ],
+      generated_at: "2026-11-15T00:00:03Z",
+      spans: [
+        {
+          span_id: "span-a",
+          run_id: "run-a",
+          attempt_id: "attempt-a",
+          parent_span_id: null,
+          span_type: "Agent",
+          operation: "execute",
+          kind: "SERVER",
+          name: "agent.execute",
+          step_index: null,
+          started_at: "2026-11-15T00:00:00Z",
+          ended_at: "2026-11-15T00:00:02Z",
+          status: "succeeded",
+          technical_status: "OK",
+          has_error: 0,
+          error_type: null,
+          quality: "observed",
+          duration_us: 2000000,
+          time_to_first_chunk_us: null,
+          time_to_first_visible_text_us: null,
+          input_tokens: null,
+          output_tokens: null,
+          model_key: null,
+          provider_key: null,
+          request_model_key: null,
+          response_model_key: null,
+          model_key_source: null,
+          streaming: null,
+          finish_reason: null,
+        },
+      ],
+      spans_has_more: false,
+      spans_next_cursor: null,
+    });
+    render(<AgentObservabilityPage />);
+    expect(await screen.findByText("question-a")).toBeInTheDocument();
+    vi.useFakeTimers();
+    await act(async () => {
+      fireEvent.click(screen.getByText("question-a"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mocks.getDetail).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10000);
+    });
+    expect(mocks.getDetail).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "刷新 Run 详情" }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mocks.getDetail).toHaveBeenCalledTimes(2);
   });
 
   it("reloads the scoped list when the active Source changes", async () => {
