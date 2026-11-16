@@ -54,7 +54,7 @@ export SWE_TEST_DB_NAME=test_conversation_performance
 
 该基线尚未接入bundle计数钩子，输出中的0表示未观测，不能解释为没有文件IO。最终实现须使用接线后的版本另报该指标；SQL/事务对照仍使用相同观察边界。该次未做真实NAS、万级或生产验收。最终对照与组合故障验收待ticket10完成，不据此声明整体性能目标已完成。
 
-## 最终组合验收记录（持续更新）
+## 最终组合验收记录
 
 截至2026-11-16，01–09的实现已合入集成分支；09采用测量后的保守决策：记录binding序列化和manifest持久化次数、字节、耗时，保留原有准确序列化及全部检查点。30 source的隔离本地测量中编码约0.000741秒，尚不足以证明增加可变证据缓存值得其可靠性成本；该测量不含数据库/业务导入，不代表端到端加速。最终CLI报告同时保留`binding_*`及`manifest_*`指标。
 
@@ -70,9 +70,32 @@ export SWE_TEST_DB_NAME=test_conversation_performance
 
 关联锁测试最初错误地在`DatabaseSession`调用事务接口，已由`ce15aea3a`修正并通过上述实际运行；不将修正前失败计为通过。中间版本正常源性能试跑为184.963秒、2419次execute、232次事务，只含01/02/03/06；混合场景遇到网络2013并全局停止、`io_drained=true`，此失败不是最终验收成功证据，也不用于性能收益结论。
 
+### 最终同环境性能对照
+
+中央运行器在01–09全部合入版本`ce182a17f`（随后`8bbfaacc9`仅格式化指标捕获）执行相同代表性fixture，**2 passed in 255.95 s**。与`cb6430e73`基线同为macOS/Python 3.12、本地临时输入、同一获准远程MySQL环境、3 source/3 workspace/128输入消息、workers=3/io-workers=2/128 MiB，无人工IO延迟；父/子测试库全部清理。远程时延和服务器负载存在波动，不以一次墙钟差异承诺普遍倍数。
+
+| 场景 | 基线墙钟→最终 | execute尝试 | BEGIN/COMMIT尝试 |
+| --- | ---: | ---: | ---: |
+| 三个正常source首次migrate | 229.499→124.960 s | 2922→2421 | 358/358→231/231 |
+| 一个running Turn失败、其余发布 | 217.765→104.449 s | 2723→2218 | 329/329→202/202 |
+| 修复失败source，原manifest重跑 | 25.754→14.889 s | 267→264 | 34/34→33/33 |
+| 全部已发布后原manifest重复运行 | 2.800→1.269 s | 25→18 | 最终1/1 |
+
+最终正常场景prepare 1.150秒；migrate阶段import 32.734秒、verify 87.200秒、最后源复查1.186秒、publish 0.826秒，数据库execute累计104.557秒。完整验证仍是主要瓶颈，继续保留全部语义比较。混合场景prepare 1.260秒、import 21.800秒、verify 78.558秒；修复重跑automatic_review 1.864秒、import 9.253秒、verify 1.685秒。并发阶段、数据库累计等待不能相加。
+
+最终bundle打开/索引解析为：正常首次36/29，全部已发布重复0/0，混合首次26/21，修复重跑10/8；基线未接线，故不宣称这些计数的前后下降比例。单次多块读取索引一次由本地真实文件计数回归独立证明。
+
+正常首次binding编码7次/43652字节/0.000596秒，manifest写6次/129913字节/0.018726秒；混合首次6次/37416字节/0.000349秒，manifest写6次/127269字节/0.012101秒；修复重跑8次/49932字节/0.000418秒，manifest写3次/112355字节/0.009243秒。全部已发布重复运行manifest写0次。09保留检查点的决定符合实测，未以缓存或降低持久性争取收益。
+
+正常首次RSS采样峰值214515712字节（约204.6 MiB）、登记临时数据81638字节；混合首次119062528/81743字节，修复重跑121044992/4326字节。128 MiB是解析/共享资源门禁，进程RSS包含解释器及依赖，并非RSS硬上限；相对基线约192 MiB未证明进程内存下降。各次migrate退出2符合待schema最终收口语义；混合首轮另含坏source，修复后3个published且failed=0。
+
+SQL形态另有确定性计数证据：513条Message为6个100行上限INSERT，513条已提交记录为3次最多256 ID查询，批量票据受100行/256 KiB/服务器packet预算限制；这些本地协议回归已在1829项组合通过中，不将整条CLI execute数误称为只有业务INSERT。
+
+最终独立复核另发现单个合法8 MiB artifact加元数据时聚合读取上限误拒绝，正在独立修正；以上性能fixture未触发该边界。最终完成状态须等待修正与回归，不能用本表掩盖该发现。
+
 ### 本地组合回归
 
-最终测试分支`8bbfaacc9`运行全部`tests/unit/app/conversation_storage`、五个相关CLI模块、`tests/unit/database`及`test_legacy_roundtrip.py`：**1829 passed，5 skipped，72.52 s**。五项skip是本地未配置真实数据库的legacy roundtrip用例，不作为MySQL语义验收证据；本地门禁/文件/领域回归全部通过。新增测试及指标捕获修改均通过正常项目提交hooks（AST、编码、密钥扫描、格式、mypy、flake8、pylint），未跳过检查。最终组合数据库性能结果仍由中央运行器回填。
+最终测试分支`8bbfaacc9`运行全部`tests/unit/app/conversation_storage`、五个相关CLI模块、`tests/unit/database`及`test_legacy_roundtrip.py`：**1829 passed，5 skipped，72.52 s**。五项skip是本地未配置真实数据库的legacy roundtrip用例，不作为MySQL语义验收证据；本地门禁/文件/领域回归全部通过。新增测试及指标捕获修改均通过正常项目提交hooks（AST、编码、密钥扫描、格式、mypy、flake8、pylint），未跳过检查。最终组合数据库性能结果见下节；完整语义回归与独立复核修正分别报告。
 
 ### 覆盖与边界
 
@@ -80,7 +103,7 @@ export SWE_TEST_DB_NAME=test_conversation_performance
 
 | 要求 | 主要用例 | 证据层级 |
 | --- | --- | --- |
-| 原prepare→migrate、多个小source及128消息source | `test_performance_workflow_mysql.py` | 最终同环境对照待中央结果 |
+| 原prepare→migrate、多个小source及128消息source | `test_performance_workflow_mysql.py` | 真实MySQL：2 passed，255.95 s；详见最终对照 |
 | 同租户双source、坏source跳过、独立准入、补迁不重读线上兄弟旧输入 | `test_tenant_workflow_mysql.py::test_same_tenant_source_retry_preserves_published_sibling` | `c5f52b4a1`真实MySQL：1 passed，35.47 s |
 | 分享、归档、事件、checkpoint、多Session/Turn/Message及中断后原作业恢复 | `test_parallel_import_mysql.py`复用`test_v3_migration_mysql.py`；既有`test_legacy_roundtrip.py` | 组合回归与中央MySQL结果分开报告 |
 | 空/满/跨块、字段形态、packet、大字段、逐行语义核对及回滚 | `test_offline_record_batching.py`、`test_batch_tickets.py` | 本地协议/领域测试；真实身份另见上表 |
@@ -91,7 +114,7 @@ export SWE_TEST_DB_NAME=test_conversation_performance
 
 新增用例已在`c5f52b4a1`真实MySQL通过（1 passed，35.47 s），父/子测试库已清理。用例针对可能的tenant级误准入或补迁误覆盖：两个source同属alice，四个旧根完全相同且NAS独立；正常兄弟发布后增加Agent、更新标题并新增Chat，破坏其旧session输入使重读可被观察，再修复坏source并使用原manifest迁移。断言未指定source、坏source及未知source不能准入，线上兄弟完整行与config保持不变，修复后只有对应source获得准入。
 
-最终范围仍不包括真实NAS、万级基线、生产部署、现场放行或固定旧镜像回滚。同租户CLI已由中央运行器真实验证；本文尚待最终性能和全套回归结果后关闭ticket10；不得以本节中单项通过替代组合验收。
+最终范围仍不包括真实NAS、万级基线、生产部署、现场放行或固定旧镜像回滚。同租户CLI已由中央运行器真实验证；本文尚待最终独立复核发现的8 MiB聚合读取预算修正及验证后关闭ticket10；不得以本节中单项通过替代组合验收。
 
 ## 运维执行与恢复
 
