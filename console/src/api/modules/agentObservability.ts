@@ -55,6 +55,7 @@ export interface AgentObservabilitySpan {
   technical_status: string | null;
   has_error: number | null;
   error_type: string | null;
+  quality: string;
   duration_us: number | null;
   time_to_first_chunk_us: number | null;
   time_to_first_visible_text_us: number | null;
@@ -73,6 +74,7 @@ export interface AgentObservabilityRunDetail {
   run: AgentObservabilityRun;
   attempts: AgentObservabilityAttempt[];
   spans: AgentObservabilitySpan[];
+  generated_at: string;
   spans_has_more: boolean;
   spans_next_cursor?: string | null;
 }
@@ -179,7 +181,9 @@ export function getAgentObservabilityRunEvents(
   if (query.cursor) params.set("cursor", query.cursor);
   params.set("limit", String(query.limit ?? 100));
   return request<AgentObservabilityEventPage>(
-    `/agent-observability/runs/${encodeURIComponent(runId)}/events?${params.toString()}`,
+    `/agent-observability/runs/${encodeURIComponent(
+      runId,
+    )}/events?${params.toString()}`,
     { signal },
   );
 }

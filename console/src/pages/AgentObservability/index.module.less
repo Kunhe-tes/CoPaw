@@ -72,6 +72,11 @@
   gap: 8px;
   padding-bottom: 12px;
   border-bottom: 1px solid #e8eaee;
+
+  :global(.ant-select) {
+    width: 100%;
+    max-width: 360px;
+  }
 }
 
 .attempt {
@@ -89,41 +94,178 @@
 .spanList {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 2px;
 }
 
-.spanRow {
+.waterfallHeader {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  min-height: 38px;
-  padding: 6px 8px;
-  border: 1px solid #e8eaee;
-  border-radius: 6px;
+  gap: 8px;
+  min-width: 0;
 
-  > div:first-child {
-    min-width: 0;
+  > span:last-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 }
 
-.modelMeta {
+.spanRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 136px 204px;
+  align-items: center;
+  gap: 8px;
+  height: 48px;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid #e8eaee;
+  border-radius: 6px;
+}
+
+.waterfallScale {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 136px 204px;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.spanTimeScale {
+  display: flex;
+  grid-column: 2;
+  justify-content: space-between;
+  color: #697586;
+  font-size: 11px;
+}
+
+.spanRowSelected {
+  border-color: #3769fc;
+  background: #f7f9ff;
+}
+
+.spanSelect {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  margin-top: 4px;
+  justify-content: center;
+  min-width: 0;
+  height: 40px;
+  overflow: hidden;
+  padding-right: 4px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
 
-  > span {
-    overflow-wrap: anywhere;
+  &:focus-visible {
+    outline: 2px solid #3769fc;
+    outline-offset: -2px;
   }
+}
+
+.spanName,
+.spanDescriptor {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spanName {
+  font-weight: 600;
+}
+
+.spanDescriptor {
+  color: #697586;
+  font-size: 12px;
+}
+
+.spanTimeline {
+  position: relative;
+  width: 100%;
+  height: 12px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: #f0f2f5;
+}
+
+.spanBar {
+  position: absolute;
+  top: 2px;
+  height: 8px;
+  min-width: 2px;
+  border-radius: 2px;
+  background: #758195;
+}
+
+.spanBarOpen {
+  border-right: 2px dashed #58677d;
+  background: #c0c8d4;
+}
+
+.spanBarSuccess {
+  background: #2f7d5b;
+}
+
+.spanBarError {
+  background: #b94a4f;
+}
+
+.spanBarWaiting {
+  background: #a56a24;
 }
 
 .spanMeta {
   display: flex;
   align-items: center;
-  flex-shrink: 0;
-  gap: 8px;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+
+  > span:first-child {
+    max-width: 88px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  > span:nth-child(2) {
+    max-width: 54px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  > button {
+    flex-shrink: 0;
+  }
+}
+
+.spanInspector {
+  padding: 12px 0;
+  border-top: 1px solid #e8eaee;
+
+  dl {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px 16px;
+    margin: 8px 0 0;
+  }
+
+  dl > div {
+    min-width: 0;
+  }
+
+  dt {
+    color: #697586;
+    font-size: 12px;
+  }
+
+  dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
 }
 
 .eventHeader {
@@ -182,5 +324,53 @@
   .footer {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .spanRow {
+    grid-template-columns: minmax(0, 1fr) 184px;
+    grid-template-rows: 32px 10px;
+    column-gap: 4px;
+    row-gap: 2px;
+    height: 48px;
+  }
+
+  .spanSelect {
+    grid-column: 1;
+    grid-row: 1;
+    height: 30px;
+  }
+
+  .spanTimeline {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .waterfallScale {
+    display: block;
+  }
+
+  .spanTimeScale {
+    justify-content: space-between;
+  }
+
+  .spanMeta {
+    grid-column: 2;
+    grid-row: 1;
+    gap: 4px;
+  }
+
+  .waterfallHeader {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
+
+    > span:last-child {
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+  }
+
+  .spanInspector dl {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

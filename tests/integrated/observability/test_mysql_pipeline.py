@@ -260,6 +260,36 @@ async def test_manual_inbox_to_mysql_projection_and_authorized_run_list(
             )
         )
 
+        partial_span_run_id = str(uuid4())
+        partial_span_id = str(uuid4())
+        partial_span = _event(
+            run_id=partial_span_run_id,
+            event_name="span.started",
+            phase="started",
+            status="running",
+            occurred_at=started,
+            started_at=started,
+            ended_at=None,
+        )
+        partial_span.update(
+            {
+                "entity_kind": "span",
+                "entity_id": partial_span_id,
+                "obs_span_id": partial_span_id,
+                "span_type": "Agent",
+                "operation": "execute",
+                "kind": "SERVER",
+                "name": "agent.execute",
+            },
+        )
+        await ingest(partial_span)
+        partial_span_rows = await store.list_spans(
+            run_id=partial_span_run_id,
+        )
+        assert len(partial_span_rows) == 1
+        assert partial_span_rows[0]["quality"] == "partial"
+        assert partial_span_rows[0]["ended_at"] is None
+
         malformed_terminal = _event(
             run_id=str(uuid4()),
             event_name="run.ended",

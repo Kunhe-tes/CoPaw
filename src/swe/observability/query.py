@@ -57,6 +57,7 @@ class RunDetailResponse(BaseModel):
     run: dict[str, Any]
     attempts: list[dict[str, Any]]
     spans: list[dict[str, Any]]
+    generated_at: datetime
     spans_has_more: bool
     spans_next_cursor: str | None = None
 
@@ -424,6 +425,7 @@ async def run_detail(
         run=_serialize_rows([row])[0],
         attempts=_serialize_rows(attempts),
         spans=span_rows,
+        generated_at=datetime.now(timezone.utc),
         spans_has_more=has_more,
         spans_next_cursor=next_cursor,
     )

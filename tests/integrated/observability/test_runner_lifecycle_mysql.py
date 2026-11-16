@@ -110,7 +110,16 @@ async def _assert_projected_run_available(
     store = ObservabilityStore(connection)
     projector = InboxProjector(store, poll_seconds=0.01)
     async with connection.transaction() as session:
-        for record in records:
+        projection_records = [
+            record
+            for record in records
+            if record["event_name"] == "span.ended"
+        ] + [
+            record
+            for record in records
+            if record["event_name"] != "span.ended"
+        ]
+        for record in projection_records:
             await session.insert(
                 "INSERT INTO swe_agentobs_inbox (payload_text) VALUES (%s)",
                 (json.dumps(record, separators=(",", ":")),),
@@ -201,13 +210,20 @@ async def _assert_projected_run_available(
             f"/agent-observability/runs/{run_id}",
             headers={"X-User-Role": "manager"},
         )
-    assert response.status_code == 200
+        attempt_detail_response = await client.get(
+            f"/agent-observability/runs/{run_id}",
+            headers={"X-User-Role": "manager"},
+            params={"attempt_id": attempt_id},
+        )
     api_row = next(
         item for item in response.json()["items"] if item["run_id"] == run_id
     )
-    assert api_row["status"] == expected_status
+    assert response.status_code == 200 and api_row["status"] == expected_status
     if llm_span is not None:
-        assert detail_response.status_code == 200
+        assert (
+            detail_response.status_code == 200
+            and detail_response.json()["generated_at"]
+        )
         api_llm_span = next(
             span
             for span in detail_response.json()["spans"]
@@ -215,6 +231,11 @@ async def _assert_projected_run_available(
         )
         assert api_llm_span["input_tokens"] == llm_span["input_tokens"]
         assert api_llm_span["output_tokens"] == llm_span["output_tokens"]
+        assert api_llm_span["quality"] == "observed"
+        assert attempt_detail_response.status_code == 200 and all(
+            span["attempt_id"] == attempt_id
+            for span in attempt_detail_response.json()["spans"]
+        )
 
 
 async def _assert_llm_span_projection(store, records, run_id):
@@ -248,6 +269,7 @@ async def _assert_llm_span_projection(store, records, run_id):
     assert decode(llm_span["finish_reason"]) == "stop"
     assert llm_span["time_to_first_chunk_us"] is None
     assert llm_span["time_to_first_visible_text_us"] is None
+    assert llm_span["quality"] == "observed"
     return llm_span
 
 
