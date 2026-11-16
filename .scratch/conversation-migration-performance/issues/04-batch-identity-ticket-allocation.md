@@ -19,6 +19,6 @@
 - 扩展 SQL journal 的有界 allocate_many 到 Session、Chat、Turn 和 Publication；保留行数、字节、packet 及唯一 SQL owner 限制，不跨 source 合并事务。
 - Publication 逐项核对 scope、scope_kind、operation key 和 bundle 相对路径；缺失旧 details 可在显式可信 scope 下事务回填，混合旧/新票据仍按完整唯一键重读真实 ID。非法整数身份和身份行不一致明确拒绝；提交不确定不更新 manifest 镜像。
 - 导入器按现有依赖接入有界 Session、同 Session 的 Chat、Turn 分配；仅为同 scope 且依赖等价的 Turn identity / recovery publication 组批量预分配，publication 的业务写入及发布顺序不变。旧 manifest 继续按首次使用分配身份；未修改关联锁声明。
-- 验证：新增测试先失败，覆盖五种身份、混合恢复、非连续自增 ID、scope/kind/path/operation 冲突、旧 details 回填、非法身份、UnknownCommit、多 Session/Chat/Turn 关联与重试，以及旧 manifest 首次分配顺序。完整 conversation_storage 单元测试 1671 项通过（追加兼容顺序回归后复验见提交记录）；所有配置提交 hooks 正常执行，无绕过。
+- 验证：新增测试先失败，覆盖五种身份、混合恢复、非连续自增 ID、scope/kind/path/operation 冲突、旧 details 回填、非法身份、UnknownCommit、多 Session/Chat/Turn 关联与重试，以及旧 manifest 首次分配顺序。完整 conversation_storage 单元测试最终 1673 项通过（123.42s）；所有配置提交 hooks 正常执行，无绕过。
 - 隔离 MySQL 集成测试已扩展五种身份的自增间隙及重启混合恢复；本工作树未运行真实 MySQL，由集成分支集中执行。真实 NAS 和现场性能不在本票交付范围，不宣称墙钟加速倍数。
 - 本分支完成前合入集成分支 33a7daa65。
