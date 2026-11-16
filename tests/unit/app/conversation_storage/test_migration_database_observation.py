@@ -10,6 +10,34 @@ from swe.app.conversation_storage.migration.progress import MigrationProgress
 from tests.unit.database.test_prepared import ProtocolSession, template
 
 
+async def test_multiblock_reader_records_one_open_and_parse(tmp_path):
+    from swe.app.conversation_storage.bundle import BundleStore, BundleBlock
+    from swe.app.conversation_storage.migration.parallel import MigrationIO
+
+    store = BundleStore(tmp_path)
+    index = store.publish(
+        "a" * 64,
+        [
+            BundleBlock("first", "message", b"one"),
+            BundleBlock("second", "message", b"two"),
+        ],
+    )
+
+    def read():
+        with store.open_reader(index.relative_path) as reader:
+            assert reader.read_extents(index.blocks.values()) == (
+                b"one",
+                b"two",
+            )
+
+    report = MigrationProgress("migrate", "job", stream=io.StringIO())
+    with report.activate():
+        async with MigrationIO(1) as executor:
+            await executor.call(read)
+    assert report.snapshot()["bundle_opens"] == 1
+    assert report.snapshot()["bundle_index_parses"] == 1
+
+
 async def test_io_threads_receive_only_value_free_observer():
     from swe.app.conversation_storage.migration.parallel import MigrationIO
     from swe.database.observation import record_operation
