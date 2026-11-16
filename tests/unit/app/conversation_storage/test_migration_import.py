@@ -472,8 +472,20 @@ async def test_verification_payloads_overlap_bounded_nas_reads_on_owner_sql_task
             active -= 1
         return json.dumps({"publication": identity}).encode()
 
+    from contextlib import contextmanager
+    from swe.app.conversation_storage.bundle import BlockExtent
+
+    @contextmanager
+    def open_reader(path, **kwargs):
+        yield SimpleNamespace(
+            index=SimpleNamespace(
+                blocks={"body": BlockExtent("message", 0, 1)},
+            ),
+            read_extents=lambda extents: (read_extent(path, 0, 1),),
+        )
+
     bundles = SimpleNamespace(
-        read_extent=read_extent,
+        open_reader=open_reader,
         validate_publication_locator=lambda row: row["relative_path"],
     )
     rows = [
@@ -679,3 +691,66 @@ async def test_archived_only_questions_are_unselectable_but_current_duplicates_r
     history.answer_turn = AsyncMock(return_value=object())
     with pytest.raises(ValueError, match="fully archived"):
         await _verify_archived_questions(history, spec, current, chat)
+
+
+async def test_payloads_share_bundle_open_for_publication(
+    tmp_path,
+    monkeypatch,
+):
+    from contextlib import contextmanager
+    from swe.app.conversation_storage.bundle import BundleStore, BundleBlock
+    from swe.app.conversation_storage.migration.verify import _payloads
+    from swe.app.conversation_storage.migration.parallel import MigrationIO
+
+    bundles = BundleStore(tmp_path)
+    index = bundles.publish(
+        "a" * 64,
+        [
+            BundleBlock("one", "message", b'{"id":1}'),
+            BundleBlock("two", "message", b'{"id":2}'),
+        ],
+    )
+
+    class Database:
+        async def fetch_all(self, *args):
+            return [
+                {
+                    "id": 1,
+                    "service_unit_key": b"svc",
+                    "relative_path": index.relative_path,
+                    "byte_length": index.byte_length,
+                },
+            ]
+
+    opens = []
+    original = bundles._open
+
+    @contextmanager
+    def counted(path):
+        opens.append(path)
+        with original(path) as source:
+            yield source
+
+    monkeypatch.setattr(bundles, "_open", counted)
+    rows = [
+        {
+            "publication_id": 1,
+            "service_unit_key": b"svc",
+            "offset": block.offset,
+            "length": block.length,
+        }
+        for block in index.blocks.values()
+    ]
+    async with MigrationIO(2) as io:
+        actual = await _payloads(
+            Database(),
+            bundles,
+            rows,
+            "offset",
+            "length",
+            service_unit_id="svc",
+            io=io,
+            io_workers=2,
+        )
+    assert actual == [{"id": 1}, {"id": 2}]
+    assert opens == [index.relative_path]

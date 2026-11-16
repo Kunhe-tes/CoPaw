@@ -3,6 +3,7 @@
 
 import asyncio
 
+from ..bundle import BlockExtent
 from ..chat_repository import MySQLChatRepository
 from ..chat_mutations import (
     load_metadata_json,
@@ -108,24 +109,51 @@ async def _payloads(
     for row in rows:
         if row["service_unit_key"] != service:
             raise ValueError("referencing row service ownership differs")
-    result = []
-    for start in range(0, len(rows), io_workers):
-        pending = []
-        for row in rows[start : start + io_workers]:
-            publication = publications[row["publication_id"]]
-            pending.append(
-                io.call(
-                    bundles.read_extent,
-                    bundles.validate_publication_locator(publication),
-                    row[offset],
-                    row[length],
-                    expected_length=publication["byte_length"],
-                ),
-            )
-        result.extend(
-            load_metadata_json(value)
-            for value in await asyncio.gather(*pending)
+    grouped = {}
+    for position, row in enumerate(rows):
+        grouped.setdefault(row["publication_id"], []).append((position, row))
+
+    def read_group(publication_id):
+        publication = publications[publication_id]
+        path = bundles.validate_publication_locator(publication)
+        with bundles.open_reader(
+            path,
+            expected_length=publication["byte_length"],
+        ) as reader:
+            result = []
+            for position, row in grouped[publication_id]:
+                block = next(
+                    (
+                        block
+                        for block in reader.index.blocks.values()
+                        if block.offset <= row[offset]
+                        and row[offset] + row[length]
+                        <= block.offset + block.length
+                    ),
+                    None,
+                )
+                if block is None:
+                    raise ValueError(
+                        "message extent is outside publication payload",
+                    )
+
+                extent = BlockExtent(block.kind, row[offset], row[length])
+                raw = reader.read_extents((extent,))[0]
+                result.append((position, load_metadata_json(raw)))
+            return result
+
+    result = [None] * len(rows)
+    identifiers = list(grouped)
+    for start in range(0, len(identifiers), io_workers):
+        groups = await asyncio.gather(
+            *(
+                io.call(read_group, identity)
+                for identity in identifiers[start : start + io_workers]
+            ),
         )
+        for group in groups:
+            for position, value in group:
+                result[position] = value
     return result
 
 
@@ -434,24 +462,10 @@ async def _verify_artifact(
 
 
 async def _read_extents(bundles, relative_path, extents, *, io):
+    arguments = (relative_path, extents)
     if io is None:
-        return tuple(
-            bundles.read_extent(relative_path, item.offset, item.length)
-            for item in extents
-        )
-    return tuple(
-        await asyncio.gather(
-            *(
-                io.call(
-                    bundles.read_extent,
-                    relative_path,
-                    item.offset,
-                    item.length,
-                )
-                for item in extents
-            ),
-        ),
-    )
+        return bundles.read_extents(*arguments)
+    return await io.call(bundles.read_extents, *arguments)
 
 
 async def _checked(report, position, check):

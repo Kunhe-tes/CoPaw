@@ -273,15 +273,16 @@ async def test_projection_recovery_is_rejected_instead_of_skipping_pins(
 
     store, operation, _ = await prepared(tmp_path, "turn")
     ticket = await store.prepare_commit(operation.operation_key)
-    original = store.bundles.read_extent
+    from swe.app.conversation_storage.bundle import BundleReader
 
-    def projected(path, offset, length, **kwargs):
-        index = store.bundles.inspect(path)
-        if offset == index.blocks["recovery"].offset:
-            return json.dumps({"format": FORMAT}).encode()
-        return original(path, offset, length, **kwargs)
+    original = BundleReader.read_extents
 
-    monkeypatch.setattr(store.bundles, "read_extent", projected)
+    def projected(reader, extents, **kwargs):
+        if extents[0] == reader.index.blocks["recovery"]:
+            return (json.dumps({"format": FORMAT}).encode(),)
+        return original(reader, extents, **kwargs)
+
+    monkeypatch.setattr(BundleReader, "read_extents", projected)
     async with MigrationIO(1) as io:
         with pytest.raises(
             IntegrityError,

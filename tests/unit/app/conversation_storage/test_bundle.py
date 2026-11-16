@@ -353,3 +353,146 @@ def test_index_duplicate_keys_and_nonfinite_numbers_are_invalid(tmp_path):
     )
     with pytest.raises(IntegrityError):
         store.inspect(store.path_for(operation))
+
+
+def test_multiblock_read_opens_and_decodes_once(tmp_path, monkeypatch):
+    store = BundleStore(tmp_path)
+    operation = new_operation_key()
+    index = store.publish(
+        operation,
+        [
+            BundleBlock("first", "message", b"one"),
+            BundleBlock("second", "message", b"two"),
+        ],
+        metadata={"operation_key": operation},
+    )
+    calls = []
+    original = store._decode_table
+    monkeypatch.setattr(
+        store,
+        "_decode_table",
+        lambda *a: (calls.append(1), original(*a))[1],
+    )
+    with store.open_reader(
+        index.relative_path,
+        expected_operation_key=operation,
+    ) as reader:
+        assert reader.read_extents(
+            list(reader.index.blocks.values()),
+            max_bytes=6,
+        ) == (
+            b"one",
+            b"two",
+        )
+    assert calls == [1]
+
+
+def test_multiblock_read_rejects_total_budget_and_identity(tmp_path):
+    store = BundleStore(tmp_path)
+    index = store.publish(
+        new_operation_key(),
+        [BundleBlock("a", "message", b"1234")],
+    )
+    with store.open_reader(index.relative_path) as reader:
+        with pytest.raises(IntegrityError, match="budget"):
+            reader.read_extents(
+                list(reader.index.blocks.values()) * 2,
+                max_bytes=7,
+            )
+    with pytest.raises(IntegrityError, match="identity"):
+        with store.open_reader(
+            index.relative_path,
+            expected_operation_key="f" * 64,
+        ):
+            pass
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_multiblock_read_rejects_same_size_mutation(tmp_path, replace):
+    store = BundleStore(tmp_path)
+    index = store.publish(
+        new_operation_key(),
+        [BundleBlock("a", "message", b"1234")],
+    )
+    path = tmp_path / index.relative_path
+    with pytest.raises(IntegrityError, match="changed"):
+        with store.open_reader(index.relative_path) as reader:
+            assert reader.read_extents(list(reader.index.blocks.values())) == (
+                b"1234",
+            )
+            content = path.read_bytes()[:-4] + b"5678"
+            if replace:
+                replacement = path.with_suffix(".replacement")
+                replacement.write_bytes(content)
+                replacement.replace(path)
+            else:
+                path.write_bytes(content)
+
+
+@pytest.mark.parametrize("unsafe", ["symlink", "fifo", "truncated", "outside"])
+def test_multiblock_read_preserves_safe_file_boundary(tmp_path, unsafe):
+    from swe.app.conversation_storage.bundle import BlockExtent
+
+    store = BundleStore(tmp_path)
+    index = store.publish(
+        new_operation_key(),
+        [BundleBlock("a", "message", b"body")],
+    )
+    path = tmp_path / index.relative_path
+    if unsafe == "symlink":
+        other = path.with_suffix(".saved")
+        path.rename(other)
+        path.symlink_to(other)
+    elif unsafe == "fifo":
+        path.unlink()
+        os.mkfifo(path)
+    elif unsafe == "truncated":
+        path.write_bytes(path.read_bytes()[:-1])
+    with pytest.raises(IntegrityError):
+        with store.open_reader(index.relative_path) as reader:
+            reader.read_extents((BlockExtent("message", 0, 1),))
+
+
+async def test_multiblock_cancel_closes_descriptor_before_io_returns(
+    tmp_path,
+    monkeypatch,
+):
+    import asyncio
+    import threading
+    from contextlib import contextmanager
+    from swe.app.conversation_storage.migration.parallel import MigrationIO
+
+    store = BundleStore(tmp_path)
+    index = store.publish(
+        new_operation_key(),
+        [BundleBlock("a", "message", b"body")],
+    )
+    entered, release = threading.Event(), threading.Event()
+    sources = []
+    original = store._open
+
+    @contextmanager
+    def held(path):
+        with original(path) as source:
+            sources.append(source)
+            entered.set()
+            assert release.wait(5)
+            yield source
+
+    monkeypatch.setattr(store, "_open", held)
+    async with MigrationIO(1) as io:
+        task = asyncio.create_task(
+            io.call(
+                store.read_extents,
+                index.relative_path,
+                tuple(index.blocks.values()),
+            ),
+        )
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert sources[0].closed
