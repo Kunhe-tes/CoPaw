@@ -42,6 +42,12 @@ async def test_bad_revision_fails_tenant_and_continues_registered_loop(
         get=AsyncMock(return_value={"state": "discovered"}),
         fail=AsyncMock(),
     )
+
+    async def get_many(keys):
+        for key in keys:
+            yield key, {"state": "discovered"}
+
+    states.get_many = get_many
     monkeypatch.setattr(cli, "TenantState", lambda *_: states)
     monkeypatch.setattr(cli, "_register_tenants", AsyncMock())
     monkeypatch.setattr(cli, "_write_failures", lambda *_: "failures.json")

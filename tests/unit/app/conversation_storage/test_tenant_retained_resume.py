@@ -14,6 +14,11 @@ from swe.app.conversation_storage import in_place_admission
 JOB = "00000000-0000-4000-8000-000000000001"
 
 
+async def failed_states(keys):
+    for key in keys:
+        yield key, {"state": "failed"}
+
+
 @pytest.mark.parametrize(
     "proof,allowed",
     [
@@ -36,7 +41,10 @@ async def test_auto_review_retained_requires_matching_digest(
         path=tmp_path / "manifest.json",
         data={"tenants": [tenant]},
     )
-    states = SimpleNamespace(get=AsyncMock(return_value={"state": "failed"}))
+    states = SimpleNamespace(
+        get=AsyncMock(return_value={"state": "failed"}),
+        get_many=failed_states,
+    )
     monkeypatch.setattr(cli, "TenantState", lambda *_: states)
     monkeypatch.setattr(cli, "_register_tenants", AsyncMock())
     review = AsyncMock(return_value={"retained_keys": [["svc", "bob"]]})
@@ -86,6 +94,7 @@ async def test_registered_failed_gate_only_opens_for_retained_attempt(
     )
     states = SimpleNamespace(
         get=AsyncMock(return_value={"state": "failed"}),
+        get_many=failed_states,
         fail=AsyncMock(),
     )
     monkeypatch.setattr(cli, "TenantState", lambda *_: states)
