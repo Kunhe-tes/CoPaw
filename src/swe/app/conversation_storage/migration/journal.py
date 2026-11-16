@@ -86,6 +86,7 @@ class MigrationJournal:
         self.persist_updates = True
         self._known_scopes = None
         self.active_tenant = None
+        self._allocation_owner = None
         self.frozen_bindings_data = None
         self.recovery = recovery
 
@@ -175,6 +176,8 @@ class MigrationJournal:
         from .isolation import state_store
 
         row = await state_store(self.db, self.manifest).get(
+            # 租户上下文由编排器注入，pylint 仅推断到初始 None。
+            # pylint: disable-next=not-an-iterable
             *self.active_tenant,
         )
         if row is None or row["state"] == "published":
@@ -197,6 +200,7 @@ class MigrationJournal:
                 if len(self.active_tenant) == 3
                 else ""
             ),
+            # pylint: disable-next=not-an-iterable
             tuple(value.encode() for value in self.active_tenant),
         )
 
@@ -328,6 +332,39 @@ class MigrationJournal:
                 "stable source key must contain 1 to 2048 UTF-8 bytes",
             )
         return kind.encode(), position.encode()
+
+    async def allocate_many(self, kind, positions):
+        """按有界事务分配消息票据；仅在提交确认后更新镜像。"""
+        from .batch_tickets import chunks, allocate_chunk
+        from .disk_manifest import DiskMap
+
+        if kind != "message":
+            raise ValueError("batch ticket allocation supports message only")
+        owner = asyncio.current_task()
+        if self._allocation_owner is None:
+            self._allocation_owner = owner
+        if owner is not self._allocation_owner:
+            raise ValueError("SQL journal allocation owner changed")
+        positions = list(positions)
+        if len(set(positions)) != len(positions):
+            raise ValueError("duplicate batch ticket source position")
+        keys = [
+            (position, self._key(kind, position)[1]) for position in positions
+        ]
+        result = {}
+        for chunk in chunks(self.db, keys):
+            assignments = await allocate_chunk(self, kind, chunk)
+            if kind not in self.manifest.data["assignments"]:
+                self.manifest.data["assignments"][kind] = (
+                    DiskMap()
+                    if isinstance(self.manifest.data["batches"], DiskMap)
+                    else {}
+                )
+            self.manifest.data["assignments"][kind].update(assignments)
+            if self.persist_updates:
+                self.manifest._persist()
+            result.update(assignments)
+        return result
 
     async def allocate(
         self,
@@ -864,6 +901,7 @@ class MigrationJournal:
         if len(owners) != 1:
             raise ValueError("legacy retention publication source is unproven")
         owner = owners.pop()
+        # pylint: disable-next=unsubscriptable-object
         if owner[:2] != self.active_tenant[:2]:
             raise ValueError("legacy retention publication tenant differs")
         return owner == self.active_tenant
@@ -880,6 +918,7 @@ class MigrationJournal:
                 raise ValueError("tenant isolation requires an active tenant")
             states = {"blocked": "failed", "ready": "published"}
             return await state_store(self.db, self.manifest).transition(
+                # pylint: disable-next=not-an-iterable
                 *self.active_tenant,
                 states.get(state, state),
                 verification,

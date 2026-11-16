@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 - [ ] 增加有界批量分配能力并接入 Message 导入调用链，保留现有单条接口及 SQL owner 限制。
 - [ ] 一个受限事务内检查和锁定已有票据、插入缺失票据、按完整唯一键重读真实 ID、回填并核对 target_id=id。
