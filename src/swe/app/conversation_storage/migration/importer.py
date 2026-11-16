@@ -324,6 +324,7 @@ class ImportBatch:
     commit_plan: object | None = None
     kind: str = "offline_import"
     epoch: int | None = None
+    legacy_locks: dict | None = None
 
 
 class ConversationImporter:
@@ -395,6 +396,18 @@ class ConversationImporter:
 
     async def _assigned(self, kind, position):
         return (await self._allocate(kind, position))["target_id"]
+
+    def _identity_batch_size(self):
+        return 1
+
+    async def _allocate_identities(self, kind, positions):
+        return {
+            position: await self._assigned(kind, position)
+            for position in positions
+        }
+
+    async def _prepare_publications(self, positions, scope):
+        """旧 manifest 维持首次使用时分配 publication 的行为。"""
 
     async def _allocate_messages(self, positions):
         """旧 manifest 保持逐条语义，SQL 导入器覆盖为有界批量。"""
@@ -551,6 +564,8 @@ class ConversationImporter:
         if current["state"] == "committed":
             from ..chat_mutations import load_metadata_json
 
+            body = await self._retained_message_plan(current, body, rows, spec)
+
             await self.store.verify_batch(
                 request,
                 assignment["target_id"],
@@ -561,19 +576,40 @@ class ConversationImporter:
             await self._batch_finished(position)
             return current
         await self._set_batch_state(position, "importing")
+        resumed = bool(current.get("durable_at"))
         if not current.get("durable_at"):
             path = self.bundles.root / assignment["relative_path"]
             if path.exists():
+                resumed = True
                 await self.store.confirm_bundle(operation)
             else:
                 await self.store.write_bundle(operation, [body, *blocks])
+        current = await self.store.get(operation)
+        if resumed:
+            body = await self._retained_message_plan(current, body, rows, spec)
         await self.store.verify_blocks(
-            await self.store.get(operation),
+            current,
             [body, *blocks],
         )
         result = await self.store.commit(operation)
         await self._batch_finished(position)
         return result
+
+    async def _retained_message_plan(self, row, body, rows, spec):
+        if spec.legacy_locks is None:
+            return body
+        from .install_records import plan_block
+        from .plan_compatibility import retained_plan
+
+        legacy = plan_block(self.target, rows, spec.updates, spec.legacy_locks)
+        return await self.store._nas_io(
+            row["operation_key"].decode(),
+            retained_plan,
+            self.store.bundles,
+            row,
+            body,
+            legacy,
+        )
 
     def _batch_committed(self, position):
         state = self.manifest.data["batches"].get(position, "planned")
@@ -712,10 +748,22 @@ class ConversationImporter:
         from swe.app.runner.expert_binding import read_expert_binding
         import json
 
-        for session in workspace["sessions"]:
+        sessions = workspace["sessions"]
+        identity_batch_size = self._identity_batch_size()
+        for session_index, session in enumerate(sessions):
+            if session_index % identity_batch_size == 0:
+                assigned_sessions = await self._allocate_identities(
+                    "session",
+                    [
+                        item["position"]
+                        for item in sessions[
+                            session_index : session_index + identity_batch_size
+                        ]
+                    ],
+                )
             position = session["position"]
             identity = session["identity"]
-            sid = await self._assigned("session", position)
+            sid = assigned_sessions[position]
             self.session_ids[position] = sid
             source = session["legacy"]["state"]
             now = self.manifest.data["source_boundary"]["captured_at"]
@@ -736,10 +784,21 @@ class ConversationImporter:
             }
             rows = [{"table": "sessions", "values": values}]
             blocks = []
-            for index in session["chat_positions"]:
+            chat_positions = session["chat_positions"]
+            for chat_index, index in enumerate(chat_positions):
+                if chat_index % identity_batch_size == 0:
+                    assigned_chats = await self._allocate_identities(
+                        "chat",
+                        [
+                            workspace["chats"][index]["position"]
+                            for index in chat_positions[
+                                chat_index : chat_index + identity_batch_size
+                            ]
+                        ],
+                    )
                 item = workspace["chats"][index]
                 spec = ChatSpec.model_validate(item["spec"])
-                cid = await self._assigned("chat", item["position"])
+                cid = assigned_chats[item["position"]]
                 self.chat_ids[item["position"]] = cid
                 light, content = split_metadata(spec.meta)
                 light_text = json.dumps(
@@ -797,13 +856,21 @@ class ConversationImporter:
             and item["spec"]["user_id"] == session["identity"][4]
             and item["spec"]["channel"] == session["identity"][5]
         }
-        for key, value in turns.items():
-            chat = chats.get(value.get("chat_id"))
-            if chat is not None:
-                self.turn_ids[(sid, key)] = await self._assigned(
-                    "turn",
-                    session["position"] + "/turn:" + key,
-                )
+        turn_keys = [
+            key
+            for key, value in turns.items()
+            if chats.get(value.get("chat_id")) is not None
+        ]
+        for start in range(0, len(turn_keys), self.batch_size):
+            batch_keys = turn_keys[start : start + self.batch_size]
+            assigned = await self._allocate_identities(
+                "turn",
+                [session["position"] + "/turn:" + key for key in batch_keys],
+            )
+            for key in batch_keys:
+                self.turn_ids[(sid, key)] = assigned[
+                    session["position"] + "/turn:" + key
+                ]
         await self._turn_identities(session, scope, chats)
         messages = extract_messages(state, context_epoch=epoch)
         if any(
@@ -846,13 +913,34 @@ class ConversationImporter:
                 rows,
                 blocks,
                 spec=ImportBatch(
-                    locks={
+                    legacy_locks={
                         "sessions": [sid],
                         "chats": list(chats.values()),
-                        "turns": list(
-                            self.turn_ids.get((sid, key))
+                        "turns": [
+                            self.turn_ids[(sid, key)]
                             for key in turns
                             if (sid, key) in self.turn_ids
+                        ],
+                    },
+                    locks={
+                        "sessions": [sid],
+                        "chats": sorted(
+                            {
+                                item["values"][key]
+                                for item in rows
+                                for key in (
+                                    "origin_chat_id",
+                                    "archive_chat_id",
+                                )
+                                if item["values"].get(key) is not None
+                            },
+                        ),
+                        "turns": sorted(
+                            {
+                                item["values"]["turn_id"]
+                                for item in rows
+                                if item["values"].get("turn_id") is not None
+                            },
                         ),
                     },
                     session_id=sid,
@@ -906,7 +994,17 @@ class ConversationImporter:
                     },
                 },
             )
-        for row in rows:
+        for index, row in enumerate(rows):
+            if index % self.batch_size == 0:
+                await self._prepare_publications(
+                    [
+                        session["position"]
+                        + "/turn-identity:"
+                        + str(item["values"]["id"])
+                        for item in rows[index : index + self.batch_size]
+                    ],
+                    scope,
+                )
             await self._publish(
                 session["position"]
                 + "/turn-identity:"
@@ -979,6 +1077,15 @@ class ConversationImporter:
                     _block(block, "recovery", {"turn_states": {key: value}}),
                 )
             if rows:
+                await self._prepare_publications(
+                    [
+                        session["position"]
+                        + "/turn-record:"
+                        + str(row["values"]["id"])
+                        for row in rows
+                    ],
+                    scope,
+                )
                 # Current Session adapter looks for the recovery block; one Turn
                 # per publication preserves bounded point lookup and original ID.
                 for (key, value), row, block in zip(
@@ -1305,6 +1412,14 @@ class ConversationImporter:
 class ParallelWorkspaceImporter(ConversationImporter):
     """Import identities, Sessions and archives for one isolated workspace."""
 
+    async def _retained_message_plan(self, row, body, rows, spec):
+        if spec.legacy_locks is None:
+            return body
+        from .install_records import plan_block
+
+        legacy = plan_block(self.target, rows, spec.updates, spec.legacy_locks)
+        return await self.context.retained_plan(row, body, legacy)
+
     def __init__(self, context, target, *, batch_size=128):
         from types import SimpleNamespace
 
@@ -1334,6 +1449,18 @@ class ParallelWorkspaceImporter(ConversationImporter):
         scope=None,
         scope_kind="workspace",
     ):
+        if kind == "publication":
+            cached = getattr(self, "_publication_assignments", {}).get(
+                position,
+            )
+            if cached is not None:
+                assignment, saved_scope = cached
+                if (
+                    saved_scope != scope
+                    or assignment.get("scope_kind", "workspace") != scope_kind
+                ):
+                    raise ValueError("cached publication scope changed")
+                return assignment
         return await self.context.journal(
             "allocate",
             kind,
@@ -1341,6 +1468,31 @@ class ParallelWorkspaceImporter(ConversationImporter):
             scope=scope,
             scope_kind=scope_kind,
         )
+
+    def _identity_batch_size(self):
+        return self.batch_size
+
+    async def _allocate_identities(self, kind, positions):
+        assignments = await self.context.journal(
+            "allocate_many",
+            kind,
+            positions,
+        )
+        return {
+            position: value["target_id"]
+            for position, value in assignments.items()
+        }
+
+    async def _prepare_publications(self, positions, scope):
+        assignments = await self.context.journal(
+            "allocate_many",
+            "publication",
+            positions,
+            scope=scope,
+        )
+        self._publication_assignments = {
+            position: (value, scope) for position, value in assignments.items()
+        }
 
     async def _allocate_messages(self, positions):
         """把消息票据分配交给协调器唯一 SQL owner。"""
@@ -1398,6 +1550,9 @@ class ParallelWorkspaceImporter(ConversationImporter):
             position=position,
         )
         if current["state"] == "committed":
+            body = await self._retained_message_plan(current, body, rows, spec)
+            expected = load_metadata_json(body.content)
+            expected_blocks = [body, *blocks]
             await self.context.verify_batch(
                 request,
                 assignment["target_id"],
@@ -1408,16 +1563,23 @@ class ParallelWorkspaceImporter(ConversationImporter):
             await self._batch_finished(position)
             return current
         await self._set_batch_state(position, "importing")
+        resumed = bool(current.get("durable_at"))
         if not current.get("durable_at"):
             if await self.context.bundle_exists(current):
+                resumed = True
                 await self.context.confirm_bundle(request.operation_key)
             else:
                 await self.context.write_bundle(
                     request.operation_key,
                     expected_blocks,
                 )
+        current = await self.context.store("get", request.operation_key)
+        if resumed:
+            body = await self._retained_message_plan(current, body, rows, spec)
+        expected = load_metadata_json(body.content)
+        expected_blocks = [body, *blocks]
         await self.context.verify_blocks(
-            await self.context.store("get", request.operation_key),
+            current,
             expected_blocks,
         )
         result = await self.context.commit(

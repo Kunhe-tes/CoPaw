@@ -407,6 +407,7 @@ async def test_imported_turn_and_message_rows_carry_immutable_service():
     )
     importer = ConversationImporter.__new__(ConversationImporter)
     importer.session_ids = {"session": 1}
+    importer.batch_size = 100
     importer.turn_ids = {(1, "question"): 2}
     importer._publish = AsyncMock()
     session = {

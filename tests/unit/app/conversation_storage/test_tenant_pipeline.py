@@ -115,6 +115,10 @@ async def test_preview_overlaps_tenants_skips_published_and_isolates_failure(
         assert asyncio.current_task() is owner
         return {"state": "published" if tenant == "live" else "discovered"}
 
+    async def get_many(keys):
+        for key in keys:
+            yield key, await state(*key)
+
     tenants = [
         {
             "service_unit_id": "s",
@@ -137,7 +141,7 @@ async def test_preview_overlaps_tenants_skips_published_and_isolates_failure(
         SimpleNamespace(data={"tenants": tenants}, migration_id="job"),
         None,
         {"workers": 2, "io_workers": 2, "memory_bytes": 256},
-        states=SimpleNamespace(get=AsyncMock(side_effect=state)),
+        states=SimpleNamespace(get_many=get_many),
     )
     assert peak == 2
     assert visited == ["bad", "good", "last"]

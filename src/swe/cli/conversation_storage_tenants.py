@@ -65,6 +65,64 @@ class TenantFailure(ValueError):
     """An explicitly identified tenant data failure, never a shared SQL error."""
 
 
+_VIEW_FIELDS = ("tenants", "workspaces", "shares", "source_change_blockers")
+
+
+def _grouped_view(parent, key):
+    """Index positions, not evidence copies, under the command's disk budget."""
+    from swe.app.conversation_storage.migration.disk_manifest import DiskGroups
+
+    signature = (
+        parent.data.get("source_isolation"),
+        parent.data.get("tenant_review_revision"),
+        *(
+            (id(parent.data.get(name)), len(parent.data.get(name, [])))
+            for name in _VIEW_FIELDS
+        ),
+    )
+    cached = getattr(parent, "_source_view_index", None)
+    if cached is None or cached[0] != signature or cached[1].closed:
+        if cached is not None:
+            cached[1].close()
+        positions = DiskGroups()
+        try:
+            for name in _VIEW_FIELDS:
+                for offset, item in enumerate(parent.data.get(name, [])):
+                    scope = (
+                        tuple(item.get("scope", []))
+                        if name == "source_change_blockers"
+                        else tuple(
+                            item.get(field)
+                            for field in (
+                                "service_unit_id",
+                                "tenant_id",
+                                "source_id",
+                            )[: len(key)]
+                        )
+                    )
+                    group = json.dumps((name, scope))
+                    positions.add(group, offset)
+        except BaseException:
+            positions.close()
+            raise
+        parent._source_view_index = signature, positions
+    else:
+        positions = cached[1]
+    return {
+        name: [
+            parent.data[name][offset]
+            for offset in positions.positions(json.dumps((name, key)))
+        ]
+        for name in _VIEW_FIELDS
+    }
+
+
+async def _state_rows(states, data):
+    keys = (unit_key(data, tenant) for tenant in data["tenants"])
+    async for key, row in states.get_many(keys):
+        yield key, row
+
+
 class TenantManifest:
     """A filtered parser view; persist only the complete parent manifest."""
 
@@ -72,25 +130,7 @@ class TenantManifest:
         self.parent = parent
         self.migration_id, self.path = parent.migration_id, parent.path
         self.key = unit_key(parent.data, tenant)
-        self.data = {
-            **parent.data,
-            "tenants": [
-                item
-                for item in parent.data["tenants"]
-                if belongs(item, self.key)
-            ],
-            "workspaces": [
-                w for w in parent.data["workspaces"] if belongs(w, self.key)
-            ],
-            "shares": [
-                s for s in parent.data["shares"] if belongs(s, self.key)
-            ],
-            "source_change_blockers": [
-                b
-                for b in parent.data.get("source_change_blockers", [])
-                if tuple(b.get("scope", [])) == self.key
-            ],
-        }
+        self.data = {**parent.data, **_grouped_view(parent, self.key)}
 
     def _persist(self):
         for name in ("assignments", "batches"):
@@ -794,19 +834,19 @@ async def _select_registered_tenants(
 ):
     tenants = manifest.data["tenants"]
     selected = []
-    for tenant in tenants:
-        view = TenantManifest(manifest, tenant)
-        row = await states.get(*view.key)
+    iterator = iter(tenants)
+    async for key, row in _state_rows(states, manifest.data):
+        tenant = next(iterator)
         if row["state"] == "published":
             published += 1
             continue
-        if tenant["state"] == "failed" and view.key not in resources.get(
+        if tenant["state"] == "failed" and key not in resources.get(
             "_retained_attempts",
             set(),
         ):
             failure = _failure(tenant, "discover")
             await states.fail(
-                *view.key,
+                *key,
                 "discover",
                 failure["code"],
                 failure["reason"],
@@ -830,12 +870,18 @@ async def _run_registered(
     tenants = manifest.data["tenants"]
     if not tenants:
         raise ValueError("tenant migration has no identifiable tenants")
-    await _register_tenants(db, manifest, states, guard)
+    if resources.get("_registered_manifest") is manifest.data:
+        # Automatic review already registered or atomically revised evidence.
+        # Recheck the complete SQL binding before using that registration.
+        await _check_job_binding(db, manifest, guard.server_uuid)
+    else:
+        await _register_tenants(db, manifest, states, guard)
     failures, published, completed = [], 0, 0
     resources = {
         **resources,
         "_journal_recovery": JournalRecovery(db, manifest),
     }
+    _stage("selection")
     selected, failures, published = await _select_registered_tenants(
         manifest,
         states,
@@ -1034,10 +1080,11 @@ async def _auto_review(db, manifest, guard, resources):
 
     states = _states(db, manifest)
     await _register_tenants(db, manifest, states, guard)
+    _stage("automatic_review")
     eligible = set()
-    for tenant in manifest.data["tenants"]:
-        key = unit_key(manifest.data, tenant)
-        row = await states.get(*key)
+    iterator = iter(manifest.data["tenants"])
+    async for key, row in _state_rows(states, manifest.data):
+        tenant = next(iterator)
         if row["state"] != "published" and (
             row["state"] == "failed" or tenant["state"] == "failed"
         ):
@@ -1092,7 +1139,9 @@ async def _auto_review(db, manifest, guard, resources):
             ):
                 continue
             allowed.add(key)
+        resources["_registered_manifest"] = manifest.data
         return allowed
+    resources["_registered_manifest"] = manifest.data
     return set()
 
 
@@ -1123,8 +1172,9 @@ async def _check_job_binding(db, manifest, server_uuid):
 async def _preview(operation, manifest, base, resources, *, states):
     failures, completed = [], 0
     selected = []
-    for tenant in manifest.data["tenants"]:
-        row = await states.get(*unit_key(manifest.data, tenant))
+    iterator = iter(manifest.data["tenants"])
+    async for _key, row in _state_rows(states, manifest.data):
+        tenant = next(iterator)
         if row and row["state"] == "published":
             completed += 1
             continue

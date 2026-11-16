@@ -54,6 +54,16 @@ class SourceState:
             self._keys(service, tenant, source),
         )
 
+    def get_many(self, keys):
+        from .isolation import iter_states
+
+        return iter_states(
+            self,
+            keys,
+            table=TENANTS,
+            fields=("service_unit_key", "tenant_key", "source_key"),
+        )
+
     async def register(self, tenants):
         """Register exact frozen evidence; never replace existing evidence."""
         async with self.db.transaction():
