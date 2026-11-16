@@ -225,6 +225,7 @@ async def _execute(
     io_workers=4,
     source_recheck=None,
     memory_bytes=512 * 1024 * 1024,
+    verification_level="fast",
 ):
     from swe.app.conversation_storage.migration.progress import (
         current_progress,
@@ -352,13 +353,15 @@ async def _execute(
                         workers=workers,
                         memory_bytes=memory_bytes,
                         health_check=guard.check,
-                        verification_level="fast",
+                        verification_level=verification_level,
                     )
                 if not result["passed"]:
                     raise ValueError(
                         "semantic verification failed: "
                         + json.dumps(result["blockers"]),
                     )
+                if operation == "verify":
+                    await journal.mark_state(job["state"], result)
             # Re-read the complete frozen source and old SQL shares before completion.
             if source_recheck is None:
                 if inventory_v3(manifest) != inventory:
@@ -422,6 +425,7 @@ async def _execute_spooled(
     memory_budget_mib,
     work_dir,
     apply=True,
+    verification_level="fast",
 ):
     protected = [
         service[key]
@@ -530,6 +534,7 @@ async def _execute_spooled(
             io_workers=io_workers,
             source_recheck=recheck_source,
             memory_bytes=memory_bytes,
+            verification_level=verification_level,
         )
 
 
@@ -588,6 +593,7 @@ def run_v3_command(
     work_dir=None,
     reviewed_discovery=None,
     rollback_inputs=None,
+    full_audit=False,
 ):
     if operation not in (
         "inventory",
@@ -607,6 +613,9 @@ def run_v3_command(
         raise ValueError("workers and io-workers must be between 1 and 32")
     if not 128 <= memory_budget_mib <= 65536:
         raise ValueError("memory budget must be between 128 and 65536 MiB")
+    if full_audit and operation != "verify":
+        raise ValueError("--full-audit is only valid with verify")
+    verification_level = "full" if full_audit else "fast"
     manifest = V3Manifest.load(manifest_path)
     output = None
     if operation in ("finalize", "rollback-tenants", "migrate"):
@@ -639,6 +648,7 @@ def run_v3_command(
                 apply=apply,
                 reviewed_discovery=reviewed_discovery,
                 rollback_inputs=rollback_inputs,
+                verification_level=verification_level,
             ),
         )
     if operation in ("retry-review", "rollback-tenants", "migrate"):
@@ -655,6 +665,7 @@ def run_v3_command(
             memory_budget_mib=memory_budget_mib,
             work_dir=work_dir,
             apply=apply,
+            verification_level=verification_level,
         ),
     )
 

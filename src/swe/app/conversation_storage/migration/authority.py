@@ -77,13 +77,21 @@ def validate_source_verification(value):
     """Validate level metadata while accepting pre-level source receipts."""
     if isinstance(value, str):
         value = _json(value, "source verification")
-    if isinstance(value, dict) and set(value) == {
+    if isinstance(value, dict) and {
         "authority",
         "verification_level",
-    }:
+    }.issubset(value):
         level = value["verification_level"]
         if level not in ("fast", "full"):
             raise IntegrityError("invalid source verification level")
+        results = value.get("verification_results", {})
+        if not isinstance(results, dict) or any(
+            key not in ("fast", "full")
+            or not isinstance(result, dict)
+            or result.get("passed") is not True
+            for key, result in results.items()
+        ):
+            raise IntegrityError("invalid source verification results")
         return validate_receipt(value["authority"]), level
     return validate_receipt(value), "full"
 

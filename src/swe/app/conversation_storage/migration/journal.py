@@ -988,13 +988,28 @@ class MigrationJournal:
                 and state not in JOB_TRANSITIONS[row["state"]]
             ):
                 raise ValueError("invalid migration job transition")
+            verification_record = verification
+            if (
+                isinstance(verification, dict)
+                and "verification_level" in verification
+            ):
+                from .verification_evidence import merge_verification
+
+                verification_record = merge_verification(
+                    row["verification_text"],
+                    verification,
+                )
             await self.db.execute(
                 "UPDATE "
                 + JOBS
                 + " SET state=%s,verification_text=COALESCE(%s,verification_text),updated_at=UTC_TIMESTAMP(6) WHERE migration_id=%s",
                 (
                     state,
-                    None if verification is None else _json(verification),
+                    (
+                        None
+                        if verification is None
+                        else _json(verification_record)
+                    ),
                     self.migration_id,
                 ),
             )

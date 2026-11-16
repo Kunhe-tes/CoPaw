@@ -174,7 +174,11 @@ async def test_source_publication_and_failure_are_independent():
         "alice",
         "A",
         "verified",
-        {"verification_level": "fast"},
+        {
+            "passed": True,
+            "verification_level": "fast",
+            "fast_summary": {"publications": 1},
+        },
     )
     proof = {
         "version": 1,

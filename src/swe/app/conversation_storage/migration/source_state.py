@@ -117,6 +117,13 @@ class SourceState:
             if current is None:
                 raise ValueError("migration tenant is not registered")
             verification_record = verification
+            if state == "verified" and verification is not None:
+                from .verification_evidence import merge_verification
+
+                verification_record = merge_verification(
+                    current["verification_text"],
+                    verification,
+                )
             if state == "published":
                 self._validate_evidence(
                     current,
@@ -134,6 +141,7 @@ class SourceState:
                 if level not in ("fast", "full"):
                     raise ValueError("invalid source verification level")
                 verification_record = {
+                    **previous_verification,
                     "authority": proof,
                     "verification_level": level,
                 }

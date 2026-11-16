@@ -457,6 +457,7 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
         for s in view.data["services"]
     }
     verification_level = resources.get("_verification_level", "fast")
+    verification_result = None
     with _spool(
         base,
         view.data,
@@ -493,7 +494,7 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
             await journal.validate_ownership()
         if operation in ("verify", "finalize", "migrate"):
             _stage("verify")
-            await _verify(
+            verification_result = await _verify(
                 db,
                 bundles,
                 view,
@@ -524,7 +525,7 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
             await states.transition(
                 *view.key,
                 "verified",
-                {"verification_level": verification_level},
+                verification_result,
             )
         if operation in ("finalize", "migrate"):
             _stage("publish")
@@ -698,6 +699,7 @@ async def run_tenants(
     apply,
     reviewed_discovery=None,
     rollback_inputs=None,
+    verification_level="fast",
 ):
     """Run one SQL-owner job; skip published tenants before reading old input."""
     from swe.database.config import get_database_config
@@ -712,6 +714,7 @@ async def run_tenants(
         "workers": workers,
         "io_workers": io_workers,
         "memory_bytes": memory_budget_mib * 1024 * 1024,
+        "_verification_level": verification_level,
     }
     config = get_database_config()
     schema = manifest.data["offline"]["application_schema"]
@@ -1013,7 +1016,12 @@ async def _run_registered(
         "pending_schema_finalize": pending_schema,
         "failure_report": _write_failures(manifest, operation, failures),
         **(
-            {"verification_level": "fast"}
+            {
+                "verification_level": resources.get(
+                    "_verification_level",
+                    "fast",
+                ),
+            }
             if operation in ("verify", "finalize", "migrate")
             else {}
         ),

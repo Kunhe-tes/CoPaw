@@ -98,13 +98,35 @@ class TenantState:
             current = await self.get(service, tenant, locked=True)
             if current is None:
                 raise ValueError("migration tenant is not registered")
+            verification_record = verification
+            if state == "verified" and verification is not None:
+                from .verification_evidence import merge_verification
+
+                verification_record = merge_verification(
+                    current["verification_text"],
+                    verification,
+                )
             if state == "published":
                 self._validate_evidence(current, service, tenant, proof)
+                previous_verification = json.loads(
+                    current["verification_text"] or "{}",
+                )
+                if not isinstance(previous_verification, dict):
+                    raise ValueError("invalid tenant verification evidence")
+                level = previous_verification.get("verification_level", "full")
+                if level not in ("fast", "full"):
+                    raise ValueError("invalid tenant verification level")
+                verification_record = {
+                    **previous_verification,
+                    "authority": proof,
+                    "verification_level": level,
+                }
             previous = current["state"]
             if previous == "published":
                 if state != "published" or (
                     verification is not None
-                    and current["verification_text"] != _json(verification)
+                    and current["verification_text"]
+                    != _json(verification_record)
                 ):
                     raise ValueError("published tenant cannot be changed")
                 return current
@@ -121,7 +143,11 @@ class TenantState:
                 + " WHERE migration_id=%s AND service_unit_key=%s AND tenant_key=%s AND state=%s",
                 (
                     state,
-                    None if verification is None else _json(verification),
+                    (
+                        None
+                        if verification is None
+                        else _json(verification_record)
+                    ),
                     int(state == "importing" and previous != "importing"),
                     state,
                     *self._keys(service, tenant),
