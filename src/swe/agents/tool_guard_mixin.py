@@ -402,6 +402,50 @@ class ToolGuardMixin:
         tool_name: str,
         tool_input: dict[str, Any],
     ) -> dict | None:
+        from ..observability.instrumentation import Observability
+
+        span = Observability().span(
+            "Tool",
+            "execute",
+            name="registered.tool",
+            tool_key=tool_name,
+            tool_call_id=str(tool_call.get("id") or ""),
+            executor_kind="agent_tool",
+        )
+        try:
+            result = await self._run_tool_call_with_hard_timeout_raw(
+                tool_call,
+                tool_name,
+                tool_input,
+            )
+        except asyncio.CancelledError:
+            if span is not None:
+                span.end(status="cancelled", technical_status="ERROR")
+            raise
+        except Exception as exc:
+            if span is not None:
+                span.end(
+                    status="failed",
+                    technical_status="ERROR",
+                    has_error=True,
+                    error_type=type(exc).__name__,
+                )
+            raise
+        if span is not None:
+            span.end(
+                status="succeeded" if result is not None else "failed",
+                technical_status="OK" if result is not None else "ERROR",
+                has_error=result is None,
+                error_type=None if result is not None else "tool_failure",
+            )
+        return result
+
+    async def _run_tool_call_with_hard_timeout_raw(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> dict | None:
         """Run a local tool under the generic hard timeout when applicable."""
         tool_call_id = str(tool_call.get("id") or "")
         with self._agent_phase_context(
