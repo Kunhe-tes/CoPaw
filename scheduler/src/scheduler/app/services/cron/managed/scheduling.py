@@ -38,6 +38,49 @@ def _allows_empty_batch(targets, kind):
     )
 
 
+def _member_skip_reason(row, kind, now):
+    if row["deleted_at"]:
+        return "job_deleted"
+    pause = row["state_pause_reason"]
+    if pause:
+        return (
+            pause
+            if pause in {"manual", "auto_unread_threshold"}
+            else "job_paused"
+        )
+    if not row["enabled"]:
+        return "job_disabled"
+    if reason := date_reason(row, now):
+        return reason
+    if row["state_management_status"] != "ready":
+        return "job_not_ready"
+    state = row["state_dispatch_state"]
+    if state == "batch_paused":
+        return "batch_paused"
+    wanted = "ordinary" if kind == "ordinary" else "batch_enabled"
+    return "job_not_in_batch_mode" if state != wanted else None
+
+
+def _partition_targets(targets, kind, now):
+    selected, skipped = [], []
+    for index, row in enumerate(targets):
+        reason = _member_skip_reason(row, kind, now)
+        if reason is None:
+            selected.append(row)
+        elif kind == "batch":
+            skipped.append(
+                {
+                    "tenant_id": row["tenant_id"],
+                    "agent_id": row["agent_id"],
+                    "job_id": row["job_id"],
+                    "job_name": row["name"],
+                    "member_role": "parent" if index == 0 else "child",
+                    "reason": reason,
+                },
+            )
+    return selected, skipped
+
+
 class BatchAlreadyActive(ExecutionConflict):
     """同一父任务仍有未结束的批次。"""
 
@@ -164,13 +207,18 @@ class ManagedSchedulingService:
                     raise BatchAlreadyActive(existing_batch)
             else:
                 root = await repository._get_row(key, include_deleted=True)
-            response, members = await self._accept_locked(
+            response, members, skipped = await self._accept_locked(
                 tx,
                 caller,
                 root,
                 observation,
             )
             response["trigger_time_basis"] = time_basis
+            receipt_response = (
+                {**response, "skipped_members": skipped}
+                if response.get("batch_id")
+                else response
+            )
             await insert(
                 tx,
                 RECEIPTS,
@@ -192,7 +240,7 @@ class ManagedSchedulingService:
                     "status": (
                         "accepted" if response["accepted"] else "skipped"
                     ),
-                    "response_json": canonical(response),
+                    "response_json": canonical(receipt_response),
                     "members_json": canonical(members),
                     "created_at": now.replace(tzinfo=None),
                 },
@@ -221,13 +269,17 @@ class ManagedSchedulingService:
         manual = observation.calendar["time_basis"] == "manual"
         reason = await self._trigger_gate(tx, root, observation)
         if reason:
-            return {
-                "job_id": root["job_id"],
-                "accepted": False,
-                "reused": False,
-                "status": "skipped",
-                "reason": reason,
-            }, []
+            return (
+                {
+                    "job_id": root["job_id"],
+                    "accepted": False,
+                    "reused": False,
+                    "status": "skipped",
+                    "reason": reason,
+                },
+                [],
+                [],
+            )
         targets = [root]
         if kind == "batch":
             children = await _children(tx, caller.job_key(root["job_id"]), [])
@@ -238,15 +290,19 @@ class ManagedSchedulingService:
                 )
                 for row in children
             ]
-        selected = [row for row in targets if self._eligible(row, kind, now)]
+        selected, skipped = _partition_targets(targets, kind, now)
         if not selected and (manual or not _allows_empty_batch(targets, kind)):
-            return {
-                "job_id": root["job_id"],
-                "accepted": False,
-                "reused": False,
-                "status": "skipped",
-                "reason": "job_not_eligible",
-            }, []
+            return (
+                {
+                    "job_id": root["job_id"],
+                    "accepted": False,
+                    "reused": False,
+                    "status": "skipped",
+                    "reason": "job_not_eligible",
+                },
+                [],
+                [],
+            )
         batch_id = (
             str(uuid5(NAMESPACE_URL, "managed-batch:" + receipt_id))
             if kind == "batch"
@@ -261,22 +317,30 @@ class ManagedSchedulingService:
             observation,
         )
         if kind == "ordinary":
-            return {
-                "job_id": root["job_id"],
-                "execution_id": members[0]["execution_id"],
-                "definition_version": members[0]["definition_version"],
+            return (
+                {
+                    "job_id": root["job_id"],
+                    "execution_id": members[0]["execution_id"],
+                    "definition_version": members[0]["definition_version"],
+                    "accepted": True,
+                    "reused": members[0]["reused"],
+                    "status": members[0]["status"],
+                },
+                members,
+                [],
+            )
+        return (
+            {
+                "batch_id": batch_id,
+                "parent_job_id": root["job_id"],
                 "accepted": True,
-                "reused": members[0]["reused"],
-                "status": members[0]["status"],
-            }, members
-        return {
-            "batch_id": batch_id,
-            "parent_job_id": root["job_id"],
-            "accepted": True,
-            "reused": False,
-            "enqueued_intents": len(members),
-            "status": "queued",
-        }, members
+                "reused": False,
+                "enqueued_intents": len(members),
+                "status": "queued",
+            },
+            members,
+            skipped,
+        )
 
     async def _trigger_gate(self, tx, root, observation):
         reason = self._gate(
@@ -323,18 +387,6 @@ class ManagedSchedulingService:
         ):
             return "trigger_outside_window"
         return None
-
-    @staticmethod
-    def _eligible(row, kind, now=None):
-        wanted = "ordinary" if kind == "ordinary" else "batch_enabled"
-        return (
-            not row["deleted_at"]
-            and row["enabled"]
-            and not row["state_pause_reason"]
-            and not date_reason(row, now)
-            and row["state_management_status"] == "ready"
-            and row["state_dispatch_state"] == wanted
-        )
 
     async def _enqueue_members(
         self,

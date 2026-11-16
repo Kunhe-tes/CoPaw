@@ -20,6 +20,7 @@ import {
   type ManagedBatchEvent,
   type ManagedBatchMember,
   type ManagedRetryResult,
+  type ManagedSkippedMember,
 } from "../../../api/modules/managedBatchBoard";
 import styles from "../CronBatchDispatch/index.module.less";
 import { labels, statusTag, settledStatusTag, timeText } from "./format";
@@ -29,6 +30,46 @@ import FailurePanel from "./FailurePanel";
 import PriorityOrder from "./PriorityOrder";
 import MemberAttempts from "./MemberAttempts";
 import { getBbkDisplayName } from "../../../constants/bbk";
+
+const skipReasonLabels: Record<string, string> = {
+  auto_unread_threshold: "未读过多自动暂停",
+  manual: "手动停用",
+  job_disabled: "任务未启用",
+  job_paused: "任务已暂停",
+  batch_paused: "批调度已暂停",
+  job_deleted: "任务已删除",
+  job_not_ready: "任务管理状态未就绪",
+  job_not_in_batch_mode: "任务未开启批调度",
+  date_before_start: "尚未到任务开始日期",
+  date_expired: "已超过任务结束日期",
+  date_configuration_invalid: "任务执行日期配置不完整",
+};
+
+const skippedColumns: ColumnsType<ManagedSkippedMember> = [
+  {
+    title: "角色 / 用户",
+    width: 160,
+    ellipsis: true,
+    render: (_, item) =>
+      `${item.member_role === "parent" ? "父任务" : "子任务"} · ${
+        item.tenant_id
+      }`,
+  },
+  {
+    title: "任务",
+    ellipsis: true,
+    render: (_, item) => (
+      <Tooltip title={`${item.job_name || item.job_id} · ${item.job_id}`}>
+        <span>{item.job_name || item.job_id}</span>
+      </Tooltip>
+    ),
+  },
+  {
+    title: "跳过原因",
+    width: 178,
+    render: (_, item) => skipReasonLabels[item.reason] ?? "其他原因",
+  },
+];
 
 function eventLabel(event: ManagedBatchEvent) {
   if (event.event_type === "auto_retry_blocked") {
@@ -203,7 +244,32 @@ export default function BatchDetail({
   const [pausing, setPausing] = useState(false);
   const detail = useBoardResource(load);
   const data = detail.value;
+  const skipped = data?.skipped_members;
+  const skippedTable = skipped?.length ? (
+    <Table
+      size="small"
+      title={() => <strong>入队前跳过 ({skipped.length})</strong>}
+      rowKey={(item) =>
+        JSON.stringify([item.tenant_id, item.agent_id, item.job_id])
+      }
+      columns={skippedColumns}
+      dataSource={skipped}
+      pagination={false}
+      scroll={{ x: 510, y: 160 }}
+      style={{ marginBottom: 8 }}
+    />
+  ) : null;
   const current = data?.batch || batch;
+  const emptyBatchDetail =
+    data &&
+    current.member_count === 0 &&
+    (skippedTable ?? (
+      <Alert
+        type="info"
+        showIcon
+        message={skipped ? "无可执行成员" : "该批次未记录跳过明细"}
+      />
+    ));
   return (
     <div className={styles.detailContent}>
       <div className={styles.detailHead}>
@@ -275,8 +341,9 @@ export default function BatchDetail({
           {
             key: "members",
             label: `执行成员 (${data?.member_total ?? batch.member_count})`,
-            children: (
+            children: emptyBatchDetail || (
               <div className={styles.intentTab}>
+                {skippedTable}
                 <div className={styles.intentFilters}>
                   <Input
                     aria-label="筛选新版执行成员"

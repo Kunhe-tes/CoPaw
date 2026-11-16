@@ -18,6 +18,54 @@ afterEach(() => {
   cleanup();
   vi.clearAllMocks();
 });
+
+it.each([
+  {
+    skipped: [
+      {
+        tenant_id: "alice",
+        agent_id: "default",
+        job_id: "parent",
+        job_name: "保险经营专家",
+        member_role: "parent",
+        reason: "auto_unread_threshold",
+      },
+    ],
+    text: "未读过多自动暂停",
+  },
+  { skipped: null, text: "该批次未记录跳过明细" },
+])("零执行成员时展示入队前跳过信息 $text", async ({ skipped, text }) => {
+  const batch = {
+    batch_id: "empty-batch",
+    job_id: "parent",
+    member_count: 0,
+    status: "received",
+  } as ManagedBatch;
+  api.detail.mockResolvedValue({
+    batch,
+    members: [],
+    member_total: 0,
+    skipped_members: skipped,
+    events: [],
+    event_total: 0,
+  });
+  render(
+    <BatchDetail
+      source="bank"
+      actor="manager"
+      batch={batch}
+      refresh={0}
+      onQueued={() => {}}
+    />,
+  );
+  expect(await screen.findByText(text)).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "执行成员 (0)" })).toBeInTheDocument();
+  if (skipped) {
+    expect(screen.getByText("保险经营专家")).toBeInTheDocument();
+    expect(screen.getByText("父任务 · alice")).toBeInTheDocument();
+  }
+});
+
 it("详情不展示任务数说明行，成员保留子任务状态文案", async () => {
   const batch = {
     batch_id: "batch",

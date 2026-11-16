@@ -205,6 +205,56 @@ async def test_batch_freezes_members_and_preserves_pause_semantics(
 
 
 @pytest.mark.asyncio
+async def test_batch_records_skipped_parent_alongside_queued_children(
+    callback_setup,
+):
+    from scheduler.app.services.cron.managed.distribution import BroadcastStore
+    from scheduler.app.services.cron.managed.distribution_worker import (
+        BroadcastProcessor,
+    )
+    from scheduler.app.services.cron.managed.scheduling import (
+        ManagedSchedulingService,
+    )
+
+    db, caller, management = callback_setup
+    created = await create_source(callback_setup, "batch_enabled")
+    task = await BroadcastStore(db).submit(
+        caller,
+        created["job_id"],
+        payload(),
+    )
+    await BroadcastProcessor(
+        db,
+        management.resources,
+        management.platform,
+    ).process(
+        task["task_id"],
+    )
+    db.conn.execute(
+        "UPDATE swe_cron_jobs_v2 SET enabled=0 WHERE job_id=?",
+        (created["job_id"],),
+    )
+    command = body(db, created, kind="batch")
+    command["operation_id"] = task["task_id"]
+    result = await ManagedSchedulingService(
+        db,
+        clock=lambda: datetime(2026, 10, 15, 23, tzinfo=timezone.utc),
+    ).accept(caller, command, "batch")
+    assert result["enqueued_intents"] == 2
+    receipt, members = db.conn.execute(
+        "SELECT response_json,members_json FROM swe_cron_managed_trigger_receipts WHERE batch_id=?",
+        (result["batch_id"],),
+    ).fetchone()
+    assert len(json.loads(members)) == 2
+    assert [
+        (item["job_id"], item["reason"])
+        for item in json.loads(receipt)["skipped_members"]
+    ] == [
+        (created["job_id"], "job_disabled"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_wrong_binding_is_rejected_but_stable_trigger_identity_is_optional(
     callback_setup,
 ):

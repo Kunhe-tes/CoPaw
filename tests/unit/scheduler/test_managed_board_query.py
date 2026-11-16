@@ -294,6 +294,9 @@ async def test_zero_member_batch_is_received_but_invalid_manifest_is_unavailable
     db, caller, _ = callback_setup
     created = await create_source(callback_setup, "batch_enabled")
     db.conn.execute("UPDATE swe_cron_jobs_v2 SET enabled=0")
+    db.conn.execute(
+        "UPDATE swe_cron_job_states SET pause_reason='auto_unread_threshold'",
+    )
     accepted = await ManagedSchedulingService(
         db,
         clock=lambda: datetime(2026, 10, 16, 1, tzinfo=timezone.utc),
@@ -304,6 +307,29 @@ async def test_zero_member_batch_is_received_but_invalid_manifest_is_unavailable
     assert row["status"] == "received"
     assert row["member_count"] == 0
     assert row["completion_rate"] is None
+    assert "skipped_members" not in accepted
+    # 恢复任务后仍展示受理时的原因。
+    db.conn.execute("UPDATE swe_cron_jobs_v2 SET enabled=1")
+    db.conn.execute("UPDATE swe_cron_job_states SET pause_reason=NULL")
+    detail = await service.detail("bank", accepted["batch_id"])
+    assert detail["members"] == []
+    assert detail["event_total"] == 0
+    assert detail["skipped_members"] == [
+        {
+            "tenant_id": "alice",
+            "agent_id": "default",
+            "job_id": created["job_id"],
+            "job_name": "report",
+            "member_role": "parent",
+            "reason": "auto_unread_threshold",
+        },
+    ]
+    db.conn.execute(
+        "UPDATE swe_cron_managed_trigger_receipts SET response_json='{}'",
+    )
+    assert (await service.detail("bank", accepted["batch_id"]))[
+        "skipped_members"
+    ] is None
     db.conn.execute(
         "UPDATE swe_cron_managed_trigger_receipts SET members_json='{}'",
     )
