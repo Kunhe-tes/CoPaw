@@ -39,3 +39,5 @@ Priority: P0
 2026-11-16：Run 非终态 status 使用严格较新的事件 `occurred_at` 更新，较旧或同刻的 accepted/running 不回退当前状态；MySQL 实测覆盖 running→旧 accepted、waiting_approval→旧及同刻 running，终态仍优先。受影响回归 191 passed，MySQL 集成复跑 1 passed。
 
 2026-11-16：新增真实 Runner admission 与 `AgentRunner.persist_outcome`→JSONL→白名单校验→隔离 MySQL 投影→manager API 集成测试，使用受控成功执行流而非真实 Provider；首次实测发现 Attempt 结束时间污染 Run ended_at、阻止 run.ended 投影，现仅 run.ended 能结束 Run。Ticket 仍保持 claimed：真实模型/专家主执行、无 coordinator legacy 路径和 Chromium 108 精确现场补丁版尚未验收。
+
+2026-11-16：已在隔离 MySQL 集成测试覆盖有 coordinator 的 `persist_outcome` 结算，以及无 coordinator 时从 durable turn terminal status 结算；两条路径均产生 run.ended 并通过 manager API 查询。真实模型/专家主执行与 Chromium 108 精确现场补丁版仍未验收。

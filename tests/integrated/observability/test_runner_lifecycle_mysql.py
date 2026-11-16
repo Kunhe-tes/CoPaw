@@ -106,7 +106,7 @@ async def _assert_projected_run_available(connection, records) -> None:
     assert any(item["run_id"] == run_id for item in response.json()["items"])
 
 
-def _make_runner_case():
+def _make_runner_case(coordinator_enabled: bool):
     from swe.app.answer_turn.models import TurnIdentity, TurnOutcome
     from swe.app.runner.runner import AgentRunner
     from swe.app.runner.query_execution.admission import stream_admission
@@ -156,6 +156,7 @@ def _make_runner_case():
         )
 
     async def successful_execution(_msgs, **_kwargs):
+        execution.state["turn_states"][question_id] = {"status": "completed"}
         yield Msg("assistant", "private answer body", "assistant"), True
 
     owner = AgentRunner.__new__(AgentRunner)
@@ -163,7 +164,7 @@ def _make_runner_case():
     owner.tenant_id = "tenant-a"
     owner._workspace = SimpleNamespace(conversation_storage=None)
     owner.session = Session()
-    owner._answer_turn_coordinator = object()
+    owner._answer_turn_coordinator = object() if coordinator_enabled else None
     owner._answer_turn_runtimes = {identity: (None, execution)}
     owner._answer_turn_locations = {}
     owner._agent_observability_contexts = {}
@@ -183,8 +184,14 @@ def _make_runner_case():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "coordinator_enabled",
+    [True, False],
+    ids=["coordinator-settlement", "legacy-settlement"],
+)
 async def test_runner_admission_settlement_emits_and_projects_one_run(
     monkeypatch,
+    coordinator_enabled,
 ):
     monkeypatch.setenv("SWE_ALLOW_MISSING_TRACE_SDK", "true")
     monkeypatch.setenv("SWE_AGENTOBS_ENABLED", "true")
@@ -213,7 +220,7 @@ async def test_runner_admission_settlement_emits_and_projects_one_run(
         request,
         question,
         identity,
-    ) = _make_runner_case()
+    ) = _make_runner_case(coordinator_enabled)
 
     try:
         frames = [
@@ -228,11 +235,12 @@ async def test_runner_admission_settlement_emits_and_projects_one_run(
             )
         ]
         assert len(frames) == 1 and frames[0][1] is True
-        await AgentRunner.persist_outcome(
-            owner,
-            TurnOutcome.completed(identity),
-        )
-        assert not owner._agent_observability_contexts
+        if coordinator_enabled:
+            await AgentRunner.persist_outcome(
+                owner,
+                TurnOutcome.completed(identity),
+            )
+            assert not owner._agent_observability_contexts
 
         assert emitter.close(timeout=1) == 0
         records = [json.loads(line) for line in sink.getvalue().splitlines()]
