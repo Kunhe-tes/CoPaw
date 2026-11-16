@@ -86,6 +86,7 @@ def test_ingest_validation_projects_body_and_rejects_bad_scope():
         "capture_enabled": True,
         "scope": context.scope.to_dict(),
         "business_ref": {"chat_id": "chat", "message": "private question"},
+        "started_at": context.run_started_at,
         "prompt": "private prompt",
     }
     validated = _validate_payload(json.dumps(event))
@@ -94,11 +95,22 @@ def test_ingest_validation_projects_body_and_rejects_bad_scope():
     event["scope"] = {"source_id": "source"}
     with pytest.raises(ValueError, match="invalid_scope"):
         _validate_payload(json.dumps(event))
+    event["scope"] = context.scope.to_dict()
+    event["event_name"] = "run.ended"
+    event["phase_key"] = "ended"
+    event["ended_at"] = context.run_started_at
+    event["terminal_fact_source"] = "business_settlement"
+    with pytest.raises(ValueError, match="event_missing_required_field"):
+        _validate_payload(json.dumps(event))
+    event["status"] = "partial"
+    with pytest.raises(ValueError, match="invalid_run_terminal_status"):
+        _validate_payload(json.dumps(event))
 
 
 def test_ingest_validation_rejects_sql_width_overflow_and_bad_attempt_ids():
     context = ObservabilityContext.new_run(
-        capture_enabled=True, scope=Scope("svc", "source", "tenant", "agent"),
+        capture_enabled=True,
+        scope=Scope("svc", "source", "tenant", "agent"),
     )
     event = {
         "schema_version": 1,

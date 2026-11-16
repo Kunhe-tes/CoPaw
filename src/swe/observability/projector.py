@@ -54,6 +54,54 @@ _UUID_FIELDS = (
     "parent_obs_span_id",
     "predecessor_attempt_id",
 )
+_REQUIRED_EVENT_FIELDS = {
+    "run.accepted": ("started_at",),
+    "run.state": ("status",),
+    "run.ended": (
+        "started_at",
+        "ended_at",
+        "status",
+        "terminal_fact_source",
+    ),
+    "attempt.started": ("obs_attempt_id", "attempt_index", "started_at"),
+    "attempt.ended": (
+        "obs_attempt_id",
+        "attempt_index",
+        "started_at",
+        "ended_at",
+        "status",
+    ),
+    "span.started": (
+        "obs_span_id",
+        "started_at",
+        "span_type",
+        "operation",
+        "kind",
+        "name",
+    ),
+    "span.ended": (
+        "obs_span_id",
+        "started_at",
+        "ended_at",
+        "status",
+        "span_type",
+        "operation",
+        "kind",
+        "name",
+        "metrics",
+        "quality",
+    ),
+    "span.event": ("obs_span_id", "event_kind"),
+    "approval.requested": ("approval_request_id",),
+    "approval.resolved": ("approval_request_id", "decision", "ended_at"),
+    "subagent.started": ("obs_span_id", "subagent"),
+    "subagent.ended": ("obs_span_id", "ended_at", "status"),
+    "asset.used": ("asset",),
+}
+_RUN_TERMINAL_STATUSES = frozenset(
+    {"succeeded", "failed", "cancelled", "timed_out", "rejected"},
+)
+_TERMINAL_FACT_SOURCES = frozenset({"business_settlement"})
 
 
 def _timestamp(value: Any) -> datetime:
@@ -68,11 +116,34 @@ def _timestamp(value: Any) -> datetime:
 def _validate_payload(raw: str) -> dict[str, Any]:
     event = _project_payload(raw)
     _validate_protocol(event)
+    _validate_event_fields(event)
     if event["event_name"] == "observer.health":
         _validate_health_event(event)
         return event
     _validate_lifecycle_event(event)
     return event
+
+
+def _validate_event_fields(event: dict[str, Any]) -> None:
+    name = event["event_name"]
+    required = _REQUIRED_EVENT_FIELDS.get(name, ())
+    if any(event.get(key) is None for key in required):
+        raise ValueError("event_missing_required_field")
+    if name == "run.ended":
+        if event["status"] not in _RUN_TERMINAL_STATUSES:
+            raise ValueError("invalid_run_terminal_status")
+        if event["terminal_fact_source"] not in _TERMINAL_FACT_SOURCES:
+            raise ValueError("invalid_terminal_fact_source")
+    if name in {"attempt.ended", "span.ended", "subagent.ended"}:
+        if event["status"] not in {
+            "succeeded",
+            "failed",
+            "cancelled",
+            "timed_out",
+            "rejected",
+            "waiting_approval",
+        }:
+            raise ValueError("invalid_operation_terminal_status")
 
 
 def _project_payload(raw: str) -> dict[str, Any]:
@@ -250,7 +321,9 @@ def _validate_lifecycle_values(event: dict[str, Any]) -> None:
             raise ValueError("invalid_metric")
     if (
         len(
-            json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+            json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8",
+            ),
         )
         > 24 * 1024
     ):
