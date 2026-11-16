@@ -33,6 +33,8 @@ SQL 为人工交付文件，应用不会读取执行。执行前由数据库负�
 
 Worker 调整按子任务采样前，在共库核对并补齐 [反馈统计列](../../scripts/sql/cron_worker_subtask_feedback.sql)，再部署 Scheduler、Monitor 和 Console。历史调整记录保留原合计，未保存的主任务和子任务明细显示为「—」。
 
+升级 Worker 反馈去重前，先在共库补齐 [反馈使用标记](../../scripts/sql/cron_worker_feedback_consumption.sql)，再切换所有 Scheduler 实例。升级前的容量记录只有汇总数量。首次使用新逻辑时，仍在反馈窗口内的旧结果可能被计入一次，随后按标记跳过。
+
 ## 表的分工
 
 | 表 | 用途及主要写入者 |

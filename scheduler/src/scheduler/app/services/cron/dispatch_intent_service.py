@@ -1756,6 +1756,7 @@ class CronDispatchIntentService:
         since: datetime,
         now_utc: datetime,
         scope: Mapping[str, Any] | None = None,
+        unused_only: bool = False,
     ) -> dict[str, Any]:
         """Summarize recent completion feedback for capacity decisions."""
         db = get_db_connection()
@@ -1781,19 +1782,26 @@ class CronDispatchIntentService:
             """,
             (now_value, *scope_params),
         )
-        completion_row = await db.fetch_one(
+        model_failure = f"status='failed' AND {_MODEL_FAILURE_EXECUTION_SQL}"
+        failure = f"CASE WHEN {model_failure} THEN 1 ELSE 0 END"
+        completion_fields = (
+            f"id, attempt_count, {failure} AS failure_count"
+            if unused_only
+            else f"COUNT(*) AS sample_count, SUM({failure}) AS failure_count"
+        )
+        unused_completion = (
+            "AND (worker_feedback_attempt IS NULL "
+            "OR worker_feedback_attempt <> attempt_count)"
+            if unused_only
+            else ""
+        )
+        completions = await db.fetch_all(
             f"""
-            SELECT
-                SUM(CASE WHEN status = 'completed' OR (status='failed' AND NOT {_MODEL_FAILURE_EXECUTION_SQL}) THEN 1 ELSE 0 END)
-                    AS success_count,
-                SUM(CASE
-                    WHEN status = 'failed'
-                     AND {_MODEL_FAILURE_EXECUTION_SQL}
-                    THEN 1 ELSE 0
-                END)
-                    AS failure_count
+            SELECT {completion_fields}
             FROM swe_cron_dispatch_intents
             WHERE (completed_at >= %s OR updated_at >= %s)
+              AND status IN ('completed', 'failed')
+              {unused_completion}
               {scope_clause}
             """,
             (
@@ -1802,31 +1810,46 @@ class CronDispatchIntentService:
                 *scope_params,
             ),
         )
-        event_row = await db.fetch_one(
+        event_fields = "e.id" if unused_only else "COUNT(*) AS retry_count"
+        unused_event = "AND e.worker_feedback_used = 0" if unused_only else ""
+        events = await db.fetch_all(
             f"""
-            SELECT COUNT(*) AS retry_count
+            SELECT {event_fields}
             FROM swe_cron_dispatch_events e
             LEFT JOIN swe_cron_dispatch_intents i ON e.intent_id = i.id
             WHERE e.event_type = 'retry_scheduled'
               AND JSON_EXTRACT(e.details,'$.model_failure')=1
               AND e.created_at >= %s
+              {unused_event}
               {event_scope_clause}
             """,
             (since_value, *event_scope_params),
         )
-        retry_count = int((event_row or {}).get("retry_count") or 0)
+        retry_count = (
+            len(events) if unused_only else int(events[0]["retry_count"])
+        )
+        sample_count = (
+            len(completions)
+            if unused_only
+            else int(completions[0]["sample_count"])
+        )
+        failures = sum(int(row["failure_count"] or 0) for row in completions)
+        samples = {}
+        if unused_only:
+            samples = {
+                "intent_attempts": [
+                    (row["id"], row["attempt_count"]) for row in completions
+                ],
+                "retry_events": [row["id"] for row in events],
+            }
         return {
             "pending_count": int((state_row or {}).get("pending_count") or 0),
             "claimed_count": int((state_row or {}).get("claimed_count") or 0),
             "running_count": int((state_row or {}).get("running_count") or 0),
-            "success_count": int(
-                (completion_row or {}).get("success_count") or 0,
-            ),
-            "failure_count": int(
-                (completion_row or {}).get("failure_count") or 0,
-            )
-            + retry_count,
+            "success_count": sample_count - failures,
+            "failure_count": failures + retry_count,
             "latency_p95_ms": 0,
+            "feedback_samples": samples,
         }
 
     async def list_dispatch_scopes(
@@ -2055,6 +2078,7 @@ class CronDispatchIntentService:
         avg_latency_ms: int = 0,
         decision_reason: str = "",
         recorded_at: datetime | None = None,
+        feedback_samples: dict[str, list] | None = None,
     ) -> None:
         db = get_db_connection()
         await write_capacity(
@@ -2100,6 +2124,7 @@ class CronDispatchIntentService:
                 (decision_reason or "")[:255],
                 _to_beijing_naive(recorded_at or datetime.now(timezone.utc)),
             ),
+            feedback_samples=feedback_samples,
         )
 
     async def _transition_intent(
