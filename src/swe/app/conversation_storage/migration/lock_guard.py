@@ -41,12 +41,25 @@ class MigrationLockGuard:
             "@@server_uuid AS server_uuid,DATABASE() AS schema_name",
             (self.lock_name,),
         )
-        if not row or (
-            row["connection_id"] != self.connection_id
-            or row["lock_owner"] != self.connection_id
-            or row["server_uuid"] != self.server_uuid
-            or row["schema_name"] != self.schema
-        ):
+        expected = {
+            "connection_id": self.connection_id,
+            "lock_owner": self.connection_id,
+            "server_uuid": self.server_uuid,
+            "schema_name": self.schema,
+        }
+        mismatches = (
+            [key for key, value in expected.items() if row.get(key) != value]
+            if row
+            else ["missing_row"]
+        )
+        if mismatches:
+            # Report the failed invariant without credentials, schema names or
+            # server identifiers. Never reacquire a lost migration lock here.
             raise RuntimeError(
-                "migration database identity or named lock lost",
+                "migration database identity or named lock lost; "
+                + "mismatches="
+                + ",".join(mismatches)
+                + f"; expected_connection_id={self.connection_id}"
+                + f"; observed_connection_id={(row or {}).get('connection_id')}"
+                + f"; observed_lock_owner={(row or {}).get('lock_owner')}",
             )

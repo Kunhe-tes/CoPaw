@@ -51,6 +51,12 @@ prepare 的最终预检（以及独立 preflight/预览）在排除已发布和�
 
 ## 1. 边界与上线单位
 
+### migrate 报 database identity or named lock lost
+
+此错误表示原 SQL owner 的连接 ID、命名锁持有者、server UUID 或当前库名至少一项不再匹配，是全局保护停止，不是可跳过的 source 输入错误。新版本错误中的 `mismatches` 指明失败项；只输出连接编号，不输出凭据、实例 UUID 或库名。`lock_owner` 表示锁不再由原连接持有（NULL 表示当前后端未持有）；`connection_id` 表示 SQL 会话变化；`server_uuid` 表示后端实例变化；`schema_name` 表示选库变化。
+
+先保留 stderr 和 failure/review-pending 审计文件，确认旧迁移进程已退出；核查数据库代理是否保持会话粘连、是否发生主从切换/重启、连接超时/KILL/reset 或 RELEASE_LOCK/RELEASE_ALL_LOCKS。用另一连接查询只能看到当前后端状态，不能证明已结束迁移连接当时的锁状态。普通事务 COMMIT 本身不会释放命名锁。不要移除 guard、在命令内部自动重拿锁、删除控制表/票据、重新 prepare 或更改 migration ID。连接稳定且没有其他迁移进程后，使用同一 manifest 重跑 `migrate --apply`；保留未发布输入冻结，已发布 source 仍跳过。反复发生时先修复连接/代理问题，不循环强行重试。
+
 - 新 prepare 作业以 `(service_unit_id, tenant_id, source_id)` 为发布单位，同 source 的 Agent、workspace 和分享一起通过；旧 manifest 仍以 `(service_unit_id, tenant_id)` 为单位。
 - `source_root/config_root/snapshot_root` 是冻结输入；`original_root` 是新版实际工作区根；`nas_root` 是新正文存储。默认冻结副本模式要求输入与所有服务的在线 `original_root` 分离。显式原地模式允许四个旧 root 相同，见第 1.1 节。`snapshot_root` 是旧分享正文根，不等于“在线工作区根”。
 - 启动迁移前停止全部旧 writer、定时任务和其他写入口并建立备份；冻结源持续保留。程序接受停写证据引用，不替代停止进程或存储冻结。

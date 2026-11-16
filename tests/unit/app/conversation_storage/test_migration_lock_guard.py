@@ -40,8 +40,32 @@ async def test_guard_rejects_connection_lock_or_database_identity_change(
         server_uuid="server",
     )
     db.fetch_one.return_value = {**original, field: value}
-    with pytest.raises(RuntimeError, match="identity or named lock lost"):
+    with pytest.raises(
+        RuntimeError,
+        match="identity or named lock lost",
+    ) as failure:
         await guard.check()
+    assert "mismatches=" + field in str(failure.value)
+    assert "expected_connection_id=17" in str(failure.value)
+    assert (
+        "schema" not in str(failure.value).split("mismatches=", maxsplit=1)[0]
+    )
+
+
+async def test_guard_reports_missing_identity_row_without_reacquiring_lock():
+    db = SimpleNamespace(fetch_one=AsyncMock(return_value=None))
+    guard = MigrationLockGuard(
+        db,
+        "lock",
+        "server",
+        "schema",
+        17,
+        asyncio.current_task(),
+    )
+    with pytest.raises(RuntimeError, match="mismatches=missing_row"):
+        await guard.check()
+    assert db.fetch_one.await_count == 1
+    assert "GET_LOCK" not in db.fetch_one.call_args.args[0]
 
 
 async def test_guard_rejects_child_task_even_with_inherited_context():
