@@ -235,7 +235,7 @@ class Observability:
                     entity_id=attempt.obs_attempt_id or "",
                     phase_key="started",
                     local_seq=0,
-                    attributes={"started_at": utc_now()},
+                    attributes={"started_at": attempt.attempt_started_at},
                 ),
             )
         return attempt
@@ -286,7 +286,11 @@ class Observability:
                 entity_id=context.obs_attempt_id,
                 phase_key="ended",
                 local_seq=0,
-                attributes={"status": status, "ended_at": utc_now()},
+                attributes={
+                    "status": status,
+                    "started_at": context.attempt_started_at,
+                    "ended_at": utc_now(),
+                },
             ),
         )
 

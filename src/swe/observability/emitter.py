@@ -16,7 +16,7 @@ from .config import EmitterConfig
 from .models import MetadataEvent
 
 _ALLOWED_KEYS = frozenset(
-    "schema_version event_id event_name occurred_at producer_id obs_run_id obs_attempt_id obs_span_id parent_obs_span_id entity_kind entity_id phase_key local_seq scope business_ref service_unit_id source_id tenant_id agent_id chat_id session_id channel root_question_msgid current_question_msgid run_started_at capture_enabled span_type operation kind name step_index started_at ended_at status technical_status has_error reason_code metrics quality model tool asset approval_request_id subagent links events predecessor_attempt_id attempt_index terminal_fact_source decision content_ref content_kind saved_state metadata_truncated error_type phase cause_id recovery_id event_kind duration_us usage_known input_tokens output_tokens total_tokens first_chunk_us first_visible_text_us start_observed end_observed truncated provider_key request_model_key response_model_key model_key_source finish_reason streaming tool_key skill_key agent_key prompt_id prompt_version tool_call_id occurrence_id message_id content_type reference_id business_subagent_key mode execution_agent_key attempt_ordinal retries loop_count tool_count".split(),
+    "schema_version event_id event_name occurred_at producer_id obs_run_id obs_attempt_id obs_span_id parent_obs_span_id entity_kind entity_id phase_key local_seq scope business_ref service_unit_id source_id tenant_id agent_id chat_id session_id channel root_question_msgid current_question_msgid run_started_at attempt_started_at capture_enabled span_type operation kind name step_index started_at ended_at status technical_status has_error reason_code metrics quality model tool asset approval_request_id subagent links events predecessor_attempt_id attempt_index terminal_fact_source decision content_ref content_kind saved_state metadata_truncated error_type phase cause_id recovery_id event_kind duration_us usage_known input_tokens output_tokens total_tokens first_chunk_us first_visible_text_us start_observed end_observed truncated provider_key request_model_key response_model_key model_key_source finish_reason streaming tool_key skill_key agent_key prompt_id prompt_version tool_call_id occurrence_id message_id content_type reference_id business_subagent_key mode execution_agent_key attempt_ordinal retries loop_count tool_count".split(),
 )
 _FORBIDDEN_KEYS = frozenset(
     "prompt messages input output content body text query parameters arguments result exception traceback api_key password secret".split(),
@@ -152,9 +152,7 @@ class JsonlEmitter:
 
     def emit(self, event: MetadataEvent | dict[str, Any]) -> bool:
         try:
-            raw = (
-                event.to_dict() if isinstance(event, MetadataEvent) else event
-            )
+            raw = event.to_dict() if isinstance(event, MetadataEvent) else event
             projected = _project(raw)
             if not isinstance(projected, dict):
                 raise ValueError("event must be an object")
@@ -227,8 +225,7 @@ class JsonlEmitter:
             if (
                 self._closed
                 or self._outstanding_events >= self.config.max_queue_events
-                or self._outstanding_bytes + len(payload)
-                > self.config.max_queue_bytes
+                or self._outstanding_bytes + len(payload) > self.config.max_queue_bytes
             ):
                 self._dropped += 1
                 return False
@@ -264,9 +261,7 @@ class JsonlEmitter:
 
     def close(self, timeout: float | None = None) -> int:
         wait_for = (
-            self.config.shutdown_timeout
-            if timeout is None
-            else min(timeout, 1.0)
+            self.config.shutdown_timeout if timeout is None else min(timeout, 1.0)
         )
         deadline = time.monotonic() + min(wait_for, 1.0)
         with self._condition:

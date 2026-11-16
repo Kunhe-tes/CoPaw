@@ -84,6 +84,11 @@ def test_span_emits_self_contained_end_and_preserves_exception():
     next_attempt = obs.start_attempt(attempt)
     assert next_attempt.attempt_index == 2
     assert next_attempt.predecessor_attempt_id == attempt.obs_attempt_id
+    assert next_attempt.attempt_started_at
+    assert (
+        ObservabilityContext.from_carrier(next_attempt.to_carrier()).attempt_started_at
+        == next_attempt.attempt_started_at
+    )
     with pytest.raises(RuntimeError, match="business failure"):
         with bind_context(attempt):
             with obs.span("Tool", "execute", name="registered.tool") as span:
@@ -93,18 +98,14 @@ def test_span_emits_self_contained_end_and_preserves_exception():
     obs.end_run(context, status="failed")
     assert emitter.close() == 0
     records = [json.loads(line) for line in stream.getvalue().splitlines()]
-    ended = next(
-        record for record in records if record["event_name"] == "span.ended"
-    )
+    ended = next(record for record in records if record["event_name"] == "span.ended")
     assert ended["started_at"]
     assert ended["ended_at"]
     assert ended["status"] == "failed"
     assert ended["error_type"] == "RuntimeError"
     assert "business failure" not in stream.getvalue()
     assert records[-1]["event_name"] == "run.ended"
-    incremental = [
-        record for record in records if record["event_name"] == "span.event"
-    ]
+    incremental = [record for record in records if record["event_name"] == "span.event"]
     assert [record["local_seq"] for record in incremental] == [0, 1]
     assert records[-1]["producer_id"]
 
@@ -239,9 +240,7 @@ def test_event_attributes_cannot_replace_envelope_identity():
             quality={"start_observed": False},
         )
     emitter.close()
-    start, end = [
-        json.loads(line) for line in stream.getvalue().splitlines()[1:]
-    ]
+    start, end = [json.loads(line) for line in stream.getvalue().splitlines()[1:]]
     assert start["obs_run_id"] == context.obs_run_id
     assert start["event_name"] == "span.started"
     assert start["span_type"] == "Agent"

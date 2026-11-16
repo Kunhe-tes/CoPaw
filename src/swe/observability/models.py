@@ -11,14 +11,14 @@ from typing import Any
 from uuid import uuid4
 
 _PRODUCER_PID = os.getpid()
-_PRODUCER_ID = f"{socket.gethostname()}:{_PRODUCER_PID}:{uuid4()}"
+_PRODUCER_ID = f"{socket.gethostname()[:32]}:{_PRODUCER_PID}:{uuid4()}"
 
 
 def producer_id() -> str:
     global _PRODUCER_PID, _PRODUCER_ID
     if _PRODUCER_PID != os.getpid():
         _PRODUCER_PID = os.getpid()
-        _PRODUCER_ID = f"{socket.gethostname()}:{_PRODUCER_PID}:{uuid4()}"
+        _PRODUCER_ID = f"{socket.gethostname()[:32]}:{_PRODUCER_PID}:{uuid4()}"
     return _PRODUCER_ID
 
 
@@ -61,6 +61,7 @@ class ObservabilityContext:
     parent_obs_span_id: str | None = None
     attempt_index: int = 0
     predecessor_attempt_id: str | None = None
+    attempt_started_at: str | None = None
 
     @classmethod
     def new_run(
@@ -84,6 +85,7 @@ class ObservabilityContext:
             parent_obs_span_id=None,
             attempt_index=self.attempt_index + 1,
             predecessor_attempt_id=self.obs_attempt_id,
+            attempt_started_at=utc_now(),
         )
 
     def with_updates(self, **updates: Any) -> "ObservabilityContext":
@@ -91,7 +93,8 @@ class ObservabilityContext:
             obs_run_id=updates.get("obs_run_id", self.obs_run_id),
             run_started_at=updates.get("run_started_at", self.run_started_at),
             capture_enabled=updates.get(
-                "capture_enabled", self.capture_enabled,
+                "capture_enabled",
+                self.capture_enabled,
             ),
             scope=updates.get("scope", self.scope),
             business_ref=updates.get("business_ref", dict(self.business_ref)),
@@ -104,6 +107,9 @@ class ObservabilityContext:
             predecessor_attempt_id=updates.get(
                 "predecessor_attempt_id",
                 self.predecessor_attempt_id,
+            ),
+            attempt_started_at=updates.get(
+                "attempt_started_at", self.attempt_started_at,
             ),
         )
 
@@ -120,6 +126,7 @@ class ObservabilityContext:
             "parent_obs_span_id": self.parent_obs_span_id,
             "attempt_index": self.attempt_index,
             "predecessor_attempt_id": self.predecessor_attempt_id,
+            "attempt_started_at": self.attempt_started_at,
         }
 
     @classmethod
@@ -140,13 +147,13 @@ class ObservabilityContext:
                 agent_id=str(scope["agent_id"]),
             ),
             business_ref={
-                str(k): str(v)
-                for k, v in carrier.get("business_ref", {}).items()
+                str(k): str(v) for k, v in carrier.get("business_ref", {}).items()
             },
             obs_attempt_id=carrier.get("obs_attempt_id"),
             parent_obs_span_id=carrier.get("parent_obs_span_id"),
             attempt_index=int(carrier.get("attempt_index", 0)),
             predecessor_attempt_id=carrier.get("predecessor_attempt_id"),
+            attempt_started_at=carrier.get("attempt_started_at"),
         )
 
 
@@ -193,9 +200,9 @@ class MetadataEvent:
             if context.attempt_index:
                 result["attempt_index"] = context.attempt_index
             if context.predecessor_attempt_id:
-                result["predecessor_attempt_id"] = (
-                    context.predecessor_attempt_id
-                )
+                result["predecessor_attempt_id"] = context.predecessor_attempt_id
+            if context.attempt_started_at:
+                result["attempt_started_at"] = context.attempt_started_at
         reserved = _REQUIRED_EVENT_KEYS | {
             "obs_run_id",
             "obs_attempt_id",
