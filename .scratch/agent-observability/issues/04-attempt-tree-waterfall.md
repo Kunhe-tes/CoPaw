@@ -38,3 +38,5 @@ Priority: P0
 2026-11-16：继续补足 Attempt 查看、节点选择与时间瀑布：详情可按服务端 Attempt 过滤，Span 行依据真实父关系缩进并在父节点未加载时显式标注；行高固定，条形按开始/结束时间相对定位，开放区间只延伸至 Run Detail 的服务端 `generated_at`，未收到结束事件时不显示为仍在运行。Span Inspector 展示业务/技术状态、质量、微秒精度 UTC 起止、身份及模型详情。Span 投影质量按结束事实升级，测试覆盖 end-before-start 与 start-only partial；乱序 MySQL 合同与 Runner 集成合计 8 passed，Observability 单测 36 passed，Console 页面 7 passed，typecheck/ESLint/Prettier/pre-commit 通过。Chrome 157 在 `hideMenu=true` 的 360×800 与 390×844 视口检查无横向溢出；前端和后端只读代码审查未发现未解决 P1/P2。仍保持 open：真实连续多 Attempt Agent 生命周期、单调耗时与墙钟区间偏差提示、跨已加载页迟到 Span 刷新，以及指定 Chromium 108.0.5359.95/360 基线未完成验收。
 
 2026-11-16：Inspector 增加单调耗时与 UTC 墙钟区间并列值，完整结束区间偏差达到 1ms 时明确提示；缺少结束事实时只显示截至服务端观测时间的墙钟区间，不比较单调耗时。Console Vitest 7 passed，TypeScript typecheck 和目标 pre-commit 通过。
+
+2026-11-16：补充真实 Chromium 108.0.5359.29 headless 360×800 检查，`hideMenu=true` 下 Agent 树、时间条和选中 Span Inspector 正常，DOM/document 宽度均为 360，单调/墙钟偏差警示可见。该构建不是现场 360 内核的 108.0.5359.95，不能替代精确基线；现场版本、原生 360 浏览器仍未验证。
