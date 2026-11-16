@@ -2,11 +2,33 @@
 """Migration metrics observe physical work without retaining SQL values."""
 
 import io
+import threading
 
 import pytest
 
 from swe.app.conversation_storage.migration.progress import MigrationProgress
 from tests.unit.database.test_prepared import ProtocolSession, template
+
+
+async def test_io_threads_receive_only_value_free_observer():
+    from swe.app.conversation_storage.migration.parallel import MigrationIO
+    from swe.database.observation import record_operation
+    from swe.database.connection import _CURRENT_CONNECTION
+
+    owner = threading.get_ident()
+
+    def read_bundle():
+        assert threading.get_ident() != owner
+        assert not _CURRENT_CONNECTION.get()
+        record_operation("bundle_open")
+        record_operation("bundle_index_parse")
+
+    report = MigrationProgress("migrate", "job", stream=io.StringIO())
+    with report.activate():
+        async with MigrationIO(2) as executor:
+            await executor.call(read_bundle)
+    assert report.snapshot()["bundle_opens"] == 1
+    assert report.snapshot()["bundle_index_parses"] == 1
 
 
 async def test_prepared_metrics_count_chunks_not_logical_calls():
