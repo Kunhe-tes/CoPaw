@@ -56,6 +56,28 @@ class PrefetchedBundles:
             "runtime locator is absent from fresh body evidence",
         )
 
+    def read_extents(
+        self,
+        relative_path,
+        extents,
+        *,
+        expected_length=None,
+        max_bytes=MAX_READ_BYTES,
+    ):
+        """对缓存证据提供同等总字节预算的多块兼容接口。"""
+        extents = tuple(extents)
+        if sum(block.length for block in extents) > max_bytes:
+            raise IntegrityError("prefetched multi-read exceeds byte budget")
+        return tuple(
+            self.read_extent(
+                relative_path,
+                block.offset,
+                block.length,
+                expected_length=expected_length,
+            )
+            for block in extents
+        )
+
 
 def _read_bounded(original, path, byte_length, allowance):
     """预留索引与正文膨胀预算后，在同一文件描述符中读取全部块。"""
