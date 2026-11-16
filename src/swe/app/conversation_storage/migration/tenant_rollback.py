@@ -162,7 +162,7 @@ async def _publication_states(database, manifest):
 
 
 def _validate_source_state(manifest, row):
-    from .authority import validate_receipt
+    from .authority import validate_source_verification
     from .source_state import SourceState
 
     key = tuple(
@@ -185,7 +185,9 @@ def _validate_source_state(manifest, row):
         if service is None or json.loads(row["evidence_text"]) != expected:
             raise ValueError("source frozen evidence differs")
         if row["state"] == "published":
-            proof = validate_receipt(json.loads(row["verification_text"]))
+            proof, _level = validate_source_verification(
+                row["verification_text"],
+            )
             if proof["migration_id"] != manifest.migration_id or set(
                 proof["services"],
             ) != {key[0]}:

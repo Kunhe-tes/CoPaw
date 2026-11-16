@@ -167,15 +167,28 @@ async def test_source_publication_and_failure_are_independent():
         ],
     )
     await states.fail("svc", "alice", "B", "inventory", "invalid", "bad")
-    for state in ("importing", "imported", "verified"):
+    for state in ("importing", "imported"):
         await states.transition("svc", "alice", "A", state)
+    await states.transition(
+        "svc",
+        "alice",
+        "A",
+        "verified",
+        {"verification_level": "fast"},
+    )
     proof = {
         "version": 1,
         "migration_id": JOB,
         "services": {"svc": {"nas_root": "/nas", "workspaces": []}},
     }
     await states.publish("svc", "alice", "A", proof)
-    assert (await states.get("svc", "alice", "A"))["state"] == "published"
+    published = await states.get("svc", "alice", "A")
+    assert published["state"] == "published"
+    assert (
+        json.loads(published["verification_text"])["verification_level"]
+        == "fast"
+    )
+    assert json.loads(published["verification_text"])["authority"] == proof
     assert (await states.get("svc", "alice", "B"))["state"] == "failed"
 
 
@@ -201,19 +214,27 @@ async def test_admission_checks_exact_source_and_proof():
             "state": "published" if source == "A" else "failed",
             "verification_text": json.dumps(
                 {
-                    "version": 1,
-                    "migration_id": JOB,
-                    "services": {
-                        "svc": {
-                            "nas_root": "/nas",
-                            "workspaces": [
-                                {
-                                    "root": "/workspace",
-                                    "scope": ["svc", "alice", source, "agent"],
-                                },
-                            ],
+                    "authority": {
+                        "version": 1,
+                        "migration_id": JOB,
+                        "services": {
+                            "svc": {
+                                "nas_root": "/nas",
+                                "workspaces": [
+                                    {
+                                        "root": "/workspace",
+                                        "scope": [
+                                            "svc",
+                                            "alice",
+                                            source,
+                                            "agent",
+                                        ],
+                                    },
+                                ],
+                            },
                         },
                     },
+                    "verification_level": "fast",
                 },
             ),
         }

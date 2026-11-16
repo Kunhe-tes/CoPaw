@@ -314,6 +314,7 @@ class OfflineJob:
                     readonly,
                     inventory,
                     self.target,
+                    verification_level="fast",
                 )
             return await installer.install(staging, bundles, inventory)
         finally:

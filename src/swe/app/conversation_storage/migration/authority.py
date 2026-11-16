@@ -73,6 +73,21 @@ def validate_receipt(receipt):
     return receipt
 
 
+def validate_source_verification(value):
+    """Validate level metadata while accepting pre-level source receipts."""
+    if isinstance(value, str):
+        value = _json(value, "source verification")
+    if isinstance(value, dict) and set(value) == {
+        "authority",
+        "verification_level",
+    }:
+        level = value["verification_level"]
+        if level not in ("fast", "full"):
+            raise IntegrityError("invalid source verification level")
+        return validate_receipt(value["authority"]), level
+    return validate_receipt(value), "full"
+
+
 async def _job(database, migration_id):
     rows = await database.fetch_all(
         "SELECT migration_id,state,target_binding_text,verification_text "

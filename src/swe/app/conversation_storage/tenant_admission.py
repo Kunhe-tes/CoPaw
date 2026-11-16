@@ -6,7 +6,7 @@ import json
 from uuid import UUID
 
 from .errors import IntegrityError, StorageUnavailable
-from .migration.authority import validate_receipt
+from .migration.authority import validate_source_verification
 
 
 class TenantNotPublished(StorageUnavailable):
@@ -89,7 +89,7 @@ class TenantAdmission:
         )
         if row is None or row["state"] != "published":
             raise TenantNotPublished()
-        proof = validate_receipt(json.loads(row["verification_text"]))
+        proof, _level = validate_source_verification(row["verification_text"])
         service = proof["services"].get(doc["service_unit_id"])
         if (
             proof["migration_id"] != doc["migration_id"]

@@ -396,7 +396,17 @@ async def _compare_shares(db, view):
         raise TenantFailure("unpublished tenant original shares changed")
 
 
-async def _verify(db, bundles, view, inventory, target, resources, guard):
+async def _verify(
+    db,
+    bundles,
+    view,
+    inventory,
+    target,
+    resources,
+    guard,
+    *,
+    verification_level="fast",
+):
     readonly = SimpleNamespace(
         data=view.data,
         migration_id=view.migration_id,
@@ -415,10 +425,17 @@ async def _verify(db, bundles, view, inventory, target, resources, guard):
             target,
             io=io,
             health_check=guard.check,
+            verification_level=verification_level,
             **{k: v for k, v in resources.items() if not k.startswith("_")},
         )
     if not result["passed"]:
-        raise TenantFailure("tenant semantic verification failed")
+        raise TenantFailure(
+            (
+                "tenant semantic verification failed"
+                if verification_level == "full"
+                else "tenant fast verification failed"
+            ),
+        )
     return result
 
 
@@ -439,6 +456,7 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
         s["service_unit_id"]: BundleStore(s["nas_root"])
         for s in view.data["services"]
     }
+    verification_level = resources.get("_verification_level", "fast")
     with _spool(
         base,
         view.data,
@@ -483,6 +501,7 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
                 target,
                 resources,
                 guard,
+                verification_level=verification_level,
             )
         _stage("final_source_check")
         with _spool(
@@ -502,7 +521,11 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
             source_isolation=view.data.get("source_isolation", False),
         )
         if operation in ("verify", "finalize", "migrate"):
-            await states.transition(*view.key, "verified")
+            await states.transition(
+                *view.key,
+                "verified",
+                {"verification_level": verification_level},
+            )
         if operation in ("finalize", "migrate"):
             _stage("publish")
             # The receipt is service-local; only this tenant's roots are checked.
@@ -520,7 +543,10 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
                 raise TenantFailure(
                     "tenant runtime root is unavailable",
                 ) from error
-            await states.publish(*view.key, tenant_receipt(view))
+            await states.publish(
+                *view.key,
+                tenant_receipt(view),
+            )
 
 
 _TENANT_FAILURE_REASONS = {
@@ -532,6 +558,7 @@ _TENANT_FAILURE_REASONS = {
     "unregistered tenant share appeared": "出现未登记的分享记录",
     "unpublished tenant original shares changed": "未发布租户的原始分享记录发生变化",
     "tenant semantic verification failed": "导入结果与源会话语义校验不一致",
+    "tenant fast verification failed": "导入结果结构校验失败；该来源未发布",
     "complete tenant import is required": "租户导入未完成；先执行 resume --apply",
     "tenant source changed during operation": "迁移期间冻结会话输入发生变化",
     "tenant runtime root is unavailable": "运行时 workspace 目录缺失或不安全",
@@ -985,6 +1012,11 @@ async def _run_registered(
         "failed": len(failures),
         "pending_schema_finalize": pending_schema,
         "failure_report": _write_failures(manifest, operation, failures),
+        **(
+            {"verification_level": "fast"}
+            if operation in ("verify", "finalize", "migrate")
+            else {}
+        ),
     }
 
 

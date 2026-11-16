@@ -40,6 +40,112 @@ VERIFY_ERRORS = (
 )
 
 
+async def _verify_fast_level(
+    database,
+    stores,
+    manifest,
+    target,
+    report,
+    *,
+    io,
+    io_workers,
+    workers,
+    memory_bytes,
+):
+    from .verify_fast import verify_fast_publications
+
+    try:
+        if io is None:
+            from .parallel import MigrationIO
+
+            async with MigrationIO(io_workers) as fast_io:
+                summary = await verify_fast_publications(
+                    database,
+                    stores,
+                    manifest,
+                    target,
+                    io=fast_io,
+                    io_workers=io_workers,
+                    memory_bytes=memory_bytes // max(1, workers),
+                )
+        else:
+            summary = await verify_fast_publications(
+                database,
+                stores,
+                manifest,
+                target,
+                io=io,
+                io_workers=io_workers,
+                memory_bytes=memory_bytes // max(1, workers),
+            )
+        report["checked"] = [
+            {"position": "publications", "count": summary["publications"]},
+        ]
+        report["fast_summary"] = summary
+    except VERIFY_ERRORS as error:
+        raise_shared_failure(error)
+        report["blockers"].append(
+            {"position": "source", "detail": str(error)},
+        )
+    report["passed"] = not report["blockers"]
+
+
+async def _verification_context(
+    database,
+    bundles,
+    manifest,
+    inventory,
+    target,
+):
+    validate_inventory(inventory)
+    from pathlib import Path
+
+    stores = bundle_stores(bundles, manifest)
+    binding = {
+        "schema": target.schema,
+        "nas_roots": {
+            key: str(store.root.resolve()) for key, store in stores.items()
+        },
+        "migration_id": manifest.migration_id,
+    }
+    if manifest.data.get("target") != binding or manifest.data[
+        "source_boundary"
+    ] != inventory.get("source_boundary"):
+        raise ValueError(
+            "verification target or source boundary differs from manifest",
+        )
+    expected = [
+        (
+            item["service_unit_id"],
+            item["tenant_id"],
+            item["source_id"],
+            item["agent_id"],
+            str(Path(item["root"]).resolve()),
+        )
+        for item in manifest.data["workspaces"]
+    ]
+    actual = [
+        (*item["scope"], item["root"]) for item in inventory["workspaces"]
+    ]
+    if expected != actual:
+        raise ValueError(
+            "verification workspace mapping differs from manifest",
+        )
+    await OfflineImportStore(
+        database,
+        next(iter(stores.values())),
+        target,
+        service_unit_id=next(iter(stores)),
+    ).validate_target()
+    return (
+        ReadOnlyDatabase(
+            database,
+            SourceBoundary(**manifest.data["source_boundary"]),
+        ),
+        stores,
+    )
+
+
 async def _payload(
     database,
     bundles,
@@ -170,63 +276,43 @@ async def verify_import(
     workers=1,
     memory_bytes=512 * 1024 * 1024,
     health_check=None,
+    verification_level="full",
 ):
+    if verification_level not in ("fast", "full"):
+        raise ValueError("verification level must be fast or full")
     report = {
         "version": 2,
         "migration_id": manifest.migration_id,
+        "verification_level": verification_level,
         "checked": [],
         "blockers": [],
         "passed": False,
     }
     try:
-        validate_inventory(inventory)
-        from pathlib import Path
-
-        stores = bundle_stores(bundles, manifest)
-        binding = {
-            "schema": target.schema,
-            "nas_roots": {
-                key: str(store.root.resolve()) for key, store in stores.items()
-            },
-            "migration_id": manifest.migration_id,
-        }
-        if manifest.data.get("target") != binding or manifest.data[
-            "source_boundary"
-        ] != inventory.get("source_boundary"):
-            raise ValueError(
-                "verification target or source boundary differs from manifest",
-            )
-        expected = [
-            (
-                item["service_unit_id"],
-                item["tenant_id"],
-                item["source_id"],
-                item["agent_id"],
-                str(Path(item["root"]).resolve()),
-            )
-            for item in manifest.data["workspaces"]
-        ]
-        actual = [
-            (*item["scope"], item["root"]) for item in inventory["workspaces"]
-        ]
-        if expected != actual:
-            raise ValueError(
-                "verification workspace mapping differs from manifest",
-            )
-        await OfflineImportStore(
+        database, stores = await _verification_context(
             database,
-            next(iter(stores.values())),
+            bundles,
+            manifest,
+            inventory,
             target,
-            service_unit_id=next(iter(stores)),
-        ).validate_target()
-        database = ReadOnlyDatabase(
-            database,
-            SourceBoundary(**manifest.data["source_boundary"]),
         )
     except VERIFY_ERRORS as error:
         raise_shared_failure(error)
         report["blockers"].append(
             {"position": "migration", "detail": str(error)},
+        )
+        return report
+    if verification_level == "fast":
+        await _verify_fast_level(
+            database,
+            stores,
+            manifest,
+            target,
+            report,
+            io=io,
+            io_workers=io_workers,
+            workers=workers,
+            memory_bytes=memory_bytes,
         )
         return report
     if io is not None:

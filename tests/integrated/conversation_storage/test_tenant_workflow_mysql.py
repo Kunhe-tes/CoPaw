@@ -322,6 +322,16 @@ async def test_prepare_migrate_repairs_failed_tenant_without_reading_online_sour
     code, migrated = await _invoke(migrate_args)
     assert code == 2
     assert migrated["published"] == 2 and migrated["failed"] == 1
+    assert migrated["verification_level"] == "fast"
+    receipts = await db.fetch_all(
+        "SELECT verification_text FROM swe_conversation_migration_sources "
+        "WHERE state='published'",
+    )
+    assert len(receipts) == 2
+    assert all(
+        json.loads(row["verification_text"])["verification_level"] == "fast"
+        for row in receipts
+    )
     await _assert_failed_tenant_has_no_commits(
         db,
         failure_mode,

@@ -352,6 +352,7 @@ async def _execute(
                         workers=workers,
                         memory_bytes=memory_bytes,
                         health_check=guard.check,
+                        verification_level="fast",
                     )
                 if not result["passed"]:
                     raise ValueError(
