@@ -396,6 +396,18 @@ class ConversationImporter:
     async def _assigned(self, kind, position):
         return (await self._allocate(kind, position))["target_id"]
 
+    def _identity_batch_size(self):
+        return 1
+
+    async def _allocate_identities(self, kind, positions):
+        return {
+            position: await self._assigned(kind, position)
+            for position in positions
+        }
+
+    async def _prepare_publications(self, positions, scope):
+        """旧 manifest 维持首次使用时分配 publication 的行为。"""
+
     async def _allocate_messages(self, positions):
         """旧 manifest 保持逐条语义，SQL 导入器覆盖为有界批量。"""
         return {
@@ -712,10 +724,22 @@ class ConversationImporter:
         from swe.app.runner.expert_binding import read_expert_binding
         import json
 
-        for session in workspace["sessions"]:
+        sessions = workspace["sessions"]
+        identity_batch_size = self._identity_batch_size()
+        for session_index, session in enumerate(sessions):
+            if session_index % identity_batch_size == 0:
+                assigned_sessions = await self._allocate_identities(
+                    "session",
+                    [
+                        item["position"]
+                        for item in sessions[
+                            session_index : session_index + identity_batch_size
+                        ]
+                    ],
+                )
             position = session["position"]
             identity = session["identity"]
-            sid = await self._assigned("session", position)
+            sid = assigned_sessions[position]
             self.session_ids[position] = sid
             source = session["legacy"]["state"]
             now = self.manifest.data["source_boundary"]["captured_at"]
@@ -736,10 +760,21 @@ class ConversationImporter:
             }
             rows = [{"table": "sessions", "values": values}]
             blocks = []
-            for index in session["chat_positions"]:
+            chat_positions = session["chat_positions"]
+            for chat_index, index in enumerate(chat_positions):
+                if chat_index % identity_batch_size == 0:
+                    assigned_chats = await self._allocate_identities(
+                        "chat",
+                        [
+                            workspace["chats"][index]["position"]
+                            for index in chat_positions[
+                                chat_index : chat_index + identity_batch_size
+                            ]
+                        ],
+                    )
                 item = workspace["chats"][index]
                 spec = ChatSpec.model_validate(item["spec"])
-                cid = await self._assigned("chat", item["position"])
+                cid = assigned_chats[item["position"]]
                 self.chat_ids[item["position"]] = cid
                 light, content = split_metadata(spec.meta)
                 light_text = json.dumps(
@@ -797,13 +832,21 @@ class ConversationImporter:
             and item["spec"]["user_id"] == session["identity"][4]
             and item["spec"]["channel"] == session["identity"][5]
         }
-        for key, value in turns.items():
-            chat = chats.get(value.get("chat_id"))
-            if chat is not None:
-                self.turn_ids[(sid, key)] = await self._assigned(
-                    "turn",
-                    session["position"] + "/turn:" + key,
-                )
+        turn_keys = [
+            key
+            for key, value in turns.items()
+            if chats.get(value.get("chat_id")) is not None
+        ]
+        for start in range(0, len(turn_keys), self.batch_size):
+            batch_keys = turn_keys[start : start + self.batch_size]
+            assigned = await self._allocate_identities(
+                "turn",
+                [session["position"] + "/turn:" + key for key in batch_keys],
+            )
+            for key in batch_keys:
+                self.turn_ids[(sid, key)] = assigned[
+                    session["position"] + "/turn:" + key
+                ]
         await self._turn_identities(session, scope, chats)
         messages = extract_messages(state, context_epoch=epoch)
         if any(
@@ -906,7 +949,17 @@ class ConversationImporter:
                     },
                 },
             )
-        for row in rows:
+        for index, row in enumerate(rows):
+            if index % self.batch_size == 0:
+                await self._prepare_publications(
+                    [
+                        session["position"]
+                        + "/turn-identity:"
+                        + str(item["values"]["id"])
+                        for item in rows[index : index + self.batch_size]
+                    ],
+                    scope,
+                )
             await self._publish(
                 session["position"]
                 + "/turn-identity:"
@@ -979,6 +1032,15 @@ class ConversationImporter:
                     _block(block, "recovery", {"turn_states": {key: value}}),
                 )
             if rows:
+                await self._prepare_publications(
+                    [
+                        session["position"]
+                        + "/turn-record:"
+                        + str(row["values"]["id"])
+                        for row in rows
+                    ],
+                    scope,
+                )
                 # Current Session adapter looks for the recovery block; one Turn
                 # per publication preserves bounded point lookup and original ID.
                 for (key, value), row, block in zip(
@@ -1334,6 +1396,18 @@ class ParallelWorkspaceImporter(ConversationImporter):
         scope=None,
         scope_kind="workspace",
     ):
+        if kind == "publication":
+            cached = getattr(self, "_publication_assignments", {}).get(
+                position,
+            )
+            if cached is not None:
+                assignment, saved_scope = cached
+                if (
+                    saved_scope != scope
+                    or assignment.get("scope_kind", "workspace") != scope_kind
+                ):
+                    raise ValueError("cached publication scope changed")
+                return assignment
         return await self.context.journal(
             "allocate",
             kind,
@@ -1341,6 +1415,31 @@ class ParallelWorkspaceImporter(ConversationImporter):
             scope=scope,
             scope_kind=scope_kind,
         )
+
+    def _identity_batch_size(self):
+        return self.batch_size
+
+    async def _allocate_identities(self, kind, positions):
+        assignments = await self.context.journal(
+            "allocate_many",
+            kind,
+            positions,
+        )
+        return {
+            position: value["target_id"]
+            for position, value in assignments.items()
+        }
+
+    async def _prepare_publications(self, positions, scope):
+        assignments = await self.context.journal(
+            "allocate_many",
+            "publication",
+            positions,
+            scope=scope,
+        )
+        self._publication_assignments = {
+            position: (value, scope) for position, value in assignments.items()
+        }
 
     async def _allocate_messages(self, positions):
         """把消息票据分配交给协调器唯一 SQL owner。"""
