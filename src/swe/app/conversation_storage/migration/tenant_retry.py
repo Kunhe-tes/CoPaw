@@ -239,7 +239,15 @@ def _ticket_owner(row, workspaces=(), shares=()):
     raise ValueError("journal ticket ownership cannot be proved")
 
 
-async def _no_data(db, migration_id, keys, workspaces=(), shares=()):
+async def _no_data(
+    db,
+    migration_id,
+    keys,
+    workspaces=(),
+    shares=(),
+    *,
+    exclude_historical_shares=False,
+):
     analysis = _REVIEW_TICKETS.get()
     if analysis is not None and analysis["task"] is not asyncio.current_task():
         raise RuntimeError("review ownership proof requires original SQL task")
@@ -297,7 +305,7 @@ async def _no_data(db, migration_id, keys, workspaces=(), shares=()):
                 raise _TenantReviewHasData(
                     "tenant evidence cannot change after business data exists",
                 )
-        if source is not None:
+        if source is not None and not exclude_historical_shares:
             await _no_legacy_data(db, migration_id, key, shares)
     await _no_tickets(db, migration_id, keys, workspaces, shares)
 
@@ -681,6 +689,10 @@ async def _retain_committed_failures(db, manifest, report, published=()):
                     {key},
                     manifest.data["workspaces"],
                     manifest.data["shares"],
+                    exclude_historical_shares=(
+                        "historical_shares"
+                        in manifest.data.get("excluded_scopes", [])
+                    ),
                 )
             except _TenantReviewHasData:
                 # Do not revise already committed evidence merely to record a new
@@ -989,6 +1001,9 @@ async def _commit_review(
             changed,
             old["workspaces"],
             old["shares"],
+            exclude_historical_shares=(
+                "historical_shares" in old.get("excluded_scopes", [])
+            ),
         )
         files = {}
         for label, data in (("old", old), ("new", new)):

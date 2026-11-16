@@ -277,6 +277,10 @@ async def _execute(
                     io_workers=io_workers,
                     health_check=guard.check,
                 )
+                result = {
+                    **result,
+                    "excluded_scopes": ["historical_shares"],
+                }
             else:
                 if job is None or job["state"] not in (
                     "imported",
