@@ -557,7 +557,7 @@ async def test_real_agent_runner_question_emits_and_projects_one_run(
             "attempt.started",
             "attempt.ended",
             "run.ended",
-        ]
+        ], records
         assert all(
             "Return a short greeting." not in line
             and "hello from the agent" not in line
