@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS swe_cron_dispatch_intents (
     viewer_heat_score DECIMAL(12,4) NOT NULL DEFAULT 0
         COMMENT 'bounded read heat score',
     attempt_count INT NOT NULL DEFAULT 0 COMMENT 'attempt count',
+    worker_feedback_attempt INT DEFAULT NULL COMMENT 'attempt used for capacity feedback',
     max_attempts INT NOT NULL DEFAULT 3 COMMENT 'max attempts',
     lock_owner VARCHAR(128) DEFAULT '' COMMENT 'worker lock owner',
     claim_token VARCHAR(36) NOT NULL DEFAULT '' COMMENT 'unique claim generation',
@@ -158,6 +159,7 @@ CREATE TABLE IF NOT EXISTS swe_cron_dispatch_events (
     tenant_id VARCHAR(64) DEFAULT '' COMMENT 'tenant id',
     source_id VARCHAR(64) DEFAULT '' COMMENT 'source id',
     details JSON DEFAULT NULL COMMENT 'event details',
+    worker_feedback_used TINYINT NOT NULL DEFAULT 0 COMMENT 'used for capacity feedback',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT 'created time',
     INDEX idx_dispatch_events_batch (batch_id, created_at),
     INDEX idx_dispatch_events_intent (intent_id),
@@ -377,6 +379,14 @@ CREATE_TABLE_STATEMENTS = [
 ]
 
 ALTER_STATEMENTS.extend(RUN_STATE_ALTERS)
+ALTER_STATEMENTS.extend(
+    [
+        "ALTER TABLE swe_cron_dispatch_intents "
+        "ADD COLUMN worker_feedback_attempt INT DEFAULT NULL",
+        "ALTER TABLE swe_cron_dispatch_events "
+        "ADD COLUMN worker_feedback_used TINYINT NOT NULL DEFAULT 0",
+    ],
+)
 ALTER_STATEMENTS.extend(
     "ALTER TABLE swe_cron_dispatch_worker_capacity "
     f"ADD COLUMN {column} INT DEFAULT NULL"

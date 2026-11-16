@@ -123,9 +123,18 @@ export function mergeTaskSources(
       fact,
     ]),
   );
+  const confirmedSchedulerKeys = new Set<string>();
+  for (const job of newJobs) {
+    const key = taskMigrationKey(job);
+    const fact = facts.get(key);
+    if (fact?.completed && bindingMatches(job, fact)) {
+      confirmedSchedulerKeys.add(key);
+    }
+  }
   const conflict = new Set<string>();
   for (const job of [...oldJobs, ...newJobs]) {
     const key = taskMigrationKey(job);
+    if (!isSchedulerTask(job) && confirmedSchedulerKeys.has(key)) continue;
     const fact = facts.get(key);
     if (fact && !bindingMatches(job, fact)) {
       conflict.add(key);

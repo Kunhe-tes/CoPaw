@@ -139,7 +139,44 @@ async def legacy_available_capacity(cur, scope, owner, now, policy):
     return remaining
 
 
-async def write_capacity(db, sql, params):
+async def _mark_feedback_used(cur, samples):
+    attempts = sorted(samples.get("intent_attempts", []))
+    for start in range(0, len(attempts), 500):
+        chunk = attempts[start : start + 500]
+        placeholders = ", ".join(["(%s, %s)"] * len(chunk))
+        await cur.execute(
+            "UPDATE swe_cron_dispatch_intents "
+            "SET worker_feedback_attempt=attempt_count, updated_at=updated_at "
+            "WHERE (worker_feedback_attempt IS NULL "
+            "OR worker_feedback_attempt<>attempt_count) "
+            f"AND (id, attempt_count) IN ({placeholders})",
+            tuple(value for attempt in chunk for value in attempt),
+        )
+        if cur.rowcount != len(chunk):
+            raise RuntimeError(
+                "Cron capacity feedback changed before publication",
+            )
+
+    for key, table, id_column in (
+        ("retry_events", "swe_cron_dispatch_events", "id"),
+        ("managed_runs", "swe_cron_execution_runs", "execution_id"),
+    ):
+        ids = sorted(samples.get(key, []))
+        for start in range(0, len(ids), 500):
+            chunk = ids[start : start + 500]
+            placeholders = ", ".join(["%s"] * len(chunk))
+            await cur.execute(
+                f"UPDATE {table} SET worker_feedback_used=1 "
+                f"WHERE worker_feedback_used=0 AND {id_column} IN ({placeholders})",
+                tuple(chunk),
+            )
+            if cur.rowcount != len(chunk):
+                raise RuntimeError(
+                    "Cron capacity feedback changed before publication",
+                )
+
+
+async def write_capacity(db, sql, params, *, feedback_samples=None):
     """Publish a capacity decision under the same lock used by claimers."""
     owner, source, provider, model = params[:4]
     async with db.acquire() as conn:
@@ -161,6 +198,8 @@ async def write_capacity(db, sql, params):
                 )
                 if lease[0] != owner or not lease[1] or lease[1] < params[-1]:
                     raise RuntimeError("Capacity scope lease lost")
+                if feedback_samples:
+                    await _mark_feedback_used(cur, feedback_samples)
                 await cur.execute(sql, params)
             await conn.commit()
         except BaseException:

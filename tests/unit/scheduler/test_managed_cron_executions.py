@@ -43,6 +43,7 @@ class ExecutionDatabase(ManagementDatabase):
                 result_json TEXT, version INTEGER DEFAULT 1,
                 settled_status TEXT, settled_at TEXT, settled_error_code TEXT,
                 subtask_success_count INTEGER, subtask_failure_count INTEGER,
+                worker_feedback_used INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT, updated_at TEXT
             );
             CREATE TABLE swe_cron_executions (
