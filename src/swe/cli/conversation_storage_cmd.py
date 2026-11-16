@@ -161,7 +161,7 @@ class OfflineJob:
             "files": len(inventory["files"]),
             "workspaces": len(inventory["workspaces"]),
             "blockers": inventory["blockers"],
-            "next": "explicit --apply required for mutations; verify always reruns full semantic checks",
+            "next": "explicit --apply required for mutations; verify performs a read-only structural check",
         }
         if operation == "inspect" and installer.receipt_path.exists():
             from swe.app.conversation_storage.chat_mutations import (

@@ -90,6 +90,7 @@ def _read_publication_plan(
         for item in (*plan["rows"], *plan["updates"]):
             values = item["values"]
             resolved = store._resolve(values, row, reader.index)
+            _validate_locator_pairs(values, resolved, row, reader.index)
             table_rows = expected.setdefault(item["table"], {})
             if resolved["id"] in table_rows:
                 raise IntegrityError(
@@ -111,6 +112,59 @@ def _read_publication_plan(
         return expected, len(plan["rows"]), len(plan["updates"])
 
 
+def _validate_locator_pairs(values, resolved, publication, index):
+    for offset_key, offset_ref in values.items():
+        if not offset_key.endswith("_offset"):
+            continue
+        length_key = offset_key[: -len("_offset")] + "_length"
+        length_ref = values.get(length_key)
+        if offset_ref is None and length_ref is None:
+            continue
+        valid_offset = (
+            isinstance(offset_ref, dict)
+            and set(offset_ref) == {"block", "part"}
+            and offset_ref["part"] == "offset"
+        )
+        valid_length = (
+            isinstance(length_ref, dict)
+            and set(length_ref) == {"block", "part"}
+            and length_ref["part"] == "length"
+        )
+        if not valid_offset and not valid_length:
+            continue
+        if (
+            not valid_offset
+            or not valid_length
+            or offset_ref["block"] != length_ref["block"]
+        ):
+            raise IntegrityError("publication locator block pair differs")
+        block = index.blocks.get(offset_ref["block"])
+        offset, length = resolved[offset_key], resolved[length_key]
+        _validate_locator_extent(offset, length, block)
+        stem = offset_key[: -len("_offset")]
+        publication_key = (
+            "publication_id" if stem == "byte" else stem + "_publication_id"
+        )
+        _validate_locator_owner(publication_key, resolved, publication)
+
+
+def _validate_locator_extent(offset, length, block):
+    if block is None or type(offset) is not int or type(length) is not int:
+        raise IntegrityError("publication locator exceeds its bundle block")
+    if offset < block.offset or length < 0:
+        raise IntegrityError("publication locator exceeds its bundle block")
+    if offset + length > block.offset + block.length:
+        raise IntegrityError("publication locator exceeds its bundle block")
+
+
+def _validate_locator_owner(publication_key, resolved, publication):
+    if publication_key not in resolved:
+        return
+    if resolved[publication_key] != publication["id"]:
+        raise IntegrityError("publication locator owner differs")
+
+
+# pylint: disable-next=too-many-statements
 async def verify_fast_publications(
     database,
     stores,
@@ -135,8 +189,16 @@ async def verify_fast_publications(
     checked_rows = 0
     checked_updates = 0
     checked_records = 0
+    seen_paths = set()
     allowance = max(1, memory_bytes // max(1, io_workers))
     while chunk := list(islice(assignments, 128)):
+        for _position, assignment in chunk:
+            path = assignment.get("relative_path")
+            if not isinstance(path, str) or path in seen_paths:
+                raise IntegrityError(
+                    "migration bundle path is missing or duplicated",
+                )
+            seen_paths.add(path)
         ids = [assignment["target_id"] for _, assignment in chunk]
         found = await database.fetch_all(
             "SELECT "

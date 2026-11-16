@@ -10,8 +10,10 @@ import pytest
 
 from swe.app.conversation_storage.bundle import BundleBlock, BundleStore
 from swe.app.conversation_storage.identity import WorkspaceScope
+from swe.app.conversation_storage.errors import IntegrityError
 from swe.app.conversation_storage.migration.verify import verify_import
 from swe.app.conversation_storage.migration.verify_fast import (
+    _validate_locator_pairs,
     verify_fast_publications,
 )
 from swe.app.conversation_storage.migration.parallel import MigrationIO
@@ -23,6 +25,7 @@ def _inputs(
     body=b"body",
     record_plan=False,
     missing_block=False,
+    mismatched_pair=False,
 ):
     migration_id = str(uuid4())
     scope = WorkspaceScope("tenant", "source", "agent", service_unit_id="svc")
@@ -41,17 +44,37 @@ def _inputs(
                         {
                             "id": 1,
                             "checkpoint_revision": 2,
-                            "checkpoint_offset": {
-                                "block": "missing-checkpoint",
-                                "part": "offset",
-                            },
+                            **(
+                                {
+                                    "checkpoint_offset": {
+                                        "block": "offset-checkpoint",
+                                        "part": "offset",
+                                    },
+                                    "checkpoint_length": {
+                                        "block": "length-checkpoint",
+                                        "part": "length",
+                                    },
+                                }
+                                if mismatched_pair
+                                else {
+                                    "checkpoint_revision": 2,
+                                    "checkpoint_offset": {
+                                        "block": "missing-checkpoint",
+                                        "part": "offset",
+                                    },
+                                    "checkpoint_length": {
+                                        "block": "missing-checkpoint",
+                                        "part": "length",
+                                    },
+                                }
+                            ),
                         }
                         if missing_block
                         else {"id": 1, "checkpoint_revision": 2}
                     ),
                 },
             ]
-            if record_plan or missing_block
+            if record_plan or missing_block or mismatched_pair
             else []
         ),
         "updates": [],
@@ -66,6 +89,8 @@ def _inputs(
                 json.dumps(import_plan, separators=(",", ":")).encode(),
             ),
             BundleBlock("message:1", "message", body),
+            BundleBlock("offset-checkpoint", "checkpoint", b"offset"),
+            BundleBlock("length-checkpoint", "checkpoint", b"length"),
         ],
         scope=scope,
         metadata={"operation_key": operation_key},
@@ -295,6 +320,58 @@ async def test_fast_verification_rejects_missing_required_block(tmp_path):
 
     assert result["passed"] is False
     assert "missing block" in result["blockers"][0]["detail"]
+
+
+@pytest.mark.asyncio
+async def test_fast_verification_rejects_locator_parts_from_different_blocks(
+    tmp_path,
+):
+    _database, bundles, _manifest, _inventory, _row = _inputs(
+        tmp_path,
+        record_plan=True,
+    )
+    relative_path = next(bundles.root.rglob("*.bundle")).relative_to(
+        bundles.root,
+    )
+    with bundles.open_reader(relative_path.as_posix()) as reader:
+        values = {
+            "checkpoint_offset": {
+                "block": "offset-checkpoint",
+                "part": "offset",
+            },
+            "checkpoint_length": {
+                "block": "length-checkpoint",
+                "part": "length",
+            },
+        }
+        resolved = {"checkpoint_offset": 1, "checkpoint_length": 1}
+        with pytest.raises(IntegrityError, match="block pair"):
+            _validate_locator_pairs(values, resolved, {"id": 1}, reader.index)
+
+
+@pytest.mark.asyncio
+async def test_fast_verification_rejects_duplicate_bundle_path_assignment(
+    tmp_path,
+):
+    database, bundles, manifest, inventory, _row = _inputs(tmp_path)
+    manifest.data["assignments"]["publication"]["duplicate"] = manifest.data[
+        "assignments"
+    ]["publication"]["publication"]
+
+    result = await verify_import(
+        database,
+        bundles,
+        manifest,
+        inventory,
+        SimpleNamespace(
+            schema="test_fast_verify",
+            migration_id=manifest.migration_id,
+        ),
+        verification_level="fast",
+    )
+
+    assert result["passed"] is False
+    assert "duplicated" in result["blockers"][0]["detail"]
 
 
 @pytest.mark.asyncio
