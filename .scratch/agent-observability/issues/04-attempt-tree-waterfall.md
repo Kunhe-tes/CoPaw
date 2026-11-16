@@ -40,3 +40,5 @@ Priority: P0
 2026-11-16：Inspector 增加单调耗时与 UTC 墙钟区间并列值，完整结束区间偏差达到 1ms 时明确提示；缺少结束事实时只显示截至服务端观测时间的墙钟区间，不比较单调耗时。Console Vitest 7 passed，TypeScript typecheck 和目标 pre-commit 通过。
 
 2026-11-16：补充真实 Chromium 108.0.5359.29 headless 360×800 检查，`hideMenu=true` 下 Agent 树、时间条和选中 Span Inspector 正常，DOM/document 宽度均为 360，单调/墙钟偏差警示可见。该构建不是现场 360 内核的 108.0.5359.95，不能替代精确基线；现场版本、原生 360 浏览器仍未验证。
+
+2026-11-16：Run Inspector 增加 5 秒有界详情首屏轮询；标签页隐藏时跳过请求，恢复可见时立即检查。刷新按 Span ID 合并并保留已加载节点，避免轮询改变选中节点或重复展示。Console fake-timer 回归验证定时刷新与隐藏暂停，页面测试 8 passed。

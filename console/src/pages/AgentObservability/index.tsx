@@ -297,6 +297,9 @@ export default function AgentObservabilityPage() {
       if (!controller.signal.aborted) setDetail(null);
     } finally {
       if (!controller.signal.aborted) setDetailLoading(false);
+      if (detailRequestRef.current === controller) {
+        detailRequestRef.current = null;
+      }
     }
   };
 
@@ -322,6 +325,9 @@ export default function AgentObservabilityPage() {
       if (!controller.signal.aborted) setDetail(null);
     } finally {
       if (!controller.signal.aborted) setDetailLoading(false);
+      if (detailRequestRef.current === controller) {
+        detailRequestRef.current = null;
+      }
     }
   };
 
@@ -387,8 +393,78 @@ export default function AgentObservabilityPage() {
       // Keep already loaded nodes available if a later page cannot be read.
     } finally {
       if (!controller.signal.aborted) setSpansLoading(false);
+      if (detailRequestRef.current === controller) {
+        detailRequestRef.current = null;
+      }
     }
   };
+
+  const refreshRunDetail = useCallback(async () => {
+    if (
+      !selectedRun ||
+      detailLoading ||
+      spansLoading ||
+      detailRequestRef.current ||
+      document.visibilityState !== "visible"
+    ) {
+      return;
+    }
+    const controller = new AbortController();
+    detailRequestRef.current = controller;
+    try {
+      const refreshed = await getAgentObservabilityRunDetail(
+        selectedRun.run_id,
+        { attemptId: selectedAttemptId ?? undefined },
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      setDetail((current) => {
+        if (!current || current.run.run_id !== refreshed.run.run_id) {
+          return current;
+        }
+        const spans = new Map(
+          current.spans.map((span) => [span.span_id, span]),
+        );
+        for (const span of refreshed.spans) spans.set(span.span_id, span);
+        return {
+          ...current,
+          run: refreshed.run,
+          attempts: refreshed.attempts,
+          spans: [...spans.values()].sort(
+            (left, right) =>
+              left.started_at.localeCompare(right.started_at) ||
+              left.span_id.localeCompare(right.span_id),
+          ),
+          spans_has_more: current.spans_has_more || refreshed.spans_has_more,
+          spans_next_cursor:
+            refreshed.spans_next_cursor ?? current.spans_next_cursor,
+        };
+      });
+    } catch {
+      // A missed refresh does not invalidate already loaded detail.
+    } finally {
+      if (detailRequestRef.current === controller) {
+        detailRequestRef.current = null;
+      }
+    }
+  }, [detailLoading, selectedAttemptId, selectedRun, spansLoading]);
+
+  useEffect(() => {
+    if (!selectedRun) return;
+    const timer = window.setInterval(() => {
+      void refreshRunDetail();
+    }, 5000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void refreshRunDetail();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [refreshRunDetail, selectedRun]);
 
   const columns: ColumnsType<AgentObservabilityRun> = [
     {

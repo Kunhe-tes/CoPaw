@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import AgentObservabilityPage from ".";
@@ -30,7 +36,10 @@ vi.mock("../../stores/iframeStore", () => ({
 }));
 
 describe("AgentObservabilityPage", () => {
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+  });
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -422,6 +431,60 @@ describe("AgentObservabilityPage", () => {
         expect.any(AbortSignal),
       ),
     );
+  });
+
+  it("refreshes open detail every five seconds and pauses while hidden", async () => {
+    mocks.listRuns.mockResolvedValueOnce({
+      items: [
+        {
+          run_id: "run-a",
+          source_key: "source-a",
+          tenant_key: "tenant-a",
+          agent_key: "agent-a",
+          chat_key: "chat-a",
+          root_question_key: "question-a",
+          started_at: "2026-11-15T00:00:00Z",
+          ended_at: null,
+          status: "running",
+          quality: "partial",
+          duration_us: null,
+          llm_calls: null,
+          tool_calls: null,
+          input_tokens: null,
+          output_tokens: null,
+          span_count: 1,
+          error_span_count: 0,
+        },
+      ],
+      next_cursor: null,
+      generated_at: "2026-11-15T00:00:00Z",
+      window_start: "2026-11-14T00:00:00Z",
+      window_end: "2026-11-15T00:00:00Z",
+    });
+    render(<AgentObservabilityPage />);
+    expect(await screen.findByText("question-a")).toBeInTheDocument();
+    vi.useFakeTimers();
+    await act(async () => {
+      fireEvent.click(screen.getByText("question-a"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mocks.getDetail).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+      await Promise.resolve();
+    });
+    expect(mocks.getDetail).toHaveBeenCalledTimes(2);
+
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "hidden",
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(mocks.getDetail).toHaveBeenCalledTimes(2);
   });
 
   it("reloads the scoped list when the active Source changes", async () => {
