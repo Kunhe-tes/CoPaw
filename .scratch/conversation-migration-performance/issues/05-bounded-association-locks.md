@@ -21,3 +21,4 @@
 - 项目完整提交 hooks（mypy/black/flake8/pylint 等）通过，无绕过。合并最新集成分支 `b802c1f96` 后相关回归 186 passed。MySQL 新用例 2 skipped，未配置数据库，不作为锁验收。
 - 新增真实 MySQL `test_migration_association_locks_mysql.py`：现有 Turn UPDATE、缺失 Turn INSERT 争锁 timeout，持有方 rollback 后重试成功，并记录 EXPLAIN。真实锁、执行计划及 source 独立发布验收由集成阶段统一执行，上方对应两项仍未勾选。
 - 稳定合并后的完整 `tests/unit/app/conversation_storage`：1663 passed in 67.28s；隔离 MySQL 未配置，新增两项再次明确 skipped。最终工作树干净，不推送。
+- 2026-11-16 独立复核修正验收用例：集中隔离 MySQL 红灯明确为两项 `DatabaseSession.transaction` AttributeError。事务改由已 acquire 固定连接内的 `db.transaction()` / `other.transaction()` 管理；保留 errno 1205 冲突断言及持有方 rollback 后写入成功断言。缺失行场景另放置无关 Turn，EXPLAIN 对已有主键探针执行同形查询并严格要求 PRIMARY，避免空表或不存在常量被优化成无索引计划而虚假通过；缺失 ID 的实际锁保护仍由 INSERT 阻塞与释放后成功证明，不宣称该探针证明缺失行执行计划或精确锁顺序。未改生产代码。修正后本地关联锁回归 10 passed、真实 MySQL 2 skipped；集中真实 MySQL 重跑待集成执行，上方锁验收项仍不勾选。
