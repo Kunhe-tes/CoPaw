@@ -4,14 +4,14 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** claimed
+**Status:** resolved
 
-- [ ] 先记录完整 binding 序列化、manifest 写入的次数、字节和耗时，依据实际调用建立优化前后对照，不先放宽持久性。
-- [ ] 仅在绑定数据确定未变化的生命周期复用结果；重审修订、cutoff/target 改变或重新加载时失效，仍验证不可变作业身份。
-- [ ] 消除可证明冗余的镜像处理；任何检查点调整均保留必要文件/目录 fsync、原子写入及 SQL 已确认映射持久化契约。
-- [ ] 不将外部 JSON 变成发布权威，不更改文件格式、稳定 ID 或票据，不跨命令信任内存证明。
-- [ ] 对已提交 SQL、镜像落后、镜像替换、source 失败、取消与写盘错误注入故障，原 manifest 能安全恢复或明确拒绝异常。
-- [ ] 经现有迁移入口证明序列化/写入减少及结果不变；若测量不支持安全消除，保留原行为并记录证据，不削弱可靠性换取计数下降。
+- [x] 先记录完整 binding 序列化、manifest 写入的次数、字节和耗时，依据实际调用建立优化前后对照，不先放宽持久性。
+- [x] 仅在绑定数据确定未变化的生命周期复用结果；重审修订、cutoff/target 改变或重新加载时失效，仍验证不可变作业身份。
+- [x] 消除可证明冗余的镜像处理；任何检查点调整均保留必要文件/目录 fsync、原子写入及 SQL 已确认映射持久化契约。
+- [x] 不将外部 JSON 变成发布权威，不更改文件格式、稳定 ID 或票据，不跨命令信任内存证明。
+- [x] 对已提交 SQL、镜像落后、镜像替换、source 失败、取消与写盘错误注入故障，原 manifest 能安全恢复或明确拒绝异常。
+- [x] 经现有迁移入口证明序列化/写入减少及结果不变；若测量不支持安全消除，保留原行为并记录证据，不削弱可靠性换取计数下降。
 
 ## Measurement and decision
 
@@ -28,3 +28,13 @@ The source binding contains mutable nested evidence. Collection identity and rev
 Progress now reports binding serialization count/UTF-8 bytes/seconds plus manifest write attempts, completed writes/bytes and total attempted write seconds. Failed writes retain elapsed cost but do not count as completed durable checkpoints. Metrics include no binding values, SQL, bodies or paths. File format, atomic replacement, temporary-file cleanup and both fsync operations are unchanged.
 
 The focused mutation regressions retain exact SQL binding rejection after nested target, cutoff, workspace, service or tenant evidence changes, review revision changes and data reload. Existing SQL-committed/mirror-lag and mirror-replacement recovery regressions, source failure invalidation and cancellation/global-stop tests remain in the focused suite. A replacement failure test proves old checkpoint bytes and temporary cleanup survive write failure.
+
+
+## Answer
+
+Resolved using the ticket's measured conservative fallback. Production changes add value-free persistence counters only; exact source/target serialization, SQL authority, checkpoint frequency, atomic replace and file/directory fsync remain unchanged. No serialization/write reduction is claimed. Optimization can be reconsidered once an enforceable immutable lifecycle or safe redundant checkpoint is demonstrated with real workload evidence.
+
+- TDD: the two new persistence metric/failure tests failed with missing metric keys before production changes; both passed afterward. Seven mutation/reload regressions preserve current exact immutable checks. The deterministic count fixture covers 30/100/1,000 sources without timing thresholds.
+- Focused validation before integration merge: 91 passed. After merging integration 52d590a6e into this branch: 94 passed in 10.17s across test_v3_journal.py, test_migration_progress.py, test_manifest.py, test_tenant_orchestration.py and test_source_isolation.py.
+- Implementation commit fc2ed8f5a passed all applicable commit hooks (AST, docstring, encoding, secrets, whitespace, trailing commas, mypy, Black, flake8 and pylint); no hook bypass. The first hook runs made formatting corrections, then passed.
+- No remote database, NAS or production timing claim. Central real-MySQL acceptance is owned by the integration runner. The measurements above are isolated local source-view/persistence fixtures.
