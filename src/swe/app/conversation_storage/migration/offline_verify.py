@@ -193,69 +193,75 @@ class OfflineVerifyStages:
         bundles = self.store.bundles
 
         def read_evidence():
-            index = bundles.inspect(
+            with bundles.open_reader(
                 ticket.relative_path,
                 expected_length=ticket.byte_length,
-            )
-            if (
-                index.relative_path != ticket.relative_path
-                or index.byte_length != ticket.byte_length
-                or index.metadata.get("operation_key")
-                != ticket.request.operation_key
-            ):
-                raise IntegrityError(
-                    "offline verification bundle identity mismatch",
-                )
-
-            expected_blocks = {"import_plan": "import_plan"}
-            for expected in ticket.blocks:
-                if expected.name in expected_blocks:
+                expected_operation_key=ticket.request.operation_key,
+            ) as reader:
+                index = reader.index
+                if (
+                    index.relative_path != ticket.relative_path
+                    or index.byte_length != ticket.byte_length
+                    or index.metadata.get("operation_key")
+                    != ticket.request.operation_key
+                ):
                     raise IntegrityError(
-                        "offline verification block names are duplicated",
+                        "offline verification bundle identity mismatch",
                     )
-                expected_blocks[expected.name] = expected.kind
 
-            def block(name, kind):
-                extent = index.blocks.get(name)
-                if extent is None or extent.kind != kind:
+                expected_blocks = {"import_plan": "import_plan"}
+                for expected in ticket.blocks:
+                    if expected.name in expected_blocks:
+                        raise IntegrityError(
+                            "offline verification block names are duplicated",
+                        )
+                    expected_blocks[expected.name] = expected.kind
+
+                def block(name, kind):
+                    extent = index.blocks.get(name)
+                    if extent is None or extent.kind != kind:
+                        raise IntegrityError(
+                            "original migration bundle block identity differs",
+                        )
+                    return reader.read_extents((extent,))[0]
+
+                imported = block("import_plan", "import_plan")
+                if load_metadata_json(imported) != load_metadata_json(
+                    ticket.expected_import_plan,
+                ):
                     raise IntegrityError(
-                        "original migration bundle block identity differs",
+                        "original import plan differs from current source mapping",
                     )
-                return bundles.read_extent(
-                    index.relative_path,
-                    extent.offset,
-                    extent.length,
-                    expected_length=index.byte_length,
+                recoveries = []
+                for expected in ticket.blocks:
+                    raw = block(expected.name, expected.kind)
+                    if raw == expected.content:
+                        continue
+                    envelope = load_metadata_json(raw)
+                    if expected.kind == "recovery" and is_projection(envelope):
+                        recoveries.append((expected.name, raw))
+                        _add_projection_blocks(
+                            index,
+                            envelope,
+                            expected_blocks,
+                        )
+                        continue
+                    raise IntegrityError(
+                        "original migration bundle content differs from source",
+                    )
+                actual_blocks = {
+                    name: extent.kind for name, extent in index.blocks.items()
+                }
+                if actual_blocks != expected_blocks:
+                    raise IntegrityError(
+                        "original migration bundle block set differs from source",
+                    )
+                return VerifyEvidence(
+                    ticket,
+                    index,
+                    imported,
+                    tuple(recoveries),
                 )
-
-            imported = block("import_plan", "import_plan")
-            if load_metadata_json(imported) != load_metadata_json(
-                ticket.expected_import_plan,
-            ):
-                raise IntegrityError(
-                    "original import plan differs from current source mapping",
-                )
-            recoveries = []
-            for expected in ticket.blocks:
-                raw = block(expected.name, expected.kind)
-                if raw == expected.content:
-                    continue
-                envelope = load_metadata_json(raw)
-                if expected.kind == "recovery" and is_projection(envelope):
-                    recoveries.append((expected.name, raw))
-                    _add_projection_blocks(index, envelope, expected_blocks)
-                    continue
-                raise IntegrityError(
-                    "original migration bundle content differs from source",
-                )
-            actual_blocks = {
-                name: extent.kind for name, extent in index.blocks.items()
-            }
-            if actual_blocks != expected_blocks:
-                raise IntegrityError(
-                    "original migration bundle block set differs from source",
-                )
-            return VerifyEvidence(ticket, index, imported, tuple(recoveries))
 
         try:
             evidence = await io.call(read_evidence)

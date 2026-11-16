@@ -2,12 +2,15 @@
 """Representative two-stage workflow metrics, never the 10k benchmark."""
 
 import asyncio
+import io
 import json
 import time
 
 from agentscope.message import Msg
 from click.testing import CliRunner
 import pytest
+
+from swe.app.conversation_storage.migration.progress import MigrationProgress
 
 from tests.integrated.conversation_storage.test_tenant_workflow_mysql import (
     _command,
@@ -18,10 +21,23 @@ from tests.integrated.conversation_storage.test_tenant_workflow_mysql import (
 
 async def _measured_invoke(arguments):
     started = time.perf_counter()
-    result = await asyncio.to_thread(CliRunner().invoke, _command(), arguments)
+    stream = io.StringIO()
+    report = MigrationProgress(arguments[0], "representative", stream=stream)
+
+    def invoke():
+        with report.activate():
+            try:
+                return CliRunner().invoke(_command(), arguments)
+            finally:
+                report.emit()
+
+    result = await asyncio.to_thread(invoke)
     assert result.exit_code in (0, 2), result.output
     progress = []
-    for line in result.stderr.splitlines():
+    lines = result.stderr.splitlines()
+    if arguments[0] == "prepare":
+        lines = stream.getvalue().splitlines()
+    for line in lines:
         try:
             record = json.loads(line)
         except ValueError:

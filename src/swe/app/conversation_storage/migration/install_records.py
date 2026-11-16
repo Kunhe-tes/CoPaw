@@ -8,6 +8,10 @@ from datetime import datetime, timezone
 import asyncio
 import json
 import re
+from functools import lru_cache
+from itertools import chain, groupby
+
+from swe.database.prepared import PreparedInsert
 
 from ..bundle import BundleBlock, BundleIndex, BundleStore
 from ..chat_mutations import load_metadata_json
@@ -20,6 +24,7 @@ from ..publications import (
 )
 from ..retention import RetentionStore
 from ..publication_associations import PublicationAssociations
+from ..reference_queries import ReferenceQuery, iter_reference_rows
 from .parallel import MigrationIO
 
 COLUMNS = {
@@ -168,6 +173,13 @@ COLUMNS = {
 }
 TABLES = {key: "swe_conversation_" + key for key in COLUMNS}
 TABLES["shares"] = "swe_chat_shares"
+VERIFY_QUERIES = {
+    "sessions": ReferenceQuery.OFFLINE_SESSION,
+    "chats": ReferenceQuery.OFFLINE_CHAT,
+    "turns": ReferenceQuery.OFFLINE_TURN,
+    "messages": ReferenceQuery.OFFLINE_MESSAGE,
+    "publications": ReferenceQuery.OFFLINE_PUBLICATION,
+}
 BINARY = {
     key
     for columns in COLUMNS.values()
@@ -294,6 +306,20 @@ def _table(name):
     if name not in TABLES:
         raise IntegrityError("unknown offline import table")
     return TABLES[name]
+
+
+@lru_cache(maxsize=32)
+def _message_insert(columns):
+    if not columns or set(columns) - COLUMNS["messages"]:
+        raise IntegrityError("unknown offline Message insert field")
+    return PreparedInsert(
+        "INSERT INTO "
+        + _table("messages")
+        + " ("
+        + ",".join(columns)
+        + ") VALUES ",
+        "(" + ",".join(["%s"] * len(columns)) + ")",
+    )
 
 
 def _sql_value(key, value):
@@ -574,29 +600,52 @@ class OfflineImportStore(PublicationStore):
         await self._verify_records_sql(publication, plan, index)
 
     async def _verify_records_sql(self, publication, plan, index):
+        grouped = {}
         for item in [*plan["rows"], *plan["updates"]]:
             table = item["table"]
             values = self._resolve(item["values"], publication, index)
-            actual = await self.db.fetch_one(
-                "SELECT * FROM " + _table(table) + " WHERE id=%s",
-                (values["id"],),
-            )
-            mismatch = (
-                []
-                if actual is None
-                else [
-                    key
-                    for key, value in values.items()
-                    if key in IMMUTABLE[table] and actual[key] != value
-                ]
-            )
-            if actual is None or mismatch:
+            expected = grouped.setdefault(table, {})
+            if values["id"] in expected:
                 raise IntegrityError(
-                    "committed target mapping or immutable typed row differs: "
-                    + table
-                    + ":"
-                    + ",".join(mismatch),
+                    "duplicate offline target mapping identity",
                 )
+            expected[values["id"]] = values
+        for table, expected in grouped.items():
+            rows = iter_reference_rows(
+                self.db,
+                VERIFY_QUERIES[table],
+                expected,
+                publication["service_unit_key"],
+            )
+            try:
+                async for identities, actual in rows:
+                    for identity in identities:
+                        self._compare_record(
+                            table,
+                            expected[identity],
+                            actual.get(identity),
+                        )
+            finally:
+                await rows.aclose()
+
+    @staticmethod
+    def _compare_record(table, values, actual):
+        mismatch = (
+            []
+            if actual is None
+            else [
+                key
+                for key, value in values.items()
+                if key in IMMUTABLE[table] and actual[key] != value
+            ]
+        )
+        if actual is None or mismatch:
+            raise IntegrityError(
+                "committed target mapping or immutable typed row differs: "
+                + table
+                + ":"
+                + ",".join(mismatch),
+            )
 
     async def verify_blocks(self, row, blocks):
         operation = row["operation_key"].decode()
@@ -906,8 +955,11 @@ class OfflineImportStore(PublicationStore):
                 "offline projection additions require explicit preassigned Message rows",
             )
         imported = _PLAN.get()
-        for item in imported["rows"]:
-            await self._apply_record(item, row, index, update=False)
+        for (table, _fields), records in groupby(
+            imported["rows"],
+            key=lambda item: (item["table"], frozenset(item["values"])),
+        ):
+            await self._install_records(table, records, row, index)
         for item in imported["updates"]:
             await self._apply_record(item, row, index, update=True)
         if plan.share is not None:
@@ -922,6 +974,34 @@ class OfflineImportStore(PublicationStore):
         from ..shares import install_share
 
         await install_share(self.db, request, plan, row, index)
+
+    def _message_parameters(self, records, columns, publication, index):
+        for item in records:
+            values = self._resolve(item["values"], publication, index)
+            self._validate_relation("messages", values, publication)
+            yield tuple(values[key] for key in columns)
+
+    async def _install_records(self, table, records, publication, index):
+        if table != "messages":
+            for item in records:
+                await self._apply_record(
+                    item,
+                    publication,
+                    index,
+                    update=False,
+                )
+            return
+        first = next(records)
+        columns = tuple(first["values"])
+        await self.db.insert_prepared(
+            _message_insert(columns),
+            self._message_parameters(
+                chain((first,), records),
+                columns,
+                publication,
+                index,
+            ),
+        )
 
     def _resolve(self, values, publication, index):
         result = {}

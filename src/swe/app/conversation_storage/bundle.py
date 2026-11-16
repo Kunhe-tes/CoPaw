@@ -20,6 +20,8 @@ import struct
 import stat
 from typing import BinaryIO, Iterator
 
+from swe.database.observation import record_operation
+
 from .errors import IntegrityError
 from .identity import SCOPE_COLUMNS, WorkspaceScope, identity_bytes
 from ...config.context import encode_scope_id, is_valid_identity_value
@@ -379,6 +381,7 @@ class BundleStore:
         """Re-fsync an existing exclusive result after a lost publish response."""
         index = self.inspect(relative_path)
         with self._directory(relative_path, create=True) as (directory, name):
+            record_operation("bundle_open")
             descriptor = os.open(
                 name,
                 os.O_RDONLY | os.O_NOFOLLOW,
@@ -425,6 +428,7 @@ class BundleStore:
             )
         with self._directory(relative_path, create=True) as (directory, name):
             temporary = f".{name}.{secrets.token_hex(16)}.tmp"
+            record_operation("bundle_open")
             fd = os.open(
                 temporary,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
@@ -465,6 +469,7 @@ class BundleStore:
     def _open(self, relative_path):
         with self._directory(relative_path) as (directory, name):
             try:
+                record_operation("bundle_open")
                 descriptor = os.open(
                     name,
                     os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
@@ -477,7 +482,14 @@ class BundleStore:
             with os.fdopen(descriptor, "rb") as source:
                 if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
                     raise IntegrityError("bundle must be a regular file")
+                before = os.fstat(source.fileno())
                 yield source
+                after = os.fstat(source.fileno())
+                named = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                if _file_state(before) != _file_state(after) or _file_state(
+                    after,
+                ) != _file_state(named):
+                    raise IntegrityError("bundle changed during read")
 
     def inspect(
         self,
@@ -485,43 +497,101 @@ class BundleStore:
         *,
         expected_length: int | None = None,
     ) -> BundleIndex:
+        with self.open_reader(
+            relative_path,
+            expected_length=expected_length,
+        ) as reader:
+            return reader.index
+
+    @contextmanager
+    def open_reader(
+        self,
+        relative_path,
+        *,
+        expected_length=None,
+        expected_operation_key=None,
+        index_allowance=None,
+    ):
+        """在单次安全打开中解析索引并读取多块，退出前复查文件身份。"""
         with self._open(relative_path) as source:
-            size = os.fstat(source.fileno()).st_size
-            header = source.read(HEADER.size)
-            if len(header) != HEADER.size:
-                raise IntegrityError("truncated bundle header")
-            magic, version, meta_size, table_size, payload_size = (
-                HEADER.unpack(header)
+            index = self._inspect_source(
+                source,
+                relative_path,
+                expected_length,
+                index_allowance,
             )
-            if magic != MAGIC or version != VERSION:
-                raise IntegrityError("unknown bundle format version")
             if (
-                meta_size > MAX_INDEX_BYTES
-                or table_size > MAX_INDEX_BYTES
-                or size != HEADER.size + meta_size + table_size + payload_size
-                or size > MAX_BUNDLE_BYTES
+                expected_operation_key is not None
+                and index.metadata.get("operation_key")
+                != expected_operation_key
             ):
-                raise IntegrityError(
-                    "bundle length or index bounds are invalid",
-                )
-            if expected_length is not None and size != expected_length:
-                raise IntegrityError(
-                    "bundle disagrees with published byte length",
-                )
-            try:
-                metadata = _load_json(source.read(meta_size))
-                _validate_metadata(metadata)
-                table = _load_json(source.read(table_size))
-                if (
-                    not isinstance(metadata, dict)
-                    or not isinstance(table, dict)
-                    or not 0 < len(table) <= MAX_BLOCKS
-                ):
-                    raise ValueError("invalid index")
-                blocks = self._decode_table(table, source.tell(), payload_size)
-            except (ValueError, TypeError, KeyError, RecursionError) as error:
-                raise IntegrityError("bundle index is invalid") from error
-            return BundleIndex(relative_path, size, metadata, blocks)
+                raise IntegrityError("bundle publication identity mismatch")
+            yield BundleReader(source, index)
+
+    def _inspect_source(
+        self,
+        source,
+        relative_path,
+        expected_length,
+        index_allowance,
+    ):
+        record_operation("bundle_index_parse")
+        size = os.fstat(source.fileno()).st_size
+        header = source.read(HEADER.size)
+        if len(header) != HEADER.size:
+            raise IntegrityError("truncated bundle header")
+        magic, version, meta_size, table_size, payload_size = HEADER.unpack(
+            header,
+        )
+        if magic != MAGIC or version != VERSION:
+            raise IntegrityError("unknown bundle format version")
+        if (
+            meta_size > MAX_INDEX_BYTES
+            or table_size > MAX_INDEX_BYTES
+            or size != HEADER.size + meta_size + table_size + payload_size
+            or size > MAX_BUNDLE_BYTES
+        ):
+            raise IntegrityError(
+                "bundle length or index bounds are invalid",
+            )
+        if expected_length is not None and size != expected_length:
+            raise IntegrityError(
+                "bundle disagrees with published byte length",
+            )
+        reservation = (meta_size + table_size) * 16 + 4096
+        if index_allowance is not None and reservation > index_allowance:
+            raise ValueError(
+                "runtime index exceeds workspace memory allowance",
+            )
+        try:
+            metadata = _load_json(source.read(meta_size))
+            _validate_metadata(metadata)
+            table = _load_json(source.read(table_size))
+            if (
+                not isinstance(metadata, dict)
+                or not isinstance(table, dict)
+                or not 0 < len(table) <= MAX_BLOCKS
+            ):
+                raise ValueError("invalid index")
+            blocks = self._decode_table(table, source.tell(), payload_size)
+        except (ValueError, TypeError, KeyError, RecursionError) as error:
+            raise IntegrityError("bundle index is invalid") from error
+        return BundleIndex(relative_path, size, metadata, blocks)
+
+    def read_extents(
+        self,
+        relative_path,
+        extents,
+        *,
+        expected_length=None,
+        max_bytes=MAX_READ_BYTES,
+    ):
+        """一次安全打开读取给定的有界多块正文，兼容独立索引定位。"""
+        with self.open_reader(
+            relative_path,
+            expected_length=expected_length,
+        ) as reader:
+            return reader.read_extents(extents, max_bytes=max_bytes)
 
     @staticmethod
     def _decode_table(table, start, payload_size):
@@ -602,3 +672,63 @@ class BundleStore:
                 expected_length=expected_length,
             ),
         )
+
+
+def _file_state(details):
+    """纳秒时间和 inode 共同识别同大小改写与名称替换。"""
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_size,
+        details.st_mtime_ns,
+        details.st_ctime_ns,
+    )
+
+
+class BundleReader:
+    """仅在 open_reader 上下文内有效的有界正文读取器。"""
+
+    def __init__(self, source, index):
+        """绑定当前打开文件与已校验索引，不延长文件生命周期。"""
+        self.source = source
+        self.index = index
+        self.index_reservation = (source.tell() - HEADER.size) * 16 + 4096
+
+    def read_extents(self, extents, *, max_bytes=MAX_READ_BYTES):
+        """按请求顺序返回正文；在分配前校验所有 extent 与总字节预算。"""
+        extents = tuple(extents)
+        if (
+            len(extents) > MAX_BLOCKS
+            or type(max_bytes) is not int
+            or max_bytes < 0
+        ):
+            raise IntegrityError("bundle multi-read budget is invalid")
+        total = 0
+        for extent in extents:
+            if (
+                type(extent.offset) is not int
+                or type(extent.length) is not int
+                or extent.offset < 0
+                or not 0 <= extent.length <= MAX_READ_BYTES
+                or not any(
+                    extent.kind == block.kind
+                    and block.offset <= extent.offset
+                    and extent.offset + extent.length
+                    <= block.offset + block.length
+                    for block in self.index.blocks.values()
+                )
+            ):
+                raise IntegrityError(
+                    "bundle extent is outside a payload block",
+                )
+            total += extent.length
+        if total > max_bytes:
+            raise IntegrityError("bundle multi-read exceeds byte budget")
+        bodies = []
+        for extent in extents:
+            self.source.seek(extent.offset)
+            body = self.source.read(extent.length)
+            if len(body) != extent.length:
+                raise IntegrityError("truncated bundle extent")
+            bodies.append(body)
+        return tuple(bodies)

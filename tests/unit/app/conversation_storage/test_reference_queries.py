@@ -217,7 +217,13 @@ async def test_fixed_query_shapes_cover_all_required_columns():
     )
     from swe.app.conversation_storage.source_messages import SOURCE_FIELDS
 
-    db = ReferenceDatabase(messages={}, turns={}, publications={}, chats={})
+    db = ReferenceDatabase(
+        messages={},
+        turns={},
+        publications={},
+        chats={},
+        sessions={},
+    )
     for kind in ReferenceQuery:
         await fetch_reference_rows(db, kind, [2**64 - 1], SERVICE)
     assert len(db.calls) == len(ReferenceQuery)
