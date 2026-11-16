@@ -12,7 +12,6 @@ import click
 
 from swe.app.conversation_storage.chat_mutations import load_metadata_json
 from swe.app.conversation_storage.migration.discovery import (
-    SHARE_FIELDS,
     discover_services,
     freeze_discovery,
 )
@@ -41,33 +40,6 @@ def _output(path, services):
                     "output cannot be inside frozen source inputs",
                 )
     return output
-
-
-async def read_original_shares():
-    """Read all legacy share fields in a consistent, read-only snapshot."""
-    from swe.database import DatabaseConnection, get_database_config
-
-    database = DatabaseConnection(get_database_config())
-    try:
-        await database.connect()
-        async with database.transaction() as transaction:
-            # Read one connection/transaction; schema initialization is never called.
-            result = []
-            offset = 0
-            fields = ", ".join("t." + name for name in SHARE_FIELDS)
-            while True:
-                rows = await transaction.fetch_all(
-                    "SELECT "
-                    + fields
-                    + " FROM swe_chat_shares t ORDER BY token LIMIT %s OFFSET %s",
-                    (1000, offset),
-                )
-                result.extend(dict(row) for row in rows)
-                if len(rows) < 1000:
-                    return result
-                offset += len(rows)
-    finally:
-        await database.close()
 
 
 def _resource_options(command):
@@ -271,11 +243,11 @@ def register_discovery_commands(group):
         try:
             declared = _list(_read(services), "services")
             destination = _output(output, declared)
-            shares = (
-                _list(_read(shares_file), "shares")
-                if shares_file
-                else asyncio.run(read_original_shares())
-            )
+            shares = _list(_read(shares_file), "shares") if shares_file else []
+            if shares:
+                raise ValueError(
+                    "historical share records are excluded from migration",
+                )
             exceptions = (
                 _list(_read(overrides), "overrides") if overrides else []
             )
@@ -306,6 +278,7 @@ def register_discovery_commands(group):
                 json.dumps(
                     {
                         "report": str(destination),
+                        "excluded_scopes": ["historical_shares"],
                         "ready": report["ready"],
                         "blockers": len(report["blockers"]),
                         **(

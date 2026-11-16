@@ -88,10 +88,12 @@ def validate_source_verification(value):
         if not isinstance(results, dict) or any(
             key not in ("fast", "full")
             or not isinstance(result, dict)
-            or result.get("passed") is not True
+            or type(result.get("passed")) is not bool
             for key, result in results.items()
         ):
             raise IntegrityError("invalid source verification results")
+        if results and results.get("fast", {}).get("passed") is not True:
+            raise IntegrityError("source fast verification did not pass")
         return validate_receipt(value["authority"]), level
     return validate_receipt(value), "full"
 

@@ -11,8 +11,8 @@ def merge_verification(existing, result):
     if not isinstance(current, dict):
         raise ValueError("invalid migration verification evidence")
     level = result.get("verification_level")
-    if level not in ("fast", "full") or result.get("passed") is not True:
-        raise ValueError("only a passed verification can be recorded")
+    if level not in ("fast", "full") or type(result.get("passed")) is not bool:
+        raise ValueError("invalid verification result")
     reports = current.get("verification_results", {})
     if not isinstance(reports, dict):
         raise ValueError("invalid migration verification results")
@@ -23,6 +23,7 @@ def merge_verification(existing, result):
             "passed",
             "verification_level",
             "fast_summary",
+            "blockers",
         )
         if key in result
     }
@@ -30,7 +31,8 @@ def merge_verification(existing, result):
         summary["checked_count"] = len(result["checked"])
     reports[level] = summary
     current["verification_results"] = reports
-    current["verification_level"] = (
-        "fast" if reports.get("fast", {}).get("passed") is True else level
-    )
+    if reports.get("fast", {}).get("passed") is True:
+        current["verification_level"] = "fast"
+    elif result["passed"]:
+        current["verification_level"] = level
     return current

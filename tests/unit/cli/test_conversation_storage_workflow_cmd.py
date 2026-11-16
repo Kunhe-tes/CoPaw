@@ -316,16 +316,22 @@ def test_prepare_freeze_refusal_never_starts_preflight(inputs, monkeypatch):
     assert not inputs["manifest"].exists()
 
 
-def test_prepare_option_defaults_use_readonly_share_reader(
+def test_prepare_excludes_historical_shares_without_database_access(
     inputs,
     monkeypatch,
 ):
-    from unittest.mock import AsyncMock
-    from swe.cli import conversation_storage_discovery_cmd as discovery
+    from swe.app.conversation_storage.migration import discovery
     from swe.cli import conversation_storage_v3_cmd as v3
 
-    shares = AsyncMock(return_value=[])
-    monkeypatch.setattr(discovery, "read_original_shares", shares)
+    discover = discovery.discover_services
+    observed = []
+
+    def record_discovery(*args, **kwargs):
+        report = discover(*args, **kwargs)
+        observed.append(report)
+        return report
+
+    monkeypatch.setattr(discovery, "discover_services", record_discovery)
     monkeypatch.setattr(
         v3,
         "run_v3_command",
@@ -338,7 +344,9 @@ def test_prepare_option_defaults_use_readonly_share_reader(
     del args[index : index + 2]
     result = CliRunner().invoke(command(), args)
     assert result.exit_code == 0, result.output
-    shares.assert_awaited_once_with()
+    assert observed[0]["shares"] == []
+    assert observed[0]["source_shares"] == []
+    assert observed[0]["excluded_scopes"] == ["historical_shares"]
 
 
 def test_prepare_audit_report_uses_frozen_review(inputs, monkeypatch):

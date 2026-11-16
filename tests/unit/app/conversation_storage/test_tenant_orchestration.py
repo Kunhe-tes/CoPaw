@@ -366,51 +366,6 @@ async def test_shared_spool_disk_missing_path_and_eio_are_not_isolated(
     orchestration.db.execute.assert_not_awaited()
 
 
-def share(token, service=None):
-    result = {
-        "token": token,
-        "chat_id": "chat",
-        "creator_id": "account",
-        "tenant_id": "same-account",
-        "snapshot_key": "same-account/chat_shares/" + token + ".json",
-        "created_at": "2026-11-01T00:00:00+00:00",
-        "access_count": 3,
-        "last_access_at": None,
-    }
-    if service is not None:
-        result["service_unit_id"] = service
-    return result
-
-
-async def test_same_account_across_services_compares_only_own_unpublished_shares():
-    own, other = share("a", "s1"), share("b", "s2")
-    parent = SimpleNamespace(
-        data={"source_shares": [own, other], "shares": [own, other]},
-    )
-    view = SimpleNamespace(
-        key=("s1", "same-account"),
-        data={"shares": [own]},
-        parent=parent,
-    )
-    db = SimpleNamespace(
-        fetch_all=AsyncMock(
-            return_value=[
-                {**share("a"), "service_unit_key": None},
-                {**share("b"), "service_unit_key": None},
-            ],
-        ),
-    )
-    await cli._compare_shares(db, view)
-    db.fetch_all.return_value = [{**share("a"), "service_unit_key": b"s1"}]
-    await cli._compare_shares(db, view)
-    # Unknown NULL-service tokens cannot be silently excluded from coverage.
-    db.fetch_all.return_value.append(
-        {**share("unknown"), "service_unit_key": None},
-    )
-    with pytest.raises(cli.TenantFailure, match="unregistered"):
-        await cli._compare_shares(db, view)
-
-
 async def test_unsafe_tenant_source_path_is_isolated_before_next_tenant(
     monkeypatch,
     orchestration,
@@ -434,6 +389,38 @@ async def test_unsafe_tenant_source_path_is_isolated_before_next_tenant(
     monkeypatch.setattr(cli, "_one_tenant", one)
     result = await run(orchestration)
     assert visited == ["b", "c"] and result["failed"] == 1
+
+
+async def test_failed_full_audit_is_persisted_and_reported_without_raw_blockers():
+    calls = []
+
+    class States:
+        async def record_verification(self, *args):
+            calls.append(("verification", args))
+
+        async def fail(self, *args):
+            calls.append(("failure", args))
+
+    result = {
+        "verification_level": "full",
+        "passed": False,
+        "blockers": [{"position": "/private/path", "detail": "mismatch"}],
+    }
+    error = cli.VerificationFailure(result)
+    failure = await cli._record_tenant_failure(
+        States(),
+        {"service_unit_id": "svc", "tenant_id": "t", "source_id": "s"},
+        "verify",
+        error,
+    )
+    assert calls[0] == ("verification", ("svc", "t", "s", result))
+    assert calls[1][0] == "failure"
+    assert failure["verification"] == {
+        "verification_level": "full",
+        "passed": False,
+        "blocker_count": 1,
+    }
+    assert "/private/path" not in str(failure)
 
 
 def test_real_source_preflight_symlink_has_domain_specific_failure(tmp_path):

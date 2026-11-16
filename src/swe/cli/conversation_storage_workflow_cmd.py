@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """Two-stage entry points for explicitly isolated tenant migrations."""
 
-import asyncio
 import json
 import os
 
@@ -34,7 +33,6 @@ def prepare_workflow(
         _semantic_validator,
         discover_services,
         freeze_discovery,
-        read_original_shares,
     )
     from .conversation_storage_v3_cmd import run_v3_command, validate_output
 
@@ -50,11 +48,11 @@ def prepare_workflow(
     schema = application_schema or configured_schema
     if schema != configured_schema:
         raise ValueError("configured application schema differs from prepare")
-    shares = (
-        _list(_read(shares_file), "shares")
-        if shares_file
-        else asyncio.run(read_original_shares())
-    )
+    shares = _list(_read(shares_file), "shares") if shares_file else []
+    if shares:
+        raise ValueError(
+            "historical share records are excluded from migration",
+        )
     report = discover_services(
         declared,
         shares=shares,

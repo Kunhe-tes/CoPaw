@@ -124,12 +124,14 @@ def _inputs(
             "service_unit_key": b"svc",
             "checkpoint_revision": 2,
         }
+        queries = []
 
         async def fetch_one(self, query, _params=None):
             assert query == "SELECT DATABASE() AS schema_name"
             return {"schema_name": "test_fast_verify"}
 
         async def fetch_all(self, query, params=None):
+            self.queries.append(query)
             if params and params[0] == b"svc":
                 return [self.record_values] if record_plan else []
             assert "FROM swe_conversation_publications" in query
@@ -218,6 +220,8 @@ async def test_fast_verification_checks_bundle_structure_without_reading_body(
 
     assert result["passed"] is True
     assert result["verification_level"] == "fast"
+    assert result["excluded_scopes"] == ["historical_shares"]
+    assert not any("swe_chat_shares" in query for query in database.queries)
 
 
 @pytest.mark.asyncio

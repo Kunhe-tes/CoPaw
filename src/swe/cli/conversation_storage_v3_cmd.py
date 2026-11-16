@@ -13,7 +13,6 @@ import tempfile
 import click
 
 from swe.app.conversation_storage.bundle import BundleStore
-from swe.app.conversation_storage.migration.discovery import SHARE_FIELDS
 from swe.app.conversation_storage.migration.direct_import import (
     DirectImporter,
     DirectTarget,
@@ -97,50 +96,6 @@ def validate_output(output, data):
     ):
         raise ValueError("output must not overlap source or NAS roots")
     return root
-
-
-def _stamp(value):
-    from datetime import datetime, timezone
-
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc).isoformat()
-    if isinstance(value, str):
-        try:
-            return _stamp(datetime.fromisoformat(value.replace("Z", "+00:00")))
-        except ValueError:
-            pass
-    return value
-
-
-async def compare_original_shares(database, data):
-    rows = await database.fetch_all(
-        "SELECT "
-        + ",".join(SHARE_FIELDS)
-        + " FROM swe_chat_shares ORDER BY token",
-    )
-
-    def normalized(row):
-        return {
-            key: (
-                _stamp(row.get(key))
-                if key in ("created_at", "last_access_at")
-                else row.get(key)
-            )
-            for key in SHARE_FIELDS
-        }
-
-    actual = {row["token"]: normalized(row) for row in rows}
-    expected = {row["token"]: normalized(row) for row in data["shares"]}
-    if (
-        len(actual) != len(rows)
-        or len(expected) != len(data["shares"])
-        or actual != expected
-    ):
-        raise ValueError(
-            "original share set, identity, timestamps or counters changed",
-        )
 
 
 def _write_json(path, value):
@@ -299,12 +254,12 @@ async def _execute(
                 schema,
                 finalized=operation == "finalize",
             )
-            await compare_original_shares(db, manifest.data)
             job = await _inspect_job(db, journal)
             if operation == "preflight":
                 return {
                     "version": 3,
                     "migration_id": manifest.migration_id,
+                    "excluded_scopes": ["historical_shares"],
                     "passed": True,
                     "state": job["state"] if job else "planned",
                 }
@@ -355,14 +310,14 @@ async def _execute(
                         health_check=guard.check,
                         verification_level=verification_level,
                     )
+                if operation == "verify":
+                    await journal.mark_state(job["state"], result)
                 if not result["passed"]:
                     raise ValueError(
                         "semantic verification failed: "
                         + json.dumps(result["blockers"]),
                     )
-                if operation == "verify":
-                    await journal.mark_state(job["state"], result)
-            # Re-read the complete frozen source and old SQL shares before completion.
+            # Re-read the complete frozen source before completion.
             if source_recheck is None:
                 if inventory_v3(manifest) != inventory:
                     raise ValueError(
@@ -370,7 +325,6 @@ async def _execute(
                     )
             else:
                 await source_recheck()
-            await compare_original_shares(db, manifest.data)
             if (
                 await check_schema(
                     db,
@@ -505,6 +459,7 @@ async def _execute_spooled(
                 "version": 3,
                 "operation": operation,
                 "migration_id": manifest.migration_id,
+                "excluded_scopes": ["historical_shares"],
                 "apply": False,
                 "ready": True,
             }
@@ -675,6 +630,7 @@ def _inventory_preview(operation, manifest, inventory):
         "version": 3,
         "operation": operation,
         "migration_id": manifest.migration_id,
+        "excluded_scopes": ["historical_shares"],
         "preview": True,
         "application_schema": manifest.data["offline"]["application_schema"],
         "source_boundary": inventory["source_boundary"],

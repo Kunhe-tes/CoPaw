@@ -429,45 +429,32 @@ async def test_source_proof_cannot_publish_sibling():
         await states.publish("svc", "alice", "A", proof)
 
 
-async def test_share_comparison_allows_live_sibling_but_rejects_unknown_source(
-    monkeypatch,
-):
-    from tests.unit.app.conversation_storage.test_tenant_orchestration import (
-        share,
+def test_source_isolation_keeps_source_scope_in_failure_identity():
+    from swe.cli.conversation_storage_tenants import _failure
+
+    failure = _failure(
+        {"service_unit_id": "svc", "tenant_id": "alice", "source_id": "A"},
+        "verify",
+    )
+    assert failure["source_id"] == "A"
+
+
+def test_source_audit_result_does_not_change_published_scope():
+    from swe.app.conversation_storage.migration.authority import (
+        validate_source_verification,
     )
 
-    own = share("frozen", "svc")
-    parent = SimpleNamespace(
-        data={
-            "source_isolation": True,
-            "source_shares": [own],
-            "shares": [own],
+    proof = {
+        "version": 1,
+        "migration_id": JOB,
+        "services": {"svc": {"nas_root": "/nas", "workspaces": []}},
+    }
+    value = {
+        "authority": proof,
+        "verification_level": "fast",
+        "verification_results": {
+            "fast": {"passed": True, "verification_level": "fast"},
+            "full": {"passed": False, "verification_level": "full"},
         },
-    )
-    view = SimpleNamespace(
-        key=("svc", "same-account", "B"),
-        migration_id=JOB,
-        parent=parent,
-        data={"source_isolation": True, "shares": [own]},
-    )
-    db = SimpleNamespace(
-        fetch_all=AsyncMock(
-            return_value=[
-                {**own, "service_unit_key": None},
-                {**share("new", "svc"), "service_unit_key": b"svc"},
-            ],
-        ),
-        fetch_one=AsyncMock(
-            side_effect=[
-                {"source_key": b"A", "scope_kind": "workspace"},
-                {"state": "published"},
-            ],
-        ),
-    )
-    await cli._compare_shares(db, view)
-    db.fetch_one.side_effect = [
-        {"source_key": b"B", "scope_kind": "workspace"},
-        {"state": "failed"},
-    ]
-    with pytest.raises(cli.TenantFailure, match="unregistered"):
-        await cli._compare_shares(db, view)
+    }
+    assert validate_source_verification(value) == (proof, "fast")

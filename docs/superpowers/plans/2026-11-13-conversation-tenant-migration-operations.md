@@ -1,18 +1,20 @@
 # 会话迁移：失败租户隔离与正常租户独立上线
 
-本篇是 **显式 `--tenant-isolation` 模式**的操作增补。未使用该选项的全量严格流程仍按 `2026-11-02-conversation-migration-and-launch-runbook.md` 执行。本篇覆盖的部分发布顺序、预览连接数据库、runtime v3 和分享最终 DDL 与旧流程不同，不能混用。设计依据是 `2026-11-13-conversation-tenant-cutover-design.md` 和 ADR 0046。
+本篇是 **显式 `--tenant-isolation` 模式**的操作增补。未使用该选项的全量严格流程仍按 `2026-11-02-conversation-migration-and-launch-runbook.md` 执行。本篇覆盖的部分发布顺序、预览连接数据库、runtime v3 和 schema 准备与旧流程不同，不能混用。设计依据是 `2026-11-13-conversation-tenant-cutover-design.md` 和 ADR 0046。
+
+**迁移范围说明（2026-11-17）：**历史分享记录不属于本次迁移输入。`discover` / `prepare` 不读取分享表；`shares-file` 若提供必须为空；inventory、导入、fast/full verify 和发布均不读取或复制旧分享记录。报告通过 `excluded_scopes: ["historical_shares"]` 标明范围。该决定不更改新版运行时永久分享功能及分享表 schema 要求。
 
 ## 2026-11-16：新作业按 source 独立迁移与上线
 
-新版 `prepare --tenant-isolation` 固定 `source_isolation=true`，发布、失败记录和自动重审单位细化为 `(service_unit_id, tenant_id, source_id)`。同 tenant 的 source=A、B、C 中，B 输入损坏仅记录 B，A、C 继续导入、验证和独立上线。一个 source 内全部 Agent、workspace 和可归属分享仍须一起通过。操作仍为 prepare、migrate 两条主命令，资源参数及四个旧 root 同路径、nas_root 独立的原地模式保持不变。下文“账号/租户”在新作业中均指该三元隔离单位。
+新版 `prepare --tenant-isolation` 固定 `source_isolation=true`，发布、失败记录和自动重审单位细化为 `(service_unit_id, tenant_id, source_id)`。同 tenant 的 source=A、B、C 中，B 输入损坏仅记录 B，A、C 继续导入、验证和独立上线。一个 source 内全部 Agent 和 workspace 仍须一起通过。操作仍为 prepare、migrate 两条主命令，资源参数及四个旧 root 同路径、nas_root 独立的原地模式保持不变。下文“账号/租户”在新作业中均指该三元隔离单位。
 
 新作业须由 DBA 预建 `swe_conversation_migration_sources`：新环境执行最新 `scripts/sql/conversation_migration_control_tables.sql`；已有控制表环境可增量执行 `scripts/sql/conversation_migration_source_tables.sql`。CLI 不执行 DDL。所有 source 发布后，分享字段收口使用 `scripts/sql/conversation_source_publication_finalize.sql`；只有部分 source 发布时不执行全库收口，正常 source 可先上线。
 
 旧 manifest 未声明 `source_isolation=true` 时保持 `(service_unit_id, tenant_id)` 语义，不能手改 manifest 或切换控制表。已有 SQL 票据或业务行的作业不可重建身份来绕过。历史细分 discover/freeze 入口保持兼容，不自动升级粒度；新 source 作业使用首选 prepare。
 
-失败 JSON 增加 `source_id`；阶段结果包含 `source_isolation=true`、`counter_unit=sources`。兼容字段 `tenants`、`published`、`completed`、`failed` 在此模式均按 source 计数。共享 DB、EIO、磁盘耗尽、锁丢失、提交结果不确定仍停止整个命令。无法唯一确定归属的旧分享保守阻断所有可能受影响的 source；已删除 Chat 的孤立旧分享只在唯一可信 source 时归属。
+失败 JSON 增加 `source_id`；阶段结果包含 `source_isolation=true`、`counter_unit=sources`。兼容字段 `tenants`、`published`、`completed`、`failed` 在此模式均按 source 计数。共享 DB、EIO、磁盘耗尽、锁丢失、提交结果不确定仍停止整个命令。
 
-运行时逐次检查 SQL source published 状态；同 tenant 的未发布 source 返回 503，已发布 source 可正常读写。Chat/Session 元数据 CRUD 使用完整可信 `(service, tenant, source, agent)` scope。孤立旧分享保留 legacy_share 的空 source 存储契约，访问时按不可变迁移证据中的 token 唯一归属做 source 准入。详见 ADR 0049。本节覆盖本页历史租户粒度描述，旧作业继续原粒度。
+运行时逐次检查 SQL source published 状态；同 tenant 的未发布 source 返回 503，已发布 source 可正常读写。Chat/Session 元数据 CRUD 使用完整可信 `(service, tenant, source, agent)` scope。本次迁移不导入或验证旧分享记录；运行时永久分享 API 和存储合同不由本变更修改。详见 ADR 0049。本节覆盖本页历史租户粒度描述，旧作业继续原粒度。
 
 ## 首选操作：准备、执行两阶段
 
@@ -35,15 +37,17 @@
   --output-dir "$AUDIT_DIR/runtime" --apply "${CS_RESOURCES[@]}"
 ```
 
-`prepare` 合并发现、证据固化、盘点和预检，读取目标库，不导入业务行、不发布账号；输出 manifest 及相邻的 `<manifest文件名>.discovery.json`。输出文件必须不存在。可选 `--shares-file`、`--overrides` 使用已审核的完整记录。部分失败仍保留可归属租户和固定作业身份，检查结果后可让正常租户进入 migrate。
+`prepare` 合并发现、证据固化、盘点和预检，读取目标库，不导入业务行、不发布账号；输出 manifest 及相邻的 `<manifest文件名>.discovery.json`。输出文件必须不存在。可选 `--overrides` 使用已审核的完整记录；兼容的 `--shares-file` 只能指向空列表，非空时命令拒绝。部分失败仍保留可归属租户和固定作业身份，检查结果后可让正常租户进入 migrate。
 
-`migrate --apply` 对每个可执行账号按依赖顺序完成导入/续跑、完整语义校验、最后源复查和发布；无需再人工运行 verify/finalize 才发布正常账号。已发布账号从 SQL 读取并跳过其旧输入。它不会部署应用、改变外部流量、停止 writer 或自动 chmod。新版服务仍按 SQL published 与凭证动态准入。
+`migrate --apply` 对每个可执行账号按依赖顺序完成导入/续跑、快速结构验证、最后源复查和发布；无需再人工运行 verify/finalize 才发布正常账号。已发布账号从 SQL 读取并跳过其旧输入。它不会部署应用、改变外部流量、停止 writer 或自动 chmod。新版服务仍按 SQL published 与凭证动态准入。
+
+`migrate --apply` 默认执行快速结构验证。单独运行 `verify` 也默认快速验证；需要核对正文与冻结源的完整语义审计时，显式添加 `--full-audit`。快速验证不证明正文逐字节相等；full audit 失败不会抹掉已有快速验证证据，也不会授权发布。
 
 每次 migrate 自动重审**进入命令前已失败**的未发布账号，每账号每次至多一次。零业务数据、零迁移票据者才可接受修订后的输入；已有部分提交者保留旧证据和票据，输入未变时核对后续跑，输入改变时报告失败，不自动删除/重绑。准备时正常但执行前发生输入变化的账号，本次隔离并记录失败，下一次执行才进入自动重审，不能在同一次执行静默接纳新输入。
 
-准备、自动重审和执行读取使用作业级有界并发：独立租户的解析、会话正文 IO 和摘要计算可以重叠。执行采用只读 inventory 预取与 owner 导入/校验流水线；所有账号共享 `io-workers` 线程池与解析内存预算，`workers=1` 时无跨租户预取。该预算是解析分配门禁，并非进程 RSS 硬上限；分享列表、清单摘要及 Python/数据库运行时还有常驻开销，须按实际分享量留出内存。SQL、事务、manifest/journal 权威更新及租户发布仍由单 owner 串行执行；同一账号导入→校验→最后源复查→发布不可乱序，不能用多个命令进程绕过同库命名锁。
+准备、自动重审和执行读取使用作业级有界并发：独立租户的解析、会话正文 IO 和摘要计算可以重叠。执行采用只读 inventory 预取与 owner 导入/校验流水线；所有账号共享 `io-workers` 线程池与解析内存预算，`workers=1` 时无跨租户预取。该预算是解析分配门禁，并非进程 RSS 硬上限；清单摘要及 Python/数据库运行时还有常驻开销。SQL、事务、manifest/journal 权威更新及租户发布仍由单 owner 串行执行；同一账号导入→校验→最后源复查→发布不可乱序，不能用多个命令进程绕过同库命名锁。
 
-prepare 的最终预检（以及独立 preflight/预览）在排除已发布和发现失败账号后，最多并行盘点 workers 个账号，共用 IO 池和每槽解析预算。migrate 最多保留 workers-1 个后续账号预读；当前账号获得其余 worker 和对应内存额度，传给 workspace 导入、分享导入、验证及最终盘点。例如 workers=4，尚有三个预读账号时当前账号使用 1 槽；只剩一个当前账号时使用 4 槽。已预读完但尚未消费的账号仍占一份额度，防止驻留数据预算超配。分配在当前账号开始处理时确定，不在账号处理中途抢占或重新分配。
+prepare 的最终预检（以及独立 preflight/预览）在排除已发布和发现失败账号后，最多并行盘点 workers 个账号，共用 IO 池和每槽解析预算。migrate 最多保留 workers-1 个后续账号预读；当前账号获得其余 worker 和对应内存额度，传给 workspace 导入、验证及最终盘点。例如 workers=4，尚有三个预读账号时当前账号使用 1 槽；只剩一个当前账号时使用 4 槽。已预读完但尚未消费的账号仍占一份额度，防止驻留数据预算超配。分配在当前账号开始处理时确定，不在账号处理中途抢占或重新分配。
 
 退出 `0` 表示该阶段全部完成；退出 `2` 且有效 JSON 为 `status=partial_success` 表示处理完所有可执行独立租户但仍有失败，查看结果中的 `failure_report`，已发布账号不撤销。共享数据库/磁盘/锁故障、取消、提交结果不确定等是致命停止，不能当作坏租户跳过。Click 参数错误也可能退出 2，必须核对结构化结果，不能只判断退出数字。失败报告只含服务、账号、阶段、代码和安全原因；完整审计材料保存在受限目录。
 
@@ -108,7 +112,7 @@ prepare 的最终预检（以及独立 preflight/预览）在排除已发布和�
 
 原地模式同样在各阶段只记录可归属的坏租户并继续正常组；数据库/锁/共享 NAS 故障仍中止本次命令。失败账号没有 legacy 回退。恢复 B 输入后，如原数据已有业务行/票据，不允许随意改内容；遵循第 5 节的原样 resume 或零数据证据重审。
 
-原地重审：将原 discovery 完整报告另存为新的审核输入，保留原 `declared_services`、完整冻结 `source_shares` 和审核 overrides，以该文件传给 `retry-review --reviewed-discovery ... --apply`。该文件用于明确授权重审输入，程序在锁内重新发现未发布组并落完整新证据审计；已发布目录仅按旧可信目录映射剪枝，不再读 A 在线配置/正文。不要在 A 已上线后直接将普通 discover 的在线分享表输出当冻结依据。新增未知账号、服务/root 变化或无法证明已发布账号独占目录等全局证据问题，会使该次重审拒绝。能归属到 B 的候选边界冲突（包括指向已发布 A 的目录）则拒绝 B 的候选修订，恢复 B 原有映射与证据并记录失败，其他独立 D 继续重审；不会改动 A。B 已有业务行/票据时，保留 B 完整旧记录、不修订其证据并报告 B 失败，其他独立组仍可继续。
+原地重审：将原 discovery 完整报告另存为新的审核输入，保留原 `declared_services` 和审核 overrides；新版 source manifest 的 `source_shares` 必须为空。该文件用于明确授权重审输入，程序在锁内重新发现未发布组并落完整新证据审计；已发布目录仅按旧可信目录映射剪枝，不再读 A 在线配置/正文。新增未知账号、服务/root 变化或无法证明已发布账号独占目录等全局证据问题，会使该次重审拒绝。能归属到 B 的候选边界冲突（包括指向已发布 A 的目录）则拒绝 B 的候选修订，恢复 B 原有映射与证据并记录失败，其他独立 D 继续重审；不会改动 A。B 已有业务行/票据时，保留 B 完整旧记录、不修订其证据并报告 B 失败，其他独立组仍可继续。
 
 原地不是独立快照，仍需迁移前数据库和 NAS 备份。上线后的整体回滚必须合成 A 最新状态与 B 保留输入，不能直接让旧版读取混合运行目录。
 
@@ -212,11 +216,18 @@ CMB_CAAS_SERVICEUNITID=REPLACE_REAL_SERVICE_ID
 
 verify/finalize 失败的租户先 resume 恢复完整 imported 状态，再 verify/finalize。不要清控制表、删 bundle、改账号/service ID 或重新 freeze 后写入同一半成品库。
 
+上述 `verify` 为快速验证。可选的完整正文审计命令为：
+
+```bash
+"$SWE_PYTHON" -m swe conversation-storage verify \
+  --manifest "$AUDIT_DIR/manifest.json" --full-audit "${CS_RESOURCES[@]}"
+```
+
 ### 首次 discovery 的配置/输入需要修正
 
-初次失败组不会因普通 resume 自动恢复。仅当该账号**尚无业务行且尚无迁移票据**时，可以审核修复冻结输入，再重新设置只读并准备完整审核报告。服务/root、账号集合和原始分享记录必须保持不变；不得修改已发布账号。修改冻结输入是受控证据修订，记录修复人与理由，不是开放旧 writer。
+初次失败组不会因普通 resume 自动恢复。仅当该账号**尚无业务行且尚无迁移票据**时，可以审核修复冻结输入，再重新设置只读并准备完整审核报告。服务/root、账号集合必须保持不变；`source_shares` 继续为空；不得修改已发布账号。修改冻结输入是受控证据修订，记录修复人与理由，不是开放旧 writer。
 
-**原地模式按第 1.1 节准备原 discovery 的完整副本，直接执行下面的 `retry-review`，跳过本节提取 shares 和重新 `discover` 的命令。** 已发布 A 的原地配置与正文就是在线数据，普通 discover 不知道 SQL 发布状态，仍会读取它们。保留副本中的原 `declared_services`、`source_shares` 和完整审核 overrides，由 `retry-review` 在锁内重发现未发布组。
+**原地模式按第 1.1 节准备原 discovery 的完整副本，直接执行下面的 `retry-review`，跳过重新 `discover` 的命令。** 已发布 A 的原地配置与正文就是在线数据，普通 discover 不知道 SQL 发布状态，仍会读取它们。保留副本中的原 `declared_services`、空 `source_shares` 和完整审核 overrides，由 `retry-review` 在锁内重发现未发布组。
 
 原地模式的审核副本及重审命令如下；示例首次发现文件名对应第 1.1 节。目标文件必须不存在；审核副本保留完整原报告，修复的是 B 的实际输入及只读措施，不能手改报告伪造新证据：
 
@@ -239,20 +250,11 @@ PYREVIEW
 
 以下重新生成 discovery 的步骤仅适用于默认冻结副本模式。新 discover 仍会盘点全部冻结账号的正文，包括已发布 A 的冻结正文；不会读取 A 的在线新正文。`retry-review` 内部再次发现时则使用已发布组的固定映射与计数，跳过其正文盘点。普通 resume/verify/finalize 也跳过已发布组，不能把这几种不同操作混为一谈。
 
-重审须使用原 manifest 的完整 `source_shares`，不能默认读取在线分享表：A 上线后新增分享或增加访问计数属于正常业务，不得写回冻结证据。先只读提取原始完整分享集合；以下命令独占创建私有文件，已存在时拒绝覆盖：
+新版 source manifest 将 `source_shares` 固定为空；重审不提取或读取在线分享表。发现只使用原冻结服务和 override 证据：
 
 ```bash
-"$SWE_PYTHON" - "$AUDIT_DIR/manifest.json" "$AUDIT_DIR/shares.frozen-review-1.json" <<'PY'
-import json, os, sys
-with open(sys.argv[1], encoding="utf-8") as stream:
-    shares = json.load(stream)["source_shares"]
-fd = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(fd, "w", encoding="utf-8") as stream:
-    json.dump({"shares": shares}, stream, ensure_ascii=False)
-PY
 "$SWE_PYTHON" -m swe conversation-storage discover \
   --tenant-isolation --services "$AUDIT_DIR/services.json" \
-  --shares-file "$AUDIT_DIR/shares.frozen-review-1.json" \
   --output "$AUDIT_DIR/discovery.review-1.json" "${CS_RESOURCES[@]}"
 "$SWE_PYTHON" -m swe conversation-storage retry-review \
   --manifest "$AUDIT_DIR/manifest.json" \

@@ -400,9 +400,7 @@ run_cs 01-discover discover --services "$AUDIT_DIR/services.json" \
 代码会找 `snapshot_root/<tenant_id>/chat_shares/<token>.json`，并校验原 `snapshot_key`。
 如果旧分享实际存放在另一处，填那个已经冻结的服务级根，不要为了凑路径把 token 内容重新复制到 workspace。
 
-`discover` 默认从数据库分页读取**全表**旧分享八字段，自动确定唯一服务归属；生产推荐不传 `--shares-file`。
-同一 token 在声明的各服务快照根必须恰好找到一份。已删除原 Chat 的分享也要迁移。
-`--shares-file` 只用于经过核对的完整导出或隔离演练，不能为了通过扫描传一个假的 `[]`。
+**本次会话迁移不包含历史分享记录。** `discover` / `prepare` 不读取分享表，也不扫描旧分享正文；报告标记 `excluded_scopes: ["historical_shares"]`。兼容的 `--shares-file` 只能为空，非空时拒绝执行。旧分享在切换后的运行时功能、分享表 schema 扩展和 DBA 收口要求不变，不表示这些记录已迁移或验证。
 
 特殊布局的服务级补充字段：
 
@@ -483,7 +481,7 @@ run_cs 05-preflight preflight --manifest "$AUDIT_DIR/manifest.json"
 如果采用 reviewed discovery，上面 `--discovery` 指向那份最终文件。证据文件须真实存在且可审计，
 程序接受字符串引用不代表已经验证停写。`freeze` 不会替你停止进程或给 NAS 上锁。
 
-`inventory/plan` 是源数据预览；`preflight` 才连接数据库核对预建结构、原分享未变化、
+`inventory/plan` 是源数据预览；`preflight` 才连接数据库核对预建结构、
 六表为空或已有行归本作业所有、作业绑定及锁等条件。预检 `passed=true` 才能继续。
 
 ```bash
@@ -497,7 +495,7 @@ run_cs 08-verify verify --manifest "$AUDIT_DIR/manifest.json"
 
 每条命令退出 0 后检查报告。`import` 输出迁移 ID 和批次状态，不带 `passed=true`，不能按那个字段判断它。
 全量 `verify` 必须 `passed=true`、`blockers=[]`。它比较消息每次出现及顺序、Session、Chat、
-归档、事件、checkpoint、分享和引用等，不只是统计总行数或抽看几条会话。
+归档、事件、checkpoint 和会话引用等，不只是统计总行数或抽看几条会话。历史分享不在本次迁移范围。
 
 中断后保持停写和输入不变，复用**同一份 manifest、同一作业 ID、同一目标**：
 

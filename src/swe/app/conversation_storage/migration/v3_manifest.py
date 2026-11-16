@@ -63,6 +63,10 @@ class V3Manifest(MigrationManifest):
                     raise ValueError("duplicate or undeclared frozen tenant")
                 tenant_scopes.add(key)
         self._validate_in_place_evidence()
+        if self.data["shares"] or self.data.get("source_shares", []):
+            raise ValueError(
+                "historical share records are excluded from migration",
+            )
         for item in self.data["workspaces"]:
             if (
                 self.data.get("tenant_isolation")
@@ -240,6 +244,7 @@ class V3Manifest(MigrationManifest):
             "services",
             "fingerprints",
             "shares",
+            "excluded_scopes",
             "discovery_version",
             "tenant_isolation",
             "source_isolation",

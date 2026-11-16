@@ -58,6 +58,31 @@ class TenantState:
             fields=("service_unit_key", "tenant_key"),
         )
 
+    async def record_verification(self, service, tenant, result):
+        from .verification_evidence import merge_verification
+
+        async with self.db.transaction():
+            current = await self.get(service, tenant, locked=True)
+            if current is None or current["state"] == "published":
+                raise ValueError("tenant verification cannot be recorded")
+            evidence = merge_verification(
+                current["verification_text"],
+                result,
+            )
+            changed = await self.db.execute(
+                "UPDATE "
+                + TENANTS
+                + " SET verification_text=%s,updated_at=UTC_TIMESTAMP(6) "
+                + "WHERE migration_id=%s AND service_unit_key=%s AND tenant_key=%s AND state=%s",
+                (
+                    _json(evidence),
+                    *self._keys(service, tenant),
+                    current["state"],
+                ),
+            )
+            if changed != 1:
+                raise ValueError("tenant verification evidence changed")
+
     async def register(self, tenants):
         """Register exact frozen evidence; never replace existing evidence."""
         async with self.db.transaction():

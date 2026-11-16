@@ -22,6 +22,8 @@ Priority: P1
 
 Use `swe conversation-storage verify --manifest ...` for fast verification, or add `--full-audit` for the optional body-level semantic audit. `migrate --apply` remains fast-only and the full audit does not authorize publication. Passing results are stored under separate `verification_results.fast` and `verification_results.full` records; the top-level level remains `fast` once a fast pass exists. The existing verifier retains all semantic checks for full mode.
 
+Failed full-audit results are also stored separately, including blockers in protected SQL evidence; the operator failure report exposes only the level and blocker count. A later fast pass remains the publication level and does not erase the audit result.
+
 The database-backed same-fixture mismatch comparison remains pending because this environment has no configured migration test database; unit coverage verifies CLI selection, evidence separation, and existing full-verifier behavior.
 
 ## Comments

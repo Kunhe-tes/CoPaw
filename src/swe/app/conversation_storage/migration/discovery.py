@@ -608,6 +608,7 @@ def discover_services(
         "services": [],
         "workspaces": [],
         "shares": [],
+        "excluded_scopes": ["historical_shares"],
         "fingerprints": [],
         "blockers": [],
         "ready": False,
@@ -744,7 +745,12 @@ def _freeze_tenant_report(report, current):
 
         return unit_key(report, item)
 
-    for field in ("services", "declared_services", "source_shares"):
+    for field in (
+        "services",
+        "declared_services",
+        "source_shares",
+        "excluded_scopes",
+    ):
         if current.get(field) != report.get(field):
             raise ValueError("freeze service or share ownership changed")
     old_tenants = {key(t): t for t in report["tenants"]}

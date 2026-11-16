@@ -65,6 +65,18 @@ class TenantFailure(ValueError):
     """An explicitly identified tenant data failure, never a shared SQL error."""
 
 
+class VerificationFailure(TenantFailure):
+    def __init__(self, result):
+        super().__init__(
+            (
+                "tenant semantic verification failed"
+                if result.get("verification_level") == "full"
+                else "tenant fast verification failed"
+            ),
+        )
+        self.result = result
+
+
 _VIEW_FIELDS = ("tenants", "workspaces", "shares", "source_change_blockers")
 
 
@@ -324,78 +336,6 @@ async def _inventory(view, spool, resources):
     return result
 
 
-async def _compare_shares(db, view):
-    from .conversation_storage_v3_cmd import SHARE_FIELDS, _stamp
-
-    # Unpublished shares have no service key yet. Include NULL and this service,
-    # but do not compare another service's already published share counters.
-    rows = await db.fetch_all(
-        "SELECT "
-        + ",".join(SHARE_FIELDS)
-        + ",service_unit_key FROM swe_chat_shares "
-        "WHERE BINARY tenant_id=%s AND (service_unit_key IS NULL OR service_unit_key=%s) ORDER BY token",
-        (view.key[1].encode(), view.key[0].encode()),
-    )
-
-    def normalized(row):
-        return {
-            k: (
-                _stamp(row[k])
-                if k in ("created_at", "last_access_at")
-                else row[k]
-            )
-            for k in SHARE_FIELDS
-        }
-
-    expected = {s["token"]: normalized(s) for s in view.data["shares"]}
-    known = {
-        s["token"]
-        for s in view.parent.data.get(
-            "source_shares",
-            view.parent.data["shares"],
-        )
-    }
-    if view.data.get("source_isolation"):
-        for row in rows:
-            if row["token"] in known:
-                continue
-            owner = await db.fetch_one(
-                "SELECT source_key,scope_kind FROM swe_conversation_publications "
-                "WHERE id=(SELECT publication_id FROM swe_chat_shares WHERE token=%s) "
-                "AND service_unit_key=%s AND tenant_key=%s AND state='committed' AND gc_state='live'",
-                (row["token"], view.key[0].encode(), view.key[1].encode()),
-            )
-            if owner is None or owner["scope_kind"] != "workspace":
-                raise TenantFailure("unregistered source share appeared")
-            owner_key = (
-                view.key[0],
-                view.key[1],
-                owner["source_key"].decode(),
-            )
-            from swe.app.conversation_storage.migration.source_state import (
-                SourceState,
-            )
-
-            state = await SourceState(db, view.migration_id).get(*owner_key)
-            if (
-                owner_key == view.key
-                or state is None
-                or state["state"] != "published"
-            ):
-                raise TenantFailure("unregistered source share appeared")
-        rows = [row for row in rows if row["token"] in expected]
-    elif any(s["token"] not in known for s in rows):
-        raise TenantFailure("unregistered tenant share appeared")
-    actual = {
-        s["token"]: normalized(s)
-        for s in rows
-        if s["token"] in expected
-        or s["service_unit_key"] == view.key[0].encode()
-    }
-    if len(expected) != len(view.data["shares"]) or actual != expected:
-        raise TenantFailure("unpublished tenant original shares changed")
-
-
 async def _verify(
     db,
     bundles,
@@ -429,13 +369,7 @@ async def _verify(
             **{k: v for k, v in resources.items() if not k.startswith("_")},
         )
     if not result["passed"]:
-        raise TenantFailure(
-            (
-                "tenant semantic verification failed"
-                if verification_level == "full"
-                else "tenant fast verification failed"
-            ),
-        )
+        raise VerificationFailure(result)
     return result
 
 
@@ -470,7 +404,6 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
             inventory = await _inventory(view, spool, resources)
         else:
             await _recheck_prefetched(view, resources)
-        await _compare_shares(db, view)
         row = await states.get(*view.key)
         if operation in ("import", "resume", "migrate"):
             _stage("import")
@@ -514,7 +447,6 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
             actual = await _inventory(view, check_spool, resources)
             if not inventories_equal(inventory, actual):
                 raise TenantFailure("tenant source changed during operation")
-        await _compare_shares(db, view)
         await guard.check()
         await check_migration_schema(
             db,
@@ -999,6 +931,7 @@ async def _run_registered(
     return {
         "version": 3,
         "migration_id": manifest.migration_id,
+        "excluded_scopes": ["historical_shares"],
         "tenant_isolation": True,
         **(
             {"source_isolation": True, "counter_unit": "sources"}
@@ -1039,6 +972,14 @@ async def _serial_tenants(tenants, resources):
 
 async def _record_tenant_failure(states, tenant, operation, error):
     failure = _failure(tenant, operation, error=error)
+    if isinstance(error, VerificationFailure):
+        key = unit_key({"source_isolation": "source_id" in tenant}, tenant)
+        await states.record_verification(*key, error.result)
+        failure["verification"] = {
+            "verification_level": error.result["verification_level"],
+            "passed": False,
+            "blocker_count": len(error.result.get("blockers", [])),
+        }
     await states.fail(
         *unit_key({"source_isolation": "source_id" in tenant}, tenant),
         operation,
@@ -1239,6 +1180,7 @@ async def _preview(operation, manifest, base, resources, *, states):
     return {
         "version": 3,
         "migration_id": manifest.migration_id,
+        "excluded_scopes": ["historical_shares"],
         "tenant_isolation": True,
         **(
             {"source_isolation": True, "counter_unit": "sources"}

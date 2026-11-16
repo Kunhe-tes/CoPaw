@@ -14,7 +14,6 @@ from ..identity import WorkspaceScope
 from ..session_adapter import MySQLSessionAdapter
 from .importer import bundle_stores, validate_inventory
 from .install_records import OfflineImportStore
-from ..shares import ShareStorage
 from ..errors import StorageError
 from mysql.connector.errors import Error as MySQLError
 from ..history import HistoryStore
@@ -98,6 +97,10 @@ async def _verification_context(
     target,
 ):
     validate_inventory(inventory)
+    if inventory.get("shares") or manifest.data.get("shares"):
+        raise ValueError(
+            "historical share records are excluded from migration",
+        )
     from pathlib import Path
 
     stores = bundle_stores(bundles, manifest)
@@ -283,6 +286,7 @@ async def verify_import(
     report = {
         "version": 2,
         "migration_id": manifest.migration_id,
+        "excluded_scopes": ["historical_shares"],
         "verification_level": verification_level,
         "checked": [],
         "blockers": [],
@@ -403,41 +407,6 @@ async def verify_import(
                 ),
             )
 
-    async def runtime_share(share, share_bundles):
-        local = {"checked": [], "blockers": []}
-        await _checked(
-            local,
-            share["position"],
-            _verify_share(
-                database,
-                share_bundles,
-                share,
-                io=io,
-                snapshot_verified=io is not None,
-            ),
-        )
-
-        return local
-
-    if io is not None:
-        from .runtime_prefetch import verify_prefetched_shares
-
-        await verify_prefetched_shares(
-            database,
-            stores,
-            inventory["shares"],
-            runtime_share,
-            io=io,
-            workers=workers,
-            allowance=memory_bytes // workers,
-            health_check=health_check,
-            merge_result=merge_runtime_result,
-        )
-    else:
-        for share in inventory["shares"]:
-            merge_runtime_result(
-                await runtime_share(share, stores[share["service_unit_id"]]),
-            )
     for item in (() if io is not None else inventory.get("files", [])):
         from .importer import artifact_is_reconstructed
 
@@ -899,60 +868,6 @@ async def _verify_epochs(database, bundles, manifest, chat, scope, *, io=None):
         actual_epoch = load_metadata_json(raw_epoch)
         if actual_epoch != epoch:
             raise ValueError("full checkpoint/event/epoch semantics differ")
-
-
-async def _verify_share(
-    database,
-    bundles,
-    share,
-    *,
-    io=None,
-    snapshot_verified=False,
-):
-    actual = await database.fetch_one(
-        "SELECT * FROM swe_chat_shares WHERE token=%s",
-        (share["record"]["token"],),
-    )
-    if actual is None:
-        raise ValueError("permanent share token missing")
-    for key, value in share["record"].items():
-        if key == "service_unit_id":
-            if actual["service_unit_key"] != value.encode():
-                raise ValueError("share service ownership differs")
-            continue
-        if hasattr(actual[key], "isoformat"):
-            from ..chat_mutations import utc_datetime
-
-            if actual[key] != utc_datetime(value):
-                raise ValueError("share timestamp differs")
-        elif actual[key] != value:
-            raise ValueError("share token/ownership/counter differs")
-    if not snapshot_verified:
-        if (
-            await _payload(
-                database,
-                bundles,
-                actual,
-                "byte_offset",
-                "byte_length",
-                service_unit_id=share["service_unit_id"],
-                io=io,
-            )
-            != share["snapshot"]
-        ):
-            raise ValueError("complete share snapshot differs")
-    if (
-        await ShareStorage(
-            database,
-            bundles,
-            retention_factory=ReadOnlyRetention,
-            service_unit_id=share["service_unit_id"],
-        ).verify_snapshot(
-            share["record"]["token"],
-        )
-        != share["snapshot"]
-    ):
-        raise ValueError("runtime share snapshot differs")
 
 
 async def _verify_runtime_chat(database, bundles, scope, chat, workspace):
