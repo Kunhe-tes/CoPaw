@@ -868,14 +868,43 @@ class OfflineImportStore(PublicationStore):
                 raise IntegrityError(
                     "offline request association is not declared in sorted lock set",
                 )
-        for table, identities in declared.items():
-            for identity in sorted(identities):
-                cached[table][identity] = await self.db.fetch_one(
-                    "SELECT * FROM "
-                    + _table(table)
-                    + " WHERE id=%s FOR UPDATE",
-                    (identity,),
+        async with self.db.acquire() as connection:
+            # IDs use at most 20 decimal bytes; reserve SQL/protocol overhead.
+            budget = min(
+                256 * 1024,
+                connection.max_allowed_packet - 1024,
+                connection.max_allowed_packet * 9 // 10,
+            )
+            limit = min(100, 65535, (budget - 256) // 24)
+            if limit <= 0:
+                raise ValueError(
+                    "association lock exceeds max_allowed_packet budget",
                 )
+            for table in ("sessions", "chats", "turns"):
+                identities = sorted(declared[table])
+                for start in range(0, len(identities), limit):
+                    chunk = identities[start : start + limit]
+                    rows = await self.db.fetch_all(
+                        "SELECT * FROM "
+                        + _table(table)
+                        + " WHERE id IN ("
+                        + ",".join("%s" for _ in chunk)
+                        + ") ORDER BY id FOR UPDATE",
+                        tuple(chunk),
+                    )
+                    cached[table].update(
+                        (identity, None) for identity in chunk
+                    )
+                    for row in rows:
+                        identity = row["id"]
+                        if (
+                            identity not in chunk
+                            or cached[table][identity] is not None
+                        ):
+                            raise IntegrityError(
+                                "offline lock result identity mismatch",
+                            )
+                        cached[table][identity] = row
         for table, values in cached.items():
             for row in values.values():
                 if row is not None:

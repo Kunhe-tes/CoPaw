@@ -152,6 +152,11 @@ class Recorder:
     async def get(self, operation):
         return self.rows[operation]
 
+    async def retained_plan(self, row, expected, legacy):
+        original = self.blocks[row["operation_key"]][0]
+        assert original.content in (expected.content, legacy.content)
+        return original
+
     async def verify_blocks(self, row, blocks):
         assert tuple(blocks) == self.blocks[row["operation_key"]]
 
