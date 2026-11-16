@@ -396,6 +396,13 @@ class ConversationImporter:
     async def _assigned(self, kind, position):
         return (await self._allocate(kind, position))["target_id"]
 
+    async def _allocate_messages(self, positions):
+        """旧 manifest 保持逐条语义，SQL 导入器覆盖为有界批量。"""
+        return {
+            position: await self._assigned("message", position)
+            for position in positions
+        }
+
     async def _set_batch_state(self, position, state):
         self.manifest.set_batch_state(position, state)
 
@@ -808,11 +815,16 @@ class ConversationImporter:
         messages = display_order_messages(messages)
         for start in range(0, len(messages), self.batch_size):
             batch = messages[start : start + self.batch_size]
+            positions = [
+                session["position"] + "/message:" + str(index)
+                for index in range(start, start + len(batch))
+            ]
+            assigned = await self._allocate_messages(positions)
             rows = []
             blocks = []
             for index, item in enumerate(batch, start=start):
                 position = session["position"] + "/message:" + str(index)
-                mid = await self._assigned("message", position)
+                mid = assigned[position]
                 block = "message:" + str(mid)
                 turn = self.turn_ids.get((sid, item["turn_key"]))
                 origin = chats.get(item["chat_key"])
@@ -1079,16 +1091,24 @@ class ConversationImporter:
             rows = []
             blocks = [_block("archive", "archive", batch["messages"])]
             first = archive_order + 1
+            positions = [
+                chat["position"]
+                + "/archive:"
+                + boundary["id"]
+                + "/"
+                + str(index)
+                for index in range(len(batch["messages"]))
+            ]
+            assigned = {}
+            for start in range(0, len(positions), self.batch_size):
+                assigned.update(
+                    await self._allocate_messages(
+                        positions[start : start + self.batch_size],
+                    ),
+                )
             for index, payload in enumerate(batch["messages"]):
                 archive_order += 1
-                mid = await self._assigned(
-                    "message",
-                    chat["position"]
-                    + "/archive:"
-                    + boundary["id"]
-                    + "/"
-                    + str(index),
-                )
+                mid = assigned[positions[index]]
                 name = "message:" + str(mid)
                 item = _entry(payload, "archive", index, 0)
                 values = _message_row(
@@ -1321,6 +1341,18 @@ class ParallelWorkspaceImporter(ConversationImporter):
             scope=scope,
             scope_kind=scope_kind,
         )
+
+    async def _allocate_messages(self, positions):
+        """把消息票据分配交给协调器唯一 SQL owner。"""
+        assignments = await self.context.journal(
+            "allocate_many",
+            "message",
+            positions,
+        )
+        return {
+            position: value["target_id"]
+            for position, value in assignments.items()
+        }
 
     async def _set_batch_state(self, position, state):
         await self.context.journal("set_batch_state", position, state)

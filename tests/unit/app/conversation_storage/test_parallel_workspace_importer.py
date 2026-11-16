@@ -175,7 +175,16 @@ class Recorder:
 
     async def journal(self, name, *args, **kwargs):
         if name == "allocate":
+            assert (
+                args[0] != "message"
+            ), "message tickets must use bounded batches"
             return self.allocate(*args, **kwargs)
+        if name == "allocate_many":
+            kind, positions = args
+            return {
+                position: self.allocate(kind, position)
+                for position in positions
+            }
         if name == "refresh_batch":
             self.finished.append(args[0])
 
