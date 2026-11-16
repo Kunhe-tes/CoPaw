@@ -398,7 +398,9 @@ async def projection_fixture(tmp_path, monkeypatch, *, external=False):
     fetch = store.db.fetch_all
 
     async def fetch_all(query, params=None):
-        if "FROM swe_conversation_messages" in query:
+        if "FROM swe_conversation_messages" in query and not query.startswith(
+            "SELECT archive_chat_id,archive_order,",
+        ):
             return [deepcopy(locator)]
         return await fetch(query, params)
 
