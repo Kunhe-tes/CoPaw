@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 - [ ] 在现有 publication 事务内优先批量写入连续、同字段集合的 Message 记录，保留每行定位解析、关联及 source 归属校验。
 - [ ] 使用可信表/字段白名单和参数化 prepared 多行插入，受行数、字节及服务器 packet 共同限制，不依靠忽略错误或覆盖冲突。
