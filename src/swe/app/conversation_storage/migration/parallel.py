@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from functools import partial
 import time
 
+from swe.database.observation import observe_operations
+
 from .progress import current_progress
 
 HEALTH_CHECK_INTERVAL = 15.0
@@ -54,6 +56,12 @@ class MigrationIO:
         self._closed = False
         self._pending = set()
 
+    def _observed_call(self, function):
+        if self._progress is None:
+            return function()
+        with observe_operations(self._progress.record_operation):
+            return function()
+
     async def call(self, function, *args, **kwargs):
         async with self._slots:
             if self._closed:
@@ -62,7 +70,10 @@ class MigrationIO:
             future = asyncio.get_running_loop().run_in_executor(
                 self._executor,
                 Context().run,
-                partial(function, *args, **kwargs),
+                partial(
+                    self._observed_call,
+                    partial(function, *args, **kwargs),
+                ),
             )
             self._pending.add(future)
             started = time.monotonic()

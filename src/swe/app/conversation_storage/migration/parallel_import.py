@@ -36,7 +36,9 @@ def workspace_source_copy(value):
 class MigrationDomainRouter:
     """Fixed domain handlers execute in the coordinator's SQL-owner task."""
 
-    JOURNAL = frozenset({"allocate", "set_batch_state", "refresh_batch"})
+    JOURNAL = frozenset(
+        {"allocate", "allocate_many", "set_batch_state", "refresh_batch"},
+    )
     STORE = frozenset(
         {
             "reserve_batch",

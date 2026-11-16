@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 - [ ] 区分逻辑数据库调用、实际 SQL 分块、事务开始/提交/回滚，说明各计数口径及是否重叠，不把批量门面调用误当作一次真实 SQL。
 - [ ] 输出阶段墙钟耗时、处理记录数、bundle 打开及索引解析次数；并发累计 IO 时间与墙钟时间明确区分。

@@ -235,6 +235,14 @@ class DirectImporter(ConversationImporter):
             scope_kind=scope_kind,
         )
 
+    async def _allocate_messages(self, positions):
+        """仅为当前消息批次分配持久身份。"""
+        assignments = await self.journal.allocate_many("message", positions)
+        return {
+            position: value["target_id"]
+            for position, value in assignments.items()
+        }
+
     async def _set_batch_state(self, position, state):
         await self.journal.set_batch_state(position, state)
 
