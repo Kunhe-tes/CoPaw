@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import os
 import socket
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -62,6 +63,8 @@ class ObservabilityContext:
     attempt_index: int = 0
     predecessor_attempt_id: str | None = None
     attempt_started_at: str | None = None
+    run_started_monotonic_ns: int | None = field(default=None, repr=False)
+    run_clock_producer_id: str | None = field(default=None, repr=False)
 
     @classmethod
     def new_run(
@@ -77,6 +80,8 @@ class ObservabilityContext:
             capture_enabled=capture_enabled,
             scope=scope,
             business_ref=dict(business_ref or {}),
+            run_started_monotonic_ns=time.monotonic_ns(),
+            run_clock_producer_id=producer_id(),
         )
 
     def new_attempt(self) -> "ObservabilityContext":
@@ -109,7 +114,16 @@ class ObservabilityContext:
                 self.predecessor_attempt_id,
             ),
             attempt_started_at=updates.get(
-                "attempt_started_at", self.attempt_started_at,
+                "attempt_started_at",
+                self.attempt_started_at,
+            ),
+            run_started_monotonic_ns=updates.get(
+                "run_started_monotonic_ns",
+                self.run_started_monotonic_ns,
+            ),
+            run_clock_producer_id=updates.get(
+                "run_clock_producer_id",
+                self.run_clock_producer_id,
             ),
         )
 
@@ -127,6 +141,8 @@ class ObservabilityContext:
             "attempt_index": self.attempt_index,
             "predecessor_attempt_id": self.predecessor_attempt_id,
             "attempt_started_at": self.attempt_started_at,
+            "run_started_monotonic_ns": self.run_started_monotonic_ns,
+            "run_clock_producer_id": self.run_clock_producer_id,
         }
 
     @classmethod
@@ -136,6 +152,15 @@ class ObservabilityContext:
         if not isinstance(carrier.get("capture_enabled"), bool):
             raise ValueError("capture_enabled must be a boolean")
         scope = carrier["scope"]
+        started_monotonic_ns = carrier.get("run_started_monotonic_ns")
+        clock_producer_id = carrier.get("run_clock_producer_id")
+        if (
+            not isinstance(started_monotonic_ns, int)
+            or isinstance(started_monotonic_ns, bool)
+            or clock_producer_id != producer_id()
+        ):
+            started_monotonic_ns = None
+            clock_producer_id = None
         return cls(
             obs_run_id=str(carrier["obs_run_id"]),
             run_started_at=str(carrier["run_started_at"]),
@@ -147,13 +172,16 @@ class ObservabilityContext:
                 agent_id=str(scope["agent_id"]),
             ),
             business_ref={
-                str(k): str(v) for k, v in carrier.get("business_ref", {}).items()
+                str(k): str(v)
+                for k, v in carrier.get("business_ref", {}).items()
             },
             obs_attempt_id=carrier.get("obs_attempt_id"),
             parent_obs_span_id=carrier.get("parent_obs_span_id"),
             attempt_index=int(carrier.get("attempt_index", 0)),
             predecessor_attempt_id=carrier.get("predecessor_attempt_id"),
             attempt_started_at=carrier.get("attempt_started_at"),
+            run_started_monotonic_ns=started_monotonic_ns,
+            run_clock_producer_id=clock_producer_id,
         )
 
 
@@ -200,7 +228,9 @@ class MetadataEvent:
             if context.attempt_index:
                 result["attempt_index"] = context.attempt_index
             if context.predecessor_attempt_id:
-                result["predecessor_attempt_id"] = context.predecessor_attempt_id
+                result["predecessor_attempt_id"] = (
+                    context.predecessor_attempt_id
+                )
             if context.attempt_started_at:
                 result["attempt_started_at"] = context.attempt_started_at
         reserved = _REQUIRED_EVENT_KEYS | {

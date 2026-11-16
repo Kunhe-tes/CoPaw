@@ -10,7 +10,13 @@ from typing import Any, Literal
 from .config import capture_enabled
 from .context import bind_context, current_context
 from .emitter import JsonlEmitter, default_emitter
-from .models import MetadataEvent, ObservabilityContext, new_id, utc_now
+from .models import (
+    MetadataEvent,
+    ObservabilityContext,
+    new_id,
+    producer_id,
+    utc_now,
+)
 
 
 class SpanHandle:
@@ -315,6 +321,16 @@ class Observability:
         emitter = self._emitter_for(context)
         if emitter is None:
             return False
+        metrics = {}
+        if (
+            context.run_started_monotonic_ns is not None
+            and context.run_clock_producer_id == producer_id()
+        ):
+            metrics["duration_us"] = max(
+                0,
+                (time.monotonic_ns() - context.run_started_monotonic_ns)
+                // 1000,
+            )
         return emitter.emit(
             MetadataEvent(
                 event_name="run.ended",
@@ -328,6 +344,7 @@ class Observability:
                     "ended_at": utc_now(),
                     "status": status,
                     "terminal_fact_source": "business_settlement",
+                    **({"metrics": metrics} if metrics else {}),
                 },
             ),
         )

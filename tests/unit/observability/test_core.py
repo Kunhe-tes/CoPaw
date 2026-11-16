@@ -86,7 +86,9 @@ def test_span_emits_self_contained_end_and_preserves_exception():
     assert next_attempt.predecessor_attempt_id == attempt.obs_attempt_id
     assert next_attempt.attempt_started_at
     assert (
-        ObservabilityContext.from_carrier(next_attempt.to_carrier()).attempt_started_at
+        ObservabilityContext.from_carrier(
+            next_attempt.to_carrier(),
+        ).attempt_started_at
         == next_attempt.attempt_started_at
     )
     with pytest.raises(RuntimeError, match="business failure"):
@@ -98,16 +100,59 @@ def test_span_emits_self_contained_end_and_preserves_exception():
     obs.end_run(context, status="failed")
     assert emitter.close() == 0
     records = [json.loads(line) for line in stream.getvalue().splitlines()]
-    ended = next(record for record in records if record["event_name"] == "span.ended")
+    ended = next(
+        record for record in records if record["event_name"] == "span.ended"
+    )
     assert ended["started_at"]
     assert ended["ended_at"]
     assert ended["status"] == "failed"
     assert ended["error_type"] == "RuntimeError"
     assert "business failure" not in stream.getvalue()
     assert records[-1]["event_name"] == "run.ended"
-    incremental = [record for record in records if record["event_name"] == "span.event"]
+    incremental = [
+        record for record in records if record["event_name"] == "span.event"
+    ]
     assert [record["local_seq"] for record in incremental] == [0, 1]
     assert records[-1]["producer_id"]
+
+
+def test_run_end_uses_local_monotonic_duration(monkeypatch):
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    obs = Observability(emitter)
+    context = obs.admit_run(
+        scope=Scope("svc", "src", "tenant", "agent"),
+        enabled=True,
+    )
+    started_ns = context.run_started_monotonic_ns
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.time.monotonic_ns",
+        lambda: started_ns + 2_500_000,
+    )
+
+    assert obs.end_run(context, status="succeeded")
+    emitter.close()
+    ended = json.loads(stream.getvalue().splitlines()[-1])
+    assert ended["metrics"]["duration_us"] == 2500
+
+
+def test_run_end_omits_uncomparable_cross_process_duration():
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    obs = Observability(emitter)
+    context = obs.admit_run(
+        scope=Scope("svc", "src", "tenant", "agent"),
+        enabled=True,
+    )
+    carrier = context.to_carrier()
+    carrier["run_clock_producer_id"] = "another-process"
+    restored = ObservabilityContext.from_carrier(carrier)
+
+    assert restored.run_started_monotonic_ns is None
+    assert obs.end_run(restored, status="succeeded")
+    emitter.close()
+    ended = json.loads(stream.getvalue().splitlines()[-1])
+    assert "metrics" not in ended
 
 
 def test_cancellation_is_recorded_and_propagated():
@@ -240,7 +285,9 @@ def test_event_attributes_cannot_replace_envelope_identity():
             quality={"start_observed": False},
         )
     emitter.close()
-    start, end = [json.loads(line) for line in stream.getvalue().splitlines()[1:]]
+    start, end = [
+        json.loads(line) for line in stream.getvalue().splitlines()[1:]
+    ]
     assert start["obs_run_id"] == context.obs_run_id
     assert start["event_name"] == "span.started"
     assert start["span_type"] == "Agent"
