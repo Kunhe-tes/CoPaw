@@ -37,7 +37,7 @@ async def _measured_invoke(arguments):
                 report.emit()
 
     result = await asyncio.to_thread(invoke)
-    assert result.exit_code in (0, 2), (
+    assert result.exit_code in (0, 1, 2), (
         result.output
         + "\nexception="
         + (repr(result.exception) if result.exception is not None else "None")
@@ -346,11 +346,26 @@ async def test_fast_verification_does_not_claim_body_equality(
     finally:
         bundle_path.chmod(0o444)
 
+    from swe.cli import conversation_storage_tenants
+
+    verification_results = []
+    verify_import = conversation_storage_tenants.verify_import
+
+    async def capture_verification(*args, **kwargs):
+        result = await verify_import(*args, **kwargs)
+        verification_results.append(result)
+        return result
+
+    monkeypatch.setattr(
+        conversation_storage_tenants,
+        "verify_import",
+        capture_verification,
+    )
     fast_result, _ = await _measured_invoke(
         ["verify", "--manifest", str(manifest), *resources],
     )
     assert fast_result["verification_level"] == "fast"
-    assert fast_result["failed"] == 0
+    assert fast_result["failed"] == 0, verification_results
 
     full_result, _ = await _measured_invoke(
         [

@@ -43,6 +43,7 @@ async def _verify_fast_level(
     database,
     stores,
     manifest,
+    inventory,
     target,
     report,
     *,
@@ -54,6 +55,12 @@ async def _verify_fast_level(
     from .verify_fast import verify_fast_publications
 
     try:
+        expected_scopes = None
+        if manifest.data.get("tenant_isolation"):
+            expected_scopes = {
+                tuple(workspace["scope"])
+                for workspace in inventory["workspaces"]
+            }
         if io is None:
             from .parallel import MigrationIO
 
@@ -66,6 +73,7 @@ async def _verify_fast_level(
                     io=fast_io,
                     io_workers=io_workers,
                     memory_bytes=memory_bytes // max(1, workers),
+                    expected_scopes=expected_scopes,
                 )
         else:
             summary = await verify_fast_publications(
@@ -76,6 +84,7 @@ async def _verify_fast_level(
                 io=io,
                 io_workers=io_workers,
                 memory_bytes=memory_bytes // max(1, workers),
+                expected_scopes=expected_scopes,
             )
         report["checked"] = [
             {"position": "publications", "count": summary["publications"]},
@@ -311,6 +320,7 @@ async def verify_import(
             database,
             stores,
             manifest,
+            inventory,
             target,
             report,
             io=io,

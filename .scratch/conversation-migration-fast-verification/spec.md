@@ -1,6 +1,6 @@
 # Conversation Migration Fast Verification
 
-Status: open
+Status: resolved
 Type: task
 Triage: ready-for-agent
 Date: 2026-11-16

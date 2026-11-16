@@ -2,6 +2,7 @@
 """Fast structural checks for committed migration publications."""
 
 import asyncio
+import json
 from itertools import islice
 
 from ..bundle import MAX_READ_BYTES, BundleStore
@@ -10,6 +11,7 @@ from ..errors import IntegrityError
 from ..identity import WorkspaceScope
 from ..reference_queries import iter_reference_rows
 from .install_records import (
+    IMMUTABLE,
     VERIFY_QUERIES,
     OfflineImportStore,
 )
@@ -167,6 +169,53 @@ def _validate_locator_owner(publication_key, resolved, publication):
         raise IntegrityError("publication locator owner differs")
 
 
+def _position_scope(position):
+    try:
+        identity, _ = json.JSONDecoder().raw_decode(position)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(identity, list) and len(identity) >= 5:
+        return tuple(identity[1:5])
+    return None
+
+
+def _batch_scope(position, assignment_scopes):
+    scope = _position_scope(position)
+    if scope is not None:
+        assigned = assignment_scopes.get(position)
+        if assigned is not None and assigned != scope:
+            raise IntegrityError(
+                "migration batch scope differs from publication assignment",
+            )
+        return scope
+    candidate = position
+    while candidate:
+        scope = assignment_scopes.get(candidate)
+        if scope is not None:
+            return scope
+        if "/" not in candidate:
+            break
+        candidate = candidate.rsplit("/", 1)[0]
+    raise IntegrityError("migration batch position is invalid")
+
+
+def _merge_expected_rows(expected_by_table, service_unit_key, expected):
+    for table, rows in expected.items():
+        grouped = expected_by_table.setdefault((service_unit_key, table), {})
+        immutable = IMMUTABLE[table]
+        for identity, row in rows.items():
+            existing = grouped.get(identity)
+            if existing is not None and any(
+                existing.get(field) != row.get(field)
+                for field in immutable
+                if field in existing and field in row
+            ):
+                raise IntegrityError(
+                    "conflicting offline target mapping identity",
+                )
+            grouped[identity] = {**(existing or {}), **row}
+
+
 # pylint: disable-next=too-many-statements
 async def verify_fast_publications(
     database,
@@ -177,13 +226,45 @@ async def verify_fast_publications(
     io,
     io_workers,
     memory_bytes,
+    expected_scopes=None,
 ):
-    assignments = iter(
-        manifest.data.get("assignments", {}).get("publication", {}).items(),
+    all_publication_assignments = manifest.data.get("assignments", {}).get(
+        "publication",
+        {},
     )
+    assignment_scopes = {
+        position: tuple(assignment.get("scope", ()))
+        for position, assignment in all_publication_assignments.items()
+    }
+    publication_assignments = all_publication_assignments.items()
+    if expected_scopes is not None:
+        selected = []
+        for position, assignment in publication_assignments:
+            position_scope = _position_scope(position)
+            assignment_scope = tuple(assignment.get("scope", ()))
+            if position_scope is not None:
+                if position_scope not in expected_scopes:
+                    continue
+                if assignment_scope != position_scope:
+                    raise IntegrityError(
+                        "publication assignment scope differs from position",
+                    )
+            elif assignment_scope not in expected_scopes:
+                continue
+            selected.append((position, assignment))
+        publication_assignments = iter(selected)
+    assignments = iter(publication_assignments)
     batches = manifest.data.get("batches", {})
+    relevant_batches = batches.items()
+    if expected_scopes is not None:
+        scoped_batches = []
+        for position, state in batches.items():
+            scope = _batch_scope(position, assignment_scopes)
+            if scope in expected_scopes:
+                scoped_batches.append(state)
+        relevant_batches = ((None, state) for state in scoped_batches)
     if any(
-        state not in ("committed", "verified") for state in batches.values()
+        state not in ("committed", "verified") for _, state in relevant_batches
     ):
         raise IntegrityError("migration contains an uncommitted import batch")
 
@@ -262,16 +343,11 @@ async def verify_fast_publications(
                 expected, rows_count, updates_count = result
                 checked_rows += rows_count
                 checked_updates += updates_count
-                for table, rows in expected.items():
-                    grouped = expected_by_table.setdefault(
-                        (service_unit_key, table),
-                        {},
-                    )
-                    if grouped.keys() & rows.keys():
-                        raise IntegrityError(
-                            "duplicate offline target mapping identity",
-                        )
-                    grouped.update(rows)
+                _merge_expected_rows(
+                    expected_by_table,
+                    service_unit_key,
+                    expected,
+                )
             batch_records = 0
             for (
                 service_unit_key,

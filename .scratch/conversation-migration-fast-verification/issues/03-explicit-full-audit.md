@@ -1,6 +1,6 @@
 # 03: Keep Full Semantic Verification as an Explicit Audit
 
-Status: open
+Status: resolved
 Type: task
 Parent: 01 Make Fast Verification the Migration Default
 Blocked by: 02 Default to Fast Structural Verification
@@ -16,7 +16,7 @@ Priority: P1
 - [x] Full-audit reports and durable evidence record `full` independently from prior or later `fast` results.
 - [x] A fast pass is never rendered or stored as a full-audit pass; a full-audit failure does not retroactively erase the fact that fast structural verification passed.
 - [x] Full audit remains optional for routine source publication and uses existing source isolation and globally fatal shared-failure handling.
-- [ ] End-to-end tests demonstrate that a body-content mismatch is not claimed by fast mode and is detected by full audit.
+- [x] End-to-end tests demonstrate that a body-content mismatch is not claimed by fast mode and is detected by full audit.
 
 ## Answer
 
@@ -24,7 +24,7 @@ Use `swe conversation-storage verify --manifest ...` for fast verification, or a
 
 Failed full-audit results are also stored separately, including blockers in protected SQL evidence; the operator failure report exposes only the level and blocker count. A later fast pass remains the publication level and does not erase the audit result.
 
-An isolated-MySQL CLI regression now mutates a Session recovery bundle body without changing its index, then expects fast verification to pass and full audit to fail for that source. It is collected locally but remains unexecuted because this environment has no configured migration test database. Unit coverage verifies CLI selection, evidence separation, and existing full-verifier behavior.
+An isolated-MySQL CLI regression mutates a Session recovery bundle body without changing its index. Fast verification passed all three sources, while full audit failed only the changed source. The test passed against a temporary isolated MySQL schema using local directories; the schema was confirmed empty and dropped afterward.
 
 ## Comments
 
