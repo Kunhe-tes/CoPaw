@@ -158,3 +158,75 @@ async def test_coordinator_counts_reset_for_each_task_phase():
     assert progress.snapshot()["completed"] == 2
     assert progress.snapshot()["task_total"] == 2
     assert progress.snapshot()["counter_unit"] == "tasks"
+
+
+def test_binding_and_manifest_metrics_measure_utf8_without_content(tmp_path):
+    from swe.app.conversation_storage.migration.journal import MigrationJournal
+    from swe.app.conversation_storage.migration.manifest import (
+        MigrationManifest,
+    )
+
+    # pylint: disable-next=relative-beyond-top-level
+    from .test_v3_journal import manifest
+
+    frozen = manifest()
+    frozen.data["source_boundary"]["snapshot_id"] = "private-正文"
+    frozen.path = tmp_path / "private-manifest.json"
+    progress = MigrationProgress(
+        "migrate",
+        frozen.migration_id,
+        stream=io.StringIO(),
+    )
+    with progress.activate():
+        target, source = MigrationJournal(None, frozen)._bindings()
+        MigrationManifest._persist(frozen)
+        MigrationManifest._persist(frozen)
+    report = progress.snapshot()
+    assert report["binding_serializations"] == 1
+    assert report["binding_serialized_bytes"] == len(
+        (target + source).encode(),
+    )
+    assert report["binding_serialization_seconds"] > 0
+    assert report["manifest_writes"] == 2
+    assert report["manifest_written_bytes"] == frozen.path.stat().st_size * 2
+    assert report["manifest_write_seconds"] > 0
+    assert json.loads(frozen.path.read_text())["source_boundary"] == {
+        "snapshot_id": "private-正文",
+    }
+    assert "private" not in json.dumps(report)
+    assert "正文" not in json.dumps(report)
+
+
+def test_manifest_write_failure_preserves_old_checkpoint(
+    tmp_path,
+    monkeypatch,
+):
+    import swe.app.conversation_storage.migration.manifest as module
+
+    # pylint: disable-next=relative-beyond-top-level
+    from .test_v3_journal import manifest
+
+    frozen = manifest()
+    frozen.path = tmp_path / "manifest.json"
+    module.MigrationManifest._persist(frozen)
+    before = frozen.path.read_bytes()
+    frozen.data["batches"]["changed"] = "committed"
+
+    def failed_replace(*_args):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(module.os, "replace", failed_replace)
+    progress = MigrationProgress(
+        "migrate",
+        frozen.migration_id,
+        stream=io.StringIO(),
+    )
+    with progress.activate(), pytest.raises(OSError, match="disk unavailable"):
+        module.MigrationManifest._persist(frozen)
+    report = progress.snapshot()
+    assert report["manifest_write_attempts"] == 1
+    assert report["manifest_writes"] == 0
+    assert report["manifest_written_bytes"] == 0
+    assert report["manifest_write_seconds"] > 0
+    assert frozen.path.read_bytes() == before
+    assert list(tmp_path.iterdir()) == [frozen.path]

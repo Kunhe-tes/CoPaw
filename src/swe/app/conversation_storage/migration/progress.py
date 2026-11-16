@@ -56,6 +56,13 @@ class MigrationProgress:
             "db_transaction_commits": 0,
             "db_transaction_rollbacks": 0,
             "bundle_opens": 0,
+            "binding_serializations": 0,
+            "binding_serialized_bytes": 0,
+            "binding_serialization_seconds": 0.0,
+            "manifest_write_attempts": 0,
+            "manifest_writes": 0,
+            "manifest_written_bytes": 0,
+            "manifest_write_seconds": 0.0,
             "bundle_index_parses": 0,
             "sql_queue_depth": 0,
             "sql_queue_peak": 0,
@@ -102,6 +109,20 @@ class MigrationProgress:
             self.data[counters[kind]] += 1
             if kind in ("db_statement", "db_executemany"):
                 self.data[kind + "_seconds"] += seconds
+
+    def record_persistence(self, kind, size, seconds, *, succeeded=True):
+        """Count completed UTF-8 output and attempted wall time, never values."""
+        with self._disk_lock:
+            if kind == "binding":
+                self.data["binding_serializations"] += 1
+                self.data["binding_serialized_bytes"] += size
+                self.data["binding_serialization_seconds"] += seconds
+            else:
+                self.data["manifest_write_attempts"] += 1
+                self.data["manifest_write_seconds"] += seconds
+                if succeeded:
+                    self.data["manifest_writes"] += 1
+                    self.data["manifest_written_bytes"] += size
 
     def snapshot(self):
         now = time.monotonic()
