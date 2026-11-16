@@ -52,7 +52,7 @@ export SWE_TEST_DB_NAME=test_conversation_performance
 
 全部正常场景导入阶段92.278 s、完整验证129.430 s；数据库 execute 累计183.310 s，不与墙钟相加。首次 RSS 采样峰值约192 MiB、登记临时数据峰值81854字节。失败场景正常source完成发布，修复后原manifest重跑达到3个published。CLI退出2为预期：前者仍待schema最终收口，后者还包括失败source；不表示共享故障。
 
-该基线尚未接入bundle计数钩子，输出中的0表示未观测，不能解释为没有文件IO。最终实现须使用接线后的版本另报该指标；SQL/事务对照仍使用相同观察边界。该次未做真实NAS、万级或生产验收。最终对照与组合故障验收待ticket10完成，不据此声明整体性能目标已完成。
+该基线尚未接入bundle计数钩子，输出中的0表示未观测，不能解释为没有文件IO。最终实现须使用接线后的版本另报该指标；SQL/事务对照仍使用相同观察边界。该次未做真实NAS、万级或生产验收。该段记录基线时点；最终对照、组合故障及收口结果见下文。
 
 ## 最终组合验收记录
 
@@ -91,11 +91,11 @@ export SWE_TEST_DB_NAME=test_conversation_performance
 
 SQL形态另有确定性计数证据：513条Message为6个100行上限INSERT，513条已提交记录为3次最多256 ID查询，批量票据受100行/256 KiB/服务器packet预算限制；这些本地协议回归已在1829项组合通过中，不将整条CLI execute数误称为只有业务INSERT。
 
-最终独立复核另发现单个合法8 MiB artifact加元数据时聚合读取上限误拒绝，正在独立修正；以上性能fixture未触发该边界。最终完成状态须等待修正与回归，不能用本表掩盖该发现。
+最终独立复核发现单个合法8 MiB artifact加元数据时聚合读取上限误拒绝；以上性能fixture未触发该边界。修复`4aa7b1558`已通过独立复核并合入：调用方最多读取两个extent，固定聚合预算16 MiB；每extent的8 MiB限制、安全文件复查及共享IO门禁保持有效。该修复未重新运行上述性能fixture，不把边界修复后的墙钟收益作为新测量结果。
 
 ### 本地组合回归
 
-最终测试分支`8bbfaacc9`运行全部`tests/unit/app/conversation_storage`、五个相关CLI模块、`tests/unit/database`及`test_legacy_roundtrip.py`：**1829 passed，5 skipped，72.52 s**。五项skip是本地未配置真实数据库的legacy roundtrip用例，不作为MySQL语义验收证据；本地门禁/文件/领域回归全部通过。新增测试及指标捕获修改均通过正常项目提交hooks（AST、编码、密钥扫描、格式、mypy、flake8、pylint），未跳过检查。最终组合数据库性能结果见下节；完整语义回归与独立复核修正分别报告。
+边界修复前测试分支`8bbfaacc9`运行全部`tests/unit/app/conversation_storage`、五个相关CLI模块、`tests/unit/database`及`test_legacy_roundtrip.py`：**1829 passed，5 skipped，72.52 s**。五项skip是本地未配置真实数据库的legacy roundtrip用例，不作为MySQL语义验收证据；本地门禁/文件/领域回归全部通过。新增测试及指标捕获修改均通过正常项目提交hooks（AST、编码、密钥扫描、格式、mypy、flake8、pylint），未跳过检查。最终数据库性能结果见前节；后续完整语义回归与独立复核修正见下文。
 
 ### 覆盖与边界
 
@@ -114,7 +114,16 @@ SQL形态另有确定性计数证据：513条Message为6个100行上限INSERT，
 
 新增用例已在`c5f52b4a1`真实MySQL通过（1 passed，35.47 s），父/子测试库已清理。用例针对可能的tenant级误准入或补迁误覆盖：两个source同属alice，四个旧根完全相同且NAS独立；正常兄弟发布后增加Agent、更新标题并新增Chat，破坏其旧session输入使重读可被观察，再修复坏source并使用原manifest迁移。断言未指定source、坏source及未知source不能准入，线上兄弟完整行与config保持不变，修复后只有对应source获得准入。
 
-最终范围仍不包括真实NAS、万级基线、生产部署、现场放行或固定旧镜像回滚。同租户CLI已由中央运行器真实验证；本文尚待最终独立复核发现的8 MiB聚合读取预算修正及验证后关闭ticket10；不得以本节中单项通过替代组合验收。
+最终范围仍不包括真实NAS、万级基线、生产部署、现场放行或固定旧镜像回滚。同租户CLI已由中央运行器真实验证；8 MiB聚合读取预算修正、独立复核及下述组合回归均完成，ticket10与最终审查已收口；单项通过仍不代替现场验收。
+
+## 最终复核与收口
+
+- 边界修复：`4aa7b1558`修复合法8 MiB artifact加metadata的误拒绝。实现者报告先在direct/threaded/prefetched三路径复现RED（3 failed、4 passed），另为超过两个extent的数量限制取得RED（1 failed、7 passed）；独立审查者也复现原缺陷。修复后会话存储与五个相关CLI模块1771 passed、67.76 s，合并ticket10后focused 87 passed、0.67 s。RED数字由实现者提供，独立审查确认原缺陷可复现。
+- 独立复核：fresh reviewer针对`4aa7b1558`给出APPROVE，独立focused **86 passed、0.68 s**，原P2已解决且无剩余发现；修复通过正常项目hooks，无绕过。
+- 真实MySQL完整语义：`test_legacy_roundtrip.py::test_complete_legacy_import_reentry_and_semantics[v3-interrupted-message-batch]` **1 passed、1 warning、253.94 s**；覆盖消息批次中断后的重入及完整语义，父/子隔离测试库清理成功。运行使用`--disable-warnings`，日志未展示warning详情，不能称无警告。
+- 本地回归历史：边界修复前最终单元组合 **1828 passed、70.88 s**；与早先含legacy roundtrip collection的1829 passed/5 skipped运行范围不同，不相加、不将skip当成MySQL通过。最终合并后的精确组合结果见下一条。
+- 最终合并组合回归：1836 passed、68.73 s（全部会话存储单元、五个会话CLI模块、database单元；无skip）；合并后extent/bundle/prefetch/parallel focused另为65 passed、0.52 s。
+- 规格与tracker审计：权威spec未改；tickets01–09均resolved且无未完成验收checkbox；ticket10验收项完成，OpenSpec任务10/11关闭。严格OpenSpec校验与正常项目hooks通过，未push、未部署生产。
 
 ## 运维执行与恢复
 
