@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 - [ ] 提供有界多块读取并接入运行时正文预取、同 publication 消息读取和适用的 import plan/恢复证据路径，保留单块兼容接口。
 - [ ] 当前读取操作复用同一受限文件描述符及解析结果，不建立跨 source、跨命令的长期正文或证据缓存。

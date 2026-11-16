@@ -150,56 +150,57 @@ class OfflineCommitStages:
         store = self.store
 
         def read_evidence():
-            index = store.bundles.inspect(
+            with store.bundles.open_reader(
                 ticket.relative_path,
                 expected_length=ticket.byte_length,
-            )
-            if (
-                index.relative_path != ticket.relative_path
-                or index.byte_length != ticket.byte_length
-                or index.metadata.get("operation_key")
-                != ticket.request.operation_key
-            ):
-                raise IntegrityError("offline commit bundle identity mismatch")
-
-            def block(name, kind):
-                extent = index.blocks.get(name)
-                if extent is None or extent.kind != kind:
-                    raise IntegrityError(
-                        "offline commit evidence block missing",
-                    )
-                return store.bundles.read_extent(
-                    index.relative_path,
-                    extent.offset,
-                    extent.length,
-                    expected_length=index.byte_length,
-                )
-
-            imported = block("import_plan", "import_plan")
-            store._validate_plan(load_metadata_json(imported))
-            recovery = share = None
-            if plan.recovery_block is not None:
-                recovery = block(plan.recovery_block, "recovery")
-                value = load_metadata_json(recovery)
+                expected_operation_key=ticket.request.operation_key,
+            ) as reader:
+                index = reader.index
                 if (
-                    is_projection(value)
-                    or not isinstance(value, dict)
-                    or set(value) != {"turn_states"}
-                    or not isinstance(value["turn_states"], dict)
-                    or len(value["turn_states"]) != 1
+                    index.relative_path != ticket.relative_path
+                    or index.byte_length != ticket.byte_length
+                    or index.metadata.get("operation_key")
+                    != ticket.request.operation_key
                 ):
                     raise IntegrityError(
-                        "recovery requires the general projection protocol",
+                        "offline commit bundle identity mismatch",
                     )
-            if plan.share is not None:
-                share = block(plan.share.block_name, "share")
-                try:
-                    ChatShareSnapshot.model_validate(load_metadata_json(share))
-                except (ValueError, TypeError) as error:
-                    raise IntegrityError(
-                        "share snapshot payload is invalid",
-                    ) from error
-            return CommitEvidence(ticket, index, imported, recovery, share)
+
+                def block(name, kind):
+                    extent = index.blocks.get(name)
+                    if extent is None or extent.kind != kind:
+                        raise IntegrityError(
+                            "offline commit evidence block missing",
+                        )
+                    return reader.read_extents((extent,))[0]
+
+                imported = block("import_plan", "import_plan")
+                store._validate_plan(load_metadata_json(imported))
+                recovery = share = None
+                if plan.recovery_block is not None:
+                    recovery = block(plan.recovery_block, "recovery")
+                    value = load_metadata_json(recovery)
+                    if (
+                        is_projection(value)
+                        or not isinstance(value, dict)
+                        or set(value) != {"turn_states"}
+                        or not isinstance(value["turn_states"], dict)
+                        or len(value["turn_states"]) != 1
+                    ):
+                        raise IntegrityError(
+                            "recovery requires the general projection protocol",
+                        )
+                if plan.share is not None:
+                    share = block(plan.share.block_name, "share")
+                    try:
+                        ChatShareSnapshot.model_validate(
+                            load_metadata_json(share),
+                        )
+                    except (ValueError, TypeError) as error:
+                        raise IntegrityError(
+                            "share snapshot payload is invalid",
+                        ) from error
+                return CommitEvidence(ticket, index, imported, recovery, share)
 
         try:
             evidence = await io.call(read_evidence)

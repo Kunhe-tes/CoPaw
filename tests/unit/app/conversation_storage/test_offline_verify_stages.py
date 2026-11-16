@@ -162,7 +162,7 @@ async def test_nas_evidence_rejects_unexpected_bundle_blocks(tmp_path):
     store, operation, plan, expected, blocks = await committed(tmp_path)
     stages = OfflineVerifyStages(store)
     ticket = await issue(stages, operation, plan, expected, blocks)
-    inspect = store.bundles.inspect
+    inspect = store.bundles._inspect_source
 
     def inspect_with_extra_block(*args, **kwargs):
         index = inspect(*args, **kwargs)
@@ -174,7 +174,7 @@ async def test_nas_evidence_rejects_unexpected_bundle_blocks(tmp_path):
             },
         )
 
-    store.bundles.inspect = inspect_with_extra_block
+    store.bundles._inspect_source = inspect_with_extra_block
     async with MigrationIO(1) as io:
         with pytest.raises(IntegrityError, match="block set"):
             await stages.read(ticket, io)
@@ -645,6 +645,19 @@ async def test_cold_turn_projection_compares_and_revalidates_authority(
             return json.dumps(envelope).encode()
         return read(path, offset, length, **kwargs)
 
+    from swe.app.conversation_storage.bundle import BundleReader
+
+    read_many = BundleReader.read_extents
+
+    def read_extents(reader, extents, **kwargs):
+        if (
+            reader.index.relative_path == current.relative_path
+            and extents[0].offset == extent.offset
+        ):
+            return (json.dumps(envelope).encode(),)
+        return read_many(reader, extents, **kwargs)
+
+    monkeypatch.setattr(BundleReader, "read_extents", read_extents)
     store.bundles.read_extent = read_extent
     blocks[-1] = replace(
         blocks[-1],
