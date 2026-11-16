@@ -88,6 +88,25 @@ function formatUtc(value: string | null) {
     .slice(0, 6)} UTC`;
 }
 
+function utcMicros(value: string) {
+  const millis = Date.parse(value);
+  if (!Number.isFinite(millis)) return null;
+  const fraction = value.match(/\.(\d+)/)?.[1] ?? "";
+  return millis * 1000 + Number(fraction.padEnd(6, "0").slice(3, 6));
+}
+
+function spanTiming(span: AgentObservabilitySpan, observedAt: string) {
+  const started = utcMicros(span.started_at);
+  const ended = utcMicros(span.ended_at ?? observedAt);
+  const wallInterval =
+    started == null || ended == null ? null : ended - started;
+  const difference =
+    span.ended_at && wallInterval != null && span.duration_us != null
+      ? wallInterval - span.duration_us
+      : null;
+  return { wallInterval, difference };
+}
+
 function spanHierarchy(
   span: AgentObservabilitySpan,
   spansById: Map<string, AgentObservabilitySpan>,
@@ -757,6 +776,7 @@ export default function AgentObservabilityPage() {
                 spansById.has(selectedSpanId) &&
                 (() => {
                   const span = spansById.get(selectedSpanId)!;
+                  const timing = spanTiming(span, detail.generated_at);
                   return (
                     <section
                       className={styles.spanInspector}
@@ -794,6 +814,30 @@ export default function AgentObservabilityPage() {
                           <dd>
                             {formatUtc(span.started_at)} →{" "}
                             {formatUtc(span.ended_at)}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>单调耗时 / 墙钟区间</dt>
+                          <dd>
+                            {span.duration_us == null
+                              ? "单调耗时未知"
+                              : `${(span.duration_us / 1000).toFixed(
+                                  1,
+                                )} ms 单调`}
+                            {" · "}
+                            {timing.wallInterval == null
+                              ? "墙钟区间未知"
+                              : `${(timing.wallInterval / 1000).toFixed(
+                                  1,
+                                )} ms 墙钟`}
+                            {timing.difference != null &&
+                              Math.abs(timing.difference) >= 1000 && (
+                                <Text type="warning">
+                                  {` · 区间相差 ${(
+                                    Math.abs(timing.difference) / 1000
+                                  ).toFixed(1)} ms`}
+                                </Text>
+                              )}
                           </dd>
                         </div>
                         <div>

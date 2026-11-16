@@ -362,7 +362,7 @@ describe("AgentObservabilityPage", () => {
       has_error: 0,
       error_type: null,
       quality: "observed",
-      duration_us: 2000000,
+      duration_us: 1900000,
       time_to_first_chunk_us: null,
       time_to_first_visible_text_us: null,
       input_tokens: 3,
@@ -409,6 +409,7 @@ describe("AgentObservabilityPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: /model.call/ }));
     expect(await screen.findByText("Span ID")).toBeInTheDocument();
     expect(screen.getByText("输入 3 · 输出 1")).toBeInTheDocument();
+    expect(screen.getByText(/区间相差 100\.0 ms/)).toBeInTheDocument();
 
     fireEvent.mouseDown(
       screen.getByRole("combobox", { name: "按 Attempt 查看操作" }),
