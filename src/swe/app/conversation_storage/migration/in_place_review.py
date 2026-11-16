@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 import os
 from pathlib import Path
+from .isolation import unit_key
 
 _PUBLISHED_ROOTS = ContextVar(
     "conversation_published_source_roots",
@@ -14,6 +15,16 @@ _PUBLISHED_INPUTS = ContextVar(
     "conversation_published_inputs",
     default=(),
 )
+_FROZEN_SHARE_SOURCES = ContextVar(
+    "conversation_frozen_share_sources",
+    default=None,
+)
+
+
+def frozen_share_source(token):
+    return (_FROZEN_SHARE_SOURCES.get() or {}).get(token)
+
+
 _FROZEN_SHARE_OWNERS = ContextVar(
     "conversation_frozen_share_owners",
     default=None,
@@ -70,7 +81,7 @@ def published_pruning(data, published):
         for workspace in candidates:
             if workspace["service_unit_id"] != service["service_unit_id"]:
                 continue
-            key = workspace["service_unit_id"], workspace["tenant_id"]
+            key = unit_key(data, workspace)
             for ref in workspace.get("evidence_refs", []):
                 path = Path(ref)
                 if path.name != "config.json" or not path.is_relative_to(base):
@@ -100,7 +111,7 @@ def published_pruning(data, published):
             )
     inputs = {(root, True) for root in roots}
     for item in [*data["workspaces"], *data.get("tenants", [])]:
-        if (item["service_unit_id"], item["tenant_id"]) not in published:
+        if unit_key(data, item) not in published:
             continue
         for field in ("root", "runtime_root"):
             if item.get(field):
@@ -109,7 +120,7 @@ def published_pruning(data, published):
             (Path(ref), False) for ref in item.get("evidence_refs", [])
         )
     for share in data.get("shares", []):
-        if (share["service_unit_id"], share["tenant_id"]) in published:
+        if unit_key(data, share) in published:
             inputs.add((Path(share["snapshot_path"]), False))
     roots.update(path for path, directory in inputs if directory)
     share_owners = {}
@@ -120,9 +131,17 @@ def published_pruning(data, published):
     token = _PUBLISHED_ROOTS.set(tuple(roots))
     input_token = _PUBLISHED_INPUTS.set(tuple(inputs))
     owner_token = _FROZEN_SHARE_OWNERS.set(share_owners)
+    source_token = _FROZEN_SHARE_SOURCES.set(
+        {
+            s["token"]: s["source_id"]
+            for s in data.get("shares", [])
+            if data.get("source_isolation")
+        },
+    )
     try:
         yield
     finally:
+        _FROZEN_SHARE_SOURCES.reset(source_token)
         _FROZEN_SHARE_OWNERS.reset(owner_token)
         _PUBLISHED_INPUTS.reset(input_token)
         _PUBLISHED_ROOTS.reset(token)

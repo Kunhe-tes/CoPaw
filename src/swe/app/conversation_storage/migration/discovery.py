@@ -472,9 +472,19 @@ def _shares(services, shares, report):
 
             ChatShareRecord.model_validate(record)
             ChatShareSnapshot.model_validate(_read_json(path))
+            source_fields = {}
+            if report.get("source_isolation"):
+                from .source_ownership import share_source
+
+                source_fields["source_id"] = share_source(
+                    report,
+                    service,
+                    record,
+                )
             report["shares"].append(
                 {
                     **record,
+                    **source_fields,
                     "service_unit_id": service["service_unit_id"],
                     "snapshot_path": str(path),
                     "position": source_key(
@@ -584,9 +594,12 @@ def discover_services(
     overrides=(),
     semantic_validator=None,
     tenant_isolation=False,
+    source_isolation=False,
     in_place=False,
 ):
     """Return complete discovery evidence without opening a DB or modifying inputs."""
+    if source_isolation and not tenant_isolation:
+        raise ValueError("source isolation requires tenant isolation")
     if in_place and not tenant_isolation:
         raise ValueError("in-place migration requires tenant isolation")
     report = {
@@ -609,6 +622,8 @@ def discover_services(
                 for row in shares
             ],
         )
+    if source_isolation:
+        report["source_isolation"] = True
     if in_place:
         report["in_place"] = True
     for item in services:
@@ -725,7 +740,9 @@ def _freeze_tenant_report(report, current):
     """Keep identity/coverage fixed while isolating changed tenant inputs."""
 
     def key(item):
-        return item["service_unit_id"], item["tenant_id"]
+        from .isolation import unit_key
+
+        return unit_key(report, item)
 
     for field in ("services", "declared_services", "source_shares"):
         if current.get(field) != report.get(field):
@@ -797,6 +814,7 @@ def freeze_discovery(
         semantic_validator=semantic_validator,
         tenant_isolation=report.get("tenant_isolation", False),
         in_place=report.get("in_place", False),
+        source_isolation=report.get("source_isolation", False),
     )
     if report.get("tenant_isolation"):
         report = _freeze_tenant_report(report, current)

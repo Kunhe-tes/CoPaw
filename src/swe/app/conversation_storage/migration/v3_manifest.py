@@ -7,6 +7,7 @@ import time
 from uuid import UUID
 
 from ..identity import WorkspaceScope, service_unit_bytes
+from .isolation import unit_key
 from .disk_manifest import DiskSet, load_disk_manifest
 from .manifest import (
     MigrationManifest,
@@ -49,11 +50,15 @@ class V3Manifest(MigrationManifest):
             for tenant in tenants:
                 scope = WorkspaceScope(
                     tenant["tenant_id"],
-                    "",
+                    (
+                        tenant["source_id"]
+                        if self.data.get("source_isolation")
+                        else ""
+                    ),
                     "",
                     service_unit_id=tenant["service_unit_id"],
                 )
-                key = (scope.service_unit_id, scope.tenant_id)
+                key = unit_key(self.data, tenant)
                 if key in tenant_scopes or scope.service_unit_id not in names:
                     raise ValueError("duplicate or undeclared frozen tenant")
                 tenant_scopes.add(key)
@@ -61,8 +66,7 @@ class V3Manifest(MigrationManifest):
         for item in self.data["workspaces"]:
             if (
                 self.data.get("tenant_isolation")
-                and (item["service_unit_id"], item["tenant_id"])
-                not in tenant_scopes
+                and unit_key(self.data, item) not in tenant_scopes
             ):
                 raise ValueError("workspace tenant is not declared")
             if item["service_unit_id"] not in names:
@@ -73,6 +77,10 @@ class V3Manifest(MigrationManifest):
                 item["agent_id"],
                 service_unit_id=item["service_unit_id"],
             )
+        if self.data.get("source_isolation"):
+            for share in self.data["shares"]:
+                if unit_key(self.data, share) not in tenant_scopes:
+                    raise ValueError("share source is not declared")
         for kind, assignments in self.data["assignments"].items():
             if kind not in KINDS:
                 raise ValueError("unknown assignment kind")
@@ -112,6 +120,11 @@ class V3Manifest(MigrationManifest):
             raise ValueError(
                 "in-place mode requires explicit tenant isolation",
             )
+        if self.data.get("source_isolation") is not None and (
+            self.data["source_isolation"] is not True
+            or not self.data.get("tenant_isolation")
+        ):
+            raise ValueError("invalid source isolation mode")
         if self.data.get("in_place"):
             for service in services:
                 roots = {
@@ -129,12 +142,12 @@ class V3Manifest(MigrationManifest):
     def _validate_in_place_evidence(self):
         if self.data.get("in_place"):
             failed = {
-                (item["service_unit_id"], item["tenant_id"])
+                unit_key(self.data, item)
                 for item in self.data["tenants"]
                 if item["state"] == "failed"
             }
             for item in [*self.data["workspaces"], *self.data["tenants"]]:
-                if (item["service_unit_id"], item["tenant_id"]) in failed:
+                if unit_key(self.data, item) in failed:
                     continue
                 hashes = item.get("in_place_evidence")
                 if (
@@ -184,11 +197,18 @@ class V3Manifest(MigrationManifest):
                 "direct migration IDs must be allocated by the SQL journal",
             ) from None
 
-    def begin_tenant_sync(self, service_unit_id, tenant_id):
+    def begin_tenant_sync(self, service_unit_id, tenant_id, source_id=None):
         from .freshness import tenant_key
 
-        key = tenant_key(service_unit_id, tenant_id)
-        return self.begin_tenant_syncs([(service_unit_id, tenant_id)])[key]
+        scope = (service_unit_id, tenant_id)
+        if self.data.get("source_isolation"):
+            if source_id is None:
+                raise ValueError(
+                    "source synchronization requires source identity",
+                )
+            scope += (source_id,)
+        key = tenant_key(*scope)
+        return self.begin_tenant_syncs([scope])[key]
 
     def begin_tenant_syncs(self, tenants):
         """Fix all tenant cutoffs in one durable manifest update before import."""
@@ -222,6 +242,7 @@ class V3Manifest(MigrationManifest):
             "shares",
             "discovery_version",
             "tenant_isolation",
+            "source_isolation",
             "in_place",
             "tenants",
             "source_shares",

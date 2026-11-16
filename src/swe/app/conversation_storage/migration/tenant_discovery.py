@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 from ..identity import WorkspaceScope
+from .isolation import unit_key, belongs
 
 
 def _tenant_semantic(selected, validator):
@@ -127,7 +128,7 @@ def map_tenant_calls(items, function, *, workers=4, io_workers=4):
                 future.cancel()
 
 
-def _configs(service):
+def _source_configs(service):
     from .discovery import _identity
 
     root = Path(service["config_root"])
@@ -151,6 +152,11 @@ def _configs(service):
             )
         except (ValueError, TypeError, KeyError):
             continue
+        yield path, tenant, source
+
+
+def _configs(service):
+    for path, tenant, _source in _source_configs(service):
         yield path, tenant
 
 
@@ -188,8 +194,15 @@ def _collect_config_tenants(report, tenants, paths, evidence):
                     raise ValueError(
                         "tenant isolation requires frozen inputs separate from runtime roots",
                     )
-        for config, tenant in _configs(service):
-            key = (name, tenant)
+        for config, tenant, source in _source_configs(service):
+            key = unit_key(
+                report,
+                {
+                    "service_unit_id": name,
+                    "tenant_id": tenant,
+                    "source_id": source,
+                },
+            )
             tenants.setdefault(key, [])
             evidence.setdefault(key, []).append(str(config))
             paths.append((config, key))
@@ -205,12 +218,12 @@ def isolate_discovery(report, shares, validator):
     evidence = {}
     _collect_config_tenants(report, tenants, paths, evidence)
     for item in report["workspaces"]:
-        key = (item["service_unit_id"], item["tenant_id"])
+        key = unit_key(report, item)
         tenants.setdefault(key, [])
         paths.append((Path(item["root"]), key))
         positions[item["position"]] = {key}
     for item in report["shares"]:
-        key = (item["service_unit_id"], item["tenant_id"])
+        key = unit_key(report, item)
         tenants.setdefault(key, [])
         positions[item["position"]] = {key}
     # A missing/ambiguous snapshot cannot establish service ownership. Block the
@@ -218,6 +231,20 @@ def isolate_discovery(report, shares, validator):
     for item in shares:
         tenant = item.get("tenant_id")
         if not isinstance(tenant, str):
+            continue
+        if report.get("source_isolation"):
+            matched = [
+                s for s in report["shares"] if s["token"] == item.get("token")
+            ]
+            candidates = (
+                {unit_key(report, s) for s in matched}
+                if matched
+                else {key for key in tenants if key[1] == tenant}
+            )
+            positions.setdefault(
+                str(item.get("token", "share")),
+                set(),
+            ).update(candidates)
             continue
         matched = [
             s for s in report["shares"] if s["token"] == item.get("token")
@@ -237,16 +264,8 @@ def isolate_discovery(report, shares, validator):
         return {
             **report,
             "blockers": [],
-            "workspaces": [
-                w
-                for w in report["workspaces"]
-                if (w["service_unit_id"], w["tenant_id"]) == key
-            ],
-            "shares": [
-                s
-                for s in report["shares"]
-                if (s["service_unit_id"], s["tenant_id"]) == key
-            ],
+            "workspaces": [w for w in report["workspaces"] if belongs(w, key)],
+            "shares": [s for s in report["shares"] if belongs(s, key)],
         }
 
     mapper = getattr(validator, "map_tenants", None)
@@ -281,6 +300,7 @@ def isolate_discovery(report, shares, validator):
         {
             "service_unit_id": key[0],
             "tenant_id": key[1],
+            **({"source_id": key[2]} if len(key) == 3 else {}),
             "state": "failed" if failures else "discovered",
             "blockers": deepcopy(failures),
             **(
@@ -346,7 +366,7 @@ def _freeze_tenant_boundaries(report):
                     blocker = {
                         "code": "tenant_input_invalid",
                         "position": json.dumps(
-                            (tenant["service_unit_id"], tenant["tenant_id"]),
+                            unit_key(report, tenant),
                         ),
                         "detail": str(error),
                     }
@@ -358,7 +378,7 @@ def _freeze_tenant_boundaries(report):
         from ..errors import IntegrityError
 
         for tenant in report["tenants"]:
-            key = tenant["service_unit_id"], tenant["tenant_id"]
+            key = unit_key(report, tenant)
             try:
                 tenant_write_boundaries(report, tenant=key)
             except IntegrityError as error:

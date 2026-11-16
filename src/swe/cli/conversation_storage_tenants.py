@@ -39,7 +39,18 @@ from swe.app.conversation_storage.migration.spool import (
     MigrationDiskCapacityError,
 )
 from swe.app.conversation_storage.migration.tenant_state import TenantState
+from swe.app.conversation_storage.migration.isolation import (
+    unit_key,
+    belongs,
+    state_store,
+)
 from swe.app.conversation_storage.migration.verify import verify_import
+
+
+def _states(db, manifest):
+    if not manifest.data.get("source_isolation"):
+        return TenantState(db, manifest.migration_id)
+    return state_store(db, manifest)
 
 
 class TenantFailure(ValueError):
@@ -52,23 +63,19 @@ class TenantManifest:
     def __init__(self, parent, tenant):
         self.parent = parent
         self.migration_id, self.path = parent.migration_id, parent.path
-        self.key = tenant["service_unit_id"], tenant["tenant_id"]
+        self.key = unit_key(parent.data, tenant)
         self.data = {
             **parent.data,
             "tenants": [
                 item
                 for item in parent.data["tenants"]
-                if (item["service_unit_id"], item["tenant_id"]) == self.key
+                if belongs(item, self.key)
             ],
             "workspaces": [
-                w
-                for w in parent.data["workspaces"]
-                if (w["service_unit_id"], w["tenant_id"]) == self.key
+                w for w in parent.data["workspaces"] if belongs(w, self.key)
             ],
             "shares": [
-                s
-                for s in parent.data["shares"]
-                if (s["service_unit_id"], s["tenant_id"]) == self.key
+                s for s in parent.data["shares"] if belongs(s, self.key)
             ],
             "source_change_blockers": [
                 b
@@ -200,10 +207,7 @@ async def _inventory(view, spool, resources):
 
         try:
             for tenant in view.data["tenants"]:
-                if (
-                    tenant["service_unit_id"],
-                    tenant["tenant_id"],
-                ) == view.key:
+                if belongs(tenant, view.key):
                     await inspect(verify_evidence, view.data, tenant)
         except SourceInputInvalid as error:
             raise TenantFailure(
@@ -303,7 +307,36 @@ async def _compare_shares(db, view):
             view.parent.data["shares"],
         )
     }
-    if any(s["token"] not in known for s in rows):
+    if view.data.get("source_isolation"):
+        for row in rows:
+            if row["token"] in known:
+                continue
+            owner = await db.fetch_one(
+                "SELECT source_key,scope_kind FROM swe_conversation_publications "
+                "WHERE id=(SELECT publication_id FROM swe_chat_shares WHERE token=%s) "
+                "AND service_unit_key=%s AND tenant_key=%s AND state='committed' AND gc_state='live'",
+                (row["token"], view.key[0].encode(), view.key[1].encode()),
+            )
+            if owner is None or owner["scope_kind"] != "workspace":
+                raise TenantFailure("unregistered source share appeared")
+            owner_key = (
+                view.key[0],
+                view.key[1],
+                owner["source_key"].decode(),
+            )
+            from swe.app.conversation_storage.migration.source_state import (
+                SourceState,
+            )
+
+            state = await SourceState(db, view.migration_id).get(*owner_key)
+            if (
+                owner_key == view.key
+                or state is None
+                or state["state"] != "published"
+            ):
+                raise TenantFailure("unregistered source share appeared")
+        rows = [row for row in rows if row["token"] in expected]
+    elif any(s["token"] not in known for s in rows):
         raise TenantFailure("unregistered tenant share appeared")
     actual = {
         s["token"]: normalized(s)
@@ -407,7 +440,11 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
         await _compare_shares(db, view)
         await guard.check()
         await check_schema(db, schema, finalized=False)
-        await check_tenant_schema(db, schema)
+        await check_tenant_schema(
+            db,
+            schema,
+            source_isolation=view.data.get("source_isolation", False),
+        )
         if operation in ("verify", "finalize", "migrate"):
             await states.transition(*view.key, "verified")
         if operation in ("finalize", "migrate"):
@@ -464,6 +501,9 @@ def _failure(tenant, stage, code="tenant_data_invalid", error=None):
     return {
         "service_unit_id": tenant["service_unit_id"],
         "tenant_id": tenant["tenant_id"],
+        **(
+            {"source_id": tenant["source_id"]} if "source_id" in tenant else {}
+        ),
         "stage": stage,
         "code": code,
         "reason": reason,
@@ -618,7 +658,11 @@ async def run_tenants(
                 server_uuid=identity["server_uuid"],
             )
             await check_schema(db, schema, finalized=False)
-            await check_tenant_schema(db, schema)
+            await check_tenant_schema(
+                db,
+                schema,
+                source_isolation=manifest.data.get("source_isolation", False),
+            )
             from swe.app.conversation_storage.migration.tenant_retry import (
                 recover_pending_review,
                 review_retry,
@@ -629,7 +673,7 @@ async def run_tenants(
             if operation in ("import", "resume", "migrate") and apply:
                 manifest.begin_tenant_syncs(
                     [
-                        (t["service_unit_id"], t["tenant_id"])
+                        unit_key(manifest.data, t)
                         for t in manifest.data["tenants"]
                     ],
                 )
@@ -674,7 +718,7 @@ async def run_tenants(
                     manifest,
                     base,
                     resources,
-                    states=TenantState(db, manifest.migration_id),
+                    states=_states(db, manifest),
                 )
                 return {**result, "passed": result["failed"] == 0}
             if operation in ("inventory", "plan", "inspect") or (
@@ -685,7 +729,7 @@ async def run_tenants(
                     manifest,
                     base,
                     resources,
-                    states=TenantState(db, manifest.migration_id),
+                    states=_states(db, manifest),
                 )
             return await _run_registered(
                 operation,
@@ -718,10 +762,7 @@ async def _register_tenants(db, manifest, states, guard):
             manifest,
             server_uuid=guard.server_uuid,
         )
-        binding_journal.active_tenant = (
-            tenants[0]["service_unit_id"],
-            tenants[0]["tenant_id"],
-        )
+        binding_journal.active_tenant = unit_key(manifest.data, tenants[0])
         await binding_journal.prepare()
 
 
@@ -766,7 +807,7 @@ async def _run_registered(
     base,
     resources,
 ):
-    states = TenantState(db, manifest.migration_id)
+    states = _states(db, manifest)
     tenants = manifest.data["tenants"]
     if not tenants:
         raise ValueError("tenant migration has no identifiable tenants")
@@ -857,6 +898,11 @@ async def _run_registered(
         "version": 3,
         "migration_id": manifest.migration_id,
         "tenant_isolation": True,
+        **(
+            {"source_isolation": True, "counter_unit": "sources"}
+            if manifest.data.get("source_isolation")
+            else {}
+        ),
         "status": (
             "partial_success" if failures or pending_schema else "success"
         ),
@@ -882,8 +928,7 @@ async def _serial_tenants(tenants, resources):
 async def _record_tenant_failure(states, tenant, operation, error):
     failure = _failure(tenant, operation, error=error)
     await states.fail(
-        tenant["service_unit_id"],
-        tenant["tenant_id"],
+        *unit_key({"source_isolation": "source_id" in tenant}, tenant),
         operation,
         failure["code"],
         failure["reason"],
@@ -961,11 +1006,11 @@ async def _auto_review(db, manifest, guard, resources):
         review_retry,
     )
 
-    states = TenantState(db, manifest.migration_id)
+    states = _states(db, manifest)
     await _register_tenants(db, manifest, states, guard)
     eligible = set()
     for tenant in manifest.data["tenants"]:
-        key = tenant["service_unit_id"], tenant["tenant_id"]
+        key = unit_key(manifest.data, tenant)
         row = await states.get(*key)
         if row["state"] != "published" and (
             row["state"] == "failed" or tenant["state"] == "failed"
@@ -1006,7 +1051,7 @@ async def _auto_review(db, manifest, guard, resources):
             tenant = next(
                 t
                 for t in manifest.data["tenants"]
-                if (t["service_unit_id"], t["tenant_id"]) == key
+                if unit_key(manifest.data, t) == key
             )
             if not tenant.get("input_digest"):
                 continue
@@ -1053,7 +1098,7 @@ async def _preview(operation, manifest, base, resources, *, states):
     failures, completed = [], 0
     selected = []
     for tenant in manifest.data["tenants"]:
-        row = await states.get(tenant["service_unit_id"], tenant["tenant_id"])
+        row = await states.get(*unit_key(manifest.data, tenant))
         if row and row["state"] == "published":
             completed += 1
             continue
@@ -1079,6 +1124,11 @@ async def _preview(operation, manifest, base, resources, *, states):
         "version": 3,
         "migration_id": manifest.migration_id,
         "tenant_isolation": True,
+        **(
+            {"source_isolation": True, "counter_unit": "sources"}
+            if manifest.data.get("source_isolation")
+            else {}
+        ),
         "preview": True,
         "status": "partial_success" if failures else "success",
         "completed": completed,

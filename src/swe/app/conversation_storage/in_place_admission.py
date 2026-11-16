@@ -4,6 +4,7 @@
 from pathlib import Path
 
 from .errors import IntegrityError
+from .migration.isolation import unit_key
 
 
 def _overlaps(left, right):
@@ -33,7 +34,7 @@ def tenant_write_boundaries(source, *, tenant=None):
         name = workspace["service_unit_id"]
         if name not in in_place:
             continue
-        owner = name, workspace["tenant_id"]
+        owner = unit_key(source, workspace)
         root = Path(workspace["runtime_root"])
         if (tenant is None or tenant == owner) and (
             not root.is_absolute() or root != root.resolve()
@@ -55,7 +56,7 @@ def tenant_write_boundaries(source, *, tenant=None):
         name = tenant_record["service_unit_id"]
         if name not in in_place:
             continue
-        owner = name, tenant_record["tenant_id"]
+        owner = unit_key(source, tenant_record)
         for reference in tenant_record.get("evidence_refs", []):
             path = Path(reference)
             if (tenant is None or tenant == owner) and (
@@ -94,7 +95,15 @@ def tenant_write_boundaries(source, *, tenant=None):
 
 
 def require_workspace_boundary(source, scope, root):
-    owner = scope.service_unit_id, scope.tenant_id
+    owner = unit_key(
+        source,
+        dict(
+            zip(
+                ("service_unit_id", "tenant_id", "source_id", "agent_id"),
+                scope.values,
+            ),
+        ),
+    )
     boundaries = tenant_write_boundaries(source, tenant=owner)
     root = Path(root)
     for other_owner, path, directory in boundaries:

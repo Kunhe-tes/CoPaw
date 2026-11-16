@@ -141,6 +141,8 @@ def test_prepare_reuses_freeze_and_readonly_preflight(
     assert output["operation"] == "prepare"
     frozen = json.loads(inputs["manifest"].read_text())
     assert frozen["tenant_isolation"] is True
+    assert frozen["source_isolation"] is True
+    assert frozen["tenants"][0]["source_id"] == "SRC"
     assert frozen["offline"]["application_schema"] == "business"
     assert frozen["assignments"] == frozen["batches"] == {}
     assert frozen["tenants"][0]["state"] == (

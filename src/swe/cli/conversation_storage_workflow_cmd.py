@@ -60,6 +60,7 @@ def prepare_workflow(
         shares=shares,
         overrides=_list(_read(overrides), "overrides") if overrides else [],
         tenant_isolation=True,
+        source_isolation=True,
         in_place=in_place,
         semantic_validator=_semantic_validator(**resources),
     )

@@ -862,7 +862,10 @@ class ConversationBackup:
         partial = await partial_admission(self.db, self.scope)
         if partial is not None:
             if rollback_authorization is None:
-                await partial.require(self.scope.tenant_id)
+                await partial.require(
+                    self.scope.tenant_id,
+                    self.scope.source_id,
+                )
             else:
                 from .migration.tenant_rollback import (
                     validate_backup_authorization,

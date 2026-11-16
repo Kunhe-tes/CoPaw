@@ -53,7 +53,12 @@ class WorkspaceConversationStorage:
         if admission is not None:
             from .tenant_admission import TenantDatabase
 
-            database = TenantDatabase(database, admission, scope.tenant_id)
+            database = TenantDatabase(
+                database,
+                admission,
+                scope.tenant_id,
+                scope.source_id,
+            )
         root = Path(workspace_root).absolute()
         try:
             mode = root.lstat().st_mode

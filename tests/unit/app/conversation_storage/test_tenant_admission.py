@@ -15,7 +15,7 @@ from swe.app.conversation_storage.errors import IntegrityError
 JOB = "00000000-0000-4000-8000-000000000001"
 
 
-def database(state="failed", tenant="alice"):
+def database(state="failed", tenant="alice", *, source_mode=False):
     proof = {
         "version": 1,
         "migration_id": JOB,
@@ -43,10 +43,19 @@ def database(state="failed", tenant="alice"):
                         "schema": "test",
                     },
                 ),
-                "source_binding_text": '{"tenant_isolation":true}',
+                "source_binding_text": json.dumps(
+                    {
+                        "tenant_isolation": True,
+                        "source_isolation": source_mode,
+                    },
+                ),
             }
         if "@@server_uuid" in query:
             return {"server_uuid": "server", "schema_name": "test"}
+        if "migration_sources" in query:
+            assert source_mode
+            assert params[-1] == b"SRC"
+            return {"state": db.state, "verification_text": json.dumps(proof)}
         if "migration_tenants" in query:
             return {"state": db.state, "verification_text": json.dumps(proof)}
         raise AssertionError(query)
@@ -62,6 +71,110 @@ def database(state="failed", tenant="alice"):
         },
     )
     return db, admission
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["authority", "capture", "gc", "rollback"],
+)
+async def test_source_published_admission_for_backup_gc_and_rollback(
+    monkeypatch,
+    tmp_path,
+    operation,
+):
+    from swe.app.conversation_storage.identity import WorkspaceScope
+    from swe.app.conversation_storage.bundle import BundleStore
+    from swe.app.conversation_storage.backup import ConversationBackup
+    from swe.app.conversation_storage.gc import GarbageCollector
+    from swe.app.conversation_storage.migration.authority import (
+        backup_authority,
+    )
+    from swe.app.conversation_storage.migration.manifest import SourceBoundary
+    from swe.app.conversation_storage.migration import (
+        tenant_rollback as rollback,
+    )
+    import swe.app.conversation_storage.tenant_admission as module
+
+    scope = WorkspaceScope("alice", "SRC", "agent", service_unit_id="svc")
+    db, admission = database("published", source_mode=True)
+    monkeypatch.setattr(
+        module,
+        "partial_admission",
+        AsyncMock(return_value=admission),
+    )
+    if operation == "authority":
+        proof = await backup_authority(db, scope)
+        assert proof["services"]["svc"]["workspaces"][0]["scope"] == list(
+            scope.values,
+        )
+    elif operation == "capture":
+        backup = ConversationBackup(db, BundleStore(tmp_path), scope)
+        await backup._check_capture_admission(None)
+    elif operation == "gc":
+        collector_db = SimpleNamespace(fetch_one=AsyncMock(return_value=None))
+        collector = GarbageCollector(
+            collector_db,
+            scope,
+            BundleStore(tmp_path),
+        )
+        reasons = await collector._protections(
+            {
+                "id": 1,
+                "state": "committed",
+                "retained_history": False,
+                "session_id": None,
+                "chat_id": None,
+                "turn_id": None,
+            },
+        )
+        assert "migration_tenant_unpublished" not in reasons
+    else:
+        evidence = rollback.TenantRollbackEvidence(
+            SourceBoundary(
+                "snapshot",
+                "2026-11-16T00:00:00Z",
+                "old@sha256:" + "a" * 64,
+                ("record",),
+            ),
+            "stop",
+            "drain",
+            "review",
+        )
+        authorization = rollback.RollbackBackupAuthorization(
+            evidence,
+            SimpleNamespace(migration_id=JOB, data={"services": []}),
+            ({},),
+            scope,
+            "/workspace",
+        )
+        monkeypatch.setattr(
+            rollback,
+            "validate_current_config",
+            lambda *_: [{"root": "/workspace", "scope": list(scope.values)}],
+        )
+        await rollback.validate_backup_authorization(authorization, db, scope)
+
+
+async def test_partial_jobs_detects_source_table_without_tenant_table():
+    from swe.app.conversation_storage.tenant_admission import partial_jobs
+
+    async def tables(query):
+        assert "'swe_conversation_migration_sources'" in query
+        return {"tenant_controls": 1}
+
+    row = {
+        "source_binding_text": json.dumps(
+            {"tenant_isolation": True, "source_isolation": True},
+        ),
+        "target_binding_text": json.dumps({"nas_roots": {"svc": "/nas"}}),
+    }
+    db = SimpleNamespace(
+        fetch_one=AsyncMock(side_effect=tables),
+        fetch_all=AsyncMock(return_value=[row]),
+    )
+    assert await partial_jobs(db, "svc") == [
+        (row, {"nas_roots": {"svc": "/nas"}}),
+    ]
 
 
 async def test_failed_then_published_is_visible_without_restart():

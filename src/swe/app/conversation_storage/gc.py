@@ -197,7 +197,10 @@ class GarbageCollector:
         partial = await partial_admission(self.db, self.scope)
         if partial is not None:
             try:
-                await partial.require(self.scope.tenant_id)
+                await partial.require(
+                    self.scope.tenant_id,
+                    self.scope.source_id,
+                )
             except TenantNotPublished:
                 reasons.append("migration_tenant_unpublished")
         if row["state"] not in ("committed", "aborted"):

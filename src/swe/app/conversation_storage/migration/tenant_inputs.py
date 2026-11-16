@@ -20,11 +20,13 @@ _RETAINED_INPUTS = ContextVar(
 
 @contextmanager
 def retained_input_digests(data, keys):
+    from .isolation import unit_key
+
     token = _RETAINED_INPUTS.set(
         {
-            _key(t): t.get("input_digest")
+            unit_key(data, t): t.get("input_digest")
             for t in data["tenants"]
-            if _key(t) in keys
+            if unit_key(data, t) in keys
         },
     )
     try:
@@ -34,7 +36,8 @@ def retained_input_digests(data, keys):
 
 
 def _key(item):
-    return item["service_unit_id"], item["tenant_id"]
+    key = item["service_unit_id"], item["tenant_id"]
+    return (*key, item["source_id"]) if "source_id" in item else key
 
 
 def _file_digest(path):
@@ -72,16 +75,20 @@ def input_digest(data, key):
 
     selected = {
         **data,
-        "workspaces": [w for w in data["workspaces"] if _key(w) == key],
+        "workspaces": [
+            w for w in data["workspaces"] if _key(w)[: len(key)] == key
+        ],
     }
     entries = set()
     for mapping in _workspace_mappings(selected):
         entries.update(workspace_entries(mapping))
     for item in [*selected["workspaces"], *data.get("tenants", [])]:
-        if _key(item) == key:
+        if _key(item)[: len(key)] == key:
             entries.update(Path(p) for p in item.get("evidence_refs", []))
     entries.update(
-        Path(s["snapshot_path"]) for s in data["shares"] if _key(s) == key
+        Path(s["snapshot_path"])
+        for s in data["shares"]
+        if _key(s)[: len(key)] == key
     )
     digest = sha256()
     for path in sorted(entries):
@@ -100,7 +107,7 @@ def input_digest(data, key):
 
 
 def verify_input_digest(data, key):
-    tenant = next(t for t in data["tenants"] if _key(t) == key)
+    tenant = next(t for t in data["tenants"] if _key(t)[: len(key)] == key)
     expected = tenant.get("input_digest")
     # Existing manifests retain their original source freshness contract.
     if expected is not None and input_digest(data, key) != expected:

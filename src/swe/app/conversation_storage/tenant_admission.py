@@ -59,22 +59,32 @@ class TenantAdmission:
         ):
             raise IntegrityError("partial migration authority binding differs")
 
-    async def require(self, tenant_id):
+    async def require(self, tenant_id, source_id=None):
         await self.validate()
         doc = self.document
         from .in_place_admission import tenant_write_boundaries
 
-        tenant_write_boundaries(
-            self.source_binding,
-            tenant=(doc["service_unit_id"], tenant_id),
-        )
+        source_mode = self.source_binding.get("source_isolation", False)
+        if source_mode and source_id is None:
+            raise TenantNotPublished()
+        key = (doc["service_unit_id"], tenant_id)
+        if source_mode:
+            key += (source_id,)
+        tenant_write_boundaries(self.source_binding, tenant=key)
         row = await self.db.fetch_one(
-            "SELECT state,verification_text FROM swe_conversation_migration_tenants "
-            "WHERE migration_id=%s AND service_unit_key=%s AND tenant_key=%s",
+            "SELECT state,verification_text FROM "
+            + (
+                "swe_conversation_migration_sources"
+                if source_mode
+                else "swe_conversation_migration_tenants"
+            )
+            + " WHERE migration_id=%s AND service_unit_key=%s AND tenant_key=%s"
+            + (" AND source_key=%s" if source_mode else ""),
             (
                 doc["migration_id"].encode(),
                 doc["service_unit_id"].encode(),
                 tenant_id.encode(),
+                *((source_id.encode(),) if source_mode else ()),
             ),
         )
         if row is None or row["state"] != "published":
@@ -87,7 +97,9 @@ class TenantAdmission:
             or service is None
             or service["nas_root"] != doc["nas_root"]
             or any(
-                item["scope"][1] != tenant_id for item in service["workspaces"]
+                item["scope"][1] != tenant_id
+                or (source_mode and item["scope"][2] != source_id)
+                for item in service["workspaces"]
             )
         ):
             raise IntegrityError("tenant publication proof differs")
@@ -97,7 +109,8 @@ class TenantAdmission:
 class TenantDatabase:
     """Protect even previously cached adapters before each database operation."""
 
-    def __init__(self, database, admission, tenant_id):
+    def __init__(self, database, admission, tenant_id, source_id=None):
+        self.source_id = source_id
         self.database, self.admission, self.tenant_id = (
             database,
             admission,
@@ -119,20 +132,25 @@ class TenantDatabase:
             return member
 
         async def guarded(*args, **kwargs):
-            await self.admission.require(self.tenant_id)
+            await self.admission.require(self.tenant_id, self.source_id)
             return await member(*args, **kwargs)
 
         return guarded
 
     @asynccontextmanager
     async def acquire(self, *args, **kwargs):
-        await self.admission.require(self.tenant_id)
+        await self.admission.require(self.tenant_id, self.source_id)
         async with self.database.acquire(*args, **kwargs) as session:
-            yield TenantDatabase(session, self.admission, self.tenant_id)
+            yield TenantDatabase(
+                session,
+                self.admission,
+                self.tenant_id,
+                self.source_id,
+            )
 
     @asynccontextmanager
     async def transaction(self, *args, **kwargs):
-        await self.admission.require(self.tenant_id)
+        await self.admission.require(self.tenant_id, self.source_id)
         async with self.database.transaction(*args, **kwargs):
             yield self
 
@@ -141,8 +159,8 @@ async def partial_jobs(database, service_unit_id=None):
     """Detect opt-in jobs without requiring the new table on legacy installs."""
     exists = await database.fetch_one(
         "SELECT COUNT(*) AS tenant_controls FROM information_schema.TABLES "
-        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME="
-        "'swe_conversation_migration_tenants'",
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN "
+        "('swe_conversation_migration_tenants','swe_conversation_migration_sources')",
     )
     if not exists or not int(exists.get("tenant_controls") or 0):
         return []

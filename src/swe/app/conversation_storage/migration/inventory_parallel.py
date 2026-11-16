@@ -123,7 +123,18 @@ def _shared_freshness(data):
     shared = shared_service_roots(data)
     for workspace in data["workspaces"]:
         cutoff = data.get("tenant_sync_started_at_ns", {}).get(
-            tenant_key(workspace["service_unit_id"], workspace["tenant_id"]),
+            (
+                tenant_key(
+                    workspace["service_unit_id"],
+                    workspace["tenant_id"],
+                    workspace["source_id"],
+                )
+                if data.get("source_isolation")
+                else tenant_key(
+                    workspace["service_unit_id"],
+                    workspace["tenant_id"],
+                )
+            ),
         )
         if cutoff is not None:
             references.update(
