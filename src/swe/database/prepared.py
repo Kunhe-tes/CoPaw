@@ -7,6 +7,8 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, Iterable
 
+from .observation import timed_operation
+
 _MAX_PARAMETERS = 65535
 _CACHE_SIZE = 4
 
@@ -68,7 +70,8 @@ async def _execute_chunk(session, template, rows, params):
     sql, cursor = cached
     # Connector/Python checks SQL object identity, so use the cached str object.
     # prepared.executemany loops execute per row and must not be used here.
-    await session._run(cursor.execute(sql, tuple(params)))
+    with timed_operation("db_statement"):
+        await session._run(cursor.execute(sql, tuple(params)))
 
 
 async def execute_prepared(

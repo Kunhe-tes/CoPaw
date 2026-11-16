@@ -55,6 +55,10 @@ prepare 的最终预检（以及独立 preflight/预览）在排除已发布和�
 
 用户数不等于迁移数据量，需同时记录 source/workspace、Session、消息数及会话输入字节。进度 `db_calls` 与 `db_seconds` 统计 DML 门面的数据库调用次数和累计等待时间，包含结构检查、状态/票据查询、失败调用和批量 prepared insert；批量操作计为一次门面调用，不含连接建立和事务 COMMIT/ROLLBACK。原 `sql_seconds` 仅覆盖协调器中的操作，不能代表整个命令的数据库耗时；两项有重叠，不可相加。`io_seconds` 是并发 IO 累计时间，也不能直接当墙钟占比。
 
+底层 `db_statement_attempts` 统计普通 cursor.execute 与每个 prepared SQL 分块的执行尝试（失败/取消也计入），`db_statement_seconds` 为这些执行的累计耗时；不包含协议 prepare/reset、建连、取结果和清理。驱动 `executemany` 的内部 SQL 数不确定，单列为 `db_executemany_calls/seconds`，不能把一次门面调用视为一条实际 SQL。`db_transaction_begins/commits/rollbacks` 统计真实连接上的边界调用尝试，嵌套事务不重复计数；提交计数不能代替提交成功证据。上述数据库层指标与 `db_calls/db_seconds/sql_seconds` 重叠，不相加。
+
+`stage_wall_seconds` 累计同名阶段的墙钟时间并包含当前未结束阶段；预读 IO 可与当前 owner 阶段重叠，因此不是各 source 独占耗时。`completed/task_total` 仍是当前工作阶段的任务计数。`bundle_opens/bundle_index_parses` 统计实际打开与索引解析尝试，不记录正文、SQL 参数、凭据或文件路径。所有指标仅在当前命令启用，不改变 SQL owner、恢复依据或退出码。代表性本地目录与隔离 MySQL 对照方式见性能验收说明；不得据本地数据声明真实 NAS 或生产性能。
+
 命令入口和每个 source 发布前仍完整检查结构，使用三次批量 information_schema 查询代替逐表往返，不跨 source 缓存结构。全量 journal 恢复仅在同一命令、同一 SQL owner 和同一映射对象内复用；每个 source 的作业绑定、业务归属、最终源复查和发布校验仍执行。新命令、映射重载或任一 source 失败后重新从 SQL 恢复，不跨命令复用恢复凭据。这些优化不改变锁丢失的致命停止语义。
 
 ### migrate 报 database identity or named lock lost
