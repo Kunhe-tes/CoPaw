@@ -301,6 +301,7 @@ class ObservabilityStore:
         run_id: str,
         attempt_id: str | None = None,
         limit: int = 200,
+        after: tuple[Any, str] | None = None,
     ) -> list[dict[str, Any]]:
         query = (
             "SELECT span_id,run_id,attempt_id,parent_span_id,span_type,operation,"
@@ -312,6 +313,11 @@ class ObservabilityStore:
         if attempt_id:
             query += " AND attempt_id=%s"
             params.append(attempt_id)
+        if after:
+            query += (
+                " AND (started_at > %s OR (started_at = %s AND span_id > %s))"
+            )
+            params.extend([after[0], after[0], after[1]])
         query += " ORDER BY started_at ASC,span_id ASC LIMIT %s"
         params.append(limit)
         async with self.connection.acquire() as session:

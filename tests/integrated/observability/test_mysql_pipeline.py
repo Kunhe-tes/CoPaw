@@ -352,16 +352,22 @@ def _emit_retry_events():
     )
     attempt = observability.start_attempt(context)
     with bind_context(attempt):
-        span = observability.span(
-            "LLM",
-            "chat",
-            name="model.call",
-            kind="CLIENT",
-        )
-        assert span is not None
-        with span:
-            for index in range(40):
-                span.event("retry", retries=index + 1, loop_count=40)
+        for span_index in range(3):
+            span = observability.span(
+                "LLM",
+                "chat",
+                name="model.call",
+                kind="CLIENT",
+                step_index=span_index + 1,
+            )
+            assert span is not None
+            with span:
+                for retry_index in range(12):
+                    span.event(
+                        "retry",
+                        retries=retry_index + 1,
+                        loop_count=12,
+                    )
     assert emitter.close(timeout=1) == 0
     return context.obs_run_id, [
         json.loads(line) for line in sink.getvalue().splitlines()
@@ -395,6 +401,30 @@ async def _assert_events_projected(connection, run_id, records):
         for record in missing_records
     ]
     assert len(inbox_rows) == len(records)
+
+
+async def _read_span_pages(client, run_id):
+    spans = []
+    cursor = None
+    for _ in range(4):
+        response = await client.get(
+            f"/agent-observability/runs/{run_id}",
+            headers={
+                "X-User-Role": "manager",
+                "X-Source-Id": "agentobs-integration",
+            },
+            params={
+                "span_limit": 2,
+                **({"span_cursor": cursor} if cursor else {}),
+            },
+        )
+        assert response.status_code == 200, response.text
+        page = response.json()
+        spans.extend(page["spans"])
+        cursor = page["spans_next_cursor"]
+        if cursor is None:
+            break
+    return spans
 
 
 @pytest.mark.asyncio
@@ -435,7 +465,22 @@ async def test_mysql_event_api_pages_more_than_one_event_array(monkeypatch):
             transport=httpx.ASGITransport(app=api),
             base_url="http://agentobs.test",
         ) as client:
-            for _ in range(4):
+            monkeypatch.delenv("SWE_AGENTOBS_CURSOR_SECRET")
+            unpaged = await client.get(
+                f"/agent-observability/runs/{run_id}",
+                headers={
+                    "X-User-Role": "manager",
+                    "X-Source-Id": "agentobs-integration",
+                },
+                params={"span_limit": 10},
+            )
+            assert unpaged.status_code == 200, unpaged.text
+            assert unpaged.json()["spans_next_cursor"] is None
+            monkeypatch.setenv(
+                "SWE_AGENTOBS_CURSOR_SECRET",
+                "integration-cursor-secret-at-least-32",
+            )
+            for _ in range(10):
                 response = await client.get(
                     f"/agent-observability/runs/{run_id}/events",
                     headers={
@@ -453,6 +498,7 @@ async def test_mysql_event_api_pages_more_than_one_event_array(monkeypatch):
                 cursor = page["next_cursor"]
                 if cursor is None:
                     break
+            span_pages = await _read_span_pages(client, run_id)
             hidden = await client.get(
                 f"/agent-observability/runs/{run_id}/events",
                 headers={
@@ -470,18 +516,20 @@ async def test_mysql_event_api_pages_more_than_one_event_array(monkeypatch):
             sum(
                 item["metadata"].get("event_kind") == "retry" for item in pages
             )
-            == 40
+            == 36
         )
-        span_id = next(
+        span_ids = {
             record["entity_id"]
             for record in records
             if record["event_name"] == "span.started"
-        )
+        }
         assert all(
-            item["entity_id"] == span_id
+            item["entity_id"] in span_ids
             for item in pages
             if item["event_name"] == "span.event"
         )
+        assert len(span_pages) == 3
+        assert len({span["span_id"] for span in span_pages}) == 3
         assert hidden.status_code == 404
         assert forbidden.status_code == 403
     finally:

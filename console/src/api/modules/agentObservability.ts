@@ -65,6 +65,7 @@ export interface AgentObservabilityRunDetail {
   attempts: AgentObservabilityAttempt[];
   spans: AgentObservabilitySpan[];
   spans_has_more: boolean;
+  spans_next_cursor?: string | null;
 }
 
 export interface AgentObservabilityEvent {
@@ -145,12 +146,13 @@ export function listAgentObservabilityRuns(
 
 export function getAgentObservabilityRunDetail(
   runId: string,
-  query: { attemptId?: string; spanLimit?: number } = {},
+  query: { attemptId?: string; spanLimit?: number; spanCursor?: string } = {},
   signal?: AbortSignal,
 ): Promise<AgentObservabilityRunDetail> {
   const params = new URLSearchParams();
   if (query.attemptId) params.set("attempt_id", query.attemptId);
   if (query.spanLimit) params.set("span_limit", String(query.spanLimit));
+  if (query.spanCursor) params.set("span_cursor", query.spanCursor);
   const suffix = params.toString() ? `?${params.toString()}` : "";
   return request<AgentObservabilityRunDetail>(
     `/agent-observability/runs/${encodeURIComponent(runId)}${suffix}`,

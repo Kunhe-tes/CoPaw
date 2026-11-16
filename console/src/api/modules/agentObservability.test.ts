@@ -51,9 +51,10 @@ describe("agent observability API", () => {
     await getAgentObservabilityRunDetail("run/one", {
       attemptId: "attempt-one",
       spanLimit: 120,
+      spanCursor: "signed+span-cursor",
     });
     expect(mocks.request).toHaveBeenCalledWith(
-      "/agent-observability/runs/run%2Fone?attempt_id=attempt-one&span_limit=120",
+      "/agent-observability/runs/run%2Fone?attempt_id=attempt-one&span_limit=120&span_cursor=signed%2Bspan-cursor",
       { signal: undefined },
     );
   });

@@ -32,3 +32,5 @@ Priority: P0
 2026-11-16：开始实施 Ticket 04。新增授权 `GET /agent-observability/runs/{run_id}`，返回 Run、Attempt 和有界 Span 页面；查询先按 manager/admin Source 范围确认 Run，再读取详情，树排序使用数据库 `started_at,span_id` 稳定顺序。Console Run 行可打开固定宽度 Inspector，展示 Attempt 状态、Span 父关系缩进、操作类型、状态和已知时长，并明确已加载节点受分页限制。后端 observability 34 passed，Console typecheck 与相关 Vitest 8 passed；当前浏览器 Chrome 157 的 hideMenu/窄屏检查已在 Ticket 03 记录，Chromium 108.0.5359.95 仍未验收。
 
 本票仍保持 `open`，因为 Ticket 03 的真实专家主执行和精确 Chromium 108.0.5359.95 验收尚未完成；本次代码作为依赖闭环的预备实现提交，不将其标记为已领取或已解决。
+
+2026-11-16：Run Detail 增加按 `(started_at,span_id)` 排序的签名 Span keyset 游标；游标绑定 manager/admin 角色、授权 Source、Run 和 Attempt。Inspector 可加载后续 Span 页面并按 Span ID 去重，支持手动刷新重新读取首屏；未加载全量不宣称完整。隔离 MySQL 用例验证 3 个 Span 分页无重复/遗漏，Console Vitest 覆盖加载后续页及刷新。Ticket 仍保持 open：连续 Agent 生命周期、真实浏览器基线、单调/墙钟偏差提示、节点选中 Inspector 和跨已加载页的迟到数据刷新语义尚未全部验收。

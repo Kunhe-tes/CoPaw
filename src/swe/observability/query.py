@@ -58,6 +58,7 @@ class RunDetailResponse(BaseModel):
     attempts: list[dict[str, Any]]
     spans: list[dict[str, Any]]
     spans_has_more: bool
+    spans_next_cursor: str | None = None
 
 
 class EventListResponse(BaseModel):
@@ -361,8 +362,9 @@ async def run_detail(
     request: Request,
     attempt_id: str | None = Query(None),
     span_limit: int = Query(200, ge=1, le=500),
+    span_cursor: str | None = Query(None, max_length=2048),
 ) -> RunDetailResponse:
-    _require_observability_reader(request)
+    role = _require_observability_reader(request)
     try:
         UUID(run_id)
         if attempt_id is not None:
@@ -373,6 +375,13 @@ async def run_detail(
             detail="Invalid run identity",
         ) from exc
     sources = _authorized_sources(request, None)
+    authority = {
+        "role": role,
+        "sources": sources,
+        "run_id": run_id,
+        "attempt_id": attempt_id,
+    }
+    decoded = _decode_cursor(span_cursor, authority) if span_cursor else None
     store = getattr(request.app.state, "agent_observability_store", None)
     if not isinstance(store, ObservabilityStore):
         raise HTTPException(
@@ -392,6 +401,7 @@ async def run_detail(
             run_id=run_id,
             attempt_id=attempt_id,
             limit=span_limit + 1,
+            after=decoded[:2] if decoded else None,
         )
     except HTTPException:
         raise
@@ -400,11 +410,22 @@ async def run_detail(
             status_code=503,
             detail="Agent observability query unavailable",
         ) from exc
+    span_rows = _serialize_rows(spans[:span_limit])
+    has_more = len(spans) > span_limit
+    next_cursor = None
+    if has_more and span_rows:
+        last = span_rows[-1]
+        next_cursor = _encode_cursor(
+            last["started_at"],
+            str(last["span_id"]),
+            authority,
+        )
     return RunDetailResponse(
         run=_serialize_rows([row])[0],
         attempts=_serialize_rows(attempts),
-        spans=_serialize_rows(spans[:span_limit]),
-        spans_has_more=len(spans) > span_limit,
+        spans=span_rows,
+        spans_has_more=has_more,
+        spans_next_cursor=next_cursor,
     )
 
 
@@ -433,7 +454,6 @@ async def run_events(
         "run_id": run_id,
         "span_id": span_id,
     }
-    _cursor_secret()
     decoded = _decode_cursor(cursor, authority) if cursor else None
     store = getattr(request.app.state, "agent_observability_store", None)
     if not isinstance(store, ObservabilityStore):

@@ -52,6 +52,20 @@
   gap: 12px;
 }
 
+.drawerTitle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+
+  > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
 .attempts {
   display: flex;
   flex-direction: column;

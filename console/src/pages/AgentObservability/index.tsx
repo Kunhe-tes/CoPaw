@@ -51,6 +51,7 @@ export default function AgentObservabilityPage() {
   const [selectedRun, setSelectedRun] = useState<AgentObservabilityRun | null>(null);
   const [detail, setDetail] = useState<AgentObservabilityRunDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [spansLoading, setSpansLoading] = useState(false);
   const [events, setEvents] = useState<AgentObservabilityEvent[]>([]);
   const [eventCursor, setEventCursor] = useState<string | null>(null);
   const [eventSpanId, setEventSpanId] = useState<string | undefined>();
@@ -180,6 +181,32 @@ export default function AgentObservabilityPage() {
     }
   };
 
+  const loadMoreSpans = async () => {
+    if (!selectedRun || !detail?.spans_next_cursor || spansLoading) return;
+    setSpansLoading(true);
+    try {
+      const next = await getAgentObservabilityRunDetail(
+        selectedRun.run_id,
+        { spanLimit: 200, spanCursor: detail.spans_next_cursor },
+      );
+      setDetail((current) => {
+        if (!current || current.run.run_id !== next.run.run_id) return current;
+        const seen = new Set(current.spans.map((span) => span.span_id));
+        const appended = next.spans.filter((span) => !seen.has(span.span_id));
+        return {
+          ...current,
+          spans: [...current.spans, ...appended],
+          spans_has_more: next.spans_has_more,
+          spans_next_cursor: next.spans_next_cursor,
+        };
+      });
+    } catch {
+      // Keep already loaded nodes available if a later page cannot be read.
+    } finally {
+      setSpansLoading(false);
+    }
+  };
+
   const columns: ColumnsType<AgentObservabilityRun> = [
     {
       title: "开始时间",
@@ -290,7 +317,24 @@ export default function AgentObservabilityPage() {
         </div>
       </footer>
       <Drawer
-        title={selectedRun ? `Run ${selectedRun.run_id}` : "Run Inspector"}
+        title={
+          selectedRun ? (
+            <div className={styles.drawerTitle}>
+              <span>Run {selectedRun.run_id}</span>
+              <Button
+                size="small"
+                icon={<RefreshCw size={14} />}
+                aria-label="刷新 Run 详情"
+                title="刷新 Run 详情"
+                loading={detailLoading}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void openRun(selectedRun);
+                }}
+              />
+            </div>
+          ) : "Run Inspector"
+        }
         open={selectedRun !== null}
         onClose={() => {
           eventRequestRef.current?.abort();
@@ -341,7 +385,13 @@ export default function AgentObservabilityPage() {
                 ))}
               </div>
               {detail.spans_has_more && (
-                <Text type="secondary">已加载部分 Span；更多节点需要分页加载。</Text>
+                <Button
+                  size="small"
+                  loading={spansLoading}
+                  onClick={() => void loadMoreSpans()}
+                >
+                  加载更多 Span
+                </Button>
               )}
               <div className={styles.eventHeader}>
                 <Text strong>{eventSpanId ? "Span 事件" : "Run 事件"}</Text>
