@@ -56,8 +56,17 @@ export interface AgentObservabilitySpan {
   has_error: number | null;
   error_type: string | null;
   duration_us: number | null;
+  time_to_first_chunk_us: number | null;
+  time_to_first_visible_text_us: number | null;
   input_tokens: number | null;
   output_tokens: number | null;
+  model_key: string | null;
+  provider_key: string | null;
+  request_model_key: string | null;
+  response_model_key: string | null;
+  model_key_source: string | null;
+  streaming: number | null;
+  finish_reason: string | null;
 }
 
 export interface AgentObservabilityRunDetail {

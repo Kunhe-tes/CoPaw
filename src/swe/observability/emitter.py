@@ -35,7 +35,7 @@ _REQUIRED_FIELDS = frozenset(
     },
 )
 _TOKEN_FIELDS = frozenset(
-    "event_name producer_id obs_run_id obs_attempt_id obs_span_id parent_obs_span_id entity_kind entity_id phase_key service_unit_id source_id tenant_id agent_id chat_id session_id channel root_question_msgid current_question_msgid span_type operation kind name status technical_status reason_code decision error_type phase provider_key request_model_key response_model_key model_key_source tool_key skill_key agent_key prompt_id prompt_version tool_call_id occurrence_id message_id content_type reference_id business_subagent_key mode execution_agent_key attempt_ordinal terminal_fact_source saved_state".split(),
+    "event_name producer_id obs_run_id obs_attempt_id obs_span_id parent_obs_span_id entity_kind entity_id phase_key service_unit_id source_id tenant_id agent_id chat_id session_id channel root_question_msgid current_question_msgid span_type operation kind name status technical_status reason_code decision error_type phase provider_key request_model_key response_model_key model_key_source finish_reason tool_key skill_key agent_key prompt_id prompt_version tool_call_id occurrence_id message_id content_type reference_id business_subagent_key mode execution_agent_key attempt_ordinal terminal_fact_source saved_state".split(),
 )
 _TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_.:@/-]{1,256}$")
 _ENUM_FIELDS = {

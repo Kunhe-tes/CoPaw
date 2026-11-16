@@ -177,6 +177,10 @@ async def test_model_wrapper_records_usage_without_payload(monkeypatch):
             return SimpleNamespace(
                 content=[{"type": "text", "text": "private answer"}],
                 usage=SimpleNamespace(input_tokens=3, output_tokens=4),
+                metadata={
+                    "model": "actual-response-model",
+                    "finish_reason": "stop",
+                },
             )
 
     context = Observability().admit_run(
@@ -200,6 +204,9 @@ async def test_model_wrapper_records_usage_without_payload(monkeypatch):
     assert ended["span_type"] == "LLM"
     assert ended["metrics"]["input_tokens"] == 3
     assert ended["metrics"]["output_tokens"] == 4
+    assert ended["response_model_key"] == "actual-response-model"
+    assert ended["model_key_source"] == "response"
+    assert ended["finish_reason"] == "stop"
     retry = next(
         json.loads(line)
         for line in payload.splitlines()
@@ -227,6 +234,10 @@ async def test_model_wrapper_records_first_nonempty_stream_chunk(monkeypatch):
                 yield SimpleNamespace(
                     content=[{"type": "text", "text": "visible"}],
                     usage=SimpleNamespace(input_tokens=2, output_tokens=1),
+                    metadata={
+                        "model": "stream-response-model",
+                        "finish_reason": "stop",
+                    },
                 )
 
             return chunks()
@@ -250,7 +261,11 @@ async def test_model_wrapper_records_first_nonempty_stream_chunk(monkeypatch):
         if '"event_name":"span.ended"' in line
     )
     assert ended["metrics"]["first_chunk_us"] >= 0
+    assert ended["metrics"]["first_visible_text_us"] >= 0
     assert ended["metrics"]["usage_known"] is True
+    assert ended["response_model_key"] == "stream-response-model"
+    assert ended["model_key_source"] == "response"
+    assert ended["finish_reason"] == "stop"
 
 
 def test_cancellation_is_recorded_and_propagated():

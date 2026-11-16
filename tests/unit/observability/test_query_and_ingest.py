@@ -215,6 +215,15 @@ def test_ingest_validation_rejects_sql_width_overflow_and_bad_attempt_ids():
     with pytest.raises(ValueError, match="invalid_error_flag"):
         _validate_payload(json.dumps(event))
     event["has_error"] = False
+    event["streaming"] = 1
+    with pytest.raises(ValueError, match="invalid_streaming_flag"):
+        _validate_payload(json.dumps(event))
+    event["streaming"] = True
+    event["model_key_source"] = "guessed"
+    with pytest.raises(ValueError, match="invalid_model_key_source"):
+        _validate_payload(json.dumps(event))
+    event.pop("streaming")
+    event.pop("model_key_source")
     event["terminal_fact_source"] = "x" * 33
     with pytest.raises(ValueError, match="field_too_long"):
         _validate_payload(json.dumps(event))

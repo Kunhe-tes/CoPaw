@@ -367,6 +367,35 @@ export default function AgentObservabilityPage() {
                     <div>
                       <Text strong>{span.name || "unknown"}</Text>
                       <Text type="secondary"> · {span.operation} · {span.span_type}</Text>
+                      {span.span_type === "LLM" && (
+                        <div className={styles.modelMeta}>
+                          <Text type="secondary">
+                            {span.provider_key ?? "Provider 未知"} · 请求 {span.request_model_key ?? "模型未知"}
+                            {" -> "}
+                            {span.response_model_key ?? span.model_key ?? "响应模型未知"}
+                            {span.model_key_source === "request_fallback" ? "（按请求模型索引）" : ""}
+                          </Text>
+                          <Text type="secondary">
+                            {span.streaming == null ? "流式状态未知" : span.streaming ? "流式" : "非流式"}
+                            {span.finish_reason ? ` · 结束原因 ${span.finish_reason}` : " · 结束原因未知"}
+                          </Text>
+                          <Text type="secondary">
+                            {span.input_tokens == null ? "输入 Token 未知" : `输入 ${span.input_tokens}`}
+                            {" · "}
+                            {span.output_tokens == null ? "输出 Token 未知" : `输出 ${span.output_tokens}`}
+                            {span.input_tokens == null && span.output_tokens == null ? " · Usage 未知" : ""}
+                          </Text>
+                          <Text type="secondary">
+                            {span.time_to_first_chunk_us == null
+                              ? "首个有效内容未知"
+                              : `首个有效内容 ${(span.time_to_first_chunk_us / 1000).toFixed(1)} ms`}
+                            {" · "}
+                            {span.time_to_first_visible_text_us == null
+                              ? "首段文本未知"
+                              : `首段文本 ${(span.time_to_first_visible_text_us / 1000).toFixed(1)} ms`}
+                          </Text>
+                        </div>
+                      )}
                     </div>
                     <div className={styles.spanMeta}>
                       <Tag color={statusColor(span.status)}>{span.status ?? "unknown"}</Tag>

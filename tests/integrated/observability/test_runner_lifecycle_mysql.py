@@ -235,6 +235,19 @@ async def _assert_llm_span_projection(store, records, run_id):
     )
     assert llm_span["input_tokens"] == model_end["metrics"]["input_tokens"]
     assert llm_span["output_tokens"] == model_end["metrics"]["output_tokens"]
+    decode = lambda value: (
+        value.decode() if isinstance(value, bytes) else value
+    )
+    assert (
+        decode(llm_span["request_model_key"]) == model_end["request_model_key"]
+    )
+    assert decode(llm_span["response_model_key"]) == "response-model"
+    assert decode(llm_span["model_key"]) == "response-model"
+    assert llm_span["model_key_source"] == "response"
+    assert llm_span["streaming"] == model_end["streaming"]
+    assert decode(llm_span["finish_reason"]) == "stop"
+    assert llm_span["time_to_first_chunk_us"] is None
+    assert llm_span["time_to_first_visible_text_us"] is None
     return llm_span
 
 
@@ -368,6 +381,7 @@ def _install_deterministic_provider(monkeypatch):
             ChatResponse(
                 content=[{"type": "text", "text": "hello from the agent"}],
                 usage=ChatUsage(input_tokens=3, output_tokens=4, time=0.0),
+                metadata={"model": "response-model", "finish_reason": "stop"},
             ),
         ]
         * 4,

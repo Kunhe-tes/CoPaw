@@ -93,6 +93,13 @@ REQUIRED_COLUMNS = {
             "kind",
             "name",
             "step_index",
+            "model_key",
+            "provider_key",
+            "request_model_key",
+            "response_model_key",
+            "model_key_source",
+            "streaming",
+            "finish_reason",
             "started_at",
             "ended_at",
             "status",
@@ -100,6 +107,8 @@ REQUIRED_COLUMNS = {
             "has_error",
             "error_type",
             "duration_us",
+            "time_to_first_chunk_us",
+            "time_to_first_visible_text_us",
             "input_tokens",
             "output_tokens",
         },
@@ -306,7 +315,10 @@ class ObservabilityStore:
         query = (
             "SELECT span_id,run_id,attempt_id,parent_span_id,span_type,operation,"
             "kind,name,step_index,started_at,ended_at,status,technical_status,"
-            "has_error,error_type,duration_us,input_tokens,output_tokens "
+            "has_error,error_type,duration_us,time_to_first_chunk_us,"
+            "time_to_first_visible_text_us,input_tokens,output_tokens,model_key,"
+            "provider_key,request_model_key,response_model_key,model_key_source,"
+            "streaming,finish_reason "
             "FROM swe_agentobs_spans WHERE run_id=%s"
         )
         params: list[Any] = [run_id]

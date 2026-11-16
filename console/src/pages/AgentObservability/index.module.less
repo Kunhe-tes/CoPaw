@@ -101,6 +101,22 @@
   padding: 6px 8px;
   border: 1px solid #e8eaee;
   border-radius: 6px;
+
+  > div:first-child {
+    min-width: 0;
+  }
+}
+
+.modelMeta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  margin-top: 4px;
+
+  > span {
+    overflow-wrap: anywhere;
+  }
 }
 
 .spanMeta {

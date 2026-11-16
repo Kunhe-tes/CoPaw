@@ -108,6 +108,12 @@ CREATE TABLE swe_agentobs_spans (
     operation VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     kind VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     model_key VARBINARY(256) NULL,
+    provider_key VARBINARY(256) NULL,
+    request_model_key VARBINARY(256) NULL,
+    response_model_key VARBINARY(256) NULL,
+    model_key_source VARCHAR(24) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    streaming TINYINT UNSIGNED NULL,
+    finish_reason VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL,
     tool_key VARBINARY(256) NULL,
     started_at DATETIME(6) NOT NULL,
     ended_at DATETIME(6) NULL,
@@ -126,6 +132,7 @@ CREATE TABLE swe_agentobs_spans (
     KEY ix_agentobs_spans_type (run_id, span_type, started_at, span_id),
     KEY ix_agentobs_spans_model (model_key, started_at, run_id),
     KEY ix_agentobs_spans_tool (tool_key, started_at, run_id),
+    CONSTRAINT ck_agentobs_span_streaming CHECK (streaming IS NULL OR streaming IN (0,1)),
     CONSTRAINT ck_agentobs_span_metadata CHECK (OCTET_LENGTH(metadata_text) <= 24576)
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;
 

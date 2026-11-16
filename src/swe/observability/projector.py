@@ -46,6 +46,8 @@ _FIELD_BYTES = {
     "name": 128,
     "error_type": 128,
     "terminal_fact_source": 32,
+    "model_key_source": 24,
+    "finish_reason": 64,
 }
 _UUID_FIELDS = (
     "obs_run_id",
@@ -304,6 +306,18 @@ def _validate_lifecycle_values(event: dict[str, Any]) -> None:
         and not isinstance(event["has_error"], bool)
     ):
         raise ValueError("invalid_error_flag")
+    if (
+        "streaming" in event
+        and event["streaming"] is not None
+        and not isinstance(event["streaming"], bool)
+    ):
+        raise ValueError("invalid_streaming_flag")
+    if event.get("model_key_source") not in {
+        None,
+        "response",
+        "request_fallback",
+    }:
+        raise ValueError("invalid_model_key_source")
     _timestamp(event.get("occurred_at"))
     _timestamp(event.get("run_started_at"))
     for key in ("attempt_index", "step_index"):
@@ -728,15 +742,26 @@ class InboxProjector:
             is_end = name == "span.ended"
             await session.execute(
                 "INSERT INTO swe_agentobs_spans (span_id,run_id,attempt_id,parent_span_id,span_type,operation,kind,name,step_index,"
-                "started_at,ended_at,status,technical_status,has_error,error_type,duration_us,input_tokens,output_tokens,metadata_text) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "started_at,ended_at,status,technical_status,has_error,error_type,duration_us,time_to_first_chunk_us,"
+                "time_to_first_visible_text_us,input_tokens,output_tokens,model_key,provider_key,request_model_key,"
+                "response_model_key,model_key_source,streaming,finish_reason,metadata_text) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON DUPLICATE KEY UPDATE status=IF(VALUES(ended_at) IS NOT NULL,COALESCE(VALUES(status),status),"
                 "IF(ended_at IS NULL,COALESCE(VALUES(status),status),status)),"
                 "ended_at=COALESCE(ended_at,VALUES(ended_at)),"
                 "technical_status=COALESCE(VALUES(technical_status),technical_status),has_error=COALESCE(VALUES(has_error),has_error),"
                 "error_type=COALESCE(VALUES(error_type),error_type),duration_us=COALESCE(VALUES(duration_us),duration_us),"
+                "time_to_first_chunk_us=COALESCE(VALUES(time_to_first_chunk_us),time_to_first_chunk_us),"
+                "time_to_first_visible_text_us=COALESCE(VALUES(time_to_first_visible_text_us),time_to_first_visible_text_us),"
                 "input_tokens=COALESCE(VALUES(input_tokens),input_tokens),"
                 "output_tokens=COALESCE(VALUES(output_tokens),output_tokens),"
+                "model_key=COALESCE(VALUES(model_key),model_key),"
+                "provider_key=COALESCE(VALUES(provider_key),provider_key),"
+                "request_model_key=COALESCE(VALUES(request_model_key),request_model_key),"
+                "response_model_key=COALESCE(VALUES(response_model_key),response_model_key),"
+                "model_key_source=COALESCE(VALUES(model_key_source),model_key_source),"
+                "streaming=COALESCE(VALUES(streaming),streaming),"
+                "finish_reason=COALESCE(VALUES(finish_reason),finish_reason),"
                 "metadata_text=VALUES(metadata_text)",
                 (
                     event["obs_span_id"],
@@ -765,8 +790,22 @@ class InboxProjector:
                     ),
                     event.get("error_type"),
                     (event.get("metrics") or {}).get("duration_us"),
+                    (event.get("metrics") or {}).get("first_chunk_us"),
+                    (event.get("metrics") or {}).get("first_visible_text_us"),
                     (event.get("metrics") or {}).get("input_tokens"),
                     (event.get("metrics") or {}).get("output_tokens"),
+                    event.get("response_model_key")
+                    or event.get("request_model_key"),
+                    event.get("provider_key"),
+                    event.get("request_model_key"),
+                    event.get("response_model_key"),
+                    event.get("model_key_source"),
+                    (
+                        int(event["streaming"])
+                        if isinstance(event.get("streaming"), bool)
+                        else None
+                    ),
+                    event.get("finish_reason"),
                     metadata,
                 ),
             )

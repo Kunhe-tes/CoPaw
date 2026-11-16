@@ -256,9 +256,13 @@ class ObservabilityModelWrapper:
             result = await self._model(messages, *args, **kwargs)
             if _is_async_iterable(result):
                 return self._consume_stream(result, handle, started)
+            response_metadata = _model_response_metadata(result)
+            if "model_key_source" not in response_metadata:
+                response_metadata["model_key_source"] = "request_fallback"
             handle.end(
                 status="succeeded",
                 metrics=_usage_metrics(result),
+                **response_metadata,
             )
             return result
         except asyncio.CancelledError:
@@ -277,7 +281,9 @@ class ObservabilityModelWrapper:
 
     async def _consume_stream(self, stream, handle: SpanHandle, started: int):
         first_chunk_us = None
+        first_visible_text_us = None
         latest_metrics: dict[str, Any] = {}
+        response_metadata: dict[str, Any] = {}
         token = _current_model_span.set(handle)
         try:
             async for chunk in stream:
@@ -286,12 +292,28 @@ class ObservabilityModelWrapper:
                         0,
                         (time.monotonic_ns() - started) // 1000,
                     )
+                if first_visible_text_us is None and _has_visible_model_text(
+                    chunk,
+                ):
+                    first_visible_text_us = max(
+                        0,
+                        (time.monotonic_ns() - started) // 1000,
+                    )
                 latest_metrics = _usage_metrics(chunk) or latest_metrics
+                response_metadata.update(_model_response_metadata(chunk))
                 yield chunk
             metrics = dict(latest_metrics)
             if first_chunk_us is not None:
                 metrics["first_chunk_us"] = first_chunk_us
-            handle.end(status="succeeded", metrics=metrics)
+            if first_visible_text_us is not None:
+                metrics["first_visible_text_us"] = first_visible_text_us
+            if "model_key_source" not in response_metadata:
+                response_metadata["model_key_source"] = "request_fallback"
+            handle.end(
+                status="succeeded",
+                metrics=metrics,
+                **response_metadata,
+            )
         except asyncio.CancelledError:
             handle.end(status="cancelled", technical_status="cancelled")
             raise
@@ -312,6 +334,28 @@ def _has_model_output(value: Any) -> bool:
     if content is None and isinstance(value, dict):
         content = value.get("content")
     return bool(content)
+
+
+def _has_visible_model_text(value: Any) -> bool:
+    content = getattr(value, "content", None)
+    if content is None and isinstance(value, dict):
+        content = value.get("content")
+    if not isinstance(content, (list, tuple)):
+        return False
+    return any(
+        (
+            isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+            and bool(block["text"].strip())
+        )
+        or (
+            getattr(block, "type", None) == "text"
+            and isinstance(getattr(block, "text", None), str)
+            and bool(block.text.strip())
+        )
+        for block in content
+    )
 
 
 def _is_async_iterable(value: Any) -> bool:
@@ -338,6 +382,21 @@ def _usage_metrics(value: Any) -> dict[str, Any]:
         if isinstance(token_value, int) and token_value >= 0:
             metrics[output_key] = token_value
     return metrics
+
+
+def _model_response_metadata(value: Any) -> dict[str, Any]:
+    metadata = getattr(value, "metadata", None)
+    if not isinstance(metadata, dict):
+        return {}
+    response_model = metadata.get("model")
+    finish_reason = metadata.get("finish_reason")
+    result = {}
+    if isinstance(response_model, str) and response_model.strip():
+        result["response_model_key"] = response_model[:256]
+        result["model_key_source"] = "response"
+    if isinstance(finish_reason, str) and finish_reason.strip():
+        result["finish_reason"] = finish_reason[:64]
+    return result
 
 
 class Observability:
