@@ -357,6 +357,7 @@ async def test_fast_verification_rejects_locator_parts_from_different_blocks(
             {"block": "offset-checkpoint", "part": "length"},
             {"block": "offset-checkpoint", "part": "offset"},
         ),
+        (None, {"block": "offset-checkpoint", "part": "length"}),
     ],
 )
 def test_fast_verification_rejects_malformed_locator_pair(
@@ -372,10 +373,9 @@ def test_fast_verification_rejects_malformed_locator_pair(
         bundles.root,
     )
     with bundles.open_reader(relative_path.as_posix()) as reader:
-        values = {
-            "checkpoint_offset": offset_ref,
-            "checkpoint_length": length_ref,
-        }
+        values = {"checkpoint_length": length_ref}
+        if offset_ref is not None:
+            values["checkpoint_offset"] = offset_ref
         with pytest.raises(IntegrityError, match="block pair"):
             _validate_locator_pairs(
                 values,

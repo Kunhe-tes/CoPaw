@@ -113,6 +113,11 @@ def _read_publication_plan(
 
 
 def _validate_locator_pairs(values, resolved, publication, index):
+    for key in values:
+        if key.endswith("_length"):
+            offset_key = key[: -len("_length")] + "_offset"
+            if offset_key not in values:
+                raise IntegrityError("publication locator block pair differs")
     for offset_key, offset_ref in values.items():
         if not offset_key.endswith("_offset"):
             continue
