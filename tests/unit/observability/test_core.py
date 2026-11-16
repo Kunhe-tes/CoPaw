@@ -170,6 +170,9 @@ async def test_model_wrapper_records_usage_without_payload(monkeypatch):
         stream = False
 
         async def __call__(self, *_args, **_kwargs):
+            from swe.observability.instrumentation import record_model_retry
+
+            record_model_retry(1, 2, "TimeoutError", 0.01)
             return SimpleNamespace(
                 content=[{"type": "text", "text": "private answer"}],
                 usage=SimpleNamespace(input_tokens=3, output_tokens=4),
@@ -196,6 +199,13 @@ async def test_model_wrapper_records_usage_without_payload(monkeypatch):
     assert ended["span_type"] == "LLM"
     assert ended["metrics"]["input_tokens"] == 3
     assert ended["metrics"]["output_tokens"] == 4
+    retry = next(
+        json.loads(line)
+        for line in payload.splitlines()
+        if '"event_name":"span.event"' in line
+    )
+    assert retry["event_kind"] == "retry"
+    assert retry["error_type"] == "TimeoutError"
 
 
 @pytest.mark.asyncio

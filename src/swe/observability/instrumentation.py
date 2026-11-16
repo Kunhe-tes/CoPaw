@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextvars import ContextVar
 from typing import Any, Literal
 
 from .config import capture_enabled
@@ -184,6 +185,30 @@ class SpanHandle:
         return False
 
 
+_current_model_span: ContextVar[SpanHandle | None] = ContextVar(
+    "agentobs_current_model_span",
+    default=None,
+)
+
+
+def record_model_retry(
+    attempt: int,
+    max_attempts: int,
+    error_type: str,
+    delay_seconds: float,
+) -> None:
+    span = _current_model_span.get()
+    if span is None:
+        return
+    span.event(
+        "retry",
+        retries=attempt,
+        loop_count=max_attempts,
+        error_type=error_type,
+        metrics={"delay_ms": max(0, int(delay_seconds * 1000))},
+    )
+
+
 class ObservabilityModelWrapper:
     """Record one logical model call without retaining model payloads."""
 
@@ -224,6 +249,7 @@ class ObservabilityModelWrapper:
         if handle is None:
             return await self._model(messages, *args, **kwargs)
         started = time.monotonic_ns()
+        token = _current_model_span.set(handle)
         try:
             result = await self._model(messages, *args, **kwargs)
             if _is_async_iterable(result):
@@ -244,10 +270,13 @@ class ObservabilityModelWrapper:
                 error_type=type(exc).__name__,
             )
             raise
+        finally:
+            _current_model_span.reset(token)
 
     async def _consume_stream(self, stream, handle: SpanHandle, started: int):
         first_chunk_us = None
         latest_metrics: dict[str, Any] = {}
+        token = _current_model_span.set(handle)
         try:
             async for chunk in stream:
                 if first_chunk_us is None and _has_model_output(chunk):
@@ -272,6 +301,8 @@ class ObservabilityModelWrapper:
                 error_type=type(exc).__name__,
             )
             raise
+        finally:
+            _current_model_span.reset(token)
 
 
 def _has_model_output(value: Any) -> bool:

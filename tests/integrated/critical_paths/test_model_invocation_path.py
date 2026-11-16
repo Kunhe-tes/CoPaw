@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import io
+import json
+
 import pytest
 from agentscope.model._model_response import ChatResponse
 from agentscope.model._model_usage import ChatUsage
@@ -11,6 +14,9 @@ from swe.agents import model_factory
 from swe.config.llm_workload import LLM_WORKLOAD_CRON, bind_llm_workload
 from swe.providers.rate_limiter import reset_rate_limiter
 from swe.providers.retry_chat_model import RetryChatModel
+from swe.observability import Observability, Scope, bind_context
+from swe.observability.config import EmitterConfig
+from swe.observability.emitter import JsonlEmitter
 
 from tests.integrated.critical_paths.conftest import (
     DeterministicChatModel,
@@ -59,7 +65,7 @@ async def test_provider_model_factory_wrappers_and_retry_are_in_invocation_path(
         agent_id="critical-agent",
     )
 
-    assert isinstance(model, RetryChatModel)
+    assert isinstance(model._model, RetryChatModel)
     assert formatter is not None
 
     with bind_llm_workload(LLM_WORKLOAD_CRON):
@@ -67,6 +73,74 @@ async def test_provider_model_factory_wrappers_and_retry_are_in_invocation_path(
 
     assert response.content[0]["text"] == "retry ok"
     assert len(bottom_model.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_model_retry_is_linked_to_one_observability_span(
+    monkeypatch,
+    isolated_agent_config,
+) -> None:
+    _, write_agent_config = isolated_agent_config
+    write_agent_config()
+    bottom_model = DeterministicChatModel(
+        [
+            TimeoutError("private provider detail"),
+            ChatResponse(
+                content=[{"type": "text", "text": "retry ok"}],
+                usage=ChatUsage(input_tokens=5, output_tokens=2, time=0.0),
+            ),
+        ],
+    )
+    manager = FakeProviderManager(FakeProvider(bottom_model))
+    monkeypatch.setattr(
+        model_factory.ProviderManager,
+        "ensure_tenant_provider_storage",
+        lambda _tenant_id: None,
+    )
+    monkeypatch.setattr(
+        model_factory.ProviderManager,
+        "get_instance",
+        lambda _tenant_id=None: manager,
+    )
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+    context = Observability().admit_run(
+        scope=Scope("svc", "source", "tenant", "critical-agent"),
+        enabled=True,
+    )
+    model, _formatter = model_factory.create_model_and_formatter(
+        agent_id="critical-agent",
+    )
+
+    with bind_context(context), bind_llm_workload(LLM_WORKLOAD_CRON):
+        result = await model([{"content": "private prompt"}])
+
+    emitter.close()
+    assert result.content[0]["text"] == "retry ok"
+    assert len(bottom_model.calls) == 2
+    records = [json.loads(line) for line in stream.getvalue().splitlines()]
+    span_starts = [
+        record for record in records if record["event_name"] == "span.started"
+    ]
+    retries = [
+        record for record in records if record.get("event_kind") == "retry"
+    ]
+    span_ends = [
+        record for record in records if record["event_name"] == "span.ended"
+    ]
+    assert len(span_starts) == len(span_ends) == 1
+    assert len(retries) == 1
+    assert retries[0]["entity_kind"] == "span"
+    assert retries[0]["entity_id"] == span_starts[0]["entity_id"]
+    assert retries[0]["error_type"] == "TimeoutError"
+    assert span_ends[0]["metrics"]["input_tokens"] == 5
+    assert span_ends[0]["metrics"]["output_tokens"] == 2
+    assert "private provider detail" not in stream.getvalue()
+    assert "private prompt" not in stream.getvalue()
 
 
 def test_provider_model_factory_passes_model_generation_config(

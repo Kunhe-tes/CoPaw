@@ -1346,13 +1346,28 @@ def create_model_and_formatter(
         )
 
         # Wrap with retry logic for transient LLM API errors
+        from ..observability.instrumentation import record_model_retry
+
+        async def on_model_retry(
+            attempt: int,
+            max_attempts: int,
+            error: Exception,
+            delay: float,
+        ) -> None:
+            record_model_retry(
+                attempt,
+                max_attempts,
+                type(error).__name__,
+                delay,
+            )
+
         wrapped_model = RetryChatModel(
             wrapped_model,
             retry_config=retry_config,
             rate_limit_config=rate_limit_config,
             tenant_id=tenant_id,
             agent_id=resolved_agent_id,
-            on_retry=None,  # 模型层重试回调，后续可通过上下文变量传递事件
+            on_retry=on_model_retry,
         )
         from ..observability.instrumentation import ObservabilityModelWrapper
 
