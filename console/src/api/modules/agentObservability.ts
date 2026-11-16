@@ -28,6 +28,45 @@ export interface AgentObservabilityRunPage {
   window_end: string;
 }
 
+export interface AgentObservabilityAttempt {
+  attempt_id: string;
+  run_id: string;
+  attempt_index: number;
+  predecessor_attempt_id: string | null;
+  started_at: string;
+  ended_at: string | null;
+  status: string | null;
+  duration_us: number | null;
+}
+
+export interface AgentObservabilitySpan {
+  span_id: string;
+  run_id: string;
+  attempt_id: string | null;
+  parent_span_id: string | null;
+  span_type: string;
+  operation: string;
+  kind: string;
+  name: string;
+  step_index: number | null;
+  started_at: string;
+  ended_at: string | null;
+  status: string | null;
+  technical_status: string | null;
+  has_error: number | null;
+  error_type: string | null;
+  duration_us: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+}
+
+export interface AgentObservabilityRunDetail {
+  run: AgentObservabilityRun;
+  attempts: AgentObservabilityAttempt[];
+  spans: AgentObservabilitySpan[];
+  spans_has_more: boolean;
+}
+
 export interface RunQuery {
   sources?: string[];
   cursor?: string;
@@ -83,6 +122,21 @@ export function listAgentObservabilityRuns(
   params.set("limit", String(query.limit ?? 50));
   return request<AgentObservabilityRunPage>(
     `/agent-observability/runs?${params.toString()}`,
+    { signal },
+  );
+}
+
+export function getAgentObservabilityRunDetail(
+  runId: string,
+  query: { attemptId?: string; spanLimit?: number } = {},
+  signal?: AbortSignal,
+): Promise<AgentObservabilityRunDetail> {
+  const params = new URLSearchParams();
+  if (query.attemptId) params.set("attempt_id", query.attemptId);
+  if (query.spanLimit) params.set("span_limit", String(query.spanLimit));
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return request<AgentObservabilityRunDetail>(
+    `/agent-observability/runs/${encodeURIComponent(runId)}${suffix}`,
     { signal },
   );
 }

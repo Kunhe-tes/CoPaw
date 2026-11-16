@@ -6,6 +6,7 @@ vi.mock("../request", () => ({ request: mocks.request }));
 import {
   getAgentObservabilityCapabilities,
   getAgentObservabilityHealth,
+  getAgentObservabilityRunDetail,
   listAgentObservabilityRuns,
 } from "./agentObservability";
 
@@ -41,6 +42,18 @@ describe("agent observability API", () => {
       2,
       "/agent-observability/health",
       { signal },
+    );
+  });
+
+  it("loads a bounded Run detail with an optional Attempt filter", async () => {
+    mocks.request.mockResolvedValue({});
+    await getAgentObservabilityRunDetail("run/one", {
+      attemptId: "attempt-one",
+      spanLimit: 120,
+    });
+    expect(mocks.request).toHaveBeenCalledWith(
+      "/agent-observability/runs/run%2Fone?attempt_id=attempt-one&span_limit=120",
+      { signal: undefined },
     );
   });
 });

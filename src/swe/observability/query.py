@@ -10,6 +10,7 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -50,6 +51,13 @@ class HealthResponse(BaseModel):
     generated_at: datetime
 
 
+class RunDetailResponse(BaseModel):
+    run: dict[str, Any]
+    attempts: list[dict[str, Any]]
+    spans: list[dict[str, Any]]
+    spans_has_more: bool
+
+
 def _require_observability_reader(request: Request) -> str:
     role = request.headers.get("X-User-Role", "").strip().lower()
     if role not in {"manager", "admin"}:
@@ -80,11 +88,16 @@ async def capabilities(request: Request) -> CapabilitiesResponse:
             request.app.state,
             "agent_observability_connection",
             None,
-        ) is not None,
+        )
+        is not None,
         storage_ready=await _storage_ready(request),
         projector_running=bool(
             getattr(
-                getattr(request.app.state, "agent_observability_projector", None),
+                getattr(
+                    request.app.state,
+                    "agent_observability_projector",
+                    None,
+                ),
                 "running",
                 False,
             ),
@@ -110,7 +123,11 @@ async def health(request: Request) -> HealthResponse:
         storage_ready=await _storage_ready(request),
         projector_running=bool(
             getattr(
-                getattr(request.app.state, "agent_observability_projector", None),
+                getattr(
+                    request.app.state,
+                    "agent_observability_projector",
+                    None,
+                ),
                 "running",
                 False,
             ),
@@ -120,7 +137,10 @@ async def health(request: Request) -> HealthResponse:
     )
 
 
-def _authorized_sources(request: Request, requested: list[str] | None) -> list[str]:
+def _authorized_sources(
+    request: Request,
+    requested: list[str] | None,
+) -> list[str]:
     role = request.headers.get("X-User-Role", "").strip().lower()
     current = getattr(request.state, "source_id", None)
     if role not in {"manager", "admin"}:
@@ -146,12 +166,17 @@ def _cursor_secret() -> bytes:
     secret = os.environ.get("SWE_AGENTOBS_CURSOR_SECRET", "")
     if len(secret.encode()) < 32:
         raise HTTPException(
-            status_code=503, detail="Observability cursor key unavailable",
+            status_code=503,
+            detail="Observability cursor key unavailable",
         )
     return secret.encode()
 
 
-def _encode_cursor(last_started: datetime, run_id: str, scope: dict[str, Any]) -> str:
+def _encode_cursor(
+    last_started: datetime,
+    run_id: str,
+    scope: dict[str, Any],
+) -> str:
     body = json.dumps(
         {
             "v": 1,
@@ -167,24 +192,31 @@ def _encode_cursor(last_started: datetime, run_id: str, scope: dict[str, Any]) -
 
 
 def _decode_cursor(
-    cursor: str, expected_authority: dict[str, Any],
+    cursor: str,
+    expected_authority: dict[str, Any],
 ) -> tuple[datetime, str, dict[str, Any]]:
     try:
         packed = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
         body, signature = packed[:-32], packed[-32:]
         if not hmac.compare_digest(
-            signature, hmac.new(_cursor_secret(), body, hashlib.sha256).digest(),
+            signature,
+            hmac.new(_cursor_secret(), body, hashlib.sha256).digest(),
         ):
             raise ValueError("bad signature")
         payload = json.loads(body)
         scope = payload.get("scope")
         if payload.get("v") != 1 or not isinstance(scope, dict):
             raise ValueError("scope changed")
-        if any(scope.get(key) != value for key, value in expected_authority.items()):
+        if any(
+            scope.get(key) != value
+            for key, value in expected_authority.items()
+        ):
             raise ValueError("authorization changed")
         started_at = datetime.fromisoformat(payload["started_at"])
         if started_at.tzinfo is not None:
-            started_at = started_at.astimezone(timezone.utc).replace(tzinfo=None)
+            started_at = started_at.astimezone(timezone.utc).replace(
+                tzinfo=None,
+            )
         run_id = str(payload["run_id"])
         if len(run_id) != 36:
             raise ValueError("invalid run ID")
@@ -192,7 +224,10 @@ def _decode_cursor(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=400, detail="Invalid run cursor") from exc
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid run cursor",
+        ) from exc
 
 
 @router.get("/runs", response_model=RunListResponse)
@@ -224,15 +259,25 @@ async def list_runs(
     )
     if decoded:
         if start and start.isoformat() != cursor_scope.get("start"):
-            raise HTTPException(status_code=400, detail="Run cursor filter changed")
+            raise HTTPException(
+                status_code=400,
+                detail="Run cursor filter changed",
+            )
         if end and end.isoformat() != cursor_scope.get("end"):
-            raise HTTPException(status_code=400, detail="Run cursor filter changed")
+            raise HTTPException(
+                status_code=400,
+                detail="Run cursor filter changed",
+            )
     if start_at.tzinfo is None or end_at.tzinfo is None:
         raise HTTPException(
-            status_code=400, detail="Time filters must include a timezone",
+            status_code=400,
+            detail="Time filters must include a timezone",
         )
     if end_at <= start_at or end_at - start_at > _MAX_WINDOW:
-        raise HTTPException(status_code=400, detail="Invalid run-list time window")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid run-list time window",
+        )
     scope = {
         **authority,
         "start": start_at.isoformat(),
@@ -242,7 +287,8 @@ async def list_runs(
     store = getattr(request.app.state, "agent_observability_store", None)
     if not isinstance(store, ObservabilityStore):
         raise HTTPException(
-            status_code=503, detail="Agent observability storage unavailable",
+            status_code=503,
+            detail="Agent observability storage unavailable",
         )
     try:
         rows = await store.list_runs(
@@ -255,14 +301,19 @@ async def list_runs(
         )
     except Exception as exc:
         raise HTTPException(
-            status_code=503, detail="Agent observability query unavailable",
+            status_code=503,
+            detail="Agent observability query unavailable",
         ) from exc
     has_more = len(rows) > limit
     rows = rows[:limit]
     next_cursor = None
     if has_more and rows:
         last = rows[-1]
-        next_cursor = _encode_cursor(last["started_at"], str(last["run_id"]), scope)
+        next_cursor = _encode_cursor(
+            last["started_at"],
+            str(last["run_id"]),
+            scope,
+        )
     items = []
     for row in rows:
         item = {}
@@ -279,4 +330,71 @@ async def list_runs(
         generated_at=datetime.now(timezone.utc),
         window_start=start_at,
         window_end=end_at,
+    )
+
+
+def _serialize_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result = []
+    for row in rows:
+        item = {}
+        for key, value in row.items():
+            if isinstance(value, bytes):
+                value = value.decode("utf-8")
+            elif isinstance(value, datetime) and value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            item[key] = value
+        result.append(item)
+    return result
+
+
+@router.get("/runs/{run_id}", response_model=RunDetailResponse)
+async def run_detail(
+    run_id: str,
+    request: Request,
+    attempt_id: str | None = Query(None),
+    span_limit: int = Query(200, ge=1, le=500),
+) -> RunDetailResponse:
+    _require_observability_reader(request)
+    try:
+        UUID(run_id)
+        if attempt_id is not None:
+            UUID(attempt_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid run identity",
+        ) from exc
+    sources = _authorized_sources(request, None)
+    store = getattr(request.app.state, "agent_observability_store", None)
+    if not isinstance(store, ObservabilityStore):
+        raise HTTPException(
+            status_code=503,
+            detail="Agent observability storage unavailable",
+        )
+    try:
+        row = await store.get_run(
+            service_unit_id=os.environ.get("SWE_SERVICE_UNIT_ID", "swe"),
+            run_id=run_id,
+            source_ids=sources,
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Run not found")
+        attempts = await store.list_attempts(run_id=run_id)
+        spans = await store.list_spans(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            limit=span_limit + 1,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Agent observability query unavailable",
+        ) from exc
+    return RunDetailResponse(
+        run=_serialize_rows([row])[0],
+        attempts=_serialize_rows(attempts),
+        spans=_serialize_rows(spans[:span_limit]),
+        spans_has_more=len(spans) > span_limit,
     )

@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, Button, Empty, Input, Spin, Table, Tag, Typography } from "antd";
+import { Alert, Button, Drawer, Empty, Input, Spin, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { RefreshCw } from "lucide-react";
 import {
   getAgentObservabilityCapabilities,
   getAgentObservabilityHealth,
+  getAgentObservabilityRunDetail,
   listAgentObservabilityRuns,
   type AgentObservabilityCapabilities,
   type AgentObservabilityHealth,
   type AgentObservabilityRun,
   type AgentObservabilityRunPage,
+  type AgentObservabilityRunDetail,
 } from "../../api/modules/agentObservability";
 import { useIframeStore } from "../../stores/iframeStore";
 import styles from "./index.module.less";
@@ -44,6 +46,9 @@ export default function AgentObservabilityPage() {
   const [capabilities, setCapabilities] = useState<AgentObservabilityCapabilities | null>(null);
   const [capabilityError, setCapabilityError] = useState<string | null>(null);
   const [health, setHealth] = useState<AgentObservabilityHealth | null>(null);
+  const [selectedRun, setSelectedRun] = useState<AgentObservabilityRun | null>(null);
+  const [detail, setDetail] = useState<AgentObservabilityRunDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const activeScope = `${isAdmin ? "admin" : "manager"}:${source ?? ""}:${(sources ?? []).join(",")}`;
   const visiblePage = pageScope === activeScope ? page : null;
 
@@ -113,6 +118,19 @@ export default function AgentObservabilityPage() {
       ? [...new Set(sourceText.split(",").map((item) => item.trim()).filter(Boolean))]
       : undefined;
     setSources(next);
+  };
+
+  const openRun = async (run: AgentObservabilityRun) => {
+    setSelectedRun(run);
+    setDetail(null);
+    setDetailLoading(true);
+    try {
+      setDetail(await getAgentObservabilityRunDetail(run.run_id));
+    } catch {
+      setDetail(null);
+    } finally {
+      setDetailLoading(false);
+    }
   };
 
   const columns: ColumnsType<AgentObservabilityRun> = [
@@ -209,6 +227,7 @@ export default function AgentObservabilityPage() {
             rowKey="run_id"
             columns={columns}
             dataSource={visiblePage?.items ?? []}
+            onRow={(record) => ({ onClick: () => void openRun(record) })}
             pagination={false}
             size="small"
             scroll={{ x: 1380 }}
@@ -223,6 +242,56 @@ export default function AgentObservabilityPage() {
           <Button type="primary" disabled={!visiblePage?.next_cursor || loading} onClick={goNext}>下一页</Button>
         </div>
       </footer>
+      <Drawer
+        title={selectedRun ? `Run ${selectedRun.run_id}` : "Run Inspector"}
+        open={selectedRun !== null}
+        onClose={() => setSelectedRun(null)}
+        width={Math.min(760, window.innerWidth - 24)}
+      >
+        <Spin spinning={detailLoading}>
+          {detail ? (
+            <div className={styles.inspector}>
+              <div className={styles.attempts}>
+                <Text strong>Attempts</Text>
+                {detail.attempts.map((attempt) => (
+                  <div className={styles.attempt} key={attempt.attempt_id}>
+                    <Tag color={statusColor(attempt.status)}>
+                      #{attempt.attempt_index} {attempt.status ?? "unknown"}
+                    </Tag>
+                    <Text type="secondary">{attempt.attempt_id}</Text>
+                  </div>
+                ))}
+              </div>
+              <Text strong>Agent 操作树 · 瀑布</Text>
+              <div className={styles.spanList}>
+                {detail.spans.map((span) => (
+                  <div
+                    className={styles.spanRow}
+                    key={span.span_id}
+                    style={{ paddingLeft: `${Math.min(32, span.parent_span_id ? 20 : 0)}px` }}
+                  >
+                    <div>
+                      <Text strong>{span.name || "unknown"}</Text>
+                      <Text type="secondary"> · {span.operation} · {span.span_type}</Text>
+                    </div>
+                    <div className={styles.spanMeta}>
+                      <Tag color={statusColor(span.status)}>{span.status ?? "unknown"}</Tag>
+                      <Text type="secondary">
+                        {span.duration_us == null ? "进行中/未知" : `${Math.round(span.duration_us / 1000)} ms`}
+                      </Text>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {detail.spans_has_more && (
+                <Text type="secondary">已加载部分 Span；更多节点需要分页加载。</Text>
+              )}
+            </div>
+          ) : (
+            <Empty description="暂无可用执行详情" />
+          )}
+        </Spin>
+      </Drawer>
     </main>
   );
 }
