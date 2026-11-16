@@ -20,6 +20,8 @@ import struct
 import stat
 from typing import BinaryIO, Iterator
 
+from swe.database.observation import record_operation
+
 from .errors import IntegrityError
 from .identity import SCOPE_COLUMNS, WorkspaceScope, identity_bytes
 from ...config.context import encode_scope_id, is_valid_identity_value
@@ -379,6 +381,7 @@ class BundleStore:
         """Re-fsync an existing exclusive result after a lost publish response."""
         index = self.inspect(relative_path)
         with self._directory(relative_path, create=True) as (directory, name):
+            record_operation("bundle_open")
             descriptor = os.open(
                 name,
                 os.O_RDONLY | os.O_NOFOLLOW,
@@ -425,6 +428,7 @@ class BundleStore:
             )
         with self._directory(relative_path, create=True) as (directory, name):
             temporary = f".{name}.{secrets.token_hex(16)}.tmp"
+            record_operation("bundle_open")
             fd = os.open(
                 temporary,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
@@ -465,6 +469,7 @@ class BundleStore:
     def _open(self, relative_path):
         with self._directory(relative_path) as (directory, name):
             try:
+                record_operation("bundle_open")
                 descriptor = os.open(
                     name,
                     os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
@@ -530,6 +535,7 @@ class BundleStore:
         expected_length,
         index_allowance,
     ):
+        record_operation("bundle_index_parse")
         size = os.fstat(source.fileno()).st_size
         header = source.read(HEADER.size)
         if len(header) != HEADER.size:
