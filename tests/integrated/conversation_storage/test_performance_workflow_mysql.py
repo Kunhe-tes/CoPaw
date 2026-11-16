@@ -48,7 +48,9 @@ async def _measured_invoke(arguments):
     metrics = {
         key: value
         for key, value in progress[-1].items()
-        if key.startswith(("db_", "bundle_", "stage_wall_"))
+        if key.startswith(
+            ("db_", "bundle_", "stage_wall_", "binding_", "manifest_"),
+        )
         or key in ("rss_peak_bytes", "temp_peak_bytes", "io_seconds")
     }
     return json.loads(result.stdout), {
