@@ -44,3 +44,5 @@ Priority: P0
 2026-11-16：Run Inspector 增加 5 秒有界详情首屏轮询；标签页隐藏时跳过请求，恢复可见时立即检查。刷新按 Span ID 合并并保留已加载节点，避免轮询改变选中节点或重复展示。Console fake-timer 回归验证定时刷新与隐藏暂停，页面测试 8 passed。
 
 2026-11-16：轮询仅在 Run/Attempt/span 有已知活动状态时运行；Run 与所有已知执行终结后自动停止，手动刷新仍可查迟到事实。Console fake-timer 回归覆盖活动刷新、隐藏暂停、终态停止和手动刷新，页面测试 9 passed。
+
+2026-11-16：只读前端与后端复审未发现未解决 P1/P2；目标 pre-commit、Console production build 通过。Chromium 108.0.5359.29 实际浏览器 smoke 已在 360×800 下验证树/Inspector、时间条和偏差提示；精确现场 Chromium 108.0.5359.95/360 及连续多 Attempt 业务链路仍未验收。
