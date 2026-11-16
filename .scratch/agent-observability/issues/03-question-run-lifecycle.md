@@ -33,3 +33,5 @@ Priority: P0
 2026-11-16：本轮已完成普通 admission 的 accepted/running/terminal 事件接线、SQL/legacy 重连去重、审批等待状态、默认租户 scope、取消早于 stream finally 的结算顺序，以及 metadata-only 前驱 Run carrier；受影响后端回归 189 项通过。仍保持 claimed：无 answer-turn coordinator 的 legacy Runner 以及完整真实主对话/专家主执行、Chromium 108 页面验收尚未在本票完成；审批续跑归并继续由 Ticket 08 处理。
 
 2026-11-16：新增 manager/admin 能力状态与 admin-only 全局 Health API；Run 状态缺失的 Console 行显式显示 `unknown`，质量仍独立显示。后端 observability 单测 32 passed，Console 类型检查通过，相关 Vitest 7 passed、ESLint 通过。完整真实主对话/专家主执行验收及精确 Chromium 108 补丁版仍待完成。
+
+2026-11-16：修正 Run 质量投影：accepted/running/waiting 状态保持 `partial`，仅已提交业务终态 `run.ended` 标记 `observed`；乱序下后到终态提升质量，晚到 accepted 不降级。隔离 MySQL 8.0.46 集成测试已覆盖 accepted→ended。

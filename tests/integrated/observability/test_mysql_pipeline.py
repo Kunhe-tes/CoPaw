@@ -146,6 +146,53 @@ async def test_manual_inbox_to_mysql_projection_and_authorized_run_list(monkeypa
                 ended_at=None,
             ),
         )
+        accepted_first_run_id = str(uuid4())
+        accepted_first_ingest_id = await ingest(
+            _event(
+                run_id=accepted_first_run_id,
+                event_name="run.accepted",
+                phase="accepted",
+                status="accepted",
+                occurred_at=started,
+                started_at=started,
+                ended_at=None,
+            ),
+        )
+        accepted_first_rows = await store.list_runs(
+            service_unit_id="swe",
+            source_ids=["agentobs-integration"],
+            limit=10,
+            start_at=started - timedelta(seconds=1),
+            end_at=ended + timedelta(seconds=1),
+        )
+        accepted_first = next(
+            row for row in accepted_first_rows if row["run_id"] == accepted_first_run_id
+        )
+        assert accepted_first["quality"] == "partial"
+        await ingest(
+            _event(
+                run_id=accepted_first_run_id,
+                event_name="run.ended",
+                phase="ended",
+                status="succeeded",
+                occurred_at=ended,
+                started_at=started,
+                ended_at=ended,
+            ),
+        )
+        accepted_first_rows = await store.list_runs(
+            service_unit_id="swe",
+            source_ids=["agentobs-integration"],
+            limit=10,
+            start_at=started - timedelta(seconds=1),
+            end_at=ended + timedelta(seconds=1),
+        )
+        accepted_first = next(
+            row for row in accepted_first_rows if row["run_id"] == accepted_first_run_id
+        )
+        assert accepted_first["status"] == "succeeded"
+        assert accepted_first["quality"] == "observed"
+
         malformed_terminal = _event(
             run_id=str(uuid4()),
             event_name="run.ended",
@@ -203,11 +250,16 @@ async def test_manual_inbox_to_mysql_projection_and_authorized_run_list(monkeypa
         async with connection.acquire() as session:
             inbox_rows = await session.fetch_all(
                 "SELECT processing_state,payload_text FROM swe_agentobs_inbox "
-                "WHERE ingest_id IN (%s,%s,%s) ORDER BY ingest_id",
-                (ended_ingest_id, accepted_ingest_id, malformed_ingest_id),
+                "WHERE ingest_id IN (%s,%s,%s,%s) ORDER BY ingest_id",
+                (
+                    ended_ingest_id,
+                    accepted_ingest_id,
+                    accepted_first_ingest_id,
+                    malformed_ingest_id,
+                ),
             )
-        assert len(inbox_rows) == 3
-        assert sum(row["processing_state"] == 1 for row in inbox_rows) == 2
+        assert len(inbox_rows) == 4
+        assert sum(row["processing_state"] == 1 for row in inbox_rows) == 3
         assert sum(row["processing_state"] == 2 for row in inbox_rows) == 1
         assert all(row["payload_text"] is None for row in inbox_rows)
     finally:

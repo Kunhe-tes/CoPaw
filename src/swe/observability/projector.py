@@ -559,7 +559,7 @@ class InboxProjector:
                     else None
                 ),
                 event.get("status") if is_run_fact else None,
-                "observed" if is_run_fact else "partial",
+                "observed" if name == "run.ended" else "partial",
                 event.get("terminal_fact_source") if is_run_fact else None,
                 metadata,
             ),
@@ -620,6 +620,7 @@ class InboxProjector:
                 "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON DUPLICATE KEY UPDATE status=IF(VALUES(ended_at) IS NOT NULL,COALESCE(VALUES(status),status),"
                 "IF(ended_at IS NULL,COALESCE(VALUES(status),status),status)),"
+                "quality=IF(VALUES(ended_at) IS NOT NULL,VALUES(quality),quality),"
                 "terminal_fact_source=IF(VALUES(ended_at) IS NOT NULL,COALESCE(VALUES(terminal_fact_source),terminal_fact_source),terminal_fact_source),"
                 "ended_at=COALESCE(ended_at,VALUES(ended_at)),"
                 "duration_us=COALESCE(VALUES(duration_us),duration_us),metadata_text=VALUES(metadata_text)",
@@ -635,7 +636,7 @@ class InboxProjector:
                     started,
                     _timestamp(event["ended_at"]) if event.get("ended_at") else None,
                     event.get("status") if is_run_fact else None,
-                    "observed" if is_run_fact else "partial",
+                    "observed" if name == "run.ended" else "partial",
                     event.get("terminal_fact_source") if is_run_fact else None,
                     (event.get("metrics") or {}).get("duration_us"),
                     metadata,
