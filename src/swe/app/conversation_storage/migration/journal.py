@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import time
 from ..bundle import BundleStore, new_operation_key
 from ..identity import WorkspaceScope
 
@@ -119,7 +120,18 @@ class MigrationJournal:
         target = dict(data["target"])
         if self.server_uuid is not None:
             target["server_uuid"] = self.server_uuid
-        return _json(target), _json(source)
+        started = time.perf_counter()
+        result = _json(target), _json(source)
+        from .progress import current_progress
+
+        progress = current_progress()
+        if progress is not None:
+            progress.record_persistence(
+                "binding",
+                sum(len(value.encode("utf-8")) for value in result),
+                time.perf_counter() - started,
+            )
+        return result
 
     async def prepare(self):
         target, source = self._bindings()

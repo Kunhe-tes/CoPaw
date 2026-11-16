@@ -769,3 +769,124 @@ async def test_refresh_batch_rejects_incomplete_sql_state():
     with pytest.raises(ValueError, match="committed SQL"):
         await journal.refresh_batch("missing")
     assert frozen.data["batches"] == {}
+
+
+@pytest.mark.parametrize("count", [30, 100, 1000])
+async def test_binding_measurement_baseline_source_views(tmp_path, count):
+    import io
+    from swe.app.conversation_storage.migration.journal import (
+        JournalRecovery,
+        MigrationJournal,
+    )
+    from swe.app.conversation_storage.migration.manifest import (
+        MigrationManifest,
+    )
+    from swe.app.conversation_storage.migration.progress import (
+        MigrationProgress,
+    )
+    from swe.cli.conversation_storage_tenants import TenantManifest
+
+    frozen = manifest()
+    tenants = [
+        dict(
+            service_unit_id="svc",
+            tenant_id=str(i),
+            source_id="s",
+            state="discovered",
+        )
+        for i in range(count)
+    ]
+    frozen.data.update(
+        tenants=tenants,
+        shares=[],
+        source_isolation=True,
+        tenant_isolation=True,
+    )
+    frozen.path = tmp_path / "manifest.json"
+    frozen._persist = lambda: MigrationManifest._persist(frozen)
+    db = Database()
+    recovery = JournalRecovery(db, frozen)
+    progress = MigrationProgress(
+        "migrate",
+        frozen.migration_id,
+        stream=io.StringIO(),
+    )
+    with progress.activate():
+        for tenant in tenants:
+            view = TenantManifest(frozen, tenant)
+            journal = MigrationJournal(db, view, recovery=recovery)
+            journal.frozen_bindings_data = frozen.data
+            journal._bindings()
+            view._persist()
+    print(
+        {
+            k: v
+            for k, v in progress.snapshot().items()
+            if k.startswith(("binding", "manifest"))
+        },
+    )
+    assert progress.data["binding_serializations"] == count
+    assert progress.data["manifest_writes"] == count
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "target",
+        "cutoff",
+        "revision",
+        "workspace",
+        "service",
+        "tenant",
+        "reload",
+    ],
+)
+async def test_binding_checks_never_trust_prior_mutable_evidence(mutation):
+    from swe.app.conversation_storage.migration.journal import (
+        JournalRecovery,
+        MigrationJournal,
+    )
+
+    frozen = manifest()
+    frozen.data.update(
+        tenant_review_revision=1,
+        tenant_sync_started_at_ns={"source": 1},
+        tenants=[{"evidence": {"digest": "before"}}],
+        workspaces=[{"evidence": {"digest": "before"}}],
+    )
+    db = Database()
+    recovery = JournalRecovery(db, frozen)
+    journal = MigrationJournal(db, frozen, recovery=recovery)
+    old_target, old_source = journal._bindings()
+    if mutation == "target":
+        frozen.data["target"]["nas_roots"]["svc"] = "/different"
+    elif mutation == "cutoff":
+        frozen.data["tenant_sync_started_at_ns"]["source"] = 2
+    elif mutation == "revision":
+        frozen.data["tenant_review_revision"] = 2
+    elif mutation == "workspace":
+        frozen.data["workspaces"][0]["evidence"]["digest"] = "changed"
+    elif mutation == "service":
+        frozen.data["services"][0]["nas_root"] = "/different"
+    elif mutation == "tenant":
+        frozen.data["tenants"][0]["evidence"]["digest"] = "changed"
+    else:
+        frozen.data = deepcopy(frozen.data)
+        frozen.data["source_boundary"]["snapshot_id"] = "reloaded"
+
+    async def existing_job(query, params=None):
+        assert "migration_jobs" in query
+        return [
+            {
+                "migration_id": journal.migration_id,
+                "manifest_version": 3,
+                "target_binding_text": old_target,
+                "source_binding_text": old_source,
+                "state": "planned",
+            },
+        ]
+
+    db.fetch_all = existing_job
+    with pytest.raises(ValueError, match="binding changed"):
+        await journal.prepare()
+    assert not db.hydration_pages
