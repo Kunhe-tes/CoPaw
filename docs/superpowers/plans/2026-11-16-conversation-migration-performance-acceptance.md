@@ -70,6 +70,10 @@ export SWE_TEST_DB_NAME=test_conversation_performance
 
 关联锁测试最初错误地在`DatabaseSession`调用事务接口，已由`ce15aea3a`修正并通过上述实际运行；不将修正前失败计为通过。中间版本正常源性能试跑为184.963秒、2419次execute、232次事务，只含01/02/03/06；混合场景遇到网络2013并全局停止、`io_drained=true`，此失败不是最终验收成功证据，也不用于性能收益结论。
 
+### 本地组合回归
+
+最终测试分支`8bbfaacc9`运行全部`tests/unit/app/conversation_storage`、五个相关CLI模块、`tests/unit/database`及`test_legacy_roundtrip.py`：**1829 passed，5 skipped，72.52 s**。五项skip是本地未配置真实数据库的legacy roundtrip用例，不作为MySQL语义验收证据；本地门禁/文件/领域回归全部通过。新增测试及指标捕获修改均通过正常项目提交hooks（AST、编码、密钥扫描、格式、mypy、flake8、pylint），未跳过检查。最终组合数据库性能结果仍由中央运行器回填。
+
 ### 覆盖与边界
 
 复用现有测试，避免新建一套迁移入口：
