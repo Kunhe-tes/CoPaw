@@ -130,8 +130,6 @@ def _validate_locator_pairs(values, resolved, publication, index):
             and set(length_ref) == {"block", "part"}
             and length_ref["part"] == "length"
         )
-        if not valid_offset and not valid_length:
-            continue
         if (
             not valid_offset
             or not valid_length

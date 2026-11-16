@@ -349,6 +349,42 @@ async def test_fast_verification_rejects_locator_parts_from_different_blocks(
             _validate_locator_pairs(values, resolved, {"id": 1}, reader.index)
 
 
+@pytest.mark.parametrize(
+    "offset_ref,length_ref",
+    [
+        (4, 8),
+        (
+            {"block": "offset-checkpoint", "part": "length"},
+            {"block": "offset-checkpoint", "part": "offset"},
+        ),
+    ],
+)
+def test_fast_verification_rejects_malformed_locator_pair(
+    tmp_path,
+    offset_ref,
+    length_ref,
+):
+    _database, bundles, _manifest, _inventory, _row = _inputs(
+        tmp_path,
+        record_plan=True,
+    )
+    relative_path = next(bundles.root.rglob("*.bundle")).relative_to(
+        bundles.root,
+    )
+    with bundles.open_reader(relative_path.as_posix()) as reader:
+        values = {
+            "checkpoint_offset": offset_ref,
+            "checkpoint_length": length_ref,
+        }
+        with pytest.raises(IntegrityError, match="block pair"):
+            _validate_locator_pairs(
+                values,
+                {"checkpoint_offset": 1, "checkpoint_length": 1},
+                {"id": 1},
+                reader.index,
+            )
+
+
 @pytest.mark.asyncio
 async def test_fast_verification_rejects_duplicate_bundle_path_assignment(
     tmp_path,
