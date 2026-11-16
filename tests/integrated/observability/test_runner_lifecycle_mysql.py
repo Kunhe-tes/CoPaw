@@ -312,6 +312,106 @@ def _make_runner_case(
     )
 
 
+def _install_deterministic_provider(monkeypatch):
+    from agentscope.model._model_response import ChatResponse
+    from agentscope.model._model_usage import ChatUsage
+    from swe.agents import model_factory
+    from swe.tracing import agent_trace_model_wrapper
+    from tests.integrated.critical_paths.conftest import (
+        DeterministicChatModel,
+        FakeProvider,
+        FakeProviderManager,
+    )
+
+    class CopyableFakeProvider(FakeProvider):
+        def __deepcopy__(self, _memo):
+            return self
+
+    model = DeterministicChatModel(
+        [
+            ChatResponse(
+                content=[{"type": "text", "text": "hello from the agent"}],
+                usage=ChatUsage(input_tokens=3, output_tokens=4, time=0.0),
+            ),
+        ]
+        * 4,
+    )
+    provider_manager = FakeProviderManager(CopyableFakeProvider(model))
+
+    async def get_provider_manager(_tenant_id=None):
+        return provider_manager
+
+    async def refresh_provider_manager():
+        return None
+
+    provider_manager.refresh_if_due = refresh_provider_manager
+    monkeypatch.setattr(
+        model_factory.ProviderManager,
+        "ensure_tenant_provider_storage",
+        lambda _tenant_id: None,
+    )
+    monkeypatch.setattr(
+        model_factory.ProviderManager,
+        "get_instance",
+        lambda _tenant_id=None: provider_manager,
+    )
+    monkeypatch.setattr(
+        model_factory.ProviderManager,
+        "get_or_create_instance",
+        get_provider_manager,
+    )
+    monkeypatch.setattr(
+        agent_trace_model_wrapper,
+        "current_capture",
+        lambda: None,
+    )
+    return model
+
+
+def _register_expert_main_for_request(
+    runner,
+    request,
+    workspace_dir,
+    chat_id,
+    user_id,
+    source_id,
+    turn_id,
+):
+    from swe.agents.skill_runtime_snapshot import (
+        ManifestStat,
+        WorkspaceSkillSnapshot,
+    )
+    from swe.app.subagents.models import BudgetConfig, PermissionPolicy
+
+    prepared = SimpleNamespace(
+        expert_id="integration-expert",
+        expert_name="Integration Expert",
+        binding_revision=1,
+        instruction="Answer as the integration expert.",
+        permission=PermissionPolicy.readonly(),
+        budget=BudgetConfig(max_turns=2, max_tool_calls=1, timeout_ms=10_000),
+        skill_snapshot_dirs=(),
+        mcp_configs={},
+        model_slot=None,
+        cleanup=lambda: None,
+        workspace_skill_snapshot=WorkspaceSkillSnapshot(
+            workspace_dir=workspace_dir,
+            generation=0,
+            manifest_stat=ManifestStat(0, 0, 0),
+            skills={},
+        ),
+    )
+    request.channel_meta["_expert_main_execution_token"] = (
+        runner.register_expert_main_execution(
+            prepared,
+            chat_id=chat_id,
+            user_id=user_id,
+            source_id=source_id,
+            turn_id=turn_id,
+        )
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "coordinator_enabled,expert_pending,expected_status",
@@ -420,9 +520,15 @@ async def test_runner_admission_settlement_emits_and_projects_one_run(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "expert_main",
+    [False, True],
+    ids=["standard", "expert-main"],
+)
 async def test_real_agent_runner_question_emits_and_projects_one_run(
     monkeypatch,
     tmp_path,
+    expert_main,
 ):
     monkeypatch.setenv("SWE_ALLOW_MISSING_TRACE_SDK", "true")
     monkeypatch.setenv("SWE_AGENTOBS_ENABLED", "true")
@@ -431,62 +537,12 @@ async def test_real_agent_runner_question_emits_and_projects_one_run(
         "runner-integration-secret-at-least-32",
     )
 
-    from agentscope.model._model_response import ChatResponse
-    from agentscope.model._model_usage import ChatUsage
-    from swe.agents import model_factory
     from swe.app.answer_turn.models import TurnIdentity
     from swe.app.runner.runner import AgentRunner
     from swe.observability import runner_lifecycle
-    from swe.tracing import agent_trace_model_wrapper
-    from tests.integrated.critical_paths.conftest import (
-        DeterministicChatModel,
-        FakeProvider,
-        FakeProviderManager,
-    )
-
-    class CopyableFakeProvider(FakeProvider):
-        def __deepcopy__(self, _memo):
-            return self
 
     workspace_dir = _create_agent_workspace(tmp_path, monkeypatch)
-    model = DeterministicChatModel(
-        [
-            ChatResponse(
-                content=[{"type": "text", "text": "hello from the agent"}],
-                usage=ChatUsage(input_tokens=3, output_tokens=4, time=0.0),
-            ),
-        ]
-        * 4,
-    )
-    provider_manager = FakeProviderManager(CopyableFakeProvider(model))
-
-    async def get_provider_manager(_tenant_id=None):
-        return provider_manager
-
-    async def refresh_provider_manager():
-        return None
-
-    provider_manager.refresh_if_due = refresh_provider_manager
-    monkeypatch.setattr(
-        model_factory.ProviderManager,
-        "ensure_tenant_provider_storage",
-        lambda _tenant_id: None,
-    )
-    monkeypatch.setattr(
-        model_factory.ProviderManager,
-        "get_instance",
-        lambda _tenant_id=None: provider_manager,
-    )
-    monkeypatch.setattr(
-        model_factory.ProviderManager,
-        "get_or_create_instance",
-        get_provider_manager,
-    )
-    monkeypatch.setattr(
-        agent_trace_model_wrapper,
-        "current_capture",
-        lambda: None,
-    )
+    model = _install_deterministic_provider(monkeypatch)
 
     sink = StringIO()
     emitter = JsonlEmitter(stream=sink)
@@ -533,6 +589,16 @@ async def test_real_agent_runner_question_emits_and_projects_one_run(
             "source_id": "runner-integration",
         },
     )
+    if expert_main:
+        _register_expert_main_for_request(
+            runner,
+            request,
+            workspace_dir,
+            chat_id,
+            "user-a",
+            "runner-integration",
+            question_id,
+        )
 
     try:
         await runner.start()
@@ -551,13 +617,24 @@ async def test_real_agent_runner_question_emits_and_projects_one_run(
 
         assert emitter.close(timeout=1) == 0
         records = [json.loads(line) for line in sink.getvalue().splitlines()]
-        assert [record["event_name"] for record in records] == [
+        event_names = [record["event_name"] for record in records]
+        assert event_names[:3] == [
             "run.accepted",
             "run.state",
             "attempt.started",
-            "attempt.ended",
-            "run.ended",
-        ], records
+        ]
+        assert event_names[-2:] == ["attempt.ended", "run.ended"]
+        if expert_main:
+            assert any(
+                getattr(message, "metadata", {})
+                .get(
+                    "execution_identity",
+                    {},
+                )
+                .get("kind")
+                == "expert_main"
+                for message, _last in outputs
+            )
         assert all(
             "Return a short greeting." not in line
             and "hello from the agent" not in line

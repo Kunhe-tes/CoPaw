@@ -47,3 +47,5 @@ Priority: P0
 2026-11-16：Chrome 157 实测 Console manager/admin 页面及 `hideMenu=true`：manager 无全局 Health，admin 可见累计丢弃状态；360x800 与 390x844 页面无横向溢出，窄屏表格可横向滚动至末列。该 UI 检查通过本地 iframe store 和 mock API 驱动；本地未启动后端，其他全局接口返回 500。Chromium 108.0.5359.95/360 极速模式仍未验收。
 
 2026-11-16：新增真实普通主对话集成用例：本地确定性 Provider 驱动真实 `AgentRunner.query_handler`、SWEAgent/RetryChatModel 和 admission，随后验证独立 JSONL、白名单脱敏、隔离 MySQL 投影及 manager API；该用例与 lease 分类用例合计通过 observability 集成回归。真实 Provider 网络调用、专家主 Agent 完整执行和指定 Chromium 108.0.5359.95 仍未验收。
+
+2026-11-16：将真实 Runner 用例扩展为普通与专家主执行两种模式。专家模式由服务端 ExpertMain Registry 注册受限快照并校验请求身份，实际 SWEAgent 在确定性 Provider 上完成问题；输出携带 `execution_identity.kind=expert_main`，Run/Attempt 生命周期经 JSONL、隔离 MySQL 投影及 manager API 验证。两种模式均通过。Ticket 继续保持 claimed：指定 Chromium 108.0.5359.95/360 极速模式与真实外网 Provider 尚未验收。
