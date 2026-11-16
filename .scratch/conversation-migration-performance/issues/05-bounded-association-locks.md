@@ -20,3 +20,4 @@
 - TDD：最初两项分别因逐行 SQL、整个会话关联声明失败后通过；兼容性两项先因缺少 retained_plan 失败后通过。覆盖 packet 分块、缺失行、跨 source/关系/活跃执行拒绝、prepared/committed 旧计划续跑及精确候选拒绝。
 - 项目完整提交 hooks（mypy/black/flake8/pylint 等）通过，无绕过。合并最新集成分支 `b802c1f96` 后相关回归 186 passed。MySQL 新用例 2 skipped，未配置数据库，不作为锁验收。
 - 新增真实 MySQL `test_migration_association_locks_mysql.py`：现有 Turn UPDATE、缺失 Turn INSERT 争锁 timeout，持有方 rollback 后重试成功，并记录 EXPLAIN。真实锁、执行计划及 source 独立发布验收由集成阶段统一执行，上方对应两项仍未勾选。
+- 稳定合并后的完整 `tests/unit/app/conversation_storage`：1663 passed in 67.28s；隔离 MySQL 未配置，新增两项再次明确 skipped。最终工作树干净，不推送。
