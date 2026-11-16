@@ -40,6 +40,8 @@ class IndexedQuery:
         self.renew_error = None
         self.stop_requested = False
         self.runtime = None
+        self.observability_context = None
+        self.observability_attempt = None
         self.semantic_publisher = None
         self.question_key = None
         self.chat = None
@@ -138,6 +140,20 @@ class IndexedQuery:
                     ),
                 )
                 raise
+            from ...observability.runner_lifecycle import (
+                admit_query_run,
+                start_query_attempt,
+            )
+
+            self.observability_context = admit_query_run(
+                self.owner,
+                self.request,
+                messages,
+                chat_id=self.chat.id,
+            )
+            self.observability_attempt = start_query_attempt(
+                self.observability_context,
+            )
             async with self.session.bind_authority(self.authority):
                 yield self
         except asyncio.CancelledError:
@@ -287,6 +303,18 @@ class IndexedQuery:
             raise
         self.execution.accept_committed_state(state)
         self.terminal_status = status
+        from ...observability.runner_lifecycle import finish_query_run
+
+        runtime_agent = getattr(self.runtime, "agent", None)
+        pending = getattr(runtime_agent, "_tool_guard_pending_info", None)
+        finish_query_run(
+            self.observability_context,
+            self.observability_attempt,
+            status,
+            waiting_for_approval=bool(
+                isinstance(pending, dict) and pending.get("request_id"),
+            ),
+        )
 
     async def _confirm_pending_terminal(self, operation_key):
         """Observe completed reconciliation without touching a closed snapshot."""
@@ -691,16 +719,21 @@ async def stream_indexed_query(owner, storage, messages, *, request, query):
                 async for frame in _observe(indexed):
                     yield frame
                 return
-            source = _stream_admitted(
-                owner,
-                messages,
-                request,
-                query,
-                execution,
-                indexed,
-            )
-            try:
-                async for frame in indexed.stream(source):
-                    yield frame
-            finally:
-                await source.aclose()
+            from ...observability.runner_lifecycle import bind_query_context
+
+            with bind_query_context(
+                indexed.observability_attempt or indexed.observability_context,
+            ):
+                source = _stream_admitted(
+                    owner,
+                    messages,
+                    request,
+                    query,
+                    execution,
+                    indexed,
+                )
+                try:
+                    async for frame in indexed.stream(source):
+                        yield frame
+                finally:
+                    await source.aclose()

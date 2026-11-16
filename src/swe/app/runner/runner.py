@@ -3011,6 +3011,10 @@ class AgentRunner(Runner):
             TurnIdentity,
             tuple[_QueryRuntime | None, Any],
         ] = {}
+        self._agent_observability_contexts: dict[
+            TurnIdentity,
+            tuple[Any, Any, bool],
+        ] = {}
         self._answer_turn_locations: dict[TurnIdentity, tuple[str, str]] = {}
         self._query_background_tasks: set[asyncio.Task[None]] = set()
         self._cron_persistence_results: dict[
@@ -3263,6 +3267,13 @@ class AgentRunner(Runner):
             outcome,
             terminal_status,
         ):
+            from ...observability.runner_lifecycle import finish_deferred_query_run
+
+            finish_deferred_query_run(
+                self,
+                outcome.identity,
+                outcome.status.value,
+            )
             return
 
         session_id = str(
@@ -3290,6 +3301,13 @@ class AgentRunner(Runner):
             mark_outcome,
             user_id=user_id,
             **mutation_options,
+        )
+        from ...observability.runner_lifecycle import finish_deferred_query_run
+
+        finish_deferred_query_run(
+            self,
+            outcome.identity,
+            outcome.status.value,
         )
 
     async def release_outcome(self, identity: TurnIdentity) -> None:

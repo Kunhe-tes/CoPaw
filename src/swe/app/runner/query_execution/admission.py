@@ -15,7 +15,18 @@ from ...crons.recheck_context import RecheckStartDenied, active_recheck
 
 from ..command_dispatch import _is_command, run_command_path
 from ..query_attempt import _query_session_execution
-from ..session_lifecycle import admit_user_turn
+from ..session_lifecycle import admit_user_turn_with_creation
+from swe.observability.runner_lifecycle import (
+    accept_query_run,
+    bind_query_context,
+    defer_query_run_settlement,
+    finish_query_run,
+    prepare_query_run,
+    query_waiting_for_approval,
+    start_query_attempt,
+    terminal_turn_status,
+    update_deferred_query_run_approval,
+)
 
 
 async def stream_admission(
@@ -61,77 +72,150 @@ async def stream_admission(
                 user_id,
             )
             is_command = recheck is None and query and _is_command(query)
+            turn_id = None
+            is_new_turn = False
             if session_execution is not None and not is_command:
-                await admit_user_turn(
-                    session_execution,
-                    msgs=msgs,
-                    request=request,
+                candidate_context = prepare_query_run(owner, request, msgs)
+                turn_id, is_new_turn, run_context = (
+                    await admit_user_turn_with_creation(
+                        session_execution,
+                        msgs=msgs,
+                        request=request,
+                        observability_context=candidate_context,
+                    )
                 )
-            preflight_args = {
-                "session_id": session_id,
-                "user_id": user_id,
-                "query": query,
-                "request": request,
-            }
-            if session_execution is not None:
-                preflight_args["session_execution"] = session_execution
-            preflight = await owner._prepare_query_preflight(**preflight_args)
-            denial = await _prepare_preflight_denial(
-                owner,
-                preflight,
-                session_execution,
-                session_id,
-                user_id,
+                if is_new_turn:
+                    accept_query_run(run_context)
+            else:
+                run_context = None
+            attempt_context = start_query_attempt(run_context)
+            identity_getter = getattr(owner, "_answer_turn_identity", None)
+            identity = (
+                identity_getter(request) if callable(identity_getter) else None
             )
-            if denial is not None:
-                yield denial, True
-                return
-
-            if not preflight.approval_consumed and is_command:
-                trace_id = await owner._start_query_trace(request, msgs)
-                try:
-                    command_args = (request, msgs, owner)
-                    if session_execution is None:
-                        command_stream = run_command_path(*command_args)
-                    else:
-                        command_stream = run_command_path(
-                            *command_args,
-                            session_execution=session_execution,
-                        )
-                    async for message, last in command_stream:
-                        yield message, last
-                except asyncio.CancelledError:
-                    await owner._end_trace_if_needed(
-                        trace_id,
-                        TraceStatus.CANCELLED,
-                    )
-                    raise
-                except Exception as exc:
-                    await owner._end_trace_if_needed(
-                        trace_id,
-                        TraceStatus.ERROR,
-                        str(exc),
-                    )
-                    raise
-                await owner._end_trace_if_needed(
-                    trace_id,
-                    TraceStatus.COMPLETED,
+            deferred_settlement = (
+                identity is not None
+                and getattr(owner, "_answer_turn_coordinator", None) is not None
+            )
+            if deferred_settlement:
+                defer_query_run_settlement(
+                    owner,
+                    identity,
+                    run_context,
+                    attempt_context,
+                    waiting_for_approval=False,
                 )
-                return
-
-            query_args = {
-                "request": request,
-                "query": query,
-                "session_id": session_id,
-                "preflight": preflight,
-            }
-            if session_execution is not None:
-                query_args["session_execution"] = session_execution
-            async for message, last in owner._stream_query_after_preflight(
+            stream = _stream_admitted_query(
+                owner,
                 msgs,
-                **query_args,
-            ):
+                request=request,
+                query=query,
+                session_id=session_id,
+                user_id=user_id,
+                session_execution=session_execution,
+                is_command=bool(is_command),
+            )
+            with bind_query_context(attempt_context or run_context):
+                try:
+                    async for item in stream:
+                        yield item
+                finally:
+                    waiting_for_approval = query_waiting_for_approval(
+                        owner,
+                        request,
+                        session_execution,
+                    )
+                    if deferred_settlement:
+                        update_deferred_query_run_approval(
+                            owner,
+                            identity,
+                            waiting_for_approval=waiting_for_approval,
+                        )
+                    else:
+                        finish_query_run(
+                            run_context,
+                            attempt_context,
+                            terminal_turn_status(session_execution, turn_id),
+                            waiting_for_approval=waiting_for_approval,
+                        )
+
+
+async def _stream_admitted_query(
+    owner,
+    msgs,
+    *,
+    request,
+    query,
+    session_id,
+    user_id,
+    session_execution,
+    is_command,
+):
+    preflight_args = {
+        "session_id": session_id,
+        "user_id": user_id,
+        "query": query,
+        "request": request,
+    }
+    if session_execution is not None:
+        preflight_args["session_execution"] = session_execution
+    preflight = await owner._prepare_query_preflight(**preflight_args)
+    denial = await _prepare_preflight_denial(
+        owner,
+        preflight,
+        session_execution,
+        session_id,
+        user_id,
+    )
+    if denial is not None:
+        yield denial, True
+        return
+
+    if not preflight.approval_consumed and is_command:
+        trace_id = await owner._start_query_trace(request, msgs)
+        try:
+            command_args = (request, msgs, owner)
+            if session_execution is None:
+                command_stream = run_command_path(*command_args)
+            else:
+                command_stream = run_command_path(
+                    *command_args,
+                    session_execution=session_execution,
+                )
+            async for message, last in command_stream:
                 yield message, last
+        except asyncio.CancelledError:
+            await owner._end_trace_if_needed(
+                trace_id,
+                TraceStatus.CANCELLED,
+            )
+            raise
+        except Exception as exc:
+            await owner._end_trace_if_needed(
+                trace_id,
+                TraceStatus.ERROR,
+                str(exc),
+            )
+            raise
+        await owner._end_trace_if_needed(
+            trace_id,
+            TraceStatus.COMPLETED,
+        )
+        return
+
+    query_args = {
+        "request": request,
+        "query": query,
+        "session_id": session_id,
+        "preflight": preflight,
+    }
+    if session_execution is not None:
+        query_args["session_execution"] = session_execution
+    async for message, last in owner._stream_query_after_preflight(
+        msgs,
+        **query_args,
+    ):
+        yield message, last
 
 
 async def _admit_recheck(recheck, session_execution, session_id, user_id):

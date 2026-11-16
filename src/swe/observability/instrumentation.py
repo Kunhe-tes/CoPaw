@@ -197,14 +197,31 @@ class Observability:
         business_ref: dict[str, str] | None = None,
         enabled: bool | None = None,
     ) -> ObservabilityContext:
-        context = ObservabilityContext.new_run(
+        context = self.prepare_run(
+            scope=scope,
+            business_ref=business_ref,
+            enabled=enabled,
+        )
+        self.accept_run(context)
+        return context
+
+    def prepare_run(
+        self,
+        *,
+        scope,
+        business_ref: dict[str, str] | None = None,
+        enabled: bool | None = None,
+    ) -> ObservabilityContext:
+        return ObservabilityContext.new_run(
             capture_enabled=capture_enabled() if enabled is None else enabled,
             scope=scope,
             business_ref=business_ref,
         )
+
+    def accept_run(self, context: ObservabilityContext) -> bool:
         emitter = self._emitter_for(context)
         if emitter is not None:
-            emitter.emit(
+            return emitter.emit(
                 MetadataEvent(
                     event_name="run.accepted",
                     obs_context=context,
@@ -218,7 +235,7 @@ class Observability:
                     },
                 ),
             )
-        return context
+        return False
 
     def start_attempt(
         self,
@@ -312,5 +329,21 @@ class Observability:
                     "status": status,
                     "terminal_fact_source": "business_settlement",
                 },
+            ),
+        )
+
+    def run_state(self, context: ObservabilityContext, *, status: str) -> bool:
+        emitter = self._emitter_for(context)
+        if emitter is None:
+            return False
+        return emitter.emit(
+            MetadataEvent(
+                event_name="run.state",
+                obs_context=context,
+                entity_kind="run",
+                entity_id=context.obs_run_id,
+                phase_key=f"state:{status}",
+                local_seq=0,
+                attributes={"status": status},
             ),
         )
