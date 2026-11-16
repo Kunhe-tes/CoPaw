@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from types import SimpleNamespace
 import json
+import time
 
 import pytest
 
@@ -137,6 +138,220 @@ def test_query_waiting_for_approval_does_not_end_run(monkeypatch):
     )
 
 
+def test_approval_facts_share_run_and_restore_only_matching_scope(monkeypatch):
+    emitter = _setup(monkeypatch)
+    owner = SimpleNamespace(agent_id="agent-a")
+    approval_id = "550e8400-e29b-41d4-a716-446655440000"
+    request = SimpleNamespace(
+        session_id="session-a",
+        user_id="user-a",
+        source_id="source-a",
+        channel_meta={"chat_id": "chat-a", "source_id": "source-a"},
+    )
+    context = runner_lifecycle.admit_query_run(
+        owner,
+        request,
+        [_message()],
+    )
+    attempt = runner_lifecycle.start_query_attempt(context)
+    with bind_context(attempt):
+        carrier = runner_lifecycle.approval_context_carrier()
+        runner_lifecycle.record_approval_requested(
+            context,
+            approval_id,
+            started_at=1_794_700_800,
+        )
+        resolved_context = runner_lifecycle.record_approval_resolved(
+            approval_id,
+            "approved",
+            started_at=1_794_700_800,
+        )
+    pending = SimpleNamespace(
+        session_id="session-a",
+        user_id="user-a",
+        extra={
+            "agent_id": "agent-a",
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "chat_id": "chat-a",
+            "msgid": "question-a",
+            "agent_observability_context": carrier,
+        },
+    )
+
+    restored = runner_lifecycle.restore_approval_context(
+        owner,
+        request,
+        pending,
+    )
+    wrong_pending = SimpleNamespace(
+        session_id=pending.session_id,
+        user_id=pending.user_id,
+        extra={**pending.extra, "source_id": "other-source"},
+    )
+    denied = runner_lifecycle.restore_approval_context(
+        owner,
+        request,
+        wrong_pending,
+    )
+
+    assert carrier["obs_run_id"] == context.obs_run_id
+    assert resolved_context is not None
+    assert restored is not None and restored.obs_run_id == context.obs_run_id
+    assert denied is None
+    requested, resolved = emitter.events[-2:]
+    assert (requested["event_name"], requested["phase_key"]) == (
+        "approval.requested",
+        "requested",
+    )
+    assert (resolved["event_name"], resolved["phase_key"]) == (
+        "approval.resolved",
+        "resolved",
+    )
+    assert (
+        requested["obs_run_id"] == resolved["obs_run_id"] == context.obs_run_id
+    )
+    assert resolved["decision"] == "approved"
+    assert requested["occurred_at"] == resolved["started_at"]
+    for event in emitter.events:
+        try:
+            _validate_payload(json.dumps(event, ensure_ascii=False))
+        except ValueError as exc:
+            pytest.fail(f"{event['event_name']}: {exc}; event={event}")
+
+    pending = SimpleNamespace(
+        request_id=approval_id,
+        session_id="session-a",
+        created_at=1_794_700_800,
+        extra=pending.extra,
+    )
+    runner_lifecycle.record_approval_superseded(pending)
+    superseded = emitter.events[-1]
+    assert superseded["event_name"] == "approval.resolved"
+    assert superseded["decision"] == "superseded"
+    assert superseded["obs_attempt_id"] == attempt.obs_attempt_id
+
+
+@pytest.mark.asyncio
+async def test_approval_command_resumes_same_run_with_predecessor_attempt(
+    monkeypatch,
+):
+    from swe.app.runner.query_execution import admission
+
+    emitter = _setup(monkeypatch)
+    owner = SimpleNamespace(agent_id="agent-a", _APPROVAL_TIMEOUT_SECONDS=60)
+    request = SimpleNamespace(
+        session_id="session-a",
+        user_id="user-a",
+        source_id="source-a",
+        channel_meta={"chat_id": "chat-a", "source_id": "source-a"},
+    )
+    context = runner_lifecycle.admit_query_run(owner, request, [_message()])
+    previous_attempt = runner_lifecycle.start_query_attempt(context)
+    with bind_context(previous_attempt):
+        carrier = runner_lifecycle.approval_context_carrier()
+    approval_id = "550e8400-e29b-41d4-a716-446655440000"
+    pending = SimpleNamespace(
+        request_id=approval_id,
+        status="pending",
+        session_id="session-a",
+        user_id="user-a",
+        created_at=time.time(),
+        extra={
+            "approval_kind": "tool_guard",
+            "agent_id": "agent-a",
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "chat_id": "chat-a",
+            "msgid": "question-a",
+            "agent_observability_context": carrier,
+        },
+    )
+
+    class ApprovalService:
+        async def get_request(self, _request_id):
+            return pending
+
+    monkeypatch.setattr(
+        "swe.app.approvals.get_approval_service",
+        ApprovalService,
+    )
+    restored, decision = await admission._approval_continuation(
+        owner,
+        request=request,
+        session_id="session-a",
+        user_id="user-a",
+        query=f"/approve {approval_id}",
+    )
+    resumed_attempt = runner_lifecycle.start_query_attempt(restored)
+
+    assert decision == "approved"
+    assert restored is not None
+    assert restored.obs_run_id == context.obs_run_id
+    assert resumed_attempt is not None
+    assert resumed_attempt.attempt_index == previous_attempt.attempt_index + 1
+    assert (
+        resumed_attempt.predecessor_attempt_id
+        == previous_attempt.obs_attempt_id
+    )
+    assert [
+        event["event_name"]
+        for event in emitter.events
+        if event["event_name"] == "run.accepted"
+    ] == ["run.accepted"]
+
+
+@pytest.mark.asyncio
+async def test_approval_with_missing_observability_carrier_is_unresolved(
+    monkeypatch,
+):
+    from swe.app.runner.query_execution import admission
+
+    _setup(monkeypatch)
+    owner = SimpleNamespace(agent_id="agent-a", _APPROVAL_TIMEOUT_SECONDS=60)
+    request = SimpleNamespace(
+        session_id="session-a",
+        user_id="user-a",
+        source_id="source-a",
+        channel_meta={"chat_id": "chat-a", "source_id": "source-a"},
+    )
+    approval_id = "550e8400-e29b-41d4-a716-446655440000"
+    pending = SimpleNamespace(
+        request_id=approval_id,
+        status="pending",
+        session_id="session-a",
+        user_id="user-a",
+        created_at=time.time(),
+        extra={
+            "approval_kind": "tool_guard",
+            "agent_id": "agent-a",
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "chat_id": "chat-a",
+            "msgid": "question-a",
+        },
+    )
+
+    class ApprovalService:
+        async def get_request(self, _request_id):
+            return pending
+
+    monkeypatch.setattr(
+        "swe.app.approvals.get_approval_service",
+        ApprovalService,
+    )
+    restored, decision = await admission._approval_continuation(
+        owner,
+        request=request,
+        session_id="session-a",
+        user_id="user-a",
+        query=f"/approve {approval_id}",
+    )
+
+    assert restored is None
+    assert decision == "unresolved"
+
+
 def test_unknown_business_status_leaves_run_unresolved(monkeypatch):
     emitter = _setup(monkeypatch)
     context = runner_lifecycle.admit_query_run(
@@ -148,7 +363,9 @@ def test_unknown_business_status_leaves_run_unresolved(monkeypatch):
 
     runner_lifecycle.finish_query_run(context, attempt, "interrupted")
 
-    assert not any(event["event_name"] == "run.ended" for event in emitter.events)
+    assert not any(
+        event["event_name"] == "run.ended" for event in emitter.events
+    )
 
 
 def test_default_tenant_is_emittable_without_tenant_context(monkeypatch):
@@ -233,7 +450,9 @@ def test_deferred_runner_settlement_emits_terminal_after_business_commit(
         waiting_for_approval=False,
     )
 
-    assert not any(event["event_name"] == "run.ended" for event in emitter.events)
+    assert not any(
+        event["event_name"] == "run.ended" for event in emitter.events
+    )
     runner_lifecycle.finish_deferred_query_run(owner, identity, "completed")
 
     assert emitter.events[-1]["event_name"] == "run.ended"
@@ -266,4 +485,45 @@ def test_early_stop_settlement_is_not_reopened_by_stream_finally(monkeypatch):
     )
 
     assert owner._agent_observability_contexts == {}
+    assert emitter.events[-1]["status"] == "cancelled"
+
+
+def test_stopped_approval_wait_settles_run_as_cancelled(monkeypatch):
+    emitter = _setup(monkeypatch)
+    owner = SimpleNamespace(_agent_observability_contexts={})
+    identity = object()
+    context = runner_lifecycle.admit_query_run(
+        SimpleNamespace(agent_id="agent-a"),
+        _request(),
+        [_message()],
+    )
+    attempt = runner_lifecycle.start_query_attempt(context)
+    runner_lifecycle.finish_query_run(
+        context,
+        attempt,
+        "completed",
+        waiting_for_approval=True,
+    )
+    runner_lifecycle.defer_query_run_settlement(
+        owner,
+        identity,
+        context,
+        attempt,
+        waiting_for_approval=True,
+    )
+
+    runner_lifecycle.update_deferred_query_run_approval(
+        owner,
+        identity,
+        waiting_for_approval=False,
+        clear_attempt=True,
+    )
+    runner_lifecycle.finish_deferred_query_run(owner, identity, "cancelled")
+
+    assert not any(
+        event["event_name"] == "attempt.ended"
+        and event["status"] == "cancelled"
+        for event in emitter.events
+    )
+    assert emitter.events[-1]["event_name"] == "run.ended"
     assert emitter.events[-1]["status"] == "cancelled"

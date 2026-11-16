@@ -1942,6 +1942,7 @@ class ToolGuardMixin:
                     guard_check_failed = True
 
         if guard_check_failed:
+            self._observe_guard_decision(tool_call, "failed")
             result = await self._acting_hook_denied(
                 tool_call,
                 tool_name,
@@ -1951,6 +1952,14 @@ class ToolGuardMixin:
             return result
 
         if action is not None and action.kind != "preapproved":
+            self._observe_guard_decision(
+                tool_call,
+                (
+                    "waiting_approval"
+                    if action.kind == "needs_approval"
+                    else "rejected"
+                ),
+            )
             result = await self._execute_guard_action(action, tool_call)
             await self._emit_tool_trace_end(span_id, result)
             return result
@@ -1962,6 +1971,40 @@ class ToolGuardMixin:
             tool_input,
             span_id,
         )
+
+    def _observe_guard_decision(
+        self,
+        tool_call: dict[str, Any],
+        status: str,
+    ) -> None:
+        """Record a guard short-circuit without counting a tool execution."""
+        try:
+            from ..observability.instrumentation import Observability
+
+            tool_name = str(tool_call.get("name") or "")
+            span = Observability().span(
+                "Guard",
+                "tool",
+                name="registered.tool",
+                tool={
+                    "tool_key": tool_name,
+                    "tool_call_id": str(tool_call.get("id") or ""),
+                    "executor_kind": (
+                        "mcp_tool"
+                        if self._resolve_mcp_server(tool_name)
+                        else "agent_tool"
+                    ),
+                },
+            )
+            if span is not None:
+                span.end(
+                    status=status,
+                    technical_status=("ERROR" if status == "failed" else "OK"),
+                    has_error=status == "failed",
+                    phase="tool_guard",
+                )
+        except Exception:
+            return
 
     async def _run_guarded_tool_call(
         self,
@@ -2338,6 +2381,11 @@ class ToolGuardMixin:
         execution_identity = self._request_context.get("execution_identity")
         if isinstance(execution_identity, dict):
             extra["execution_identity"] = dict(execution_identity)
+        from ..observability.runner_lifecycle import approval_context_carrier
+
+        observability_context = approval_context_carrier()
+        if observability_context is not None:
+            extra["agent_observability_context"] = observability_context
         if hook_ask_handler_ids:
             extra["hook_ask_handler_ids"] = list(hook_ask_handler_ids)
         if original_msg is not None:
@@ -2471,6 +2519,14 @@ class ToolGuardMixin:
             tool_name=tool_name,
             result=guard_result,
             extra=extra,
+        )
+        from ..observability.context import current_context
+        from ..observability.runner_lifecycle import record_approval_requested
+
+        record_approval_requested(
+            current_context(),
+            pending_request.request_id,
+            started_at=pending_request.created_at,
         )
         await self._notify_approval_pending(pending_request)
 

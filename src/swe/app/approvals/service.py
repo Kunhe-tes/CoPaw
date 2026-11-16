@@ -587,6 +587,14 @@ class ApprovalService:
                 status=pending.status,
                 details={"chat_id": chat_id, "msgid": msgid},
             )
+            try:
+                from ...observability.runner_lifecycle import (
+                    record_approval_superseded,
+                )
+
+                record_approval_superseded(pending)
+            except Exception:
+                pass
         return len(superseded)
 
     async def consume_approval(

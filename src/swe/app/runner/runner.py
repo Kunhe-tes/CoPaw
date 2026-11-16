@@ -3385,6 +3385,17 @@ class AgentRunner(Runner):
                 pending.request_id,
                 ApprovalDecision.TIMEOUT,
             )
+            from swe.observability.runner_lifecycle import (
+                finish_query_run,
+                record_approval_resolved,
+            )
+
+            context = record_approval_resolved(
+                pending.request_id,
+                "timed_out",
+                started_at=pending.created_at,
+            )
+            finish_query_run(context, None, "timed_out")
             return (
                 _build_denial_response_msg(
                     pending,
@@ -3419,6 +3430,15 @@ class AgentRunner(Runner):
                 ApprovalDecision.APPROVED,
             )
             record = resolved or pending
+            from swe.observability.runner_lifecycle import (
+                record_approval_resolved,
+            )
+
+            record_approval_resolved(
+                record.request_id,
+                "approved",
+                started_at=record.created_at,
+            )
             approved_tool_call = _approved_tool_call_from_record(record)
             await self._notify_console_approval_result(
                 record,
@@ -3437,6 +3457,17 @@ class AgentRunner(Runner):
             pending.request_id,
             denial_decision,
         )
+        from swe.observability.runner_lifecycle import (
+            finish_query_run,
+            record_approval_resolved,
+        )
+
+        context = record_approval_resolved(
+            pending.request_id,
+            "denied",
+            started_at=pending.created_at,
+        )
+        finish_query_run(context, None, "rejected")
         await self._discard_pending_expert_main_approval(pending, request)
         await self._notify_console_approval_result(
             resolved or pending,

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, AsyncIterator
 
 from agentscope.message import Msg
@@ -23,6 +24,7 @@ from swe.observability.runner_lifecycle import (
     finish_query_run,
     prepare_query_run,
     query_waiting_for_approval,
+    restore_approval_context,
     start_query_attempt,
     terminal_turn_status,
     update_deferred_query_run_approval,
@@ -72,9 +74,22 @@ async def stream_admission(
                 user_id,
             )
             is_command = recheck is None and query and _is_command(query)
+            approval_context, approval_decision = await _approval_continuation(
+                owner,
+                request=request,
+                session_id=session_id,
+                user_id=user_id,
+                query=query,
+            )
             turn_id = None
             is_new_turn = False
-            if session_execution is not None and not is_command:
+            if approval_context is not None:
+                run_context = approval_context
+            elif (
+                session_execution is not None
+                and not is_command
+                and approval_decision != "unresolved"
+            ):
                 candidate_context = prepare_query_run(owner, request, msgs)
                 turn_id, is_new_turn, run_context = (
                     await admit_user_turn_with_creation(
@@ -88,7 +103,11 @@ async def stream_admission(
                     accept_query_run(run_context)
             else:
                 run_context = None
-            attempt_context = start_query_attempt(run_context)
+            attempt_context = (
+                start_query_attempt(run_context)
+                if approval_decision in {None, "approved"}
+                else None
+            )
             attempt_context_ref = {"value": attempt_context}
             identity_getter = getattr(owner, "_answer_turn_identity", None)
             identity = (
@@ -98,6 +117,8 @@ async def stream_admission(
                 identity is not None
                 and getattr(owner, "_answer_turn_coordinator", None)
                 is not None
+                and approval_decision
+                not in {"denied", "timed_out", "unresolved"}
             )
             if deferred_settlement:
                 defer_query_run_settlement(
@@ -143,6 +164,61 @@ async def stream_admission(
                             terminal_turn_status(session_execution, turn_id),
                             waiting_for_approval=waiting_for_approval,
                         )
+
+
+async def _approval_continuation(
+    owner: Any,
+    *,
+    request: Any,
+    session_id: str,
+    user_id: str,
+    query: str | None,
+) -> tuple[Any, str | None]:
+    if not query:
+        return None, None
+    from swe.app.approvals import get_approval_service
+    from ..runner import (
+        _approval_request_id,
+        _denial_request_id,
+        _is_approval,
+        _is_denial,
+        _request_matches_external_approval_submission,
+        _select_pending_approval,
+    )
+
+    explicit_approval = _is_approval(query)
+    decision = "approved" if explicit_approval else "denied"
+    if not explicit_approval and not _is_denial(query):
+        return None, None
+    request_id = _approval_request_id(query) or _denial_request_id(query)
+    service = get_approval_service()
+    pending = await _select_pending_approval(
+        service,
+        session_id=session_id,
+        request_id=request_id,
+    )
+    if (
+        pending is None
+        or pending.status != "pending"
+        or pending.user_id != user_id
+    ):
+        return None, None
+    timeout_seconds = getattr(owner, "_APPROVAL_TIMEOUT_SECONDS", None)
+    if (
+        isinstance(timeout_seconds, (int, float))
+        and time.time() - pending.created_at > timeout_seconds
+    ):
+        decision = "timed_out"
+    extra = pending.extra if isinstance(pending.extra, dict) else {}
+    submission = extra.get("external_submission")
+    if isinstance(submission, dict):
+        if not _request_matches_external_approval_submission(
+            request,
+            submission,
+        ):
+            return None, None
+    context = restore_approval_context(owner, request, pending)
+    return (context, decision) if context is not None else (None, "unresolved")
 
 
 async def _stream_admitted_query(

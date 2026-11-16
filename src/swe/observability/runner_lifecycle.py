@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from ..config.context import (
@@ -11,7 +12,7 @@ from ..config.context import (
     resolve_runtime_tenant_id,
 )
 from .config import capture_enabled
-from .context import bind_context
+from .context import bind_context, current_context
 from .instrumentation import Observability
 from .models import ObservabilityContext, Scope
 
@@ -69,6 +70,9 @@ def prepare_query_run(
     business_ref = {"root_question_msgid": question_id}
     if chat_id:
         business_ref["chat_id"] = chat_id
+    session_id = getattr(request, "session_id", None)
+    if isinstance(session_id, str) and session_id:
+        business_ref["session_id"] = session_id
     try:
         return _OBSERVABILITY.prepare_run(
             scope=Scope(
@@ -83,6 +87,176 @@ def prepare_query_run(
         )
     except Exception:
         return None
+
+
+def approval_context_carrier() -> dict[str, Any] | None:
+    context = current_context()
+    if context is None or not context.capture_enabled:
+        return None
+    try:
+        return context.to_carrier()
+    except Exception:
+        return None
+
+
+def restore_approval_context(
+    owner: Any,
+    request: Any,
+    pending: Any,
+) -> ObservabilityContext | None:
+    extra = getattr(pending, "extra", None)
+    if not isinstance(extra, dict):
+        return None
+    carrier = extra.get("agent_observability_context")
+    if not isinstance(carrier, dict):
+        return None
+    try:
+        context = ObservabilityContext.from_carrier(carrier)
+        meta = getattr(request, "channel_meta", None) or {}
+        source_id = (
+            get_current_source_id()
+            or getattr(request, "source_id", None)
+            or meta.get("source_id")
+        )
+        tenant_id = get_current_effective_tenant_id()
+        expected_source = str(source_id or "")
+        expected_tenant = str(tenant_id or extra.get("tenant_id") or "default")
+        expected_agent = str(
+            getattr(owner, "agent_id", "default") or "default",
+        )
+        scope = context.scope
+        business = context.business_ref
+        actual_scope = (
+            pending.session_id,
+            pending.user_id,
+            extra.get("source_id"),
+            extra.get("tenant_id"),
+            extra.get("agent_id"),
+            expected_source,
+            expected_tenant,
+            expected_agent,
+            extra.get("chat_id"),
+            extra.get("msgid"),
+        )
+        carrier_scope = (
+            getattr(request, "session_id", None),
+            getattr(request, "user_id", None),
+            scope.source_id,
+            scope.tenant_id,
+            scope.agent_id,
+            scope.source_id,
+            scope.tenant_id,
+            scope.agent_id,
+            business.get("chat_id"),
+            business.get("root_question_msgid"),
+        )
+        if actual_scope != carrier_scope:
+            return None
+        return context
+    except Exception:
+        return None
+
+
+def record_approval_requested(
+    context: ObservabilityContext | None,
+    approval_request_id: str,
+    *,
+    started_at: float | None = None,
+) -> None:
+    if context is None:
+        return
+    try:
+        started = (
+            datetime.fromtimestamp(started_at, timezone.utc)
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z")
+            if started_at is not None
+            else None
+        )
+        _OBSERVABILITY.approval_requested(
+            context,
+            approval_request_id,
+            started_at=started,
+        )
+    except Exception:
+        return
+
+
+def record_approval_resolved(
+    approval_request_id: str,
+    decision: str,
+    *,
+    started_at: float | None = None,
+) -> ObservabilityContext | None:
+    context = current_context()
+    if context is None:
+        return None
+    try:
+        started = (
+            datetime.fromtimestamp(started_at, timezone.utc)
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z")
+            if started_at is not None
+            else None
+        )
+        _OBSERVABILITY.approval_resolved(
+            context,
+            approval_request_id,
+            decision=decision,
+            started_at=started,
+        )
+        return context
+    except Exception:
+        return None
+
+
+def record_approval_superseded(pending: Any) -> None:
+    extra = getattr(pending, "extra", None)
+    carrier = (
+        extra.get("agent_observability_context")
+        if isinstance(extra, dict)
+        else None
+    )
+    if not isinstance(carrier, dict):
+        return
+    try:
+        context = ObservabilityContext.from_carrier(carrier)
+        scope = context.scope
+        business = context.business_ref
+        carrier_scope = (
+            scope.source_id,
+            scope.tenant_id,
+            scope.agent_id,
+            business.get("chat_id"),
+            business.get("root_question_msgid"),
+            business.get("session_id"),
+        )
+        approval_scope = (
+            str(extra.get("source_id") or ""),
+            str(extra.get("tenant_id") or ""),
+            str(extra.get("agent_id") or ""),
+            str(extra.get("chat_id") or ""),
+            str(extra.get("msgid") or ""),
+            str(getattr(pending, "session_id", "")),
+        )
+        if not context.capture_enabled or carrier_scope != approval_scope:
+            return
+        started_at = getattr(pending, "created_at", None)
+        started = (
+            datetime.fromtimestamp(started_at, timezone.utc)
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z")
+            if isinstance(started_at, (int, float))
+            else None
+        )
+        _OBSERVABILITY.approval_resolved(
+            context,
+            str(pending.request_id),
+            decision="superseded",
+            started_at=started,
+        )
+    except Exception:
+        return
 
 
 def accept_query_run(context: ObservabilityContext | None) -> None:
@@ -200,6 +374,7 @@ def update_deferred_query_run_approval(
     *,
     waiting_for_approval: bool,
     attempt: ObservabilityContext | None = None,
+    clear_attempt: bool = False,
 ) -> None:
     pending = getattr(owner, "_agent_observability_contexts", None)
     current = pending.get(identity) if isinstance(pending, dict) else None
@@ -208,7 +383,11 @@ def update_deferred_query_run_approval(
         if isinstance(pending, dict):
             pending[identity] = (
                 context,
-                attempt if attempt is not None else current_attempt,
+                (
+                    None
+                    if clear_attempt
+                    else (attempt if attempt is not None else current_attempt)
+                ),
                 waiting_for_approval,
             )
 
