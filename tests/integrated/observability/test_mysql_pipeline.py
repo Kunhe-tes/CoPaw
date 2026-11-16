@@ -97,6 +97,94 @@ def _event(
     }
 
 
+async def _verify_partial_run_ordering(store, ingest, started, ended):
+    run_id = str(uuid4())
+    running_at = started + timedelta(milliseconds=500)
+    running_ingest_id = await ingest(
+        _event(
+            run_id=run_id,
+            event_name="run.state",
+            phase="running",
+            status="running",
+            occurred_at=running_at,
+            started_at=started,
+            ended_at=None,
+        ),
+    )
+    late_accepted_ingest_id = await ingest(
+        _event(
+            run_id=run_id,
+            event_name="run.accepted",
+            phase="accepted",
+            status="accepted",
+            occurred_at=started - timedelta(seconds=1),
+            started_at=started,
+            ended_at=None,
+        ),
+    )
+    rows = await store.list_runs(
+        service_unit_id="swe",
+        source_ids=["agentobs-integration"],
+        limit=10,
+        start_at=started - timedelta(seconds=1),
+        end_at=ended + timedelta(seconds=1),
+    )
+    projected = next(row for row in rows if row["run_id"] == run_id)
+    assert projected["status"] == "running"
+    assert projected["quality"] == "partial"
+
+    waiting_at = started + timedelta(seconds=1)
+    for phase, status, occurred_at in (
+        ("waiting-approval", "waiting_approval", waiting_at),
+        ("running-late", "running", running_at),
+        ("running-same-time", "running", waiting_at),
+    ):
+        await ingest(
+            _event(
+                run_id=run_id,
+                event_name="run.state",
+                phase=phase,
+                status=status,
+                occurred_at=occurred_at,
+                started_at=started,
+                ended_at=None,
+            ),
+        )
+    rows = await store.list_runs(
+        service_unit_id="swe",
+        source_ids=["agentobs-integration"],
+        limit=10,
+        start_at=started - timedelta(seconds=1),
+        end_at=ended + timedelta(seconds=1),
+    )
+    projected = next(row for row in rows if row["run_id"] == run_id)
+    assert projected["status"] == "waiting_approval"
+    assert projected["quality"] == "partial"
+
+    await ingest(
+        _event(
+            run_id=run_id,
+            event_name="run.ended",
+            phase="ended",
+            status="succeeded",
+            occurred_at=ended,
+            started_at=started,
+            ended_at=ended,
+        ),
+    )
+    rows = await store.list_runs(
+        service_unit_id="swe",
+        source_ids=["agentobs-integration"],
+        limit=10,
+        start_at=started - timedelta(seconds=1),
+        end_at=ended + timedelta(seconds=1),
+    )
+    projected = next(row for row in rows if row["run_id"] == run_id)
+    assert projected["status"] == "succeeded"
+    assert projected["quality"] == "observed"
+    return running_ingest_id, late_accepted_ingest_id
+
+
 @pytest.mark.asyncio
 async def test_manual_inbox_to_mysql_projection_and_authorized_run_list(monkeypatch):
     monkeypatch.setenv(
@@ -146,52 +234,12 @@ async def test_manual_inbox_to_mysql_projection_and_authorized_run_list(monkeypa
                 ended_at=None,
             ),
         )
-        accepted_first_run_id = str(uuid4())
-        accepted_first_ingest_id = await ingest(
-            _event(
-                run_id=accepted_first_run_id,
-                event_name="run.accepted",
-                phase="accepted",
-                status="accepted",
-                occurred_at=started,
-                started_at=started,
-                ended_at=None,
-            ),
+        running_ingest_id, late_accepted_ingest_id = await _verify_partial_run_ordering(
+            store,
+            ingest,
+            started,
+            ended,
         )
-        accepted_first_rows = await store.list_runs(
-            service_unit_id="swe",
-            source_ids=["agentobs-integration"],
-            limit=10,
-            start_at=started - timedelta(seconds=1),
-            end_at=ended + timedelta(seconds=1),
-        )
-        accepted_first = next(
-            row for row in accepted_first_rows if row["run_id"] == accepted_first_run_id
-        )
-        assert accepted_first["quality"] == "partial"
-        await ingest(
-            _event(
-                run_id=accepted_first_run_id,
-                event_name="run.ended",
-                phase="ended",
-                status="succeeded",
-                occurred_at=ended,
-                started_at=started,
-                ended_at=ended,
-            ),
-        )
-        accepted_first_rows = await store.list_runs(
-            service_unit_id="swe",
-            source_ids=["agentobs-integration"],
-            limit=10,
-            start_at=started - timedelta(seconds=1),
-            end_at=ended + timedelta(seconds=1),
-        )
-        accepted_first = next(
-            row for row in accepted_first_rows if row["run_id"] == accepted_first_run_id
-        )
-        assert accepted_first["status"] == "succeeded"
-        assert accepted_first["quality"] == "observed"
 
         malformed_terminal = _event(
             run_id=str(uuid4()),
@@ -250,16 +298,17 @@ async def test_manual_inbox_to_mysql_projection_and_authorized_run_list(monkeypa
         async with connection.acquire() as session:
             inbox_rows = await session.fetch_all(
                 "SELECT processing_state,payload_text FROM swe_agentobs_inbox "
-                "WHERE ingest_id IN (%s,%s,%s,%s) ORDER BY ingest_id",
+                "WHERE ingest_id IN (%s,%s,%s,%s,%s) ORDER BY ingest_id",
                 (
                     ended_ingest_id,
                     accepted_ingest_id,
-                    accepted_first_ingest_id,
+                    running_ingest_id,
+                    late_accepted_ingest_id,
                     malformed_ingest_id,
                 ),
             )
-        assert len(inbox_rows) == 4
-        assert sum(row["processing_state"] == 1 for row in inbox_rows) == 3
+        assert len(inbox_rows) == 5
+        assert sum(row["processing_state"] == 1 for row in inbox_rows) == 4
         assert sum(row["processing_state"] == 2 for row in inbox_rows) == 1
         assert all(row["payload_text"] is None for row in inbox_rows)
     finally:

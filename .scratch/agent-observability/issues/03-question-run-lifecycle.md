@@ -35,3 +35,5 @@ Priority: P0
 2026-11-16：新增 manager/admin 能力状态与 admin-only 全局 Health API；Run 状态缺失的 Console 行显式显示 `unknown`，质量仍独立显示。后端 observability 单测 32 passed，Console 类型检查通过，相关 Vitest 7 passed、ESLint 通过。完整真实主对话/专家主执行验收及精确 Chromium 108 补丁版仍待完成。
 
 2026-11-16：修正 Run 质量投影：accepted/running/waiting 状态保持 `partial`，仅已提交业务终态 `run.ended` 标记 `observed`；乱序下后到终态提升质量，晚到 accepted 不降级。隔离 MySQL 8.0.46 集成测试已覆盖 accepted→ended。
+
+2026-11-16：Run 非终态 status 使用严格较新的事件 `occurred_at` 更新，较旧或同刻的 accepted/running 不回退当前状态；MySQL 实测覆盖 running→旧 accepted、waiting_approval→旧及同刻 running，终态仍优先。受影响回归 191 passed，MySQL 集成复跑 1 passed。

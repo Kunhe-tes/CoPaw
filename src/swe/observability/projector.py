@@ -619,11 +619,18 @@ class InboxProjector:
                 "started_at,ended_at,status,quality,terminal_fact_source,duration_us,metadata_text) "
                 "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON DUPLICATE KEY UPDATE status=IF(VALUES(ended_at) IS NOT NULL,COALESCE(VALUES(status),status),"
-                "IF(ended_at IS NULL,COALESCE(VALUES(status),status),status)),"
+                "IF(ended_at IS NULL AND VALUES(status) IS NOT NULL AND "
+                "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(VALUES(metadata_text),'$.occurred_at')),'') > "
+                "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(metadata_text,'$.occurred_at')),''),"
+                "VALUES(status),status)),"
                 "quality=IF(VALUES(ended_at) IS NOT NULL,VALUES(quality),quality),"
                 "terminal_fact_source=IF(VALUES(ended_at) IS NOT NULL,COALESCE(VALUES(terminal_fact_source),terminal_fact_source),terminal_fact_source),"
                 "ended_at=COALESCE(ended_at,VALUES(ended_at)),"
-                "duration_us=COALESCE(VALUES(duration_us),duration_us),metadata_text=VALUES(metadata_text)",
+                "duration_us=COALESCE(VALUES(duration_us),duration_us),"
+                "metadata_text=IF(VALUES(status) IS NOT NULL AND "
+                "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(VALUES(metadata_text),'$.occurred_at')),'') > "
+                "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(metadata_text,'$.occurred_at')),''),"
+                "VALUES(metadata_text),metadata_text)",
                 (
                     run_id,
                     scope["service_unit_id"].encode(),
