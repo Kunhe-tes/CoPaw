@@ -24,6 +24,10 @@ class TicketDatabase:
         self.failure = None
 
     @asynccontextmanager
+    async def acquire(self):
+        yield self
+
+    @asynccontextmanager
     async def transaction(self):
         before = deepcopy(self.entries)
         try:
@@ -158,3 +162,32 @@ async def test_unknown_commit_keeps_sql_but_never_updates_mirror():
     )
     assert recovered["a"]["target_id"] == 90
     assert len(db.entries) == 1
+
+
+async def test_batch_tickets_read_packet_limit_from_pinned_lease():
+    from swe.app.conversation_storage.migration.preflight import DMLDatabase
+
+    class Connection:
+        config = None
+
+        def __init__(self):
+            self.session = TicketDatabase()
+
+        @asynccontextmanager
+        async def acquire(self):
+            yield self.session
+
+        def transaction(self):
+            return self.session.transaction()
+
+        def __getattr__(self, name):
+            if name == "max_allowed_packet":
+                raise AttributeError(name)
+            return getattr(self.session, name)
+
+    db = DMLDatabase(Connection())
+    result = await MigrationJournal(db, manifest()).allocate_many(
+        "message",
+        ["a"],
+    )
+    assert result["a"]["target_id"] == 90

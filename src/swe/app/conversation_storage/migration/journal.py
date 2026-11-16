@@ -351,8 +351,13 @@ class MigrationJournal:
         keys = [
             (position, self._key(kind, position)[1]) for position in positions
         ]
+        if not keys:
+            return {}
+        # packet 限额来自命名锁固定的物理租约，连接门面本身无此属性。
+        async with self.db.acquire() as session:
+            packet_limit = session.max_allowed_packet
         result = {}
-        for chunk in chunks(self.db, keys):
+        for chunk in chunks(packet_limit, keys):
             assignments = await allocate_chunk(self, kind, chunk)
             if kind not in self.manifest.data["assignments"]:
                 self.manifest.data["assignments"][kind] = (

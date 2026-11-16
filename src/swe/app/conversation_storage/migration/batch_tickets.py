@@ -17,9 +17,8 @@ MAX_ROWS = 100
 MAX_BYTES = 256 * 1024
 
 
-def chunks(database, keys):
+def chunks(packet, keys):
     """同时限制行数、参数字节和服务器 packet 安全预算。"""
-    packet = database.max_allowed_packet
     budget = min(MAX_BYTES, packet - 1024, packet * 9 // 10)
     pending, used = [], 1024
     for position, key in keys:
