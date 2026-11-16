@@ -54,6 +54,53 @@ def _config() -> DatabaseConfig:
     )
 
 
+def _create_agent_workspace(tmp_path, monkeypatch):
+    from swe.config.config import (
+        AgentProfileConfig,
+        AgentProfileRef,
+        AgentsConfig,
+        AgentsRunningConfig,
+        Config,
+        save_agent_config,
+    )
+    from swe.config.utils import save_config
+
+    monkeypatch.setattr("swe.config.utils.WORKING_DIR", tmp_path)
+    monkeypatch.setattr("swe.config.config.WORKING_DIR", tmp_path)
+    workspace_dir = tmp_path / "workspaces" / "critical-agent"
+    workspace_dir.mkdir(parents=True)
+    save_config(
+        Config(
+            agents=AgentsConfig(
+                active_agent="critical-agent",
+                profiles={
+                    "critical-agent": AgentProfileRef(
+                        id="critical-agent",
+                        workspace_dir=str(workspace_dir),
+                    ),
+                },
+            ),
+        ),
+    )
+    save_agent_config(
+        "critical-agent",
+        AgentProfileConfig(
+            id="critical-agent",
+            name="Critical Agent",
+            workspace_dir=str(workspace_dir),
+            running=AgentsRunningConfig(
+                max_iters=3,
+                llm_retry_enabled=True,
+                llm_max_retries=1,
+                llm_backoff_base=0.1,
+                llm_backoff_cap=0.5,
+            ),
+            system_prompt_files=[],
+        ),
+    )
+    return workspace_dir
+
+
 async def _assert_projected_run_available(
     connection,
     records,
@@ -190,8 +237,7 @@ def _make_runner_case(
             assert timeout_seconds == 5.0
             yield execution
 
-    question_id = str(uuid4())
-    chat_id = str(uuid4())
+    question_id, chat_id = str(uuid4()), str(uuid4())
     identity = TurnIdentity.create(chat_id=chat_id, msgid=question_id)
     request = SimpleNamespace(
         channel="console",
@@ -370,4 +416,155 @@ async def test_runner_admission_settlement_emits_and_projects_one_run(
         )
     finally:
         emitter.close(timeout=1)
+        await connection.close()
+
+
+@pytest.mark.asyncio
+async def test_real_agent_runner_question_emits_and_projects_one_run(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("SWE_ALLOW_MISSING_TRACE_SDK", "true")
+    monkeypatch.setenv("SWE_AGENTOBS_ENABLED", "true")
+    monkeypatch.setenv(
+        "SWE_AGENTOBS_CURSOR_SECRET",
+        "runner-integration-secret-at-least-32",
+    )
+
+    from agentscope.model._model_response import ChatResponse
+    from agentscope.model._model_usage import ChatUsage
+    from swe.agents import model_factory
+    from swe.app.answer_turn.models import TurnIdentity
+    from swe.app.runner.runner import AgentRunner
+    from swe.observability import runner_lifecycle
+    from swe.tracing import agent_trace_model_wrapper
+    from tests.integrated.critical_paths.conftest import (
+        DeterministicChatModel,
+        FakeProvider,
+        FakeProviderManager,
+    )
+
+    class CopyableFakeProvider(FakeProvider):
+        def __deepcopy__(self, _memo):
+            return self
+
+    workspace_dir = _create_agent_workspace(tmp_path, monkeypatch)
+    model = DeterministicChatModel(
+        [
+            ChatResponse(
+                content=[{"type": "text", "text": "hello from the agent"}],
+                usage=ChatUsage(input_tokens=3, output_tokens=4, time=0.0),
+            ),
+        ]
+        * 4,
+    )
+    provider_manager = FakeProviderManager(CopyableFakeProvider(model))
+
+    async def get_provider_manager(_tenant_id=None):
+        return provider_manager
+
+    async def refresh_provider_manager():
+        return None
+
+    provider_manager.refresh_if_due = refresh_provider_manager
+    monkeypatch.setattr(
+        model_factory.ProviderManager,
+        "ensure_tenant_provider_storage",
+        lambda _tenant_id: None,
+    )
+    monkeypatch.setattr(
+        model_factory.ProviderManager,
+        "get_instance",
+        lambda _tenant_id=None: provider_manager,
+    )
+    monkeypatch.setattr(
+        model_factory.ProviderManager,
+        "get_or_create_instance",
+        get_provider_manager,
+    )
+    monkeypatch.setattr(
+        agent_trace_model_wrapper,
+        "current_capture",
+        lambda: None,
+    )
+
+    sink = StringIO()
+    emitter = JsonlEmitter(stream=sink)
+    monkeypatch.setattr(
+        runner_lifecycle,
+        "_OBSERVABILITY",
+        Observability(emitter),
+    )
+    connection = DatabaseConnection(_config())
+    await connection.connect()
+
+    class PersistingCoordinator:
+        runner = None
+
+        async def status(self, _identity):
+            from swe.app.answer_turn.models import TurnStatus
+
+            return TurnStatus.RUNNING
+
+        async def settle(self, outcome):
+            await self.runner.persist_outcome(outcome)
+
+    coordinator = PersistingCoordinator()
+    runner = AgentRunner(
+        agent_id="critical-agent",
+        workspace_dir=workspace_dir,
+        answer_turn_coordinator=coordinator,
+    )
+    coordinator.runner = runner
+    question_id = str(uuid4())
+    chat_id = str(uuid4())
+    identity = TurnIdentity.create(chat_id=chat_id, msgid=question_id)
+    question = Msg("user", "Return a short greeting.", "user")
+    question.id = question_id
+    request = SimpleNamespace(
+        channel="console",
+        session_id="real-runner-session",
+        user_id="user-a",
+        source_id="runner-integration",
+        execution_origin="interactive",
+        channel_meta={
+            "answer_turn_identity": identity,
+            "chat_id": chat_id,
+            "source_id": "runner-integration",
+        },
+    )
+
+    try:
+        await runner.start()
+        outputs = [
+            item
+            async for item in runner.query_handler(
+                [question],
+                request=request,
+            )
+        ]
+        assert (
+            outputs
+            and model.calls
+            and not runner._agent_observability_contexts
+        )
+
+        assert emitter.close(timeout=1) == 0
+        records = [json.loads(line) for line in sink.getvalue().splitlines()]
+        assert [record["event_name"] for record in records] == [
+            "run.accepted",
+            "run.state",
+            "attempt.started",
+            "attempt.ended",
+            "run.ended",
+        ]
+        assert all(
+            "Return a short greeting." not in line
+            and "hello from the agent" not in line
+            for line in sink.getvalue().splitlines()
+        )
+        await _assert_projected_run_available(connection, records)
+    finally:
+        emitter.close(timeout=1)
+        await runner.stop()
         await connection.close()

@@ -43,3 +43,7 @@ Priority: P0
 2026-11-16：已在隔离 MySQL 集成测试覆盖有 coordinator 的 `persist_outcome` 结算，以及无 coordinator 时从 durable turn terminal status 结算；两条路径均产生 run.ended 并通过 manager API 查询。真实模型/专家主执行与 Chromium 108 精确现场补丁版仍未验收。
 
 2026-11-16：补入真实 `ExpertMainRegistry`/`ExpertMainLease` 的 Runner admission 集成覆盖，成功执行投影为 succeeded；Lease 中存在待审批工具请求时，即使 Turn completed 也保持 waiting_approval、Attempt 已结束且 Run 不终结。Run 结束事件现携带本进程单调时钟 duration_us；跨进程无法比较时长时不伪造值，MySQL 验证了 Run 与 Attempt 结束时间分离。受影响回归 28 passed。仍未验收真实 Provider/完整应用请求与 Chromium 108.0.5359.95。
+
+2026-11-16：Chrome 157 实测 Console manager/admin 页面及 `hideMenu=true`：manager 无全局 Health，admin 可见累计丢弃状态；360x800 与 390x844 页面无横向溢出，窄屏表格可横向滚动至末列。该 UI 检查通过本地 iframe store 和 mock API 驱动；本地未启动后端，其他全局接口返回 500。Chromium 108.0.5359.95/360 极速模式仍未验收。
+
+2026-11-16：新增真实普通主对话集成用例：本地确定性 Provider 驱动真实 `AgentRunner.query_handler`、SWEAgent/RetryChatModel 和 admission，随后验证独立 JSONL、白名单脱敏、隔离 MySQL 投影及 manager API；该用例与 lease 分类用例合计通过 observability 集成回归。真实 Provider 网络调用、专家主 Agent 完整执行和指定 Chromium 108.0.5359.95 仍未验收。
