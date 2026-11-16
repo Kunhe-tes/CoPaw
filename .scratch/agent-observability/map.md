@@ -95,6 +95,7 @@ Q1–Q25已确认。没有新增必须用户选择的产品前沿；以下按已
 ## Implementation Progress
 
 - 01 已完成并由子代理检视：独立事件/上下文/埋点内核、元数据白名单writer和埋点矩阵。详见 [ticket 01](issues/01-instrumentation-core.md) 与 [instrumentation matrix](instrumentation-matrix.md)。后续首个可领取票为 02；其余票仍按现有依赖阻塞。
+- 02 的实现与代码检视已完成，代码已通过单测和前端构建；ticket保持claimed，因为目标MySQL 8.0.21+实库与 Chromium 108/360 验收环境当前不可用。03–15 仍受 02 阻塞。
 
 ## Facts resolved after Round 3
 

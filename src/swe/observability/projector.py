@@ -1,0 +1,638 @@
+# -*- coding: utf-8 -*-
+"""Bounded inbox validation and idempotent event projection."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import re
+from datetime import datetime, timezone
+from typing import Any
+from uuid import UUID
+
+from .emitter import _project
+from .store import ObservabilityStore
+
+_MAX_BATCH = 32
+_EVENT_NAMES = frozenset(
+    {
+        "run.accepted",
+        "run.state",
+        "run.ended",
+        "attempt.started",
+        "attempt.ended",
+        "span.started",
+        "span.ended",
+        "span.event",
+        "approval.requested",
+        "approval.resolved",
+        "subagent.started",
+        "subagent.ended",
+        "asset.used",
+        "observer.health",
+    },
+)
+_TOKEN = re.compile(r"^[A-Za-z0-9_.:@/-]{1,256}$")
+logger = logging.getLogger(__name__)
+_FIELD_BYTES = {
+    "event_name": 48,
+    "entity_kind": 16,
+    "phase_key": 64,
+    "producer_id": 128,
+    "span_type": 32,
+    "operation": 64,
+    "kind": 16,
+    "name": 128,
+    "error_type": 128,
+    "terminal_fact_source": 32,
+}
+_UUID_FIELDS = (
+    "obs_run_id",
+    "obs_attempt_id",
+    "obs_span_id",
+    "parent_obs_span_id",
+    "predecessor_attempt_id",
+)
+
+
+def _timestamp(value: Any) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("timestamp missing")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp timezone missing")
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _validate_payload(raw: str) -> dict[str, Any]:
+    event = _project_payload(raw)
+    _validate_protocol(event)
+    if event["event_name"] == "observer.health":
+        _validate_health_event(event)
+        return event
+    _validate_lifecycle_event(event)
+    return event
+
+
+def _project_payload(raw: str) -> dict[str, Any]:
+    if len(raw.encode("utf-8")) > 24 * 1024:
+        raise ValueError("event_too_large")
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError("invalid_event")
+    event = _project(parsed)
+    required = {
+        "schema_version",
+        "event_id",
+        "event_name",
+        "occurred_at",
+        "producer_id",
+        "entity_kind",
+        "entity_id",
+        "phase_key",
+        "local_seq",
+    }
+    if not isinstance(event, dict) or not required.issubset(event):
+        raise ValueError("invalid_event")
+    return event
+
+
+def _validate_protocol(event: dict[str, Any]) -> None:
+    if event["schema_version"] != 1:
+        raise ValueError("unsupported_schema")
+    if event["event_name"] not in _EVENT_NAMES:
+        raise ValueError("unsupported_event")
+    for key in (
+        "event_id",
+        "event_name",
+        "producer_id",
+        "entity_kind",
+        "entity_id",
+        "phase_key",
+    ):
+        if not isinstance(event.get(key), str) or not _TOKEN.fullmatch(event[key]):
+            raise ValueError("invalid_protocol_value")
+    if any(
+        len(event[key].encode("utf-8")) > limit
+        for key, limit in _FIELD_BYTES.items()
+        if key in event
+    ):
+        raise ValueError("field_too_long")
+    if (
+        isinstance(event["local_seq"], bool)
+        or not isinstance(event["local_seq"], int)
+        or event["local_seq"] < 0
+    ):
+        raise ValueError("invalid_sequence")
+    if event["local_seq"] > 0xFFFFFFFF:
+        raise ValueError("invalid_sequence")
+    try:
+        _require_uuid(event, "event_id")
+    except (ValueError, TypeError, KeyError) as exc:
+        raise ValueError("invalid_identity") from exc
+
+
+def _require_uuid(event: dict[str, Any], key: str) -> None:
+    if str(UUID(event[key])) != event[key]:
+        raise ValueError("noncanonical")
+
+
+def _validate_health_event(event: dict[str, Any]) -> None:
+    if event.get("entity_kind") != "observer":
+        raise ValueError("invalid_entity_kind")
+    try:
+        _require_uuid(event, "entity_id")
+    except (ValueError, TypeError, KeyError) as exc:
+        raise ValueError("invalid_identity") from exc
+
+
+def _validate_lifecycle_event(event: dict[str, Any]) -> None:
+    for key in ("event_id", "obs_run_id", "entity_id"):
+        try:
+            _require_uuid(event, key)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise ValueError("invalid_identity") from exc
+    _validate_entity_identity(event)
+    _validate_related_ids(event)
+    _validate_scope(event)
+    _validate_lifecycle_values(event)
+
+
+def _validate_entity_identity(event: dict[str, Any]) -> None:
+    expected_entity = None
+    if event["event_name"].startswith("run."):
+        expected_entity = ("run", "obs_run_id")
+    elif event["event_name"].startswith("attempt."):
+        expected_entity = ("attempt", "obs_attempt_id")
+    elif event["event_name"].startswith("span."):
+        expected_entity = ("span", "obs_span_id")
+    elif event["event_name"].startswith("approval."):
+        expected_entity = ("approval", "approval_request_id")
+    elif event["event_name"].startswith("subagent."):
+        expected_entity = ("span", "obs_span_id")
+    elif event["event_name"] == "asset.used":
+        expected_entity = ("asset", "entity_id")
+    if expected_entity is None or event.get("entity_kind") != expected_entity[0]:
+        raise ValueError("invalid_entity_kind")
+    if expected_entity[1] != "entity_id" and event.get("entity_id") != event.get(
+        expected_entity[1],
+    ):
+        raise ValueError("invalid_entity_identity")
+
+
+def _validate_related_ids(event: dict[str, Any]) -> None:
+    for key in _UUID_FIELDS:
+        if event.get(key) is None:
+            continue
+        try:
+            if str(UUID(event[key])) != event[key]:
+                raise ValueError("noncanonical")
+        except (ValueError, TypeError) as exc:
+            raise ValueError("invalid_identity") from exc
+
+
+def _validate_scope(event: dict[str, Any]) -> None:
+    scope = event.get("scope")
+    if not isinstance(scope, dict) or not all(
+        isinstance(scope.get(key), str) and scope[key]
+        for key in ("service_unit_id", "source_id", "tenant_id", "agent_id")
+    ):
+        raise ValueError("invalid_scope")
+    if any(len(scope[key].encode("utf-8")) > 256 for key in scope):
+        raise ValueError("invalid_scope")
+    business_ref = event.get("business_ref") or {}
+    if not isinstance(business_ref, dict):
+        raise ValueError("invalid_business_reference")
+    if any(
+        not isinstance(business_ref.get(key, ""), str)
+        or len(business_ref.get(key, "").encode("utf-8")) > limit
+        for key, limit in {
+            "chat_id": 128,
+            "root_question_msgid": 256,
+            "session_id": 1024,
+            "current_question_msgid": 256,
+        }.items()
+    ):
+        raise ValueError("invalid_business_reference")
+
+
+def _validate_lifecycle_values(event: dict[str, Any]) -> None:
+    if not isinstance(event.get("capture_enabled"), bool):
+        raise ValueError("invalid_capture_snapshot")
+    if (
+        "has_error" in event
+        and event["has_error"] is not None
+        and not isinstance(event["has_error"], bool)
+    ):
+        raise ValueError("invalid_error_flag")
+    _timestamp(event.get("occurred_at"))
+    _timestamp(event.get("run_started_at"))
+    for key in ("attempt_index", "step_index"):
+        value = event.get(key)
+        if value is not None and (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 0 <= value <= 0xFFFFFFFF
+        ):
+            raise ValueError("invalid_ordinal")
+    metrics = event.get("metrics") or {}
+    if not isinstance(metrics, dict):
+        raise ValueError("invalid_metrics")
+    for metric_key, value in metrics.items():
+        if isinstance(value, bool) and metric_key.endswith("_known"):
+            continue
+        if value is not None and (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 0 <= value <= 0xFFFFFFFFFFFFFFFF
+        ):
+            raise ValueError("invalid_metric")
+    if (
+        len(
+            json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+        )
+        > 24 * 1024
+    ):
+        raise ValueError("event_too_large")
+
+
+def _semantic_json(event: dict[str, Any]) -> str:
+    semantic = {k: v for k, v in event.items() if k not in {"event_id", "producer_id"}}
+    return json.dumps(
+        semantic,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+
+class InboxProjector:
+    def __init__(self, store: ObservabilityStore, *, poll_seconds: float = 1.0) -> None:
+        self.store = store
+        self.connection = store.connection
+        self.poll_seconds = poll_seconds
+        self._task: asyncio.Task | None = None
+        self._stopping = asyncio.Event()
+
+    async def start(self) -> None:
+        if self._task is None:
+            self._stopping.clear()
+            self._task = asyncio.create_task(self._run(), name="agentobs-projector")
+
+    async def stop(self) -> None:
+        if self._task is None:
+            return
+        self._stopping.set()
+        self._task.cancel()
+        try:
+            await asyncio.wait_for(self._task, timeout=2)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+        self._task = None
+
+    async def _run(self) -> None:
+        while not self._stopping.is_set():
+            try:
+                count = await self.project_batch()
+                if count:
+                    continue
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Agent observability projector cycle failed: %s",
+                    type(exc).__name__,
+                )
+                await asyncio.sleep(min(max(self.poll_seconds, 1.0) * 5, 30))
+                continue
+            await asyncio.sleep(self.poll_seconds)
+
+    async def project_batch(self) -> int:
+        async with self.connection.acquire() as session:
+            await session.execute(
+                "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED",
+            )
+            async with self.connection.transaction() as tx:
+                rows = await tx.fetch_all(
+                    "SELECT ingest_id, payload_text FROM swe_agentobs_inbox "
+                    "WHERE processing_state = 0 AND payload_text IS NOT NULL "
+                    "ORDER BY ingest_id LIMIT %s FOR UPDATE SKIP LOCKED",
+                    (_MAX_BATCH,),
+                )
+                for row in rows:
+                    await self._project_one(tx, row)
+                return len(rows)
+
+    async def _project_one(self, session, row: dict[str, Any]) -> None:
+        ingest_id = int(row["ingest_id"])
+        try:
+            event = _validate_payload(row["payload_text"] or "")
+        except ValueError as exc:
+            state, reason, event = 2, str(exc)[:64], None
+            await session.execute(
+                "UPDATE swe_agentobs_inbox SET payload_text = NULL WHERE ingest_id = %s",
+                (ingest_id,),
+            )
+        else:
+            assert event is not None
+            await session.execute("SAVEPOINT agentobs_row")
+            state = await self._store_event(session, event, ingest_id)
+            await session.execute("RELEASE SAVEPOINT agentobs_row")
+            reason = None
+        if event is not None and state == 3:
+            reason = "event_conflict"
+        elif event is not None and state == 2:
+            reason = "event_not_inserted"
+        await session.execute(
+            "UPDATE swe_agentobs_inbox SET processing_state = %s, processed_at = UTC_TIMESTAMP(6), "
+            "reason_code = %s, event_id = %s, payload_text = NULL WHERE ingest_id = %s",
+            (state, reason, event.get("event_id") if event else None, ingest_id),
+        )
+
+    async def _store_event(self, session, event: dict[str, Any], ingest_id: int) -> int:
+        semantic = _semantic_json(event)
+        slot = (
+            event["entity_kind"],
+            event["entity_id"],
+            event["phase_key"],
+            event["local_seq"],
+        )
+        existing = await session.fetch_one(
+            "SELECT event_id, metadata_text FROM swe_agentobs_events WHERE event_id = %s",
+            (event["event_id"],),
+        )
+        slot_row = await session.fetch_one(
+            "SELECT event_id, metadata_text FROM swe_agentobs_events "
+            "WHERE entity_kind = %s AND entity_id = %s AND phase_key = %s AND local_seq = %s",
+            slot,
+        )
+        for duplicate in (existing, slot_row):
+            if duplicate:
+                prior = json.loads(duplicate["metadata_text"])
+                if _semantic_json(prior) == semantic:
+                    return 1
+                return 3
+        metadata = json.dumps(
+            event,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        context_scope = event.get("scope") or {}
+        run_id = event.get("obs_run_id")
+        if not await self._ensure_run_row(session, event, metadata):
+            return 3
+        if event.get("obs_attempt_id"):
+            existing_attempt = await session.fetch_one(
+                "SELECT run_id FROM swe_agentobs_attempts WHERE attempt_id=%s FOR UPDATE",
+                (event["obs_attempt_id"],),
+            )
+            if existing_attempt and existing_attempt["run_id"] != run_id:
+                return 3
+        if event.get("obs_span_id"):
+            existing_span = await session.fetch_one(
+                "SELECT run_id,attempt_id,parent_span_id FROM swe_agentobs_spans WHERE span_id=%s FOR UPDATE",
+                (event["obs_span_id"],),
+            )
+            if existing_span and (
+                existing_span["run_id"] != run_id
+                or existing_span["attempt_id"] != event.get("obs_attempt_id")
+                or existing_span["parent_span_id"] != event.get("parent_obs_span_id")
+            ):
+                return 3
+        attempt_id = event.get("obs_attempt_id")
+        span_id = event.get("obs_span_id")
+        occurred_at = _timestamp(event["occurred_at"])
+        inserted = await session.execute(
+            "INSERT IGNORE INTO swe_agentobs_events "
+            "(event_id,schema_version,event_name,entity_kind,entity_id,phase_key,local_seq,run_id,attempt_id,span_id,"
+            "service_unit_key,source_key,tenant_key,agent_key,occurred_at,first_ingest_id,producer_id,metadata_text) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                event["event_id"],
+                1,
+                event["event_name"],
+                slot[0],
+                slot[1],
+                slot[2],
+                slot[3],
+                run_id,
+                attempt_id,
+                span_id,
+                context_scope.get("service_unit_id", "").encode() or None,
+                context_scope.get("source_id", "").encode() or None,
+                context_scope.get("tenant_id", "").encode() or None,
+                context_scope.get("agent_id", "").encode() or None,
+                occurred_at,
+                ingest_id,
+                event["producer_id"],
+                metadata,
+            ),
+        )
+        if not inserted:
+            duplicate = await session.fetch_one(
+                "SELECT event_id,metadata_text FROM swe_agentobs_events WHERE event_id=%s",
+                (event["event_id"],),
+            )
+            if duplicate is None:
+                duplicate = await session.fetch_one(
+                    "SELECT event_id,metadata_text FROM swe_agentobs_events "
+                    "WHERE entity_kind=%s AND entity_id=%s AND phase_key=%s AND local_seq=%s",
+                    slot,
+                )
+            if duplicate is None:
+                return 2
+            prior = json.loads(duplicate["metadata_text"])
+            return 1 if _semantic_json(prior) == semantic else 3
+        await self._project_entity(session, event, metadata)
+        return 1
+
+    async def _ensure_run_row(
+        self,
+        session,
+        event: dict[str, Any],
+        metadata: str,
+    ) -> bool:
+        run_id = event.get("obs_run_id")
+        if not run_id:
+            return event["event_name"] == "observer.health"
+        scope = event["scope"]
+        business = event.get("business_ref") or {}
+        name = event["event_name"]
+        is_run_fact = name.startswith("run.")
+        await session.execute(
+            "INSERT IGNORE INTO swe_agentobs_runs "
+            "(run_id,service_unit_key,source_key,tenant_key,agent_key,chat_key,root_question_key,capture_enabled,"
+            "started_at,ended_at,status,quality,terminal_fact_source,metadata_text) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                run_id,
+                scope["service_unit_id"].encode(),
+                scope["source_id"].encode(),
+                scope["tenant_id"].encode(),
+                scope["agent_id"].encode(),
+                business.get("chat_id", "").encode(),
+                business.get("root_question_msgid", "").encode(),
+                int(bool(event["capture_enabled"])),
+                _timestamp(event["run_started_at"]),
+                (
+                    _timestamp(event["ended_at"])
+                    if name == "run.ended" and event.get("ended_at")
+                    else None
+                ),
+                event.get("status") if is_run_fact else None,
+                "observed" if is_run_fact else "partial",
+                event.get("terminal_fact_source") if is_run_fact else None,
+                metadata,
+            ),
+        )
+        stored = await session.fetch_one(
+            "SELECT service_unit_key,source_key,tenant_key,agent_key,chat_key,root_question_key,"
+            "capture_enabled,ended_at,status FROM swe_agentobs_runs WHERE run_id=%s FOR UPDATE",
+            (run_id,),
+        )
+        if stored is None:
+            return False
+        if stored["capture_enabled"] != int(bool(event["capture_enabled"])):
+            return False
+        for column, field in (
+            ("service_unit_key", "service_unit_id"),
+            ("source_key", "source_id"),
+            ("tenant_key", "tenant_id"),
+            ("agent_key", "agent_id"),
+        ):
+            if stored[column] != scope[field].encode():
+                return False
+        for column, field in (
+            ("chat_key", "chat_id"),
+            ("root_question_key", "root_question_msgid"),
+        ):
+            value = business.get(field)
+            if value and stored[column] != value.encode():
+                return False
+        if (
+            name == "run.ended"
+            and stored["ended_at"] is not None
+            and stored["status"] != event.get("status")
+        ):
+            return False
+        return True
+
+    async def _project_entity(
+        self,
+        session,
+        event: dict[str, Any],
+        metadata: str,
+    ) -> None:
+        name = event["event_name"]
+        scope = event.get("scope") or {}
+        run_id = event.get("obs_run_id")
+        started = _timestamp(
+            event.get("run_started_at")
+            or event.get("started_at")
+            or event["occurred_at"],
+        )
+        if run_id:
+            business = event.get("business_ref") or {}
+            is_run_fact = name.startswith("run.")
+            await session.execute(
+                "INSERT INTO swe_agentobs_runs "
+                "(run_id,service_unit_key,source_key,tenant_key,agent_key,chat_key,root_question_key,capture_enabled,"
+                "started_at,ended_at,status,quality,terminal_fact_source,duration_us,metadata_text) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON DUPLICATE KEY UPDATE status=IF(VALUES(ended_at) IS NOT NULL,COALESCE(VALUES(status),status),"
+                "IF(ended_at IS NULL,COALESCE(VALUES(status),status),status)),"
+                "terminal_fact_source=IF(VALUES(ended_at) IS NOT NULL,COALESCE(VALUES(terminal_fact_source),terminal_fact_source),terminal_fact_source),"
+                "ended_at=COALESCE(ended_at,VALUES(ended_at)),"
+                "duration_us=COALESCE(VALUES(duration_us),duration_us),metadata_text=VALUES(metadata_text)",
+                (
+                    run_id,
+                    scope["service_unit_id"].encode(),
+                    scope["source_id"].encode(),
+                    scope["tenant_id"].encode(),
+                    scope["agent_id"].encode(),
+                    business.get("chat_id", "").encode(),
+                    business.get("root_question_msgid", "").encode(),
+                    int(bool(event["capture_enabled"])),
+                    started,
+                    _timestamp(event["ended_at"]) if event.get("ended_at") else None,
+                    event.get("status") if is_run_fact else None,
+                    "observed" if is_run_fact else "partial",
+                    event.get("terminal_fact_source") if is_run_fact else None,
+                    (event.get("metrics") or {}).get("duration_us"),
+                    metadata,
+                ),
+            )
+        if (
+            name in {"attempt.started", "attempt.ended"}
+            and run_id
+            and event.get("obs_attempt_id")
+        ):
+            is_attempt_end = name == "attempt.ended"
+            await session.execute(
+                "INSERT INTO swe_agentobs_attempts (attempt_id,run_id,attempt_index,predecessor_attempt_id,started_at,ended_at,status,metadata_text) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                "status=IF(VALUES(ended_at) IS NOT NULL,COALESCE(VALUES(status),status),"
+                "IF(ended_at IS NULL,COALESCE(VALUES(status),status),status)),"
+                "ended_at=COALESCE(ended_at,VALUES(ended_at)),metadata_text=VALUES(metadata_text)",
+                (
+                    event["obs_attempt_id"],
+                    run_id,
+                    event.get("attempt_index") or 1,
+                    event.get("predecessor_attempt_id"),
+                    _timestamp(
+                        event.get("started_at")
+                        or event.get("attempt_started_at")
+                        or event["occurred_at"],
+                    ),
+                    (
+                        _timestamp(event["ended_at"])
+                        if is_attempt_end and event.get("ended_at")
+                        else None
+                    ),
+                    event.get("status") if is_attempt_end else "running",
+                    metadata,
+                ),
+            )
+        if (
+            name in {"span.started", "span.ended"}
+            and run_id
+            and event.get("obs_span_id")
+        ):
+            is_end = name == "span.ended"
+            await session.execute(
+                "INSERT INTO swe_agentobs_spans (span_id,run_id,attempt_id,parent_span_id,span_type,operation,kind,name,step_index,"
+                "started_at,ended_at,status,technical_status,has_error,error_type,duration_us,input_tokens,output_tokens,metadata_text) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON DUPLICATE KEY UPDATE status=IF(VALUES(ended_at) IS NOT NULL,COALESCE(VALUES(status),status),"
+                "IF(ended_at IS NULL,COALESCE(VALUES(status),status),status)),"
+                "ended_at=COALESCE(ended_at,VALUES(ended_at)),"
+                "technical_status=COALESCE(VALUES(technical_status),technical_status),has_error=COALESCE(VALUES(has_error),has_error),"
+                "error_type=COALESCE(VALUES(error_type),error_type),duration_us=COALESCE(VALUES(duration_us),duration_us),metadata_text=VALUES(metadata_text)",
+                (
+                    event["obs_span_id"],
+                    run_id,
+                    event.get("obs_attempt_id"),
+                    event.get("parent_obs_span_id"),
+                    event.get("span_type", "Custom"),
+                    event.get("operation") or "unknown",
+                    event.get("kind") or "INTERNAL",
+                    event.get("name") or "unknown",
+                    event.get("step_index"),
+                    _timestamp(event.get("started_at") or event["occurred_at"]),
+                    (
+                        _timestamp(event["ended_at"])
+                        if is_end and event.get("ended_at")
+                        else None
+                    ),
+                    event.get("status") if is_end else "running",
+                    event.get("technical_status"),
+                    int(bool(event["has_error"])) if "has_error" in event else None,
+                    event.get("error_type"),
+                    (event.get("metrics") or {}).get("duration_us"),
+                    (event.get("metrics") or {}).get("input_tokens"),
+                    (event.get("metrics") or {}).get("output_tokens"),
+                    metadata,
+                ),
+            )

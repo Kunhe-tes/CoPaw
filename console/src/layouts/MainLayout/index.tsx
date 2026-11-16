@@ -52,6 +52,7 @@ import MyMCPPage from "../../pages/MyMCP";
 import WPlusSopWorkspace from "../../pages/WPlusSopWorkspace";
 import ExpertsPage from "../../pages/Experts";
 import ExpertCommunityPage from "../../pages/ExpertCommunity";
+import AgentObservabilityPage from "../../pages/AgentObservability";
 
 import { useDynamicRender } from "@/components/agentscope-chat/DynamicRenderContext";
 
@@ -94,6 +95,7 @@ const pathToKey: Record<string, string> = {
   "/analytics/cron-job-overview": "analytics-cron-job-overview",
   "/analytics/continuous-governance": "analytics-continuous-governance",
   "/monitor/tasks": "monitor-task-center",
+  "/agent-observability/runs": "agent-observability",
   "/monitor/cron-batch-dispatch": "monitor-cron-batch-dispatch",
   "/monitor/cron-batch-dispatch-new": "monitor-cron-batch-dispatch-new",
   "/monitor/cron-task-tracking": "monitor-cron-task-tracking",
@@ -205,6 +207,7 @@ export default function MainLayout() {
                 element={<SystemConfigPage />}
               />
               <Route path="/system-check" element={<SystemCheckPage />} />
+              <Route path="/agent-observability/runs" element={<AgentObservabilityPage />} />
               <Route path="/security" element={<SecurityPage />} />
               <Route path="/token-usage" element={<TokenUsagePage />} />
               <Route

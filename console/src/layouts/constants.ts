@@ -34,6 +34,7 @@ export const DEFAULT_OPEN_KEYS = [
 ];
 
 export const KEY_TO_PATH: Record<string, string> = {
+  "agent-observability": "/agent-observability/runs",
   chat: "/chat",
   channels: "/channels",
   sessions: "/sessions",
@@ -88,6 +89,7 @@ export const KEY_TO_PATH: Record<string, string> = {
 };
 
 export const KEY_TO_LABEL: Record<string, string> = {
+  "agent-observability": "nav.agentObservability",
   chat: "nav.chat",
   channels: "nav.channels",
   sessions: "nav.sessions",

@@ -27,6 +27,7 @@ import {
   Wrench,
   Puzzle,
   SlidersHorizontal,
+  Activity,
 } from "lucide-react";
 import { KEY_TO_PATH } from "./constants";
 
@@ -241,6 +242,12 @@ export function createSidebarNavigation(
           label: t("nav.systemCheck", { defaultValue: "系统自检" }),
           icon: <SearchCheck size={size} />,
           visible: visibility.showSystemCheck,
+        },
+        {
+          key: "agent-observability",
+          label: t("nav.agentObservability", "Agent 执行"),
+          icon: <Activity size={size} />,
+          visible: visibility.showSourceManagement,
         },
       ],
     },
