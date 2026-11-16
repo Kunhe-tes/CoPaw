@@ -36,6 +36,41 @@ export interface RunQuery {
   limit?: number;
 }
 
+export interface AgentObservabilityCapabilities {
+  capture_enabled: boolean;
+  storage_configured: boolean;
+  storage_ready: boolean;
+  projector_running: boolean;
+  queue_events: number;
+  queue_bytes: number;
+  max_event_bytes: number;
+}
+
+export interface AgentObservabilityHealth {
+  capture_enabled: boolean;
+  storage_ready: boolean;
+  projector_running: boolean;
+  dropped_events: number | null;
+  generated_at: string;
+}
+
+export function getAgentObservabilityCapabilities(
+  signal?: AbortSignal,
+): Promise<AgentObservabilityCapabilities> {
+  return request<AgentObservabilityCapabilities>(
+    "/agent-observability/capabilities",
+    { signal },
+  );
+}
+
+export function getAgentObservabilityHealth(
+  signal?: AbortSignal,
+): Promise<AgentObservabilityHealth> {
+  return request<AgentObservabilityHealth>("/agent-observability/health", {
+    signal,
+  });
+}
+
 export function listAgentObservabilityRuns(
   query: RunQuery = {},
   signal?: AbortSignal,

@@ -348,6 +348,10 @@ class InboxProjector:
         self._task: asyncio.Task | None = None
         self._stopping = asyncio.Event()
 
+    @property
+    def running(self) -> bool:
+        return self._task is not None and not self._task.done()
+
     async def start(self) -> None:
         if self._task is None:
             self._stopping.clear()

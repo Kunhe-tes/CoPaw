@@ -14,6 +14,8 @@ from swe.observability.query import (
     _authorized_sources,
     _decode_cursor,
     _encode_cursor,
+    capabilities,
+    health,
 )
 
 
@@ -63,6 +65,60 @@ def test_cursor_is_signed_and_bound_to_authorized_filters(monkeypatch):
     assert error.value.status_code == 400
     with pytest.raises(HTTPException):
         _decode_cursor(token[:-2] + "aa", scope)
+
+
+@pytest.mark.asyncio
+async def test_capabilities_are_scoped_and_do_not_expose_database_secrets(monkeypatch):
+    monkeypatch.delenv("SWE_AGENTOBS_ENABLED", raising=False)
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            agent_observability_connection=None,
+            agent_observability_projector=None,
+            agent_observability_store=None,
+        ),
+    )
+    request = SimpleNamespace(
+        headers={"X-User-Role": "manager"},
+        state=SimpleNamespace(source_id="source-a"),
+        app=app,
+    )
+    result = await capabilities(request)
+    assert result.capture_enabled is False
+    assert result.storage_configured is False
+    assert not hasattr(result, "password")
+
+    request.headers = {"X-User-Role": "user"}
+    with pytest.raises(HTTPException) as error:
+        await capabilities(request)
+    assert error.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_global_health_is_admin_only(monkeypatch):
+    monkeypatch.delenv("SWE_AGENTOBS_ENABLED", raising=False)
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            agent_observability_projector=None,
+            agent_observability_store=None,
+        ),
+    )
+    manager = SimpleNamespace(
+        headers={"X-User-Role": "manager"},
+        state=SimpleNamespace(source_id="source-a"),
+        app=app,
+    )
+    with pytest.raises(HTTPException) as error:
+        await health(manager)
+    assert error.value.status_code == 403
+
+    admin = SimpleNamespace(
+        headers={"X-User-Role": "admin"},
+        state=SimpleNamespace(),
+        app=app,
+    )
+    result = await health(admin)
+    assert result.storage_ready is False
+    assert result.dropped_events is None
 
 
 def test_ingest_validation_projects_body_and_rejects_bad_scope():

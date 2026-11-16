@@ -31,3 +31,5 @@ Priority: P0
 2026-11-16：Ticket 02 已完成并解除依赖。本轮开始将独立 Run/Attempt 上下文接入普通 Runner admission，覆盖 SQL 与 legacy 会话路径；尚需补齐终态事件与审批等待回归、重连/重复受理证明及 Chromium 108 页面验收。
 
 2026-11-16：本轮已完成普通 admission 的 accepted/running/terminal 事件接线、SQL/legacy 重连去重、审批等待状态、默认租户 scope、取消早于 stream finally 的结算顺序，以及 metadata-only 前驱 Run carrier；受影响后端回归 189 项通过。仍保持 claimed：无 answer-turn coordinator 的 legacy Runner 以及完整真实主对话/专家主执行、Chromium 108 页面验收尚未在本票完成；审批续跑归并继续由 Ticket 08 处理。
+
+2026-11-16：新增 manager/admin 能力状态与 admin-only 全局 Health API；Run 状态缺失的 Console 行显式显示 `unknown`，质量仍独立显示。后端 observability 单测 32 passed，Console 类型检查通过，相关 Vitest 7 passed、ESLint 通过。完整真实主对话/专家主执行验收及精确 Chromium 108 补丁版仍待完成。

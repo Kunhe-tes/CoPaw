@@ -15,6 +15,8 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from ..config.context import is_valid_identity_value
+from .config import EmitterConfig, capture_enabled
+from .emitter import default_emitter
 from .store import ObservabilityStore
 
 router = APIRouter(prefix="/agent-observability", tags=["agent-observability"])
@@ -28,6 +30,94 @@ class RunListResponse(BaseModel):
     generated_at: datetime
     window_start: datetime
     window_end: datetime
+
+
+class CapabilitiesResponse(BaseModel):
+    capture_enabled: bool
+    storage_configured: bool
+    storage_ready: bool
+    projector_running: bool
+    queue_events: int
+    queue_bytes: int
+    max_event_bytes: int
+
+
+class HealthResponse(BaseModel):
+    capture_enabled: bool
+    storage_ready: bool
+    projector_running: bool
+    dropped_events: int | None
+    generated_at: datetime
+
+
+def _require_observability_reader(request: Request) -> str:
+    role = request.headers.get("X-User-Role", "").strip().lower()
+    if role not in {"manager", "admin"}:
+        raise HTTPException(status_code=403, detail="Manager role required")
+    if role == "manager" and not getattr(request.state, "source_id", None):
+        raise HTTPException(status_code=403, detail="Source scope required")
+    return role
+
+
+async def _storage_ready(request: Request) -> bool:
+    store = getattr(request.app.state, "agent_observability_store", None)
+    if not isinstance(store, ObservabilityStore):
+        return False
+    try:
+        readiness = await store.readiness()
+    except Exception:
+        return False
+    return bool(readiness.get("ready"))
+
+
+@router.get("/capabilities", response_model=CapabilitiesResponse)
+async def capabilities(request: Request) -> CapabilitiesResponse:
+    _require_observability_reader(request)
+    config = EmitterConfig.from_environment()
+    return CapabilitiesResponse(
+        capture_enabled=capture_enabled(),
+        storage_configured=getattr(
+            request.app.state,
+            "agent_observability_connection",
+            None,
+        ) is not None,
+        storage_ready=await _storage_ready(request),
+        projector_running=bool(
+            getattr(
+                getattr(request.app.state, "agent_observability_projector", None),
+                "running",
+                False,
+            ),
+        ),
+        queue_events=config.max_queue_events,
+        queue_bytes=config.max_queue_bytes,
+        max_event_bytes=config.max_event_bytes,
+    )
+
+
+@router.get("/health", response_model=HealthResponse)
+async def health(request: Request) -> HealthResponse:
+    if _require_observability_reader(request) != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+    dropped_events = None
+    if capture_enabled():
+        try:
+            dropped_events = default_emitter().dropped_count
+        except Exception:
+            dropped_events = None
+    return HealthResponse(
+        capture_enabled=capture_enabled(),
+        storage_ready=await _storage_ready(request),
+        projector_running=bool(
+            getattr(
+                getattr(request.app.state, "agent_observability_projector", None),
+                "running",
+                False,
+            ),
+        ),
+        dropped_events=dropped_events,
+        generated_at=datetime.now(timezone.utc),
+    )
 
 
 def _authorized_sources(request: Request, requested: list[str] | None) -> list[str]:

@@ -3,7 +3,11 @@ import { Alert, Button, Empty, Input, Spin, Table, Tag, Typography } from "antd"
 import type { ColumnsType } from "antd/es/table";
 import { RefreshCw } from "lucide-react";
 import {
+  getAgentObservabilityCapabilities,
+  getAgentObservabilityHealth,
   listAgentObservabilityRuns,
+  type AgentObservabilityCapabilities,
+  type AgentObservabilityHealth,
   type AgentObservabilityRun,
   type AgentObservabilityRunPage,
 } from "../../api/modules/agentObservability";
@@ -37,6 +41,9 @@ export default function AgentObservabilityPage() {
   const requestRef = useRef<AbortController | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [capabilities, setCapabilities] = useState<AgentObservabilityCapabilities | null>(null);
+  const [capabilityError, setCapabilityError] = useState<string | null>(null);
+  const [health, setHealth] = useState<AgentObservabilityHealth | null>(null);
   const activeScope = `${isAdmin ? "admin" : "manager"}:${source ?? ""}:${(sources ?? []).join(",")}`;
   const visiblePage = pageScope === activeScope ? page : null;
 
@@ -72,12 +79,33 @@ export default function AgentObservabilityPage() {
 
   useEffect(() => {
     if (!isAdmin && !isManager) return;
+    const controller = new AbortController();
+    setCapabilities(null);
+    setCapabilityError(null);
+    setHealth(null);
+    void getAgentObservabilityCapabilities(controller.signal)
+      .then(setCapabilities)
+      .catch((cause: unknown) => {
+        if (!controller.signal.aborted) {
+          setCapabilityError(cause instanceof Error ? cause.message : "读取能力状态失败");
+        }
+      });
+    if (isAdmin) {
+      void getAgentObservabilityHealth(controller.signal)
+        .then(setHealth)
+        .catch(() => {
+          if (!controller.signal.aborted) setHealth(null);
+        });
+    }
     setPage(null);
     setCursor(undefined);
     setHistory([undefined]);
     windowRef.current = null;
     void load();
-    return () => requestRef.current?.abort();
+    return () => {
+      controller.abort();
+      requestRef.current?.abort();
+    };
   }, [isAdmin, isManager, load, source]);
 
   const applySources = () => {
@@ -94,9 +122,10 @@ export default function AgentObservabilityPage() {
       width: 176,
       render: (value: string) => new Date(value).toLocaleString(),
     },
-    { title: "状态", dataIndex: "status", width: 132, render: (value: string | null) => (
-      <Tag color={statusColor(value)}>{valueOrDash(value)}</Tag>
-    ) },
+    { title: "状态", dataIndex: "status", width: 132, render: (value: string | null) => {
+      const displayStatus = value ?? "unknown";
+      return <Tag color={statusColor(value)}>{displayStatus}</Tag>;
+    } },
     { title: "Source", dataIndex: "source_key", width: 156, ellipsis: true },
     { title: "Agent", dataIndex: "agent_key", width: 136, ellipsis: true },
     { title: "Chat", dataIndex: "chat_key", width: 180, ellipsis: true },
@@ -156,6 +185,22 @@ export default function AgentObservabilityPage() {
           />
           <Button onClick={applySources}>应用</Button>
         </div>
+      )}
+      {capabilityError && (
+        <Alert
+          type="warning"
+          showIcon
+          message="采集能力状态不可用"
+          description={capabilityError}
+        />
+      )}
+      {capabilities && (
+        <Alert
+          type={capabilities.capture_enabled && capabilities.storage_ready ? "success" : "warning"}
+          showIcon
+          message={`采集${capabilities.capture_enabled ? "已开启" : "已关闭"} · 元数据存储${capabilities.storage_ready ? "就绪" : capabilities.storage_configured ? "未就绪" : "未配置"} · 投影器${capabilities.projector_running ? "运行中" : "未运行"}`}
+          description={`事件队列上限 ${capabilities.queue_events} 条 / ${Math.round(capabilities.queue_bytes / 1024 / 1024)} MiB；单事件上限 ${Math.round(capabilities.max_event_bytes / 1024)} KiB${health?.dropped_events == null ? "" : `；进程累计丢弃 ${health.dropped_events} 条`}`}
+        />
       )}
       {error && <Alert type="error" showIcon message="执行列表不可用" description={error} />}
       <section className={styles.tableRegion} aria-busy={loading}>
