@@ -26,6 +26,8 @@ class _ToolExecutor:
         self.calls.append(tool_call)
         if isinstance(self.outcome, BaseException):
             raise self.outcome
+        if callable(self.outcome):
+            return await self.outcome(tool_call)
         return self.outcome
 
 
@@ -72,6 +74,7 @@ async def test_tool_execution_preserves_business_result_and_projects_outcome(
     emitter = JsonlEmitter(EmitterConfig(), stream=stream)
     monkeypatch.setattr(instrumentation, "default_emitter", lambda: emitter)
     agent = _ObservedToolAgent(outcome)
+    agent._observability_step_index = 4
     tool_call = {"id": "call-1", "name": "read_file", "input": {}}
     context = ObservabilityContext.new_run(
         capture_enabled=True,
@@ -95,6 +98,7 @@ async def test_tool_execution_preserves_business_result_and_projects_outcome(
     ]
     assert events[0]["tool"]["tool_key"] == "read_file"
     assert events[0]["tool"]["tool_call_id"] == "call-1"
+    assert events[0]["step_index"] == 4
     assert events[1]["status"] == span_status
     assert events[1]["technical_status"] == technical_status
     assert events[1]["has_error"] is has_error
@@ -145,6 +149,141 @@ async def test_tool_execution_records_exception_and_preserves_propagation(
     if technical_status is not None:
         assert events[1]["error_type"] == type(error).__name__
     assert "private tool error" not in stream.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_executions_keep_distinct_span_identities(
+    monkeypatch,
+):
+    from swe.observability import instrumentation
+
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(instrumentation, "default_emitter", lambda: emitter)
+
+    class ConcurrentToolExecutor(_ObservedToolAgent):
+        def __init__(self):
+            self.ready = asyncio.Event()
+            super().__init__(self._result)
+
+        async def _result(self, tool_call):
+            if len(self.calls) == 2:
+                self.ready.set()
+            await self.ready.wait()
+            return {"content": tool_call["id"]}
+
+    agent = ConcurrentToolExecutor()
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+    ).new_attempt()
+    calls = [
+        {"id": "parallel-call-a", "name": "read_file", "input": {}},
+        {"id": "parallel-call-b", "name": "write_file", "input": {}},
+    ]
+
+    with bind_context(context):
+        results = await asyncio.gather(
+            *(
+                agent._run_tool_call_with_hard_timeout_impl(
+                    tool_call,
+                    tool_call["name"],
+                    {},
+                )
+                for tool_call in calls
+            ),
+        )
+    assert emitter.close(timeout=1) == 0
+    events = _events(stream)
+    started = {
+        event["tool"]["tool_call_id"]: event
+        for event in events
+        if event["event_name"] == "span.started"
+    }
+    ended = {
+        event["tool"]["tool_call_id"]: event
+        for event in events
+        if event["event_name"] == "span.ended"
+    }
+
+    assert results == [
+        {"content": "parallel-call-a"},
+        {"content": "parallel-call-b"},
+    ]
+    assert len(agent.calls) == 2
+    assert set(started) == {"parallel-call-a", "parallel-call-b"}
+    assert set(ended) == set(started)
+    execution_ids = {
+        event["tool"]["tool_execution_id"] for event in started.values()
+    }
+    assert len(execution_ids) == 2
+    assert all(event["status"] == "succeeded" for event in ended.values())
+
+
+@pytest.mark.asyncio
+async def test_tool_hard_timeout_records_controlled_failure(monkeypatch):
+    from swe.agents import tool_guard_mixin
+    from swe.observability import instrumentation
+
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(instrumentation, "default_emitter", lambda: emitter)
+    monkeypatch.setattr(
+        tool_guard_mixin,
+        "LOCAL_TOOL_EXECUTION_HARD_TIMEOUT",
+        0.01,
+    )
+
+    async def slow_result(_tool_call):
+        await asyncio.sleep(0.05)
+        return {"content": "too late"}
+
+    class GenericTimeoutAgent(_ObservedToolAgent):
+        def _tool_has_specific_timeout(self, _tool_name):
+            return False
+
+        async def _persist_local_tool_timeout_result(
+            self,
+            _tool_call_id,
+            _tool_name,
+            _timeout_text,
+        ):
+            return None
+
+        def _extract_current_tool_response(
+            self,
+            _tool_call_id,
+            *,
+            include_structured_failure=False,
+        ):
+            assert include_structured_failure
+            return {"isError": True, "error_type": "tool_timeout"}
+
+    agent = GenericTimeoutAgent(slow_result)
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+    ).new_attempt()
+    tool_call = {"id": "timeout-call", "name": "local_tool", "input": {}}
+
+    with bind_context(context):
+        result = await agent._run_tool_call_with_hard_timeout_impl(
+            tool_call,
+            "local_tool",
+            {},
+        )
+    assert emitter.close(timeout=1) == 0
+    events = _events(stream)
+
+    assert result is None
+    assert len(agent.calls) == 1
+    assert [event["event_name"] for event in events] == [
+        "span.started",
+        "span.ended",
+    ]
+    assert events[-1]["status"] == "failed"
+    assert events[-1]["technical_status"] == "ERROR"
+    assert events[-1]["error_type"] == "tool_timeout"
 
 
 @pytest.mark.asyncio
