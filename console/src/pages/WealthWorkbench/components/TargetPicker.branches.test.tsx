@@ -141,6 +141,11 @@ describe("中台紧凑机构与人员卡片", () => {
         (item: { mmOrgCode: string }) => item.mmOrgCode,
       ),
     ).toEqual(["110", "a", "a1", "b"]);
+    fireEvent.click(childBox);
+    expect(parentBox).toBePartiallyChecked();
+    expect(rootBox).toBePartiallyChecked();
+    expect(otherBox).toBeChecked();
+    expect(mock).toHaveBeenCalledTimes(4);
     fireEvent.click(screen.getByRole("button", { name: "南山支行" }));
     await screen.findByText(/共 1 人/);
     expect(otherBox).toBeChecked();
@@ -148,14 +153,66 @@ describe("中台紧凑机构与人员卡片", () => {
       "0001",
       "0003",
     ]);
-    fireEvent.click(childBox);
-    expect(parentBox).toBePartiallyChecked();
-    expect(rootBox).toBePartiallyChecked();
-    expect(otherBox).toBeChecked();
     fireEvent.click(rootBox);
     expect(childBox).toBeChecked();
     expect(rootBox).toBeChecked();
     expect(mock).toHaveBeenCalledTimes(5);
+  });
+  it("根据已查询下级的已选人员展示未查询上级的半选状态", async () => {
+    const [branch, sibling] = tree.children;
+    const nestedTree = {
+      ...tree,
+      children: [
+        {
+          ...branch,
+          children: [
+            ...(branch.children ?? []),
+            { mOrgCode: "a2", mOrgName: "翠竹支行", mOrgLvl: 80 },
+          ],
+        },
+        sibling,
+      ],
+    };
+    mock.mockImplementation(async (path, options) => {
+      if (path.endsWith("bbkTree")) return { code: "200", data: nestedTree };
+      const [{ mmOrgCode }] = JSON.parse(options!.body as string).orgList;
+      if (mmOrgCode === "a1") return { code: "200", data: [people[1]] };
+      if (mmOrgCode === "a2") return { code: "200", data: [people[0]] };
+      return { code: "200", data: people };
+    });
+    await ready();
+    fireEvent.click(screen.getByRole("button", { name: "展开罗湖支行" }));
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "选择北京分行全部人员" }),
+    );
+    await screen.findByText(/共 2 人/);
+
+    fireEvent.click(screen.getByRole("button", { name: "东门支行" }));
+    await screen.findByText(/共 1 人/);
+    const parent = screen.getByRole("checkbox", {
+      name: "选择罗湖支行全部人员",
+    });
+    const kept = screen.getByRole("checkbox", { name: "选择东门支行全部人员" });
+    const removed = screen.getByRole("checkbox", {
+      name: "选择翠竹支行全部人员",
+    });
+    expect(parent).toBeChecked();
+    fireEvent.click(removed);
+    expect(parent).toBePartiallyChecked();
+    await waitFor(() =>
+      expect(useWealthStore.getState().targetSapIds).toEqual(["0002"]),
+    );
+    expect(parent).toBePartiallyChecked();
+    expect(kept).toBeChecked();
+    expect(removed).not.toBeChecked();
+    expect(
+      mock.mock.calls
+        .slice(1)
+        .map(
+          ([, options]) =>
+            JSON.parse(options!.body as string).orgList[0].mmOrgCode,
+        ),
+    ).toEqual(["110", "a1", "a2"]);
   });
   it("人员归属误报为兄弟机构时，只勾选实际操作的机构", async () => {
     const mismatched = {

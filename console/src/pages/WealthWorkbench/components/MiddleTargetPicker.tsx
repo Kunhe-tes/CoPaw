@@ -169,13 +169,10 @@ function InstitutionPicker({ root }: { root: Institution }) {
             {rows.length ? (
               rows.map(({ node, depth }) => {
                 const code = node.mOrgCode;
-                const count = snapshot.selected.filter((u) =>
-                  session.isPersonSelectedIn(code, u),
-                ).length;
                 const checked = session.isInstitutionSelected(code);
                 const mixed =
                   !checked &&
-                  (count > 0 ||
+                  (session.hasSelectedPeopleInSubtree(code) ||
                     session.isPendingSelection(code) ||
                     snapshot.emptyInstitutions.some((empty) =>
                       session.index.contains(code, empty),
@@ -450,7 +447,7 @@ function InstitutionPicker({ root }: { root: Institution }) {
                       key={user.sapId}
                       type="button"
                       aria-label={`移除${user.name}`}
-                      onClick={() => session.togglePerson(user)}
+                      onClick={() => session.removeRecipients([user])}
                     >
                       {user.name} ×
                     </button>
