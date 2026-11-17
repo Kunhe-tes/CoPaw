@@ -389,6 +389,17 @@ async def test_consecutive_approvals_keep_root_run_and_attempt_chain(
                 started_at=approval_started_at,
             )
         assert resolved is not None
+        service.pending.status = "approved"
+        duplicate, duplicate_decision = await admission._approval_continuation(
+            owner,
+            request=request,
+            session_id="session-a",
+            user_id="user-a",
+            query=f"/approve {approval_id}",
+        )
+        assert duplicate is None
+        assert duplicate_decision is None
+        service.pending.status = "pending"
         predecessor = current_attempt
 
     assert not any(
