@@ -1,4 +1,3 @@
-import type { DistributeTarget } from "../types";
 import type { Institution } from "./api";
 
 export class InstitutionIndex {
@@ -20,22 +19,6 @@ export class InstitutionIndex {
   }
   contains(parent: string, child: string) {
     return this.descendants.get(parent)?.has(child) ?? false;
-  }
-  includes(code: string, user: DistributeTarget) {
-    return (
-      code === this.root.mOrgCode || this.contains(code, user.bbkOrgId ?? "")
-    );
-  }
-  branchOf(user: DistributeTarget): string | undefined {
-    let code = user.bbkOrgId;
-    if (!code || !this.nodes.has(code)) return undefined;
-    while (
-      this.parents.has(code) &&
-      this.parents.get(code) !== this.root.mOrgCode
-    ) {
-      code = this.parents.get(code)!;
-    }
-    return code;
   }
   path(code: string): Institution[] {
     const nodes: Institution[] = [];

@@ -84,7 +84,7 @@ async function loadA() {
 }
 
 describe("中台紧凑机构与人员卡片", () => {
-  it("分行和父级勾选展开所有机构请求并联动子级，含零人支行", async () => {
+  it("分行和父级请求完整子树，只联动已独立查询的机构", async () => {
     const branchB = {
       sapID: "0003",
       userName: "王五",
@@ -117,25 +117,29 @@ describe("中台紧凑机构与人员卡片", () => {
     const otherBox = screen.getByRole("checkbox", {
       name: "选择南山支行全部人员",
     });
+    fireEvent.click(screen.getByRole("button", { name: "东门支行" }));
+    await screen.findByText("该机构暂无可分发人员");
     fireEvent.click(parentBox);
     await waitFor(() => expect(childBox).toBeChecked());
     expect(parentBox).toBeChecked();
     expect(otherBox).not.toBeChecked();
     expect(
-      JSON.parse(mock.mock.calls[1][1]!.body as string).orgList.map(
+      JSON.parse(mock.mock.calls[2][1]!.body as string).orgList.map(
         (item: { mmOrgCode: string }) => item.mmOrgCode,
       ),
     ).toEqual(["a", "a1"]);
     fireEvent.click(rootBox);
-    await waitFor(() => expect(otherBox).toBeChecked());
-    expect(rootBox).toBeChecked();
+    await waitFor(() => expect(rootBox).toBeChecked());
+    expect(otherBox).not.toBeChecked();
     expect(parentBox).toBeChecked();
     expect(childBox).toBeChecked();
     expect(
-      JSON.parse(mock.mock.calls[2][1]!.body as string).orgList.map(
+      JSON.parse(mock.mock.calls[3][1]!.body as string).orgList.map(
         (item: { mmOrgCode: string }) => item.mmOrgCode,
       ),
     ).toEqual(["110", "a", "a1", "b"]);
+    fireEvent.click(screen.getByRole("button", { name: "南山支行" }));
+    await waitFor(() => expect(otherBox).toBeChecked());
     expect(useWealthStore.getState().targetSapIds.sort()).toEqual([
       "0001",
       "0003",
@@ -147,7 +151,43 @@ describe("中台紧凑机构与人员卡片", () => {
     fireEvent.click(rootBox);
     expect(childBox).toBeChecked();
     expect(rootBox).toBeChecked();
-    expect(mock).toHaveBeenCalledTimes(3);
+    expect(mock).toHaveBeenCalledTimes(5);
+  });
+  it("人员归属误报为兄弟机构时，只勾选实际操作的机构", async () => {
+    const mismatched = {
+      ...people[0],
+      subBranchID: "b",
+      subBranchName: "南山支行",
+    };
+    mock.mockImplementation(async (path) => ({
+      code: "200",
+      data: path.endsWith("bbkTree") ? tree : [mismatched],
+    }));
+    await ready();
+    fireEvent.click(screen.getByRole("button", { name: "南山支行" }));
+    await screen.findByText(/共 1 人/);
+    const selected = screen.getByRole("checkbox", {
+      name: "选择罗湖支行全部人员",
+    });
+    const other = screen.getByRole("checkbox", {
+      name: "选择南山支行全部人员",
+    });
+    fireEvent.click(selected);
+    await waitFor(() => expect(selected).toBeChecked());
+    expect(other).not.toBeChecked();
+    expect(other).not.toBePartiallyChecked();
+    expect(
+      screen.getByRole("heading", { name: /^罗湖支行\s*全部 1 人$/ }),
+    ).toBeVisible();
+    expect(useWealthStore.getState().targetSapIds).toEqual(["0001"]);
+    fireEvent.click(other);
+    expect(other).toBeChecked();
+    expect(selected).toBeChecked();
+    fireEvent.click(selected);
+    expect(other).toBeChecked();
+    expect(useWealthStore.getState().targetSapIds).toEqual(["0001"]);
+    fireEvent.click(other);
+    expect(useWealthStore.getState().targetSapIds).toEqual([]);
   });
   it("空机构可勾选并显示全部零人，可取消、移除和清空且不重复查询", async () => {
     mock.mockImplementation(async (path) => ({
@@ -244,11 +284,15 @@ describe("中台紧凑机构与人员卡片", () => {
     ]);
     expect(screen.getByText("全部 2 人")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "展开罗湖支行" }));
+    mock.mockResolvedValueOnce({ code: "200", data: [people[1]] });
     fireEvent.click(screen.getByRole("button", { name: "东门支行" }));
     expect(mock).toHaveBeenCalledTimes(2);
-    expect(
-      screen.getByRole("checkbox", { name: "选择东门支行全部人员" }),
-    ).toBeChecked();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("checkbox", { name: "选择东门支行全部人员" }),
+      ).toBeChecked(),
+    );
+    expect(mock).toHaveBeenCalledTimes(3);
     fireEvent.click(screen.getByRole("button", { name: "移除该机构" }));
     expect(useWealthStore.getState().targetSapIds).toEqual([]);
   });
@@ -297,7 +341,7 @@ describe("中台紧凑机构与人员卡片", () => {
       screen.getByRole("checkbox", { name: "选择罗湖支行全部人员" }),
     );
     fireEvent.change(screen.getByLabelText("搜索分发目标"), {
-      target: { value: "支行" },
+      target: { value: "000" },
     });
     fireEvent.click(screen.getByRole("button", { name: "取消选择搜索结果" }));
     expect(useWealthStore.getState().targetSapIds).toEqual([]);
@@ -312,7 +356,7 @@ describe("中台紧凑机构与人员卡片", () => {
     expect(screen.getByText("全部 1 人")).toBeInTheDocument();
     expect(screen.queryByText("部分 1 / 2 人")).not.toBeInTheDocument();
   });
-  it("分行待选及取消待选都不改变已有支行汇总", async () => {
+  it("历史人员未查询前不按接口归属分组，取消待选保留人员", async () => {
     useWealthStore.setState({
       targetSapIds: ["0001", "0003"],
       targets: [
@@ -322,12 +366,7 @@ describe("中台紧凑机构与人员卡片", () => {
     });
     await ready();
     const expectOriginalGroups = () => {
-      expect(
-        screen.getByRole("heading", { name: /罗湖支行/ }),
-      ).toBeInTheDocument();
-      expect(
-        screen.getByRole("heading", { name: /南山支行/ }),
-      ).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: /未匹配机构/ })).toBeVisible();
       expect(useWealthStore.getState().targetSapIds).toEqual(["0001", "0003"]);
     };
     expectOriginalGroups();
