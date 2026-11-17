@@ -159,7 +159,7 @@ describe("分发人员批量队列", () => {
     expect(session.getSnapshot().people).toEqual([users[2]]);
     expect(session.getSnapshot().selected).toEqual([users[2]]);
   });
-  it("500ms 固定窗口，不因第二次点击延后，合并多机构请求", async () => {
+  it("500ms 固定窗口，不因第二次点击延后，按机构分别请求", async () => {
     const { session, query } = setup();
     session.toggleInstitution("a");
     await vi.advanceTimersByTimeAsync(300);
@@ -169,10 +169,12 @@ describe("分发人员批量队列", () => {
     expect(query).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(query).toHaveBeenCalledTimes(1);
-    expect(query.mock.calls[0][0].map((n: Institution) => n.mOrgCode)).toEqual([
-      "a",
-      "b",
-    ]);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(
+      query.mock.calls.map(([nodes]) => nodes.map((n) => n.mOrgCode)),
+    ).toEqual([["a"], ["b"]]);
+    expect(session.getSnapshot().people).toEqual([users[2]]);
     expect(session.getSnapshot().selected.map((u) => u.sapId)).toEqual([
       "01",
       "02",
@@ -237,22 +239,26 @@ describe("分发人员批量队列", () => {
     expect(session.getSnapshot().selected).toEqual(users.slice(0, 2));
     expect(query).toHaveBeenCalledTimes(2);
   });
-  it("已加载上级复用下级，但下级不冒充上级完整名单", async () => {
+  it("下级列表直接展示该机构接口返回的人员，即使归属编号不匹配", async () => {
+    const returned = [users[0], user("02", "other"), users[2], users[3]];
     const query = vi
       .fn()
-      .mockResolvedValueOnce([users[1]])
-      .mockResolvedValueOnce(users);
+      .mockResolvedValueOnce(users)
+      .mockResolvedValueOnce(returned);
     const { session } = setup(query);
-    session.view("a1");
-    await vi.advanceTimersByTimeAsync(500);
     session.view("root");
     await vi.advanceTimersByTimeAsync(500);
-    expect(query).toHaveBeenCalledTimes(2);
     session.view("a");
-    session.view("b");
+    expect(session.getSnapshot().people).toBeUndefined();
     await vi.advanceTimersByTimeAsync(500);
     expect(query).toHaveBeenCalledTimes(2);
-    expect(session.getSnapshot().people).toEqual([users[2]]);
+    expect(query.mock.calls[1][0]).toEqual([root.children[0]]);
+    expect(session.getSnapshot().people).toEqual(returned);
+    session.toggleInstitution("a");
+    expect(session.getSnapshot().selected).toEqual(returned);
+    session.toggleInstitution("a");
+    expect(session.getSnapshot().selected).toEqual([]);
+    expect(query).toHaveBeenCalledTimes(2);
   });
   it("半选补全、父级覆盖下级，取消单人保持其他机构选择", async () => {
     const { session } = setup();
@@ -261,6 +267,7 @@ describe("分发人员批量队列", () => {
     session.view("a1");
     session.togglePerson(users[1]);
     session.toggleInstitution("a");
+    await vi.advanceTimersByTimeAsync(500);
     expect(
       session
         .getSnapshot()
@@ -268,6 +275,7 @@ describe("分发人员批量队列", () => {
         .sort(),
     ).toEqual(["01", "02"]);
     session.toggleInstitution("b");
+    await vi.advanceTimersByTimeAsync(500);
     session.togglePerson(users[1]);
     expect(
       session
@@ -336,7 +344,8 @@ describe("分发人员批量队列", () => {
     const query = vi
       .fn()
       .mockResolvedValueOnce([users[0]])
-      .mockResolvedValueOnce([users[0], added, users[2]]);
+      .mockResolvedValueOnce([users[0], added, users[2]])
+      .mockResolvedValueOnce([users[0], added]);
     const { session } = setup(query);
     session.view("a");
     await vi.advanceTimersByTimeAsync(500);
@@ -344,11 +353,12 @@ describe("分发人员批量队列", () => {
     session.view("root");
     await vi.advanceTimersByTimeAsync(500);
     session.view("a");
+    await vi.advanceTimersByTimeAsync(500);
     expect(session.getSnapshot().people).toEqual([users[0], added]);
     expect(session.people("a1")).toEqual([added]);
     session.toggleInstitution("a");
     expect(session.getSnapshot().selected).toEqual([users[0], added]);
-    expect(query).toHaveBeenCalledTimes(2);
+    expect(query).toHaveBeenCalledTimes(3);
   });
   it("全选失败后的半选点击重试补全，保留原有人员直到查询成功", async () => {
     const pending = deferred<DistributeTarget[]>();
@@ -374,7 +384,9 @@ describe("分发人员批量队列", () => {
   });
   it("未匹配历史人员不应使已清空的分行分组重新生效", async () => {
     const unknown = user("historical", "removed-org");
-    const session = new DistributionSession(root, [unknown], async () => users);
+    const session = new DistributionSession(root, [unknown], async ([scope]) =>
+      scope.mOrgCode === "a1" ? [users[1]] : users,
+    );
     sessions.push(session);
     session.toggleInstitution("root");
     await vi.advanceTimersByTimeAsync(500);
@@ -383,6 +395,7 @@ describe("分发人员批量队列", () => {
     expect(session.getSnapshot().selected).toEqual([unknown]);
     expect(session.getSnapshot().anchors).toEqual([]);
     session.toggleInstitution("a1");
+    await vi.advanceTimersByTimeAsync(500);
     expect(session.getSnapshot().anchors).toEqual(["a1"]);
     expect(session.getSnapshot().selected).toEqual([unknown, users[1]]);
   });
