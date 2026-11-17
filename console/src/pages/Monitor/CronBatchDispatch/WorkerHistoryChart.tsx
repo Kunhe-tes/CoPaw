@@ -52,11 +52,15 @@ export default function WorkerHistoryChart({
               if (!point?.record) return "";
               const r = point.record;
               if (showOccupancy)
-                return `${dayjs(r.created_at).format(
-                  "MM-DD HH:mm:ss",
-                )}\n有效 Worker：${r.effective_workers}\n占用 Worker：${
-                  sampledOccupancy(r) ?? "无采样"
-                }\n${r.decision_reason || "未记录原因"}`;
+                return [
+                  dayjs(r.created_at).format("MM-DD HH:mm:ss"),
+                  `调整前 Worker：${r.previous_workers}`,
+                  `有效 Worker：${r.effective_workers}`,
+                  `占用 Worker：${sampledOccupancy(r) ?? "无采样"}`,
+                  `成功数：${r.success_count}，失败数：${r.failure_count}`,
+                  `错误率：${(r.error_rate * 100).toFixed(2)}%`,
+                  r.decision_reason || "未记录原因",
+                ].join("\n");
               return `${dayjs(r.created_at).format("MM-DD HH:mm:ss")}\n${
                 entry.seriesName
               }\nWorker ${r.previous_workers} → ${r.effective_workers}\n${

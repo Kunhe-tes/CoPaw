@@ -211,6 +211,10 @@ class ManagedBoardQuery:
         if row is None:
             raise LookupError("cron_batch_not_found")
         batch = batch_item(row)
+        skipped_members = await self._skipped_members(
+            row["receipt_id"],
+            source,
+        )
         members, total = await self._members(
             batch_id,
             query.member_page,
@@ -230,6 +234,7 @@ class ManagedBoardQuery:
         return {
             "batch": batch,
             "members": members,
+            "skipped_members": skipped_members,
             "member_total": total,
             "member_page": query.member_page,
             "member_page_size": query.member_limit,
@@ -238,6 +243,25 @@ class ManagedBoardQuery:
             "event_page": query.event_page,
             "event_page_size": query.event_limit,
         }
+
+    async def _skipped_members(self, receipt_id, source):
+        row = await self.db.fetch_one(
+            f"SELECT response_json FROM {sql.RECEIPTS} "
+            "WHERE receipt_id=%s AND source_id COLLATE utf8mb4_bin=%s",
+            (receipt_id, source),
+        )
+        if row is None:
+            return None
+        try:
+            response = json.loads(row["response_json"])
+        except (TypeError, ValueError):
+            return None
+        skipped = (
+            response.get("skipped_members")
+            if isinstance(response, dict)
+            else None
+        )
+        return skipped if isinstance(skipped, list) else None
 
     async def _members(self, batch_id, page, limit, status, role, query):
         clauses, params = ["m.batch_id=%s"], [batch_id]

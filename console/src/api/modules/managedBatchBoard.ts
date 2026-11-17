@@ -68,6 +68,14 @@ export interface ManagedBatchEvent {
   occurred_at: string;
   details: Record<string, unknown>;
 }
+export interface ManagedSkippedMember {
+  tenant_id: string;
+  agent_id: string;
+  job_id: string;
+  job_name: string | null;
+  member_role: "parent" | "child";
+  reason: string;
+}
 export interface ManagedBatchList {
   items: ManagedBatch[];
   total: number;
@@ -84,6 +92,7 @@ export interface ManagedBatchList {
 export interface ManagedBatchDetail {
   batch: ManagedBatch;
   members: ManagedBatchMember[];
+  skipped_members?: ManagedSkippedMember[] | null;
   member_total: number;
   member_page: number;
   member_page_size: number;
