@@ -301,11 +301,14 @@ describe("中台紧凑机构与人员卡片", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "取消选择搜索结果" }));
     expect(useWealthStore.getState().targetSapIds).toEqual([]);
+    mock.mockResolvedValueOnce({ code: "200", data: [people[1]] });
     fireEvent.click(screen.getByRole("button", { name: "展开罗湖支行" }));
     fireEvent.click(
       screen.getByRole("checkbox", { name: "选择东门支行全部人员" }),
     );
-    expect(useWealthStore.getState().targetSapIds).toEqual(["0002"]);
+    await waitFor(() =>
+      expect(useWealthStore.getState().targetSapIds).toEqual(["0002"]),
+    );
     expect(screen.getByText("全部 1 人")).toBeInTheDocument();
     expect(screen.queryByText("部分 1 / 2 人")).not.toBeInTheDocument();
   });

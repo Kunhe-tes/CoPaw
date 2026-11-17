@@ -26,6 +26,7 @@ type QueryPeople = (
 /** One form owns its queue/cache. The tree cache has a separate, longer lifetime. */
 export class DistributionSession {
   readonly index: InstitutionIndex;
+  private queriedIds = new Map<string, Set<string>>();
   private cache = new Map<string, DistributeTarget[]>();
   private selected = new Map<string, DistributeTarget>();
   private intents = new Map<string, Intent>();
@@ -115,7 +116,7 @@ export class DistributionSession {
     this.clearPendingSelections(code);
     // Cancelling a failed bulk operation must preserve recipients selected before it.
     for (const user of this.selected.values()) {
-      if (this.index.includes(code, user))
+      if (this.includesPerson(code, user))
         this.personIntents.set(user.sapId, {
           selected: true,
           order: ++this.order,
@@ -128,17 +129,24 @@ export class DistributionSession {
   private wants(code: string) {
     return this.orgIntent(code)?.selected === true;
   }
+  private includesPerson(code: string, user: DistributeTarget) {
+    if (code === this.index.root.mOrgCode) return true;
+    return (
+      this.queriedIds.get(code)?.has(user.sapId) ??
+      this.index.includes(code, user)
+    );
+  }
   private applyIntents(users: DistributeTarget[], scopes: string[]) {
     for (const user of users) {
       // Lookup results may refresh metadata, but only unfinished choices add recipients.
-      if (!scopes.some((code) => this.index.includes(code, user))) {
+      if (!scopes.some((code) => this.includesPerson(code, user))) {
         if (this.selected.has(user.sapId)) this.selected.set(user.sapId, user);
         continue;
       }
       let latest = this.personIntents.get(user.sapId);
       for (const [scope, intent] of this.intents) {
         if (
-          this.index.includes(scope, user) &&
+          this.includesPerson(scope, user) &&
           (!latest || latest.order < intent.order)
         )
           latest = intent;
@@ -151,12 +159,16 @@ export class DistributionSession {
   private buildSnapshot(): DistributionSnapshot {
     const blocked = [...this.statuses].some(
       ([code, status]) =>
-        status !== "error" || (this.wants(code) && !this.people(code)),
+        status !== "error" ||
+        (this.wants(code) && this.pendingSelections.has(code)),
     );
     return {
       current: this.current,
       selected: [...this.selected.values()],
-      people: this.current ? this.people(this.current) : undefined,
+      people:
+        this.current && this.queriedIds.has(this.current)
+          ? this.cache.get(this.current)
+          : undefined,
       statuses: new Map(this.statuses),
       errors: new Map(this.errors),
       anchors: [...this.anchors],
@@ -176,7 +188,7 @@ export class DistributionSession {
     for (const anchor of this.anchors) {
       if (
         !this.emptyInstitutions.has(anchor) &&
-        !selected.some((user) => this.index.includes(anchor, user))
+        !selected.some((user) => this.includesPerson(anchor, user))
       )
         this.anchors.delete(anchor);
     }
@@ -192,7 +204,7 @@ export class DistributionSession {
     this.schedule();
   }
   toggleInstitution(code: string) {
-    const people = this.people(code);
+    const people = this.queriedIds.has(code) ? this.cache.get(code) : undefined;
     const pending =
       this.wants(code) &&
       [...this.pendingSelections].some((scope) => {
@@ -218,8 +230,8 @@ export class DistributionSession {
       this.addSelectionAnchor(code);
     } else {
       this.pendingSelections.add(code);
-      this.enqueue(code);
     }
+    this.enqueue(code);
     this.prune();
     this.emit();
     this.schedule();
@@ -232,7 +244,7 @@ export class DistributionSession {
         this.emptyInstitutions.delete(empty);
     }
     for (const [id, user] of this.selected) {
-      if (this.index.includes(code, user)) this.selected.delete(id);
+      if (this.includesPerson(code, user)) this.selected.delete(id);
     }
     for (const anchor of this.anchors) {
       if (this.index.contains(code, anchor)) this.anchors.delete(anchor);
@@ -303,22 +315,18 @@ export class DistributionSession {
     )
       this.anchors.add(code);
   }
-  private cachePeople(codes: string[], users: DistributeTarget[]) {
-    // A newer complete ancestor result supersedes exact and derived descendant caches.
-    for (const cached of this.cache.keys()) {
-      if (codes.some((code) => this.index.contains(code, cached)))
-        this.cache.delete(cached);
+  private cachePeople(code: string, users: DistributeTarget[]) {
+    // A newer ancestor result invalidates older descendant queries.
+    for (const descendant of this.index.descendants.get(code) ?? []) {
+      this.cache.delete(descendant);
+      this.queriedIds.delete(descendant);
     }
-    codes.forEach((code) =>
-      this.cache.set(
-        code,
-        users.filter((user) => this.index.includes(code, user)),
-      ),
-    );
+    this.cache.set(code, users);
+    this.queriedIds.set(code, new Set(users.map(({ sapId }) => sapId)));
   }
   private enqueue(code: string) {
     if (
-      this.people(code) ||
+      this.queriedIds.has(code) ||
       this.statuses.get(code) === "loading" ||
       this.queue.has(code)
     )
@@ -330,7 +338,10 @@ export class DistributionSession {
   private prune() {
     for (const [code, status] of this.statuses) {
       if (status === "loading") continue;
-      if (this.people(code) || (!this.wants(code) && this.current !== code)) {
+      if (
+        this.queriedIds.has(code) ||
+        (!this.wants(code) && this.current !== code)
+      ) {
         this.statuses.delete(code);
         this.errors.delete(code);
         this.queue.delete(code);
@@ -353,53 +364,43 @@ export class DistributionSession {
     this.timer = null;
     if (this.disposed || this.active) return;
     this.prune();
-    // The API adapter expands each retained scope into all of its descendant orgList entries.
-    const codes = [...this.queue.keys()].filter(
-      (code, _, all) =>
-        !all.some(
-          (other) => other !== code && this.index.contains(other, code),
-        ),
-    );
-    if (!codes.length) {
+    // Each scope needs its own flat response, including for queued selections.
+    const code = this.queue.keys().next().value;
+    if (code === undefined) {
       this.emit();
       return;
     }
-    const batch = [...this.queue.keys()];
-    batch.forEach((code) => {
-      this.queue.delete(code);
-      this.statuses.set(code, "loading");
-    });
+    this.queue.delete(code);
+    this.statuses.set(code, "loading");
     const controller = new AbortController();
     this.active = controller;
     this.emit();
     try {
       const users = await this.query(
-        codes.map((code) => this.index.nodes.get(code)!),
+        [this.index.nodes.get(code)!],
         controller.signal,
       );
       if (this.disposed) return;
-      this.cachePeople(codes, users);
-      const completed = [...this.pendingSelections].filter(
-        (code) => this.people(code) !== undefined,
+      this.cachePeople(code, users);
+      const completed = [...this.pendingSelections].filter((code) =>
+        this.queriedIds.has(code),
       );
       this.applyIntents(users, completed);
       completed.forEach((code) => {
         this.addSelectionAnchor(code);
         this.pendingSelections.delete(code);
       });
-      batch.forEach((code) => {
-        this.statuses.delete(code);
-        this.errors.delete(code);
-      });
+      this.statuses.delete(code);
+      this.errors.delete(code);
+      if (this.current && !this.statuses.has(this.current))
+        this.enqueue(this.current);
       this.prune();
     } catch (error) {
       if (this.disposed) return;
       const message =
         error instanceof Error ? error.message : "人员查询失败，请重试";
-      batch.forEach((code) => {
-        this.statuses.set(code, "error");
-        this.errors.set(code, message);
-      });
+      this.statuses.set(code, "error");
+      this.errors.set(code, message);
       this.prune();
     } finally {
       this.active = null;
