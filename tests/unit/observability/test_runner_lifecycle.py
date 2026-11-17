@@ -302,6 +302,104 @@ async def test_approval_command_resumes_same_run_with_predecessor_attempt(
 
 
 @pytest.mark.asyncio
+async def test_consecutive_approvals_keep_root_run_and_attempt_chain(
+    monkeypatch,
+):
+    from swe.app.runner.query_execution import admission
+
+    emitter = _setup(monkeypatch)
+    owner = SimpleNamespace(agent_id="agent-a", _APPROVAL_TIMEOUT_SECONDS=60)
+    request = SimpleNamespace(
+        session_id="session-a",
+        user_id="user-a",
+        source_id="source-a",
+        channel_meta={"chat_id": "chat-a", "source_id": "source-a"},
+    )
+    root = runner_lifecycle.admit_query_run(owner, request, [_message()])
+    previous_attempt = runner_lifecycle.start_query_attempt(root)
+
+    class ApprovalService:
+        pending = None
+
+        async def get_request(self, _request_id):
+            return self.pending
+
+    service = ApprovalService()
+    monkeypatch.setattr(
+        "swe.app.approvals.get_approval_service",
+        lambda: service,
+    )
+    predecessor = previous_attempt
+    for approval_id in (
+        "550e8400-e29b-41d4-a716-446655440001",
+        "550e8400-e29b-41d4-a716-446655440002",
+    ):
+        runner_lifecycle.finish_query_run(
+            root,
+            predecessor,
+            "completed",
+            waiting_for_approval=True,
+        )
+        with bind_context(predecessor):
+            carrier = runner_lifecycle.approval_context_carrier()
+        service.pending = SimpleNamespace(
+            request_id=approval_id,
+            status="pending",
+            session_id="session-a",
+            user_id="user-a",
+            created_at=time.time(),
+            extra={
+                "approval_kind": "tool_guard",
+                "agent_id": "agent-a",
+                "tenant_id": "tenant-a",
+                "source_id": "source-a",
+                "chat_id": "chat-a",
+                "msgid": "question-a",
+                "agent_observability_context": carrier,
+            },
+        )
+        restored, decision = await admission._approval_continuation(
+            owner,
+            request=request,
+            session_id="session-a",
+            user_id="user-a",
+            query=f"/approve {approval_id}",
+        )
+        assert decision == "approved"
+        assert restored.obs_run_id == root.obs_run_id
+        assert restored.business_ref["root_question_msgid"] == "question-a"
+        current_attempt = runner_lifecycle.start_query_attempt(restored)
+        assert current_attempt.attempt_index == predecessor.attempt_index + 1
+        assert (
+            current_attempt.predecessor_attempt_id
+            == predecessor.obs_attempt_id
+        )
+        predecessor = current_attempt
+
+    runner_lifecycle.finish_query_run(root, predecessor, "completed")
+    assert (
+        len(
+            [
+                event
+                for event in emitter.events
+                if event["event_name"] == "run.accepted"
+            ],
+        )
+        == 1
+    )
+    attempt_ends = [
+        event
+        for event in emitter.events
+        if event["event_name"] == "attempt.ended"
+    ]
+    assert [event["status"] for event in attempt_ends] == [
+        "waiting_approval",
+        "waiting_approval",
+        "succeeded",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_approval_with_missing_observability_carrier_is_unresolved(
     monkeypatch,
 ):
