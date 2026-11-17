@@ -79,6 +79,12 @@ class DatabaseConnection:
         if self._pool is not None:
             await self._pool.close()
 
+    def expect_identity(self, server_uuid, schema):
+        if not self.is_connected:
+            raise RuntimeError("Database not connected")
+        expected = (server_uuid, schema)
+        self._pool.expect_identity(expected)
+
     def _current(self):
         binding = _CURRENT_CONNECTION.get() or {}
         session = binding.get(self)

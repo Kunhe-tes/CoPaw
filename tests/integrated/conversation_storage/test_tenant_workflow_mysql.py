@@ -201,17 +201,15 @@ def _prepare_sources(tmp_path, failure_mode, *, same_tenant=False):
     )
 
 
-def _observe_import_failure(monkeypatch, failure_mode, session_b):
-    if failure_mode == "changed_bytes":
-        before = session_b.stat()
-        state = json.loads(session_b.read_text())
-        state["revision"] = 2
-        session_b.chmod(0o644)
-        session_b.write_text(json.dumps(state))
-        session_b.chmod(0o444)
+def _observe_import_failure(monkeypatch, failure_mode, chats_b):
+    if failure_mode == "changed_chats_mtime":
+        before = chats_b.stat()
         import os
 
-        os.utime(session_b, ns=(before.st_atime_ns, before.st_mtime_ns))
+        os.utime(
+            chats_b,
+            ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000),
+        )
     imported_failures = []
     from swe.app.conversation_storage.migration.tenant_errors import (
         TenantInputError,
@@ -241,7 +239,7 @@ async def _assert_failed_tenant_has_no_commits(
         assert imported_failures == [
             (("svc", "bob"), "unsettled legacy Turn blocks offline import"),
         ]
-    if failure_mode in ("running_turn", "changed_bytes"):
+    if failure_mode in ("running_turn", "changed_chats_mtime"):
         bob_scope = ["svc", "bob", "SRC", "agent"]
         tickets = await db.fetch_all(
             "SELECT entry_kind,source_key,details_text FROM swe_conversation_migration_entries",
@@ -262,9 +260,9 @@ async def _assert_failed_tenant_has_no_commits(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure_mode",
-    ["config", "running_turn", "changed_bytes"],
+    ["config", "running_turn", "changed_chats_mtime"],
 )
-async def test_prepare_migrate_repairs_failed_tenant_without_reading_online_sources(
+async def test_migrate_retry_keeps_failed_source_closed_and_skips_published_source(
     conversation_test_database,
     tmp_path,
     monkeypatch,
@@ -276,8 +274,8 @@ async def test_prepare_migrate_repairs_failed_tenant_without_reading_online_sour
         source,
         nas,
         workspaces,
-        config_b,
-        original_b,
+        _config_b,
+        _original_b,
         session_b,
         manifest,
         output,
@@ -308,7 +306,7 @@ async def test_prepare_migrate_repairs_failed_tenant_without_reading_online_sour
     imported_failures = _observe_import_failure(
         monkeypatch,
         failure_mode,
-        session_b,
+        workspaces["bob"] / "chats.json",
     )
     migrate_args = [
         "migrate",
@@ -356,29 +354,19 @@ async def test_prepare_migrate_repairs_failed_tenant_without_reading_online_sour
         runtime,
         workspaces["alice"],
     )
-    if failure_mode == "config":
-        config_b.chmod(0o644)
-        config_b.write_bytes(original_b)
-        config_b.chmod(0o444)
-    elif failure_mode == "running_turn":
-        state = json.loads(session_b.read_text())
-        state.pop("turn_states")
-        session_b.chmod(0o644)
-        session_b.write_text(json.dumps(state))
-        session_b.chmod(0o444)
     parsed = []
     real_inventory = tenant_cli._inventory
 
     async def inventory(view, spool, resources):
         parsed.append(view.key[1])
-        assert view.key[1] == "bob", "published source was parsed again"
+        assert view.key[1] != "alice", "published source was parsed again"
         return await real_inventory(view, spool, resources)
 
     monkeypatch.setattr(tenant_cli, "_inventory", inventory)
     code, resumed = await _invoke(migrate_args)
-    assert code == 2 and resumed["pending_schema_finalize"] is True
-    assert resumed["published"] == 3 and resumed["failed"] == 0
-    assert parsed and set(parsed) == {"bob"}
+    assert code == 2 and resumed["pending_schema_finalize"] is False
+    assert resumed["published"] == 2 and resumed["failed"] == 1
+    assert "alice" not in parsed
     assert (
         await db.fetch_all(
             "SELECT * FROM swe_conversation_chats WHERE tenant_key=%s ORDER BY id",
@@ -387,7 +375,8 @@ async def test_prepare_migrate_repairs_failed_tenant_without_reading_online_sour
         == online
     )
     assert config_a.read_text() == json.dumps(current)
-    await runtime.admit("bob")
+    with pytest.raises(TenantNotPublished):
+        await runtime.admit("bob")
 
 
 @pytest.mark.asyncio

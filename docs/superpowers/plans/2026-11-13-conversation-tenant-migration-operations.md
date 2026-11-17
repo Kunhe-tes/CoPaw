@@ -4,6 +4,8 @@
 
 **迁移范围说明（2026-11-17）：**历史分享记录不属于本次迁移输入。`discover` / `prepare` 不读取分享表；`shares-file` 若提供必须为空；inventory、导入、fast/full verify 和发布均不读取或复制旧分享记录。报告通过 `excluded_scopes: ["historical_shares"]` 标明范围。该决定不更改新版运行时永久分享功能及分享表 schema 要求。
 
+**新简化协议说明（2026-11-17）：**新 `prepare` 作业标记 `freshness_protocol="chats-mtime-v1"`，发现与语义盘点一次后冻结每个 workspace 的 `chats.json` `st_mtime_ns`；不生成输入摘要，不在 freeze 阶段重复发现。新协议 `migrate --apply` 先从 SQL 剪枝 published source，再逐 source 串行解析、导入、目标验证，并在导入前和发布前比较 chats mtime；不自动重发现、失败证据重审或完整源重盘。未发布 source 的会话输入、sessions/dialog 和身份配置须从 prepare 至发布保持只读不变。新协议由部署侧保证每个应用 schema 全局仅有一个迁移进程，不获取 MySQL schema 命名锁；事务仍固定在单连接，连接池每次借出物理连接时校验 server UUID/schema。旧 manifest/job 继续本页原有 digest、review 和 named-lock 行为，不可手改转换。详见 ADR 0051。
+
 ## 2026-11-16：新作业按 source 独立迁移与上线
 
 新版 `prepare --tenant-isolation` 固定 `source_isolation=true`，发布、失败记录和自动重审单位细化为 `(service_unit_id, tenant_id, source_id)`。同 tenant 的 source=A、B、C 中，B 输入损坏仅记录 B，A、C 继续导入、验证和独立上线。一个 source 内全部 Agent 和 workspace 仍须一起通过。操作仍为 prepare、migrate 两条主命令，资源参数及四个旧 root 同路径、nas_root 独立的原地模式保持不变。下文“账号/租户”在新作业中均指该三元隔离单位。

@@ -423,6 +423,8 @@ class ConversationImporter:
         self._batch_committed(position)
 
     def _assert_source_fresh(self, report):
+        if self.manifest.data.get("freshness_protocol"):
+            return
         from .freshness import changed_source, tenant_key
 
         timestamps = self.manifest.data.get("tenant_sync_started_at_ns", {})

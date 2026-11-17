@@ -107,11 +107,40 @@ def input_digest(data, key):
 
 
 def verify_input_digest(data, key):
+    if data.get("freshness_protocol"):
+        return
     tenant = next(t for t in data["tenants"] if _key(t)[: len(key)] == key)
     expected = tenant.get("input_digest")
     # Existing manifests retain their original source freshness contract.
     if expected is not None and input_digest(data, key) != expected:
         raise SourceChanged("tenant input changed after preparation")
+
+
+def verify_chats_mtimes(data, key):
+    """Check only the frozen chats.json timestamp for a new source job."""
+    from .isolation import belongs
+
+    for workspace in data["workspaces"]:
+        if not belongs(workspace, key):
+            continue
+        verify_workspace_chats_mtime(workspace)
+
+
+def verify_workspace_chats_mtime(workspace):
+    registry = Path(workspace["root"]) / workspace.get(
+        "registry_path",
+        "chats.json",
+    )
+    if registry.is_symlink():
+        raise SourceInputInvalid("chats.json cannot be a symlink")
+    try:
+        details = registry.lstat()
+    except FileNotFoundError:
+        raise SourceInputInvalid("chats.json is missing") from None
+    if not stat.S_ISREG(details.st_mode):
+        raise SourceInputInvalid("chats.json must be a regular file")
+    if details.st_mtime_ns != workspace.get("chats_mtime_ns"):
+        raise SourceChanged("chats.json changed after preparation")
 
 
 def _capture_digest(item):

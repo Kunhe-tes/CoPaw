@@ -109,6 +109,7 @@ class MigrationJournal:
                 "discovery_version",
                 "tenant_isolation",
                 "source_isolation",
+                "freshness_protocol",
                 "in_place",
                 "tenant_review_revision",
                 "tenants",

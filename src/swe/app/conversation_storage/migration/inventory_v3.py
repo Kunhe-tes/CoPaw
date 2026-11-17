@@ -15,6 +15,7 @@ from .source_inputs import (
     safe_input_entries,
     workspace_entries,
 )
+from .tenant_errors import SourceChanged
 from .manifest import SourceBoundary
 from .failure_scope import isolated_inventory, raise_shared_failure
 from .in_place_source import evidence_paths, verify_evidence
@@ -251,6 +252,27 @@ def _verify_tenant_evidence(data):
             verify_evidence(data, tenant)
 
 
+def _verify_discovery_tenant_evidence(data):
+    if not data.get("freshness_protocol"):
+        _verify_tenant_evidence(data)
+
+
+def _verify_discovery_workspace_evidence(data, mapped):
+    if not data.get("freshness_protocol"):
+        verify_evidence(data, mapped)
+
+
+def _legacy_source_cutoff(data, mapping):
+    if data.get("freshness_protocol"):
+        return None
+    key = (
+        tenant_key(*mapping.scope.values[:3])
+        if data.get("source_isolation")
+        else tenant_key(*mapping.scope.values[:2])
+    )
+    return data.get("tenant_sync_started_at_ns", {}).get(key)
+
+
 def _workspace_source_paths(data, mapped, entries):
     return [str(path) for path in entries] + evidence_paths(data, mapped)
 
@@ -258,7 +280,7 @@ def _workspace_source_paths(data, mapped, entries):
 @isolated_inventory
 def inventory_discovery(data, *, workspace_offset=0):
     """Parse source semantics without manufacturing a frozen source boundary."""
-    _verify_tenant_evidence(data)
+    _verify_discovery_tenant_evidence(data)
     if (
         data.get("fingerprints")
         and fingerprints(
@@ -277,14 +299,8 @@ def inventory_discovery(data, *, workspace_offset=0):
     }
     for index, mapping in enumerate(mappings):
         mapped = data["workspaces"][index]
-        verify_evidence(data, mapped)
-        cutoff = data.get("tenant_sync_started_at_ns", {}).get(
-            (
-                tenant_key(*mapping.scope.values[:3])
-                if data.get("source_isolation")
-                else tenant_key(*mapping.scope.values[:2])
-            ),
-        )
+        _verify_discovery_workspace_evidence(data, mapped)
+        cutoff = _legacy_source_cutoff(data, mapping)
         entries = workspace_entries(mapping)
         input_files = [path for path in entries if path.is_file()]
         source_paths = _workspace_source_paths(data, mapped, entries)
@@ -570,7 +586,20 @@ def inventories_equal(left, right):
 def inventory_workspace(data, index):
     """Parse one workspace preserving its global artifact positions."""
     workspace = data["workspaces"][index]
-    return inventory_discovery(
+    registry = None
+    before = None
+    if data.get("freshness_protocol"):
+        registry = Path(workspace["root"]) / workspace.get(
+            "registry_path",
+            "chats.json",
+        )
+        if registry.is_symlink():
+            raise SourceInputInvalid("chats.json cannot be a symlink")
+        before = registry.lstat()
+        expected = workspace.get("chats_mtime_ns")
+        if expected is not None and before.st_mtime_ns != expected:
+            raise SourceChanged("chats.json changed after preparation")
+    result = inventory_discovery(
         {
             **data,
             "workspaces": [workspace],
@@ -588,3 +617,10 @@ def inventory_workspace(data, index):
         },
         workspace_offset=index,
     )
+    if registry is not None:
+        after = registry.lstat()
+        if before.st_mtime_ns != after.st_mtime_ns:
+            raise SourceChanged("chats.json changed during inventory")
+        if workspace.get("chats_mtime_ns") is None:
+            workspace["chats_mtime_ns"] = after.st_mtime_ns
+    return result

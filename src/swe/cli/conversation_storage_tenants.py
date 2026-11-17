@@ -246,7 +246,9 @@ async def _inventory(view, spool, resources):
                 return function(*args)
             return await io.call(function, *args)
 
-    if view.data.get("in_place"):
+    if view.data.get("in_place") and not view.data.get(
+        "freshness_protocol",
+    ):
         from swe.app.conversation_storage.in_place_admission import (
             tenant_write_boundaries,
         )
@@ -280,10 +282,14 @@ async def _inventory(view, spool, resources):
 
     try:
         from swe.app.conversation_storage.migration.tenant_inputs import (
+            verify_chats_mtimes,
             verify_input_digest,
         )
 
-        await inspect(verify_input_digest, view.data, view.key)
+        if view.data.get("freshness_protocol"):
+            await inspect(verify_chats_mtimes, view.data, view.key)
+        else:
+            await inspect(verify_input_digest, view.data, view.key)
         result = await inventory_v3_spooled(
             view,
             spool,
@@ -373,6 +379,32 @@ async def _verify(
     return result
 
 
+async def _final_source_check(view, inventory, base, resources):
+    if view.data.get("freshness_protocol"):
+        from swe.app.conversation_storage.migration.tenant_inputs import (
+            verify_chats_mtimes,
+        )
+
+        try:
+            await resources["_shared_io"].call(
+                verify_chats_mtimes,
+                view.data,
+                view.key,
+            )
+        except TenantInputError as error:
+            raise TenantFailure(str(error)) from error
+        return
+    with _spool(
+        base,
+        view.data,
+        resources["memory_bytes"],
+        resources["workers"],
+    ) as check_spool:
+        actual = await _inventory(view, check_spool, resources)
+        if not inventories_equal(inventory, actual):
+            raise TenantFailure("tenant source changed during operation")
+
+
 async def _one_tenant(operation, view, db, states, guard, base, resources):
     from .conversation_storage_v3_cmd import validate_runtime_roots
 
@@ -438,15 +470,7 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
                 verification_level=verification_level,
             )
         _stage("final_source_check")
-        with _spool(
-            base,
-            view.data,
-            resources["memory_bytes"],
-            resources["workers"],
-        ) as check_spool:
-            actual = await _inventory(view, check_spool, resources)
-            if not inventories_equal(inventory, actual):
-                raise TenantFailure("tenant source changed during operation")
+        await _final_source_check(view, inventory, base, resources)
         await guard.check()
         await check_migration_schema(
             db,
@@ -619,6 +643,46 @@ async def _rollback_command(
     }
 
 
+@asynccontextmanager
+async def _migration_sql_owner(control, schema, manifest):
+    from swe.database.connection import _named_lock_name
+    from swe.app.conversation_storage.migration.lock_guard import (
+        MigrationLockGuard,
+    )
+
+    db = DMLDatabase(control)
+    if manifest.data.get("freshness_protocol"):
+        identity = await db.fetch_one(
+            "SELECT @@server_uuid AS server_uuid,DATABASE() AS schema_name",
+        )
+        if identity["schema_name"] != schema or not identity["server_uuid"]:
+            raise ValueError("database identity differs from target")
+        control.expect_identity(identity["server_uuid"], schema)
+        guard = await MigrationLockGuard.capture_identity(
+            db,
+            schema=schema,
+            server_uuid=identity["server_uuid"],
+        )
+        yield db, guard
+        return
+    async with control.named_lock(
+        "conversation-migration:" + schema,
+        timeout=0,
+    ):
+        identity = await db.fetch_one(
+            "SELECT @@server_uuid AS server_uuid,DATABASE() AS schema_name",
+        )
+        if identity["schema_name"] != schema or not identity["server_uuid"]:
+            raise ValueError("database identity differs from target")
+        guard = await MigrationLockGuard.capture(
+            db,
+            _named_lock_name("conversation-migration:" + schema),
+            schema=schema,
+            server_uuid=identity["server_uuid"],
+        )
+        yield db, guard
+
+
 async def run_tenants(
     operation,
     manifest,
@@ -635,10 +699,7 @@ async def run_tenants(
 ):
     """Run one SQL-owner job; skip published tenants before reading old input."""
     from swe.database.config import get_database_config
-    from swe.database.connection import DatabaseConnection, _named_lock_name
-    from swe.app.conversation_storage.migration.lock_guard import (
-        MigrationLockGuard,
-    )
+    from swe.database.connection import DatabaseConnection
 
     base = _work_base(work_dir, manifest.data)
     _validate_tenant_roots(manifest.data)
@@ -658,25 +719,11 @@ async def run_tenants(
     try:
         _stage("database_setup")
         await control.connect()
-        async with control.named_lock(
-            "conversation-migration:" + schema,
-            timeout=0,
-        ):
-            db = DMLDatabase(control)
-            identity = await db.fetch_one(
-                "SELECT @@server_uuid AS server_uuid,DATABASE() AS schema_name",
-            )
-            if (
-                identity["schema_name"] != schema
-                or not identity["server_uuid"]
-            ):
-                raise ValueError("database identity differs from target")
-            guard = await MigrationLockGuard.capture(
-                db,
-                _named_lock_name("conversation-migration:" + schema),
-                schema=schema,
-                server_uuid=identity["server_uuid"],
-            )
+        async with _migration_sql_owner(
+            control,
+            schema,
+            manifest,
+        ) as (db, guard):
             await check_migration_schema(
                 db,
                 schema,
@@ -687,9 +734,14 @@ async def run_tenants(
                 review_retry,
             )
 
-            await recover_pending_review(db, manifest)
+            if not manifest.data.get("freshness_protocol"):
+                await recover_pending_review(db, manifest)
             # Fix cutoffs under the same lock before first recording SQL binding.
-            if operation in ("import", "resume", "migrate") and apply:
+            if (
+                operation in ("import", "resume", "migrate")
+                and apply
+                and not manifest.data.get("freshness_protocol")
+            ):
                 manifest.begin_tenant_syncs(
                     [
                         unit_key(manifest.data, t)
@@ -700,13 +752,14 @@ async def run_tenants(
             if operation == "migrate":
                 if not apply:
                     raise ValueError("migrate requires --apply")
-                _stage("automatic_review")
-                resources["_retained_attempts"] = await _auto_review(
-                    db,
-                    manifest,
-                    guard,
-                    resources,
-                )
+                if not manifest.data.get("freshness_protocol"):
+                    _stage("automatic_review")
+                    resources["_retained_attempts"] = await _auto_review(
+                        db,
+                        manifest,
+                        guard,
+                        resources,
+                    )
             if operation == "retry-review":
                 if not apply or reviewed_discovery is None:
                     raise ValueError(
@@ -733,6 +786,23 @@ async def run_tenants(
                     rollback_inputs,
                 )
             if operation == "preflight":
+                if manifest.data.get("freshness_protocol"):
+                    return {
+                        "version": 3,
+                        "operation": "preflight",
+                        "status": "success",
+                        "migration_id": manifest.migration_id,
+                        "tenant_isolation": True,
+                        "source_isolation": True,
+                        "passed": True,
+                        "state": "preflight_passed",
+                        "tenants": len(manifest.data["tenants"]),
+                        "published": 0,
+                        "completed": 0,
+                        "failed": 0,
+                        "pending_schema_finalize": False,
+                        "failure_report": None,
+                    }
                 result = await _preview(
                     operation,
                     manifest,
@@ -856,6 +926,7 @@ async def _run_registered(
     context = (
         tenant_pipeline(selected, base, manifest, resources)
         if operation == "migrate"
+        and not manifest.data.get("freshness_protocol")
         else _serial_tenants(selected, resources)
     )
     async with context as results:
@@ -1031,6 +1102,7 @@ def _validate_tenant_roots(data):
 
 async def _recheck_prefetched(view, resources):
     from swe.app.conversation_storage.migration.tenant_inputs import (
+        verify_chats_mtimes,
         verify_input_digest,
     )
     from swe.app.conversation_storage.migration.source_inputs import (
@@ -1040,7 +1112,11 @@ async def _recheck_prefetched(view, resources):
     try:
         async with resources["_shared_resources"].reserve():
             await resources["_shared_io"].call(
-                verify_input_digest,
+                (
+                    verify_chats_mtimes
+                    if view.data.get("freshness_protocol")
+                    else verify_input_digest
+                ),
                 view.data,
                 view.key,
             )

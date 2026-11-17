@@ -60,6 +60,7 @@ def prepare_workflow(
         tenant_isolation=True,
         source_isolation=True,
         in_place=in_place,
+        freshness_protocol="chats-mtime-v1",
         semantic_validator=_semantic_validator(**resources),
     )
     if not report.get("tenants"):
@@ -70,6 +71,7 @@ def prepare_workflow(
         source_boundary,
         schema,
         semantic_validator=_semantic_validator(**resources),
+        revalidate=False,
     )
     _write_discovery(
         discovery_path,

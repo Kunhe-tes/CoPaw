@@ -68,6 +68,69 @@ async def test_guard_reports_missing_identity_row_without_reacquiring_lock():
     assert "GET_LOCK" not in db.fetch_one.call_args.args[0]
 
 
+async def test_unlocked_guard_accepts_connection_rotation_but_checks_identity():
+    db = SimpleNamespace(
+        fetch_one=AsyncMock(
+            side_effect=[
+                {"server_uuid": "server", "schema_name": "schema"},
+                {"server_uuid": "server", "schema_name": "schema"},
+            ],
+        ),
+    )
+    guard = await MigrationLockGuard.capture_identity(
+        db,
+        schema="schema",
+        server_uuid="server",
+    )
+    await guard.check()
+    assert "CONNECTION_ID" not in db.fetch_one.call_args.args[0]
+    db.fetch_one.side_effect = None
+    db.fetch_one.return_value = {
+        "server_uuid": "other",
+        "schema_name": "schema",
+    }
+    with pytest.raises(RuntimeError, match="database identity changed"):
+        await guard.check()
+
+
+async def test_source_sql_owner_does_not_acquire_schema_named_lock():
+    from contextlib import asynccontextmanager
+
+    from swe.cli.conversation_storage_tenants import _migration_sql_owner
+
+    class Control:
+        config = SimpleNamespace()
+
+        def __init__(self):
+            self.expect_identity = lambda *_args: None
+            self.lock_requested = False
+
+        async def fetch_one(self, query, _params=None):
+            if "CONNECTION_ID" in query:
+                return {"connection_id": 99}
+            if "IS_USED_LOCK" in query:
+                raise AssertionError(
+                    "source protocol must not inspect named locks",
+                )
+            return {"server_uuid": "server", "schema_name": "schema"}
+
+        @asynccontextmanager
+        async def named_lock(self, *_args, **_kwargs):
+            self.lock_requested = True
+            yield
+
+    control = Control()
+    manifest = SimpleNamespace(
+        data={"freshness_protocol": "chats-mtime-v1"},
+    )
+    async with _migration_sql_owner(control, "schema", manifest) as (
+        database,
+        guard,
+    ):
+        await guard.check()
+    assert control.lock_requested is False
+
+
 async def test_guard_rejects_child_task_even_with_inherited_context():
     db = SimpleNamespace(fetch_one=AsyncMock())
     guard = MigrationLockGuard(

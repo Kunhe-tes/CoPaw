@@ -434,14 +434,10 @@ def test_discovery_rejects_registry_that_would_generate_chat_identity(
     )
 
 
-def test_share_only_service_snapshot_lives_outside_workspace(tmp_path):
-    from pathlib import Path
+def test_historical_share_snapshot_is_excluded_from_migration(tmp_path):
     from swe.app.conversation_storage.migration.discovery import (
         discover_services,
         freeze_discovery,
-    )
-    from swe.app.conversation_storage.migration.inventory_v3 import (
-        inventory_v3,
     )
 
     source = tmp_path / "frozen"
@@ -479,24 +475,16 @@ def test_share_only_service_snapshot_lives_outside_workspace(tmp_path):
         "old@sha256:" + "a" * 64,
         ("stop", "readonly"),
     )
-    manifest = freeze_discovery(
-        report,
-        tmp_path / "manifest.json",
-        boundary,
-        "business",
-    )
-    result = inventory_v3(manifest, begin_sync=True)
-    assert result["ready"], result["blockers"]
-    assert result["shares"][0]["scope_kind"] == "legacy_share"
-    assert result["shares"][0]["record"]["access_count"] == 4
-    cutoff = manifest.data["tenant_sync_started_at_ns"]["SERVICE\x00tenant"]
-    import os
-
-    os.utime(target, ns=(cutoff + 1, cutoff + 1))
-    result = inventory_v3(manifest)
-    assert not result["ready"]
-    assert result["blockers"][0]["scope"] == ["SERVICE", "tenant"]
-    assert result["blockers"][0]["path"] == str(target)
+    with pytest.raises(
+        ValueError,
+        match="historical share records are excluded",
+    ):
+        freeze_discovery(
+            report,
+            tmp_path / "manifest.json",
+            boundary,
+            "business",
+        )
 
 
 def test_relative_profile_requires_original_process_directory(tmp_path):

@@ -586,6 +586,25 @@ def _unique_workspaces(report):
             )
 
 
+def _set_freshness_protocol(report, freshness_protocol, source_isolation):
+    if freshness_protocol is None:
+        return
+    if freshness_protocol != "chats-mtime-v1" or not source_isolation:
+        raise ValueError("unsupported source freshness protocol")
+    report["freshness_protocol"] = freshness_protocol
+
+
+def _capture_discovery_digests(report, semantic_validator):
+    if report.get("freshness_protocol"):
+        return
+    from .tenant_inputs import capture_input_digests
+
+    capture_input_digests(
+        report,
+        mapper=getattr(semantic_validator, "map_input_digests", None),
+    )
+
+
 @isolated_discovery
 def discover_services(
     services,
@@ -596,6 +615,7 @@ def discover_services(
     tenant_isolation=False,
     source_isolation=False,
     in_place=False,
+    freshness_protocol=None,
 ):
     """Return complete discovery evidence without opening a DB or modifying inputs."""
     if source_isolation and not tenant_isolation:
@@ -627,6 +647,7 @@ def discover_services(
         report["source_isolation"] = True
     if in_place:
         report["in_place"] = True
+    _set_freshness_protocol(report, freshness_protocol, source_isolation)
     for item in services:
         try:
             service = _service(item)
@@ -713,12 +734,7 @@ def discover_services(
         from .tenant_discovery import isolate_discovery
 
         isolate_discovery(report, shares, semantic_validator)
-        from .tenant_inputs import capture_input_digests
-
-        capture_input_digests(
-            report,
-            mapper=getattr(semantic_validator, "map_input_digests", None),
-        )
+        _capture_discovery_digests(report, semantic_validator)
     elif not report["blockers"]:
         from .inventory_v3 import inventory_discovery
 
@@ -807,29 +823,44 @@ def freeze_discovery(
     application_schema,
     *,
     semantic_validator=None,
+    revalidate=True,
 ):
     """Revalidate discovery and atomically save a v3 manifest outside the source."""
     if (not report.get("ready") or report.get("blockers")) and not report.get(
         "tenant_isolation",
     ):
         raise ValueError("discovery contains blockers")
-    current = discover_services(
-        report.get("declared_services", report["services"]),
-        shares=report.get("source_shares", report["shares"]),
-        overrides=report.get("overrides", ()),
-        semantic_validator=semantic_validator,
-        tenant_isolation=report.get("tenant_isolation", False),
-        in_place=report.get("in_place", False),
-        source_isolation=report.get("source_isolation", False),
-    )
-    if report.get("tenant_isolation"):
-        report = _freeze_tenant_report(report, current)
-    elif current["fingerprints"] != report["fingerprints"]:
-        raise ValueError("source changed since discovery")
-    elif current != report:
-        raise ValueError(
-            "discovery report differs from verified source evidence",
+    if revalidate:
+        current = discover_services(
+            report.get("declared_services", report["services"]),
+            shares=report.get("source_shares", report["shares"]),
+            overrides=report.get("overrides", ()),
+            semantic_validator=semantic_validator,
+            tenant_isolation=report.get("tenant_isolation", False),
+            in_place=report.get("in_place", False),
+            source_isolation=report.get("source_isolation", False),
+            freshness_protocol=report.get("freshness_protocol"),
         )
+        if report.get("tenant_isolation"):
+            report = _freeze_tenant_report(report, current)
+        elif current["fingerprints"] != report["fingerprints"]:
+            raise ValueError("source changed since discovery")
+        elif current != report:
+            raise ValueError(
+                "discovery report differs from verified source evidence",
+            )
+    elif report.get("freshness_protocol"):
+        for workspace in report["workspaces"]:
+            registry = Path(workspace["root"]) / workspace.get(
+                "registry_path",
+                "chats.json",
+            )
+            if (
+                registry.is_symlink()
+                or registry.lstat().st_mtime_ns
+                != workspace.get("chats_mtime_ns")
+            ):
+                raise ValueError("chats.json changed during preparation")
     data = {
         **deepcopy(report),
         "version": 3,

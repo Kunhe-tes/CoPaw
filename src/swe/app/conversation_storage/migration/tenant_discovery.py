@@ -18,12 +18,40 @@ def _tenant_semantic(selected, validator):
     from .spool import MigrationCapacityError, MigrationDiskCapacityError
 
     try:
-        if selected.get("in_place"):
+        registry_stats = {}
+        if selected.get("freshness_protocol"):
+            for workspace in selected["workspaces"]:
+                registry = Path(workspace["root"]) / workspace.get(
+                    "registry_path",
+                    "chats.json",
+                )
+                before = registry.lstat()
+                registry_stats[workspace["position"]] = (
+                    registry,
+                    before.st_mtime_ns,
+                )
+        if selected.get("freshness_protocol"):
+            _verify_readonly_evidence(selected)
+        if selected.get("in_place") and not selected.get(
+            "freshness_protocol",
+        ):
             from .in_place_source import freeze_evidence
 
             for item in selected["workspaces"]:
                 item["in_place_evidence"] = freeze_evidence(item)
-        return (validator or inventory_discovery)(selected)
+        result = (validator or inventory_discovery)(selected)
+        for workspace in selected["workspaces"]:
+            entry = registry_stats.get(workspace.get("position"))
+            if entry is None:
+                continue
+            registry, mtime_ns = entry
+            after = registry.lstat()
+            if after.st_mtime_ns != mtime_ns:
+                raise SourceInputInvalid(
+                    "chats.json changed during preparation",
+                )
+            workspace["chats_mtime_ns"] = mtime_ns
+        return result
     except MigrationDiskCapacityError:
         raise
     except (
@@ -68,7 +96,14 @@ def _compact_tenant_inventory(data, allowance):
 
     summaries, references, blockers = [], [], []
     for index, workspace in enumerate(data["workspaces"]):
-        _preflight_workspace(workspace, allowance)
+        if data.get("freshness_protocol"):
+            _preflight_workspace(
+                workspace,
+                allowance,
+                require_readonly=True,
+            )
+        else:
+            _preflight_workspace(workspace, allowance)
         result = inventory_workspace(data, index)
         parsed = result["workspaces"][0]
         summaries.append(
@@ -98,6 +133,23 @@ def _compact_tenant_inventory(data, allowance):
         _inventory_shares({**data, "shares": [source]}, report)
         blockers.extend(report["blockers"])
     return {"blockers": blockers, "workspaces": summaries}
+
+
+def _verify_readonly_evidence(data):
+    from .source_inputs import SourceInputInvalid
+
+    for workspace in data["workspaces"]:
+        for value in workspace.get("evidence_refs", []):
+            path = Path(value)
+            details = path.lstat()
+            if (
+                not path.is_file()
+                or path.is_symlink()
+                or details.st_mode & 0o222
+            ):
+                raise SourceInputInvalid(
+                    "identity evidence must be a read-only regular file",
+                )
 
 
 def map_tenant_calls(items, function, *, workers=4, io_workers=4):

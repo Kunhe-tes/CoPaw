@@ -80,6 +80,31 @@ def freeze(tmp_path, report):
     )
 
 
+def prepare_source(report):
+    return discovery.discover_services(
+        report["declared_services"],
+        tenant_isolation=True,
+        source_isolation=True,
+        in_place=True,
+        freshness_protocol="chats-mtime-v1",
+    )
+
+
+def freeze_source(tmp_path, report):
+    return discovery.freeze_discovery(
+        report,
+        tmp_path / "source-manifest.json",
+        SourceBoundary(
+            "snapshot",
+            "2026-11-15T00:00:00Z",
+            "old@sha256:" + "a" * 64,
+            ("stop", "readonly"),
+        ),
+        "business",
+        revalidate=False,
+    )
+
+
 @pytest.mark.parametrize("repair", [False, True])
 def test_failed_tenant_change_does_not_block_freeze(tmp_path, repair):
     report, paths = setup_source(tmp_path, broken=True)
@@ -187,6 +212,73 @@ def test_freshness_has_explicit_source_changed_error(tmp_path):
             },
         )
     assert recorded[0]["scope"] == ["svc", "bob"]
+
+
+def test_source_protocol_freezes_only_chats_mtime_and_skips_config_hash(
+    tmp_path,
+):
+    from swe.app.conversation_storage.migration.tenant_inputs import (
+        verify_chats_mtimes,
+        verify_input_digest,
+    )
+
+    report, paths = setup_source(tmp_path)
+    prepared = prepare_source(report)
+    manifest = freeze_source(tmp_path, prepared)
+    tenant = manifest.data["tenants"][0]
+    workspace = next(
+        item
+        for item in manifest.data["workspaces"]
+        if item["tenant_id"] == tenant["tenant_id"]
+    )
+    assert (
+        workspace["chats_mtime_ns"]
+        == (paths[tenant["tenant_id"]][1] / "chats.json").stat().st_mtime_ns
+    )
+    assert "input_digest" not in tenant
+    config = paths[tenant["tenant_id"]][0]
+    config.chmod(0o644)
+    config.write_text("configuration bytes are not hashed")
+    config.chmod(0o444)
+    verify_input_digest(
+        manifest.data,
+        tuple(
+            tenant[key]
+            for key in ("service_unit_id", "tenant_id", "source_id")
+        ),
+    )
+    verify_chats_mtimes(
+        manifest.data,
+        tuple(
+            tenant[key]
+            for key in ("service_unit_id", "tenant_id", "source_id")
+        ),
+    )
+
+
+def test_source_protocol_rejects_chats_mtime_change(tmp_path):
+    from swe.app.conversation_storage.migration.tenant_errors import (
+        SourceChanged,
+    )
+    from swe.app.conversation_storage.migration.tenant_inputs import (
+        verify_chats_mtimes,
+    )
+
+    report, paths = setup_source(tmp_path)
+    manifest = freeze_source(tmp_path, prepare_source(report))
+    tenant = manifest.data["tenants"][0]
+    chats = paths[tenant["tenant_id"]][1] / "chats.json"
+    chats.chmod(0o644)
+    chats.write_text('{"version":1,"chats":[],"changed":true}')
+    chats.chmod(0o444)
+    with pytest.raises(SourceChanged, match="chats.json changed"):
+        verify_chats_mtimes(
+            manifest.data,
+            tuple(
+                tenant[key]
+                for key in ("service_unit_id", "tenant_id", "source_id")
+            ),
+        )
 
 
 async def test_automatic_review_only_accepts_prior_failed_tenant(

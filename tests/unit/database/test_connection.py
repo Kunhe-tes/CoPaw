@@ -32,6 +32,8 @@ class Cursor:
             "value": "中文",
             "max_allowed_packet": 1048576,
             "sql_mode": self.conn.sql_mode,
+            "database_name": self.conn.kwargs.get("database"),
+            "server_uuid": self.conn.server_uuid,
         }
 
     async def fetchall(self):
@@ -49,6 +51,7 @@ class Connection:
         self.calls = []
         self.failure = None
         self.sql_mode = ""
+        self.server_uuid = "server"
         self.in_transaction = False
         self.closed = False
         self.autocommit = True
@@ -323,6 +326,23 @@ async def test_connect_uses_official_constructor_contract(db):
     assert conn.kwargs["autocommit"] is True
     assert isinstance(conn.kwargs["read_timeout"], int)
     assert isinstance(conn.kwargs["write_timeout"], int)
+
+
+@pytest.mark.asyncio
+async def test_expected_database_identity_accepts_matching_pool_connection(db):
+    db.expect_identity("server", db.config.database)
+    await db.execute("QUERY")
+    assert len(Connection.instances) == 1
+
+
+@pytest.mark.asyncio
+async def test_expected_database_identity_rejects_new_connection_on_other_server(
+    db,
+):
+    db.expect_identity("expected-server", db.config.database)
+    with pytest.raises(RuntimeError, match="connection identity differs"):
+        await db.execute("QUERY")
+    assert not db._pool._entries
 
 
 @pytest.mark.asyncio

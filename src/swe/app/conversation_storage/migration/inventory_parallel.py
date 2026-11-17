@@ -13,7 +13,11 @@ from .in_place_source import shared_service_roots
 from .parallel import MigrationCoordinator, MigrationResources
 from .progress import current_progress
 from .spool import MigrationCapacityError
-from .source_inputs import safe_input_entries, session_input_roots
+from .source_inputs import (
+    SourceInputInvalid,
+    safe_input_entries,
+    session_input_roots,
+)
 
 
 @dataclass(frozen=True)
@@ -149,7 +153,7 @@ def _shared_freshness(data):
     }
 
 
-def _preflight_workspace(workspace, allowance):
+def _preflight_workspace(workspace, allowance, *, require_readonly=False):
     """Bound raw inputs before legacy parsers allocate decoded object graphs."""
     root = Path(workspace["root"])
     total = 0
@@ -172,7 +176,19 @@ def _preflight_workspace(workspace, allowance):
         max_total_file_bytes=source_limit,
     ):
         if not path.is_file():
+            if (
+                require_readonly
+                and path != root
+                and path.stat().st_mode & 0o222
+            ):
+                raise SourceInputInvalid(
+                    "conversation input directories must be read-only",
+                )
             continue
+        if require_readonly and path.stat().st_mode & 0o222:
+            raise SourceInputInvalid(
+                "conversation input files must be read-only",
+            )
         size = path.stat().st_size
         if size > MAX_READ_BYTES:
             raise MigrationCapacityError(

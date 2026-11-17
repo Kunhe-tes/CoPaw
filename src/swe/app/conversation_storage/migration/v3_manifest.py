@@ -62,7 +62,9 @@ class V3Manifest(MigrationManifest):
                 if key in tenant_scopes or scope.service_unit_id not in names:
                     raise ValueError("duplicate or undeclared frozen tenant")
                 tenant_scopes.add(key)
-        self._validate_in_place_evidence()
+        self._validate_protocol_and_source_metadata()
+        if not self.data.get("freshness_protocol"):
+            self._validate_in_place_evidence()
         if self.data["shares"] or self.data.get("source_shares", []):
             raise ValueError(
                 "historical share records are excluded from migration",
@@ -100,6 +102,25 @@ class V3Manifest(MigrationManifest):
             value not in TRANSITIONS for value in self.data["batches"].values()
         ):
             raise ValueError("invalid batch state")
+
+    def _validate_protocol_and_source_metadata(self):
+        freshness_protocol = self.data.get("freshness_protocol")
+        if freshness_protocol is not None:
+            if freshness_protocol != "chats-mtime-v1" or not self.data.get(
+                "source_isolation",
+            ):
+                raise ValueError("unsupported source freshness protocol")
+            failed = {
+                unit_key(self.data, tenant)
+                for tenant in self.data["tenants"]
+                if tenant.get("state") == "failed"
+            }
+            for workspace in self.data["workspaces"]:
+                value = workspace.get("chats_mtime_ns")
+                if unit_key(self.data, workspace) not in failed and (
+                    type(value) is not int or value < 0
+                ):
+                    raise ValueError("workspace chats mtime is missing")
         timestamps = self.data.get("tenant_sync_started_at_ns", {})
         if not isinstance(timestamps, dict) or any(
             not isinstance(key, str) or type(value) is not int or value <= 0
@@ -248,6 +269,7 @@ class V3Manifest(MigrationManifest):
             "discovery_version",
             "tenant_isolation",
             "source_isolation",
+            "freshness_protocol",
             "in_place",
             "tenants",
             "source_shares",

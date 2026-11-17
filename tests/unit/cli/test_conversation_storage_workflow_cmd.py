@@ -142,6 +142,12 @@ def test_prepare_reuses_freeze_and_readonly_preflight(
     frozen = json.loads(inputs["manifest"].read_text())
     assert frozen["tenant_isolation"] is True
     assert frozen["source_isolation"] is True
+    assert frozen["freshness_protocol"] == "chats-mtime-v1"
+    assert (
+        frozen["workspaces"][0]["chats_mtime_ns"]
+        == (inputs["workspace"] / "chats.json").stat().st_mtime_ns
+    )
+    assert "input_digest" not in frozen["tenants"][0]
     assert frozen["tenants"][0]["source_id"] == "SRC"
     assert frozen["offline"]["application_schema"] == "business"
     assert frozen["assignments"] == frozen["batches"] == {}
@@ -298,7 +304,8 @@ def test_prepare_in_place_mode_is_durable(inputs, monkeypatch):
     assert result.exit_code == 0, result.output
     frozen = json.loads(inputs["manifest"].read_text())
     assert frozen["in_place"] is True
-    assert frozen["workspaces"][0]["in_place_evidence"]
+    assert frozen["freshness_protocol"] == "chats-mtime-v1"
+    assert "in_place_evidence" not in frozen["workspaces"][0]
 
 
 def test_prepare_freeze_refusal_never_starts_preflight(inputs, monkeypatch):
@@ -320,10 +327,10 @@ def test_prepare_excludes_historical_shares_without_database_access(
     inputs,
     monkeypatch,
 ):
-    from swe.app.conversation_storage.migration import discovery
+    from swe.cli import conversation_storage_discovery_cmd as discovery_cmd
     from swe.cli import conversation_storage_v3_cmd as v3
 
-    discover = discovery.discover_services
+    discover = discovery_cmd.discover_services
     observed = []
 
     def record_discovery(*args, **kwargs):
@@ -331,7 +338,7 @@ def test_prepare_excludes_historical_shares_without_database_access(
         observed.append(report)
         return report
 
-    monkeypatch.setattr(discovery, "discover_services", record_discovery)
+    monkeypatch.setattr(discovery_cmd, "discover_services", record_discovery)
     monkeypatch.setattr(
         v3,
         "run_v3_command",
@@ -347,9 +354,10 @@ def test_prepare_excludes_historical_shares_without_database_access(
     assert observed[0]["shares"] == []
     assert observed[0]["source_shares"] == []
     assert observed[0]["excluded_scopes"] == ["historical_shares"]
+    assert len(observed) == 1
 
 
-def test_prepare_audit_report_uses_frozen_review(inputs, monkeypatch):
+def test_prepare_rejects_chats_change_after_inventory(inputs, monkeypatch):
     from swe.cli import conversation_storage_discovery_cmd as discovery
     from swe.cli import conversation_storage_v3_cmd as v3
 
@@ -371,16 +379,10 @@ def test_prepare_audit_report_uses_frozen_review(inputs, monkeypatch):
         Mock(return_value={"status": "partial_success", "passed": False}),
     )
     result = CliRunner().invoke(command(), prepare_args(inputs))
-    assert result.exit_code == 2, result.output
-    output = json.loads(result.output)
-    audit = json.loads(Path(output["discovery"]).read_text())
-    frozen = json.loads(inputs["manifest"].read_text())
-    assert audit["tenants"][0]["state"] == "failed"
-    assert any(
-        item["code"] == "source_changed_after_discovery"
-        for item in audit["blockers"]
-    )
-    assert all(value == frozen[key] for key, value in audit.items())
+    assert result.exit_code == 1, result.output
+    assert "chats.json changed during preparation" in result.output
+    v3.run_v3_command.assert_not_called()
+    assert not inputs["manifest"].exists()
 
 
 def test_prepare_rejects_empty_tenant_job(inputs, monkeypatch):
