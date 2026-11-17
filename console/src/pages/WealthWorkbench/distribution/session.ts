@@ -111,9 +111,9 @@ export class DistributionSession {
     const people = this.people(code);
     if (!people) {
       const intent = this.orgIntent(code);
-      if (!intent || this.hasExcludedDescendant(code)) return false;
+      if (this.hasExcludedDescendant(code)) return false;
       if (
-        !intent.selected &&
+        intent?.selected === false &&
         [...this.intents].some(
           ([scope, selection]) =>
             selection === intent && this.isExcluded(scope),
@@ -123,10 +123,11 @@ export class DistributionSession {
       if (this.pendingSelections.has(code))
         return this.statuses.get(code) !== "error";
 
-      // A cached ancestor can confirm full selection from its actual recipients.
       let parent = this.index.parents.get(code);
       while (parent !== undefined) {
-        if (this.cache.has(parent)) return this.isInstitutionSelected(parent);
+        const parentPeople = this.people(parent);
+        if (parentPeople)
+          return this.inheritsSelection(code, parent, parentPeople);
         parent = this.index.parents.get(parent);
       }
       return false;
@@ -135,6 +136,30 @@ export class DistributionSession {
     return (
       people.every((user) => this.isPersonSelectedIn(code, user)) &&
       !this.hasExcludedDescendant(code)
+    );
+  }
+  private inheritsSelection(
+    code: string,
+    parent: string,
+    people: DistributeTarget[],
+  ) {
+    if (this.isInstitutionSelected(parent)) return true;
+
+    // A whole-institution exclusion only affects its own subtree.
+    const otherExclusions = [...this.intents.keys()].filter(
+      (scope) =>
+        this.index.contains(parent, scope) &&
+        !this.index.contains(scope, code) &&
+        !this.index.contains(code, scope) &&
+        this.isExcluded(scope),
+    );
+    return (
+      otherExclusions.length > 0 &&
+      people.every(
+        (user) =>
+          this.isPersonSelectedIn(parent, user) ||
+          otherExclusions.some((scope) => this.includesPerson(scope, user)),
+      )
     );
   }
   private hasExcludedDescendant(code: string) {
@@ -184,6 +209,20 @@ export class DistributionSession {
     return [...scopes].some((scope) =>
       this.selectionCovers(code, scope, selected),
     );
+  }
+  hasSelectedPeopleInSubtree(code: string) {
+    for (const user of this.selected.values()) {
+      if (this.isPersonSelectedIn(code, user)) return true;
+    }
+    for (const [scope, people] of this.cache) {
+      if (
+        scope !== code &&
+        this.index.contains(code, scope) &&
+        people.some((user) => this.isPersonSelectedIn(scope, user))
+      )
+        return true;
+    }
+    return false;
   }
   private selectionCovers(code: string, scope: string, user: DistributeTarget) {
     return (
@@ -335,8 +374,9 @@ export class DistributionSession {
     }
     for (const user of this.selected.values()) {
       if (
-        code === this.index.root.mOrgCode ||
-        this.isPersonSelectedIn(code, user)
+        !needsLookup &&
+        (code === this.index.root.mOrgCode ||
+          this.isPersonSelectedIn(code, user))
       )
         this.deselectPerson(user, code);
     }
@@ -374,17 +414,22 @@ export class DistributionSession {
     if (selected && this.current) this.anchors.add(this.current);
     this.emit();
   }
-  removeUnknown() {
-    for (const [id, user] of this.selected) {
-      if (
-        !this.selectionScopes.has(id) &&
-        this.matchedInstitution(id) === undefined
-      ) {
-        this.deselectPerson(user);
-        this.personIntents.set(id, { selected: false, order: ++this.order });
-      }
+  removeRecipients(users: DistributeTarget[]) {
+    const order = ++this.order;
+    for (const user of users) {
+      this.deselectPerson(user);
+      this.personIntents.set(user.sapId, { selected: false, order });
     }
     this.emit();
+  }
+  removeUnknown() {
+    this.removeRecipients(
+      [...this.selected.values()].filter(
+        ({ sapId }) =>
+          !this.selectionScopes.has(sapId) &&
+          this.matchedInstitution(sapId) === undefined,
+      ),
+    );
   }
   clear() {
     this.removeInstitution(this.index.root.mOrgCode);

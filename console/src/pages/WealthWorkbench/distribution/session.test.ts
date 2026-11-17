@@ -101,7 +101,7 @@ describe("分发人员批量队列", () => {
     expect(session.getSnapshot().selected).toEqual(users.slice(1));
     expect(query).toHaveBeenCalledTimes(3);
   });
-  it("取消继承勾选的子级按该机构实际名单移除人员，父级变半选且人员不重复", async () => {
+  it("取消一个子级只查询并移除该子级，未查询的兄弟保持全选", async () => {
     const { session, query } = setup();
     session.toggleInstitution("root");
     await vi.advanceTimersByTimeAsync(500);
@@ -111,9 +111,17 @@ describe("分发人员批量队列", () => {
     session.toggleInstitution("a");
     expect(session.isInstitutionSelected("a")).toBe(false);
     expect(session.isInstitutionSelected("root")).toBe(false);
+    expect(session.isInstitutionSelected("b")).toBe(true);
+    expect(session.isInstitutionSelected("c")).toBe(true);
     expect(session.getSnapshot().blocked).toBe(true);
+    expect(session.getSnapshot().selected).toEqual(users);
     await vi.advanceTimersByTimeAsync(500);
-    expect(query).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls.map(([nodes]) => nodes[0].mOrgCode)).toEqual([
+      "root",
+      "a",
+    ]);
+    expect(session.isInstitutionSelected("b")).toBe(true);
+    expect(session.isInstitutionSelected("c")).toBe(true);
     expect(session.getSnapshot().selected.map(({ sapId }) => sapId)).toEqual([
       "03",
       "04",
@@ -128,6 +136,22 @@ describe("分发人员批量队列", () => {
     expect(
       new Set(session.getSnapshot().selected.map(({ sapId }) => sapId)).size,
     ).toBe(4);
+  });
+  it("整机构取消后在上级名单再取消单人，未查询的兄弟停止继承", async () => {
+    const { session, query } = setup();
+    session.toggleInstitution("root");
+    await vi.advanceTimersByTimeAsync(500);
+    session.toggleInstitution("a");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(session.isInstitutionSelected("b")).toBe(true);
+    expect(session.isInstitutionSelected("c")).toBe(true);
+
+    session.view("root");
+    session.togglePerson(users[2]);
+    expect(session.isInstitutionSelected("b")).toBe(false);
+    expect(session.isInstitutionSelected("c")).toBe(false);
+    expect(session.getSnapshot().selected).toEqual([users[3]]);
+    expect(query).toHaveBeenCalledTimes(2);
   });
   it("重新选中已取消子级的全部人员后，上级恢复全选", async () => {
     const { session, query } = setup();
