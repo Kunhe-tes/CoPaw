@@ -7,6 +7,7 @@ type RequestStatus = "waiting" | "loading" | "error";
 interface Intent {
   selected: boolean;
   order: number;
+  excludesEmpty?: boolean;
 }
 export interface DistributionSnapshot {
   current: string | null;
@@ -29,6 +30,8 @@ export class DistributionSession {
   private queriedIds = new Map<string, Set<string>>();
   private cache = new Map<string, DistributeTarget[]>();
   private selected = new Map<string, DistributeTarget>();
+  // Keep the institutions used to select each recipient separate from API metadata.
+  private selectionScopes = new Map<string, Set<string>>();
   private intents = new Map<string, Intent>();
   private pendingSelections = new Set<string>();
   private personIntents = new Map<string, Intent>();
@@ -69,13 +72,18 @@ export class DistributionSession {
     this.listeners.clear();
   }
   people(code: string): DistributeTarget[] | undefined {
-    if (this.cache.has(code)) return this.cache.get(code);
-    for (const [ancestor, users] of this.cache) {
-      if (!this.index.contains(ancestor, code)) continue;
-      const result = users.filter((user) => this.index.includes(code, user));
-      this.cache.set(code, result);
-      return result;
+    return this.cache.get(code);
+  }
+  matchedInstitution(sapId: string) {
+    let matched: string | undefined;
+    for (const [code, ids] of this.queriedIds) {
+      if (
+        ids.has(sapId) &&
+        (matched === undefined || this.index.contains(matched, code))
+      )
+        matched = code;
     }
+    return matched;
   }
   private orgIntent(code: string): Intent | undefined {
     let latest: Intent | undefined;
@@ -89,17 +97,13 @@ export class DistributionSession {
     return latest;
   }
   isPendingSelection(code: string) {
-    return (
-      this.wants(code) &&
-      [...this.pendingSelections].some((scope) =>
-        this.index.contains(scope, code),
-      )
-    );
+    return this.pendingSelections.has(code);
   }
-  private hasUnselectedEmptyDescendant(code: string) {
+  private hasExcludedEmptyDescendant(code: string) {
     return [...(this.index.descendants.get(code) ?? [])].some(
       (scope) =>
-        this.people(scope)?.length === 0 && !this.emptyInstitutions.has(scope),
+        this.people(scope)?.length === 0 &&
+        this.orgIntent(scope)?.excludesEmpty === true,
     );
   }
   isInstitutionSelected(code: string) {
@@ -107,8 +111,8 @@ export class DistributionSession {
     if (!people) return false;
     if (!people.length && !this.emptyInstitutions.has(code)) return false;
     return (
-      people.every((user) => this.selected.has(user.sapId)) &&
-      !this.hasUnselectedEmptyDescendant(code)
+      people.every((user) => this.isPersonSelectedIn(code, user)) &&
+      !this.hasExcludedEmptyDescendant(code)
     );
   }
   cancelPending(code: string) {
@@ -116,7 +120,7 @@ export class DistributionSession {
     this.clearPendingSelections(code);
     // Cancelling a failed bulk operation must preserve recipients selected before it.
     for (const user of this.selected.values()) {
-      if (this.includesPerson(code, user))
+      if (this.isPersonSelectedIn(code, user))
         this.personIntents.set(user.sapId, {
           selected: true,
           order: ++this.order,
@@ -130,30 +134,66 @@ export class DistributionSession {
     return this.orgIntent(code)?.selected === true;
   }
   private includesPerson(code: string, user: DistributeTarget) {
-    if (code === this.index.root.mOrgCode) return true;
-    return (
-      this.queriedIds.get(code)?.has(user.sapId) ??
-      this.index.includes(code, user)
+    return this.queriedIds.get(code)?.has(user.sapId) ?? false;
+  }
+  isPersonSelectedIn(code: string, user: DistributeTarget) {
+    const selected = this.selected.get(user.sapId);
+    if (!selected) return false;
+    const scopes = this.selectionScopes.get(user.sapId);
+    if (!scopes) {
+      return this.includesPerson(code, user);
+    }
+    return [...scopes].some((scope) =>
+      this.selectionCovers(code, scope, selected),
     );
+  }
+  private selectionCovers(code: string, scope: string, user: DistributeTarget) {
+    return (
+      this.index.contains(code, scope) ||
+      (this.index.contains(scope, code) && this.includesPerson(code, user))
+    );
+  }
+  private selectPerson(user: DistributeTarget, scope: string | null) {
+    this.selected.set(user.sapId, user);
+    if (scope !== null) {
+      const scopes = this.selectionScopes.get(user.sapId) ?? new Set<string>();
+      scopes.add(scope);
+      this.selectionScopes.set(user.sapId, scopes);
+    }
+  }
+  private deselectPerson(user: DistributeTarget, code?: string | null) {
+    const scopes = this.selectionScopes.get(user.sapId);
+    if (code && scopes) {
+      for (const scope of scopes) {
+        if (this.selectionCovers(code, scope, user)) scopes.delete(scope);
+      }
+      if (scopes.size) return;
+    }
+    this.selected.delete(user.sapId);
+    this.selectionScopes.delete(user.sapId);
   }
   private applyIntents(users: DistributeTarget[], scopes: string[]) {
     for (const user of users) {
       // Lookup results may refresh metadata, but only unfinished choices add recipients.
-      if (!scopes.some((code) => this.includesPerson(code, user))) {
+      const selectionScope = scopes.find((code) =>
+        this.includesPerson(code, user),
+      );
+      if (selectionScope === undefined) {
         if (this.selected.has(user.sapId)) this.selected.set(user.sapId, user);
         continue;
       }
       let latest = this.personIntents.get(user.sapId);
       for (const [scope, intent] of this.intents) {
         if (
-          this.includesPerson(scope, user) &&
+          this.selectionCovers(scope, selectionScope, user) &&
           (!latest || latest.order < intent.order)
         )
           latest = intent;
       }
       if (latest?.selected || (!latest && this.selected.has(user.sapId)))
-        this.selected.set(user.sapId, user);
-      else if (latest) this.selected.delete(user.sapId);
+        this.selectPerson(user, selectionScope);
+      else if (latest && this.isPersonSelectedIn(selectionScope, user))
+        this.deselectPerson(user, selectionScope);
     }
   }
   private buildSnapshot(): DistributionSnapshot {
@@ -178,17 +218,16 @@ export class DistributionSession {
   }
   private emit() {
     if (this.disposed) return;
-    const selected = [...this.selected.values()].filter((user) =>
-      this.index.nodes.has(user.bbkOrgId ?? ""),
-    );
     for (const code of this.emptyInstitutions) {
-      if (this.people(code)?.length || this.hasUnselectedEmptyDescendant(code))
+      if (this.people(code)?.length || this.hasExcludedEmptyDescendant(code))
         this.emptyInstitutions.delete(code);
     }
     for (const anchor of this.anchors) {
       if (
         !this.emptyInstitutions.has(anchor) &&
-        !selected.some((user) => this.includesPerson(anchor, user))
+        ![...this.selected.values()].some((user) =>
+          this.isPersonSelectedIn(anchor, user),
+        )
       )
         this.anchors.delete(anchor);
     }
@@ -205,15 +244,10 @@ export class DistributionSession {
   }
   toggleInstitution(code: string) {
     const people = this.queriedIds.has(code) ? this.cache.get(code) : undefined;
+    const status = this.statuses.get(code);
     const pending =
-      this.wants(code) &&
-      [...this.pendingSelections].some((scope) => {
-        const status = this.statuses.get(scope);
-        return (
-          this.index.contains(scope, code) &&
-          (status === "waiting" || status === "loading")
-        );
-      });
+      this.isPendingSelection(code) &&
+      (status === "waiting" || status === "loading");
     const full = this.isInstitutionSelected(code);
     if (pending && !full) {
       this.cancelPending(code);
@@ -237,14 +271,25 @@ export class DistributionSession {
     this.schedule();
   }
   removeInstitution(code: string) {
-    this.intents.set(code, { selected: false, order: ++this.order });
+    const excludesEmpty = [...this.emptyInstitutions].some((scope) =>
+      this.index.contains(code, scope),
+    );
+    this.intents.set(code, {
+      selected: false,
+      order: ++this.order,
+      excludesEmpty,
+    });
     this.clearPendingSelections(code);
     for (const empty of this.emptyInstitutions) {
       if (this.index.contains(code, empty) || this.index.contains(empty, code))
         this.emptyInstitutions.delete(empty);
     }
-    for (const [id, user] of this.selected) {
-      if (this.includesPerson(code, user)) this.selected.delete(id);
+    for (const user of this.selected.values()) {
+      if (
+        code === this.index.root.mOrgCode ||
+        this.isPersonSelectedIn(code, user)
+      )
+        this.deselectPerson(user, code);
     }
     for (const anchor of this.anchors) {
       if (this.index.contains(code, anchor)) this.anchors.delete(anchor);
@@ -254,29 +299,39 @@ export class DistributionSession {
     this.schedule();
   }
   togglePerson(user: DistributeTarget) {
-    const selected = !this.selected.has(user.sapId);
+    const selected = this.current
+      ? !this.isPersonSelectedIn(this.current, user)
+      : !this.selected.has(user.sapId);
     this.personIntents.set(user.sapId, { selected, order: ++this.order });
     if (selected) {
-      this.selected.set(user.sapId, user);
+      this.selectPerson(user, this.current);
       if (this.current) this.anchors.add(this.current);
-    } else this.selected.delete(user.sapId);
+    } else this.deselectPerson(user, this.current);
     this.emit();
   }
   selectPeople(users: DistributeTarget[]) {
-    const selected = !users.every((user) => this.selected.has(user.sapId));
+    const current = this.current;
+    const selected = !users.every((user) =>
+      current
+        ? this.isPersonSelectedIn(current, user)
+        : this.selected.has(user.sapId),
+    );
     const order = ++this.order;
     for (const user of users) {
       this.personIntents.set(user.sapId, { selected, order });
-      if (selected) this.selected.set(user.sapId, user);
-      else this.selected.delete(user.sapId);
+      if (selected) this.selectPerson(user, this.current);
+      else this.deselectPerson(user, this.current);
     }
     if (selected && this.current) this.anchors.add(this.current);
     this.emit();
   }
   removeUnknown() {
     for (const [id, user] of this.selected) {
-      if (!this.index.nodes.has(user.bbkOrgId ?? "")) {
-        this.selected.delete(id);
+      if (
+        !this.selectionScopes.has(id) &&
+        this.matchedInstitution(id) === undefined
+      ) {
+        this.deselectPerson(user);
         this.personIntents.set(id, { selected: false, order: ++this.order });
       }
     }
@@ -306,21 +361,10 @@ export class DistributionSession {
       return;
     }
     // Pending bulk choices must not regroup recipients already selected elsewhere.
-    if (
-      this.people(code)?.some(
-        (user) =>
-          this.index.nodes.has(user.bbkOrgId ?? "") &&
-          this.selected.has(user.sapId),
-      )
-    )
+    if (this.people(code)?.some((user) => this.isPersonSelectedIn(code, user)))
       this.anchors.add(code);
   }
   private cachePeople(code: string, users: DistributeTarget[]) {
-    // A newer ancestor result invalidates older descendant queries.
-    for (const descendant of this.index.descendants.get(code) ?? []) {
-      this.cache.delete(descendant);
-      this.queriedIds.delete(descendant);
-    }
     this.cache.set(code, users);
     this.queriedIds.set(code, new Set(users.map(({ sapId }) => sapId)));
   }
