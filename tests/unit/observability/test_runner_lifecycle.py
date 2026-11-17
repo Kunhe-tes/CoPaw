@@ -330,18 +330,25 @@ async def test_consecutive_approvals_keep_root_run_and_attempt_chain(
         lambda: service,
     )
     predecessor = previous_attempt
-    for approval_id in (
+    approval_ids = (
         "550e8400-e29b-41d4-a716-446655440001",
         "550e8400-e29b-41d4-a716-446655440002",
-    ):
+    )
+    for approval_id in approval_ids:
         runner_lifecycle.finish_query_run(
             root,
             predecessor,
             "completed",
             waiting_for_approval=True,
         )
+        approval_started_at = time.time()
         with bind_context(predecessor):
             carrier = runner_lifecycle.approval_context_carrier()
+            runner_lifecycle.record_approval_requested(
+                root,
+                approval_id,
+                started_at=approval_started_at,
+            )
         service.pending = SimpleNamespace(
             request_id=approval_id,
             status="pending",
@@ -366,6 +373,7 @@ async def test_consecutive_approvals_keep_root_run_and_attempt_chain(
             query=f"/approve {approval_id}",
         )
         assert decision == "approved"
+        assert restored is not None
         assert restored.obs_run_id == root.obs_run_id
         assert restored.business_ref["root_question_msgid"] == "question-a"
         current_attempt = runner_lifecycle.start_query_attempt(restored)
@@ -374,8 +382,18 @@ async def test_consecutive_approvals_keep_root_run_and_attempt_chain(
             current_attempt.predecessor_attempt_id
             == predecessor.obs_attempt_id
         )
+        with bind_context(current_attempt):
+            resolved = runner_lifecycle.record_approval_resolved(
+                approval_id,
+                "approved",
+                started_at=approval_started_at,
+            )
+        assert resolved is not None
         predecessor = current_attempt
 
+    assert not any(
+        event["event_name"] == "run.ended" for event in emitter.events
+    )
     runner_lifecycle.finish_query_run(root, predecessor, "completed")
     assert (
         len(
@@ -397,6 +415,17 @@ async def test_consecutive_approvals_keep_root_run_and_attempt_chain(
         "waiting_approval",
         "succeeded",
     ]
+    approval_events = [
+        event
+        for event in emitter.events
+        if event["event_name"].startswith("approval.")
+    ]
+    assert len(approval_events) == 4
+    run_ends = [
+        event for event in emitter.events if event["event_name"] == "run.ended"
+    ]
+    assert len(run_ends) == 1
+    assert run_ends[0]["status"] == "succeeded"
 
 
 @pytest.mark.asyncio
