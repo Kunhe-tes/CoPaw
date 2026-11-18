@@ -36,6 +36,20 @@ def test_default_connection_policy_matches_deployment():
         assert config.write_timeout == 600
 
 
+@pytest.mark.parametrize(
+    ("access", "expected"),
+    [("BEE_prefixed-secret", "prefixed-secret"), ("raw-secret", "raw-secret")],
+)
+def test_database_access_only_strips_known_prefix(
+    monkeypatch,
+    access,
+    expected,
+):
+    monkeypatch.setenv("SWE_DB_ACCESS", access)
+
+    assert get_database_config().password == expected
+
+
 def test_environment_policy_reaches_driver_and_pool_deadlines(monkeypatch):
     for name, value in {
         "CHARSET": "utf8mb4",
