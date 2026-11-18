@@ -567,6 +567,10 @@ async def submit_external_approval_decision(
     async def producer(identity: TurnIdentity, bound_payload: Any):
         await submission_ready.wait()
         if not submission_accepted:
+            await coordinator.cancel_unstarted(identity)
+            return
+        if not await coordinator.mark_producer_started(identity):
+            await coordinator.cancel_unstarted(identity)
             return
         next_payload = {
             **bound_payload,
@@ -585,6 +589,7 @@ async def submit_external_approval_decision(
             payload,
             producer,
             msgid=f"approval-{pending.request_id}",
+            defer_producer_start=True,
         )
         is_new_run = lease.is_new_run
 

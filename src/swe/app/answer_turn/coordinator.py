@@ -38,6 +38,7 @@ class TurnSettlementPendingError(RuntimeError):
 class _TurnState:
     identity: TurnIdentity
     status: TurnStatus
+    producer_started: bool = True
     outcome: TurnOutcome | None = None
     stop_effects_started: bool = False
     hard_cancel_watcher_started: bool = False
@@ -83,6 +84,7 @@ class AnswerTurnCoordinator:
         *,
         msgid: str | None = None,
         before_start: Any | None = None,
+        defer_producer_start: bool = False,
     ) -> TurnLease:
         lock = await self._chat_lock(chat_id)
         async with lock:
@@ -108,7 +110,11 @@ class AnswerTurnCoordinator:
                 chat_id=chat_id,
                 msgid=msgid or f"msg-{uuid4().hex}",
             )
-            new_state = _TurnState(identity, TurnStatus.ADMITTING)
+            new_state = _TurnState(
+                identity,
+                TurnStatus.ADMITTING,
+                producer_started=not defer_producer_start,
+            )
             self._turns[chat_id] = new_state
             try:
                 queue, _ = await self.stream.attach_or_start(
@@ -149,6 +155,46 @@ class AnswerTurnCoordinator:
                 state.transport_ended = True
                 return None
             return TurnLease(state.identity, queue, False)
+
+    async def cancel_unstarted(self, identity: TurnIdentity) -> bool:
+        """Settle a turn whose business producer never started."""
+        outcome = TurnOutcome.cancelled(identity)
+        lock = await self._chat_lock(identity.chat_id)
+        accepted = False
+        retry_needed = False
+        async with lock:
+            state = self._turns.get(identity.chat_id)
+            if (
+                state is None
+                or state.identity != identity
+                or state.status
+                not in {TurnStatus.RUNNING, TurnStatus.STOPPING}
+                or state.settlement_started
+                or state.producer_started
+            ):
+                return False
+            accepted, retry_needed = await self._settle_locked(
+                identity,
+                outcome,
+            )
+        if retry_needed:
+            self._schedule_settlement_retry(identity)
+        return accepted and not retry_needed
+
+    async def mark_producer_started(self, identity: TurnIdentity) -> bool:
+        """Mark a deferred producer as entering its business execution."""
+        lock = await self._chat_lock(identity.chat_id)
+        async with lock:
+            state = self._turns.get(identity.chat_id)
+            if (
+                state is None
+                or state.identity != identity
+                or state.status != TurnStatus.RUNNING
+                or state.settlement_started
+            ):
+                return False
+            state.producer_started = True
+            return True
 
     async def recover_current(
         self,
@@ -323,49 +369,63 @@ class AnswerTurnCoordinator:
         if outcome.identity != identity:
             raise ValueError("outcome identity must match settled turn")
         lock = await self._chat_lock(identity.chat_id)
-        retry_needed = False
         async with lock:
-            state = self._turns.get(identity.chat_id)
-            if state is None or state.identity != identity:
-                return False
-            if state.settlement_started:
-                return False
-            state.settlement_started = True
-            state.status = outcome.status
-            state.outcome = outcome
-            # The coordinator lock is the turn linearization point.  Keep it
-            # through the short durable outcome transaction so a following
-            # submission can never start between terminal state and persistence.
-            try:
-                await self.session.persist_outcome(outcome)
-            except asyncio.CancelledError:
-                retry_needed = True
-                logger.warning(
-                    "Cancelled while persisting answer turn outcome; retrying "
-                    "chat_id=%s msgid=%s",
-                    identity.chat_id,
-                    identity.msgid,
-                )
-            except Exception:
-                retry_needed = True
-                logger.exception(
-                    "Failed to persist answer turn outcome; retrying "
-                    "chat_id=%s msgid=%s",
-                    identity.chat_id,
-                    identity.msgid,
-                )
-            else:
-                await self.stream.close(identity)
-                release = getattr(self.session, "release_outcome", None)
-                if release is not None:
-                    await release(identity)
-                state = self._turns.get(identity.chat_id)
-                if state is not None and state.identity == identity:
-                    self._turns.pop(identity.chat_id, None)
+            accepted, retry_needed = await self._settle_locked(
+                identity,
+                outcome,
+            )
+        if not accepted:
+            return False
         if retry_needed:
             self._schedule_settlement_retry(identity)
             return False
         return True
+
+    async def _settle_locked(
+        self,
+        identity: TurnIdentity,
+        outcome: TurnOutcome,
+    ) -> tuple[bool, bool]:
+        state = self._turns.get(identity.chat_id)
+        if (
+            state is None
+            or state.identity != identity
+            or state.settlement_started
+        ):
+            return False, False
+        state.settlement_started = True
+        state.status = outcome.status
+        state.outcome = outcome
+        retry_needed = False
+        # Hold the coordinator lock through persistence to prevent a new Turn
+        # from starting before this terminal outcome becomes durable.
+        try:
+            await self.session.persist_outcome(outcome)
+        except asyncio.CancelledError:
+            retry_needed = True
+            logger.warning(
+                "Cancelled while persisting answer turn outcome; retrying "
+                "chat_id=%s msgid=%s",
+                identity.chat_id,
+                identity.msgid,
+            )
+        except Exception:
+            retry_needed = True
+            logger.exception(
+                "Failed to persist answer turn outcome; retrying "
+                "chat_id=%s msgid=%s",
+                identity.chat_id,
+                identity.msgid,
+            )
+        else:
+            await self.stream.close(identity)
+            release = getattr(self.session, "release_outcome", None)
+            if release is not None:
+                await release(identity)
+            state = self._turns.get(identity.chat_id)
+            if state is not None and state.identity == identity:
+                self._turns.pop(identity.chat_id, None)
+        return True, retry_needed
 
     def _schedule_settlement_retry(self, identity: TurnIdentity) -> None:
         if identity.chat_id in self._settlement_retry_tasks:
