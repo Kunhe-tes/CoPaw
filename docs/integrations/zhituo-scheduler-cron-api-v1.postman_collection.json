@@ -775,7 +775,7 @@
               }
             ],
             "url": "{{scheduler_base_url}}/api/scheduler/cron/jobs/{{job_id}}/broadcast",
-            "description": "接口及持久处理器已实现，后台已装配，待部署验收。targets 0～1000，source 继承源；分发不携带调度模式。新轮新 request_id，旧轮失败不提供续办。",
+            "description": "接口及持久处理器已实现，后台已装配，待部署验收。targets 可提交超过 1000 项，空数组只调整既有子任务的排程。source 继承源任务，调度模式通过独立接口控制。失败目标用新 request_id 发起新一轮。",
             "body": {
               "mode": "raw",
               "raw": "{\n  \"request_id\": \"{{broadcast_request_id}}\",\n  \"expected_definition_version\": {{definition_version}},\n  \"targets\": [\n    {\n      \"tenant_id\": \"{{target_tenant_id}}\",\n      \"tenant_name\": \"{{target_tenant_name}}\",\n      \"bbk_id\": \"{{target_bbk_id}}\",\n      \"agent_id\": \"{{agent_id}}\"\n    }\n  ],\n  \"enable_offset\": false,\n  \"offset_window_hours\": 0\n}",

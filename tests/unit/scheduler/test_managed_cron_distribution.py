@@ -257,8 +257,8 @@ async def test_active_broadcast_blocks_source_delete_and_content_update(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("count", [0, 1, 1000])
-async def test_distribution_accepts_documented_target_count_boundaries(
+@pytest.mark.parametrize("count", [0, 1, 1001])
+async def test_distribution_accepts_empty_single_and_large_target_lists(
     distribution_setup,
     count,
 ):
@@ -276,7 +276,7 @@ async def test_distribution_accepts_documented_target_count_boundaries(
 
 
 @pytest.mark.asyncio
-async def test_distribution_rejects_over_limit_and_conflicting_duplicate_profiles(
+async def test_distribution_rejects_non_list_targets_and_conflicting_duplicates(
     distribution_setup,
 ):
     from scheduler.app.services.cron.managed.distribution import BroadcastStore
@@ -288,11 +288,7 @@ async def test_distribution_rejects_over_limit_and_conflicting_duplicate_profile
         await store.submit(
             caller,
             created["job_id"],
-            payload(
-                targets=[
-                    {"tenant_id": f"user-{index}"} for index in range(1001)
-                ],
-            ),
+            payload(targets={}),
         )
     with pytest.raises(ValueError, match="duplicate"):
         await store.submit(

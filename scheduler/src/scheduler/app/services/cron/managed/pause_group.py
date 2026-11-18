@@ -96,13 +96,20 @@ class PauseGroupService:
         for ref in [current, *await _children(tx, key, [])]:
             item_key = tuple(ref[name] for name in IDENTITY_FIELDS)
             await _lock_definition(tx, item_key)
-            await DispatchStateStore._exclusive(tx, item_key)
+            failed_broadcast_child = await DispatchStateStore._exclusive(
+                tx,
+                item_key,
+                allow_failed_broadcast_child=item_key != key,
+            )
             row = await ManagedCronRepository(tx)._get_row(item_key, True)
             state = await tx.fetch_one(
                 f"SELECT * FROM swe_cron_job_states WHERE {WHERE_JOB} FOR UPDATE",
                 item_key,
             )
-            if state is None or state["management_status"] != "ready":
+            allowed = {"ready"}
+            if failed_broadcast_child:
+                allowed.update({"create_failed", "update_failed"})
+            if state is None or state["management_status"] not in allowed:
                 raise ManagementConflict("cron_job_not_ready")
             result.append((row, state))
         return result
@@ -140,6 +147,7 @@ class PauseGroupService:
             {**state, **values},
             key[2],
             utc_now(),
+            existing_only=state["management_status"] != "ready",
         )
         await insert(
             tx,

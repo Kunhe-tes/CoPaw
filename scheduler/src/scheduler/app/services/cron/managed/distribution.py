@@ -84,7 +84,7 @@ def _target(raw, caller):
 def normalized_request(caller, payload):
     identity_value(payload["request_id"])
     targets = payload.get("targets")
-    if not isinstance(targets, list) or len(targets) > 1000:
+    if not isinstance(targets, list):
         raise ValueError("invalid_broadcast_target_count")
     enabled = payload.get("enable_offset", False)
     window = payload.get("offset_window_hours", 0)
