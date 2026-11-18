@@ -9,6 +9,8 @@ from tests.unit.scheduler.test_managed_cron_dispatch_state import (
     group,
     mode_setup,
 )
+from tests.unit.scheduler.test_managed_cron_distribution import payload
+from tests.unit.scheduler.test_managed_cron_management import create_payload
 
 
 @pytest.mark.asyncio
@@ -46,6 +48,143 @@ async def test_group_pause_is_durable_before_platform_calls(mode_setup):
     assert all(
         not enabled for _, enabled in management.platform.trace[len(trace) :]
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tenant", ["bob", "dave"], ids=["update", "create"])
+async def test_group_pause_accepts_failed_broadcast_child(
+    mode_setup,
+    tenant,
+):
+    from scheduler.app.services.cron.managed.distribution import BroadcastStore
+    from scheduler.app.services.cron.managed.distribution_worker import (
+        BroadcastProcessor,
+    )
+    from scheduler.app.services.cron.managed.operations import (
+        ManagementConflict,
+    )
+    from scheduler.app.services.cron.managed.pause_group import (
+        PauseGroupService,
+    )
+
+    db, caller, management = mode_setup
+    root = await group(mode_setup)
+    store = BroadcastStore(db)
+    processor = BroadcastProcessor(
+        db,
+        management.resources,
+        management.platform,
+    )
+    service = PauseGroupService(db, management.platform)
+    command = {
+        "request_id": "pause-after-broadcast",
+        "expected_definition_version": 1,
+    }
+    targets = [{"tenant_id": tenant}]
+    first = await store.submit(caller, root, payload("fail", targets=targets))
+    with pytest.raises(
+        ManagementConflict,
+        match="^cron_broadcast_in_progress$",
+    ):
+        await service.submit(caller, root, command)
+
+    management.resources.fail_prepare = True
+    await processor.process(first["task_id"])
+    management.resources.fail_prepare = False
+    failed = await store.get(caller, root, first["task_id"])
+    assert failed["status"] == "failed"
+    child = failed["results"][0]["job_id"]
+    child_caller = replace(caller, tenant_id=tenant, is_manager=True)
+    pending = await management.store.pending(child_caller, child)
+    assert pending["status"] == "failed"
+
+    operation = await service.submit(caller, root, command)
+    await service.process(operation["operation_id"])
+    assert (await service.get(caller, root, operation["operation_id"]))[
+        "status"
+    ] == "completed"
+    assert all(
+        not row[0]
+        for row in db.conn.execute("SELECT enabled FROM swe_cron_jobs_v2")
+    )
+    assert await management.store.pending(child_caller, child) == pending
+    projection = db.conn.execute(
+        "SELECT enabled FROM swe_cron_jobs WHERE id=?",
+        (child,),
+    ).fetchone()
+    if tenant == "bob":
+        assert projection["enabled"] == 0
+        assert (f"timer-{child}-ordinary", False) in management.platform.trace
+    else:
+        assert projection is None
+
+    second = await store.submit(
+        caller,
+        root,
+        payload("repair", targets=targets),
+    )
+    await processor.process(second["task_id"])
+    assert (await store.get(caller, root, second["task_id"]))[
+        "status"
+    ] == "succeeded"
+    assert await management.store.pending(child_caller, child) is None
+    assert (
+        db.conn.execute(
+            "SELECT enabled FROM swe_cron_jobs_v2 WHERE job_id=?",
+            (child,),
+        ).fetchone()["enabled"]
+        == 0
+    )
+
+
+@pytest.mark.asyncio
+async def test_group_pause_keeps_conflict_for_independent_child_update(
+    mode_setup,
+):
+    from scheduler.app.services.cron.managed.operations import (
+        ManagementConflict,
+    )
+    from scheduler.app.services.cron.managed.pause_group import (
+        PauseGroupService,
+    )
+
+    db, caller, management = mode_setup
+    root = await group(mode_setup)
+    child = db.conn.execute(
+        "SELECT job_id FROM swe_cron_jobs_v2 WHERE parent_job_id=? AND tenant_id='bob'",
+        (root,),
+    ).fetchone()["job_id"]
+    child_caller = replace(caller, tenant_id="bob", is_manager=True)
+    operation, _ = await management.store.begin(
+        child_caller,
+        "update",
+        {
+            "request_id": "independent-update",
+            "expected_definition_version": 1,
+            "spec": create_payload(name="new report")["spec"],
+        },
+        child,
+    )
+    service = PauseGroupService(db, management.platform)
+    command = {"request_id": "blocked-pause", "expected_definition_version": 1}
+    with pytest.raises(
+        ManagementConflict,
+        match="^cron_management_in_progress$",
+    ):
+        await service.submit(caller, root, command)
+
+    management.resources.fail_prepare = True
+    result = await management.retry(
+        child_caller,
+        child,
+        operation["operation_id"],
+    )
+    assert result["status"] == "failed"
+    with pytest.raises(
+        ManagementConflict,
+        match="^cron_management_in_progress$",
+    ):
+        await service.submit(caller, root, command)
 
 
 @pytest.mark.asyncio

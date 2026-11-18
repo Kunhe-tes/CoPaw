@@ -78,13 +78,16 @@ export function ManagedBroadcastModal({
   const task = panel.value?.task;
   const locked = Boolean(task) || attempted;
   const submit = async () => {
-    if (!panel.alive.current || sending || tenants.length > 1000) return;
+    if (!panel.alive.current || sending) return;
     setSending(true);
     try {
+      const profilesByTenant = new Map(
+        profiles.map((profile) => [profile.tenant_id, profile]),
+      );
       const body = {
         expected_definition_version: job.definition_version,
         targets: tenants.map((id) => {
-          const profile = profiles.find((item) => item.tenant_id === id);
+          const profile = profilesByTenant.get(id);
           return {
             tenant_id: id,
             tenant_name: profile?.tenant_name,
@@ -143,7 +146,7 @@ export function ManagedBroadcastModal({
             <Button
               type="primary"
               loading={sending}
-              disabled={!panel.value || Boolean(task) || tenants.length > 1000}
+              disabled={!panel.value || Boolean(task)}
               onClick={() => void submit()}
             >
               开始分发
@@ -157,7 +160,7 @@ export function ManagedBroadcastModal({
         {!syncTaskId && (
           <Alert
             type="info"
-            message="0～1000 人；0 人仅调整已有子任务的散列时间。分发失败请在新一轮处理，不改变调度方式。"
+            message="未选择接收人时，只调整已有子任务的散列时间。失败目标可在新一轮分发。"
           />
         )}
         {panel.error && <Alert type="error" showIcon message={panel.error} />}

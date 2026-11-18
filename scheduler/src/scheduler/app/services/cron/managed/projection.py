@@ -50,6 +50,7 @@ async def write_projection(
     *,
     deleted=False,
     expect_new=False,
+    existing_only=False,
 ):
     key = (spec["tenant_id"], spec["source_id"], agent_id, spec["id"])
     if await imported_binding(db, key, state):
@@ -62,7 +63,7 @@ async def write_projection(
         raise ValueError("legacy_projection_already_exists")
     if existing and not _owned(existing, spec, agent_id):
         raise ValueError("legacy_projection_identity_conflict")
-    if deleted and existing is None:
+    if (deleted or existing_only) and existing is None:
         return
     values = _values(spec, state, agent_id, now, deleted)
     if existing:

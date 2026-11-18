@@ -59,8 +59,7 @@ class BroadcastRequest(OperationRequest):
         description="源任务详情的 definition_version",
     )
     targets: list[BroadcastTarget] = Field(
-        max_length=1000,
-        description="必须显式提供 0～1000 个目标；空数组只调整全部未删除既有子任务的排程",
+        description="必须显式提供目标数组；空数组只调整全部未删除既有子任务的排程",
     )
     enable_offset: StrictBool = Field(
         default=False,

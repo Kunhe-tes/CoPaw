@@ -534,7 +534,7 @@ POST {SchedulerBaseUrl}/api/scheduler/cron/jobs/{job_id}/broadcast
 | --- | --- | --- |
 | request_id | string | 必填，一轮分发的稳定请求 ID |
 | expected_definition_version | integer | 必填，GET 源任务详情取得 |
-| targets | array | 必填，0～1000 个显式接收方 |
+| targets | array | 必填，显式接收方列表，可提交超过 1000 项或传空数组 |
 | targets[].tenant_id | string | 必填，接收方逻辑 tenant |
 | targets[].tenant_name、bbk_id | string | 展示和目标身份辅助信息，不作为授权凭据 |
 | targets[].agent_id | string | 可选，省略沿用源 Agent |
@@ -640,7 +640,7 @@ current 指按创建顺序最近一轮，不仅查询正在执行的一轮；不
 - 未在本轮 targets 中的历史子任务不删除、不顺带重新初始化；模式切换另算整组范围。
 - 失败对象通过新 request_id 发起新一轮处理，不提供旧轮失败项续办接口。
 - targets=[] 不新建、不删除，仅对源任务下全部未删除子任务重算散列排程，包含停用对象但不恢复启用，不改正文/模型/技能。
-- 0 人模式中的 tenant_count 是实际纳入调整的既有对象数，不是“新增了多少人”。历史多轮累计对象数可大于本轮显式 targets 的 1000 人输入限制。
+- `targets=[]` 时，`tenant_count` 统计实际纳入排程调整的既有子任务数。
 - 散列沿用在窗口内均匀提前的算法，不是用户 ID 哈希；新一轮人数或顺序不同，偏移可能变化。
 - Cron 无法安全平移时回退原排程、实际偏移记 0 并告警，不默默声称已散列。
 - Agent 分发到目标环境时，指定模型不可用按既有规则回退目标默认模型并告警；必要 Workflow/技能配置缺失则该对象失败。普通单任务创建不因此获得“任何配置错误都自动回退”的语义。
