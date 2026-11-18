@@ -45,6 +45,9 @@ interface DynamicRenderContextValue {
     templateName: string,
     data: Record<string, any>
   ) => Promise<string | null>;
+  /** 清除指定模板的内容缓存（templateCacheRef / loadingPromiseRef / loadingByNameRef），
+   *  使下一次渲染重新获取模板内容（`/assets/text/read`）。用于「刷新」时强制重拉模板内容。 */
+  clearTemplateContentCache: (templateIdOrName?: number | string | null) => void;
   templateList
 }
 
@@ -59,6 +62,7 @@ const DynamicRenderContext = createContext<DynamicRenderContextValue>({
   renderStaticTemplate: async () => null,
   getTemplateContentByName: async () => null,
   renderTemplateByName: async () => null,
+  clearTemplateContentCache: () => { },
   templateList: [],
 });
 
@@ -460,6 +464,39 @@ export function DynamicRenderProvider(props: DynamicRenderProviderProps) {
     [getTemplateContentByName]
   );
 
+  /**
+   * 清除指定模板的内容缓存，强制下一次渲染重新获取模板内容。
+   * 支持按 templateId（number）或 templateName（string）清除：
+   *  - templateCacheRef：已拉取并编译的模板内容
+   *  - loadingPromiseRef：按 templateId 去重的在途请求
+   *  - loadingByNameRef：按 templateName 去重的在途请求
+   * 清除后 renderTemplate / getTemplateContent / getTemplateContentByName 会重新请求
+   *  `/assets/text/read`。
+   */
+  const clearTemplateContentCache = useCallback(
+    (templateIdOrName?: number | string | null) => {
+      let tid: number | null = null;
+      if (typeof templateIdOrName === "number") {
+        tid = templateIdOrName;
+      } else if (typeof templateIdOrName === "string" && templateIdOrName) {
+        const parsed = parseInt(templateIdOrName, 10);
+        tid = Number.isNaN(parsed) ? null : parsed;
+        if (tid === null) {
+          loadingByNameRef.current.delete(templateIdOrName);
+        }
+      }
+
+      if (tid !== null) {
+        templateCacheRef.current.delete(tid);
+        loadingPromiseRef.current.delete(tid);
+        // 同步清理按 templateName 维度的在途请求
+        const t = templateListRef.current.find((x) => x.templateId === tid);
+        if (t) loadingByNameRef.current.delete(t.templateName);
+      }
+    },
+    []
+  );
+
   // 使用 useMemo 优化 Context value，避免不必要的重渲染
   const value = useMemo(
     () => ({
@@ -473,6 +510,7 @@ export function DynamicRenderProvider(props: DynamicRenderProviderProps) {
       renderStaticTemplate,
       getTemplateContentByName,
       renderTemplateByName,
+      clearTemplateContentCache,
       templateList: templateListRef,
     }),
     [
@@ -486,6 +524,7 @@ export function DynamicRenderProvider(props: DynamicRenderProviderProps) {
       renderStaticTemplate,
       getTemplateContentByName,
       renderTemplateByName,
+      clearTemplateContentCache,
     ]
   );
 

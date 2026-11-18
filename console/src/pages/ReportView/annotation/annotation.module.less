@@ -1,0 +1,173 @@
+/**
+ * ！！！！注意代码不同步，不能合并
+ */
+
+.annotationToolbar {
+
+  .optText {
+    font-weight: bold;
+  }
+}
+
+.annotationToolbarOpt {
+  display: flex;
+}
+
+.annotationLayout {
+  display: flex;
+}
+
+/* 左侧报告预览区域 */
+.annotationPreviewArea {
+  flex: 1;
+}
+
+/* 右侧批注列表（固定 350px 宽） */
+.annotationList {
+  width: 264px;
+}
+
+.annotationListHeader {
+  padding: 10px 12px;
+}
+
+.annotationListTitle {
+  font-size: 14px;
+}
+
+.annotationListTip {
+  font-size: 12px;
+}
+
+.annotationListBody {
+  /* 细滚动条 */
+  &::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.15);
+  }
+}
+
+.annotationListEmpty {
+  padding: 40px 10px;
+
+  .annotationListEmptyTip {
+    font-size: 12px;
+  }
+}
+
+/* 批注卡片 */
+.annotationCard {
+  border: 1px solid rgba(0, 0, 0, 0.1);
+
+  &:hover {
+    border-color: #7b6fe0;
+    box-shadow: 0 2px 8px rgba(123, 111, 224, 0.12);
+  }
+}
+
+/* 编辑态卡片强调 */
+.annotationCardEditing {
+  border-color: #7b6fe0;
+}
+
+.annotationCardReport {
+  border-color: #ea580c;
+
+  &:hover {
+    border-color: #ea580c;
+  }
+
+  .annotationCardIndex {
+    color: #ea580c;
+  }
+}
+
+.annotationCardHeader {
+  display: flex;
+}
+
+.annotationCardIndex {
+  font-size: 13px;
+}
+
+.annotationCardTime {
+  font-size: 12px;
+  color: #8c8c8c;
+}
+
+.annotationCardTarget {
+  font-size: 12px;
+}
+
+.annotationCardEditor,
+.annotationCardPreview {
+  display: flex;
+}
+
+.annotationCardComment {
+  font-size: 13px;
+}
+
+/* 卡片右下角文字操作按钮 */
+.annotationCardActions {
+  display: flex;
+
+  a {
+    font-size: 12px;
+  }
+}
+
+.annotationActionCancel {
+  color: #8c8c8c;
+
+  &:hover {
+    color: #595959;
+  }
+}
+
+.annotationActionConfirm {
+  color: #7b6fe0;
+
+  &:hover {
+    color: #9488ec;
+  }
+}
+
+.annotationActionDelete {
+  color: #ff4d4f;
+
+  &:hover {
+    color: #ff7875;
+  }
+}
+
+.annotationActionEdit {
+  color: #7b6fe0;
+
+  &:hover {
+    color: #9488ec;
+  }
+}
+
+.annotationPopover {
+  position: fixed;
+}
+
+.annotationPopoverTitle {
+  font-size: 14px;
+}
+
+.annotationPopoverActions {
+  display: flex;
+
+  .annotationPopoverConfirm {
+    background: #7b6fe0;
+
+    &:hover {
+      background: #9488ec;
+    }
+  }
+}
