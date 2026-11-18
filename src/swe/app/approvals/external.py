@@ -561,7 +561,13 @@ async def submit_external_approval_decision(
     if coordinator is None:
         raise RuntimeError("answer-turn coordinator is not configured")
 
+    submission_ready = asyncio.Event()
+    submission_accepted = False
+
     async def producer(identity: TurnIdentity, bound_payload: Any):
+        await submission_ready.wait()
+        if not submission_accepted:
+            return
         next_payload = {
             **bound_payload,
             "meta": {
@@ -573,21 +579,25 @@ async def submit_external_approval_decision(
         async for event in console_channel.stream_one(next_payload):
             yield event
 
-    lease = await coordinator.start_or_attach(
-        chat.id,
-        payload,
-        producer,
-        msgid=f"approval-{pending.request_id}",
-    )
-    is_new_run = lease.is_new_run
+    try:
+        lease = await coordinator.start_or_attach(
+            chat.id,
+            payload,
+            producer,
+            msgid=f"approval-{pending.request_id}",
+        )
+        is_new_run = lease.is_new_run
 
-    await get_approval_service().record_external_submission(
-        pending,
-        decision=decision.value,
-        source_channel=source_channel,
-        source_user_id=source_user_id,
-        source_message_id=source_message_id,
-    )
+        await get_approval_service().record_external_submission(
+            pending,
+            decision=decision.value,
+            source_channel=source_channel,
+            source_user_id=source_user_id,
+            source_message_id=source_message_id,
+        )
+        submission_accepted = True
+    finally:
+        submission_ready.set()
 
     await notify_cron_approval_result(
         workspace,
