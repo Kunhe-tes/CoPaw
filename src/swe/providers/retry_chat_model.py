@@ -344,10 +344,14 @@ class RetryChatModel(ChatModelBase):
         on_retry: (
             Callable[[int, int, Exception, float], Awaitable[None]] | None
         ) = None,
+        on_request_attempt: (
+            Callable[[int, bool], Awaitable[None]] | None
+        ) = None,
     ) -> None:
         super().__init__(model_name=inner.model_name, stream=inner.stream)
         self._inner = inner
         self._on_retry = on_retry
+        self._on_request_attempt = on_request_attempt
         self._retry_config = _normalize_retry_config(retry_config)
         self._rate_limit_config = _normalize_rate_limit_config(
             rate_limit_config,
@@ -489,6 +493,7 @@ class RetryChatModel(ChatModelBase):
                         f"{limiter_scope.agent_id}, workload={workload})",
                     ) from exc
 
+                await self._notify_request_attempt(call_attempt)
                 result = await asyncio.wait_for(
                     self._inner(*args, **kwargs),
                     timeout=self._call_timeout,
@@ -527,6 +532,14 @@ class RetryChatModel(ChatModelBase):
                         call_attempt,
                         self.model_name,
                     )
+                    await self._notify_retry(
+                        call_attempt,
+                        call_attempt + 1,
+                        EmptyModelOutputError(
+                            "LLM call returned empty model output",
+                        ),
+                        0,
+                    )
                     continue
 
                 return result
@@ -547,16 +560,12 @@ class RetryChatModel(ChatModelBase):
                     exc,
                     delay,
                 )
-                if self._on_retry:
-                    try:
-                        await self._on_retry(
-                            transient_attempt,
-                            attempts,
-                            exc,
-                            delay,
-                        )
-                    except Exception:
-                        pass  # 回调失败不影响重试逻辑
+                await self._notify_retry(
+                    transient_attempt,
+                    attempts,
+                    exc,
+                    delay,
+                )
                 transient_attempt += 1
                 await asyncio.sleep(delay)
 
@@ -588,12 +597,30 @@ class RetryChatModel(ChatModelBase):
             exc,
             delay,
         )
-        if self._on_retry:
-            try:
-                await self._on_retry(attempt, max_attempts, exc, delay)
-            except Exception:
-                pass  # 回调失败不影响重试逻辑
+        await self._notify_retry(attempt, max_attempts, exc, delay)
         await asyncio.sleep(delay)
+
+    async def _notify_request_attempt(self, attempt: int) -> None:
+        if self._on_request_attempt is None:
+            return
+        try:
+            await self._on_request_attempt(attempt, bool(self.stream))
+        except Exception:
+            pass
+
+    async def _notify_retry(
+        self,
+        attempt: int,
+        max_attempts: int,
+        error: Exception,
+        delay: float,
+    ) -> None:
+        if self._on_retry is None:
+            return
+        try:
+            await self._on_retry(attempt, max_attempts, error, delay)
+        except Exception:
+            pass  # 回调失败不影响重试逻辑
 
     async def _acquire_stream_retry_slot(
         self,
@@ -719,6 +746,7 @@ class RetryChatModel(ChatModelBase):
                     )
                     acquired = True
 
+                    await self._notify_request_attempt(call_attempt)
                     result = await asyncio.wait_for(
                         self._inner(*call_args, **call_kwargs),
                         timeout=self._call_timeout,

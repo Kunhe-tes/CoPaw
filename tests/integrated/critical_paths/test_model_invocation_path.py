@@ -76,7 +76,7 @@ async def test_provider_model_factory_wrappers_and_retry_are_in_invocation_path(
 
 
 @pytest.mark.asyncio
-async def test_model_retry_is_linked_to_one_observability_span(
+async def test_model_retry_creates_linked_request_attempt_spans(
     monkeypatch,
     isolated_agent_config,
 ) -> None:
@@ -126,21 +126,124 @@ async def test_model_retry_is_linked_to_one_observability_span(
     span_starts = [
         record for record in records if record["event_name"] == "span.started"
     ]
-    retries = [
-        record for record in records if record.get("event_kind") == "retry"
+    request_starts = [
+        record
+        for record in records
+        if record.get("operation") == "request_attempt"
+        and record["event_name"] == "span.started"
+    ]
+    request_ends = [
+        record
+        for record in records
+        if record.get("operation") == "request_attempt"
+        and record["event_name"] == "span.ended"
     ]
     span_ends = [
         record for record in records if record["event_name"] == "span.ended"
     ]
-    assert len(span_starts) == len(span_ends) == 1
-    assert len(retries) == 1
-    assert retries[0]["entity_kind"] == "span"
-    assert retries[0]["entity_id"] == span_starts[0]["entity_id"]
-    assert retries[0]["error_type"] == "TimeoutError"
-    assert span_ends[0]["metrics"]["input_tokens"] == 5
-    assert span_ends[0]["metrics"]["output_tokens"] == 2
+    logical_end = next(
+        record for record in span_ends if record.get("operation") == "chat"
+    )
+    assert len(span_starts) == 3
+    assert len(request_starts) == len(request_ends) == 2, records
+    assert [record["status"] for record in request_ends] == [
+        "failed",
+        "succeeded",
+    ]
+    assert request_starts[1]["links"] == [
+        {
+            "relation_type": "retry_of",
+            "obs_span_id": request_starts[0]["obs_span_id"],
+        },
+    ]
+    assert logical_end["metrics"]["input_tokens"] == 5
+    assert logical_end["metrics"]["output_tokens"] == 2
     assert "private provider detail" not in stream.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_empty_output_retry_emits_cause_and_linked_request_attempts(
+    monkeypatch,
+    isolated_agent_config,
+) -> None:
+    _, write_agent_config = isolated_agent_config
+    write_agent_config()
+    bottom_model = DeterministicChatModel(
+        [
+            ChatResponse(
+                content=[],
+                usage=ChatUsage(input_tokens=0, output_tokens=0, time=0.0),
+            ),
+            ChatResponse(
+                content=[{"type": "text", "text": "retry ok"}],
+                usage=ChatUsage(input_tokens=5, output_tokens=2, time=0.0),
+            ),
+        ],
+    )
+    manager = FakeProviderManager(FakeProvider(bottom_model))
+    monkeypatch.setattr(
+        model_factory.ProviderManager,
+        "ensure_tenant_provider_storage",
+        lambda _tenant_id: None,
+    )
+    monkeypatch.setattr(
+        model_factory.ProviderManager,
+        "get_instance",
+        lambda _tenant_id=None: manager,
+    )
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+    context = Observability().admit_run(
+        scope=Scope("svc", "source", "tenant", "critical-agent"),
+        enabled=True,
+    )
+    model, _formatter = model_factory.create_model_and_formatter(
+        agent_id="critical-agent",
+    )
+
+    with bind_context(context), bind_llm_workload(LLM_WORKLOAD_CRON):
+        result = await model([{"content": "private prompt"}])
+
+    emitter.close()
+    assert result.content[0]["text"] == "retry ok"
+    assert len(bottom_model.calls) == 2
+    records = [json.loads(line) for line in stream.getvalue().splitlines()]
+    attempts = [
+        record
+        for record in records
+        if record.get("operation") == "request_attempt"
+    ]
+    starts = [
+        record for record in attempts if record["event_name"] == "span.started"
+    ]
+    ends = [
+        record for record in attempts if record["event_name"] == "span.ended"
+    ]
+    retries = [
+        record
+        for record in records
+        if record.get("event_type") == "model.retry_scheduled"
+    ]
+    assert len(retries) == 1
+    retry = retries[0]
+    assert len(starts) == len(ends) == 2
+    assert [record["status"] for record in ends] == ["failed", "succeeded"]
+    assert (
+        ends[0]["error_type"] == retry["error_type"] == "EmptyModelOutputError"
+    )
+    assert retry["retries"] == 1
+    assert starts[1]["links"] == [
+        {
+            "relation_type": "retry_of",
+            "obs_span_id": starts[0]["obs_span_id"],
+        },
+    ]
     assert "private prompt" not in stream.getvalue()
+    assert "retry ok" not in stream.getvalue()
 
 
 def test_provider_model_factory_passes_model_generation_config(
