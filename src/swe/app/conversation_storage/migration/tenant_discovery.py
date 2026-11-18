@@ -188,6 +188,8 @@ def _source_configs(service):
 
     candidates = config_candidates(root)
     for path in candidates:
+        if path == root / "config.json":
+            continue
         if (
             not path.parent.is_symlink()
             and not path.is_symlink()
@@ -210,6 +212,42 @@ def _source_configs(service):
 def _configs(service):
     for path, tenant, _source in _source_configs(service):
         yield path, tenant
+
+
+def _candidate_identity(service, path):
+    """Return a candidate's explicit tenant/source identity, if available."""
+    from .discovery import _identity
+
+    try:
+        relative = Path(path).relative_to(Path(service["source_root"]))
+    except ValueError:
+        return None
+    if not relative.parts:
+        return None
+    config = Path(service["config_root"]) / relative.parts[0] / "config.json"
+    try:
+        return _identity(config, service)
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+def _candidate_key(report, service, path):
+    identity = _candidate_identity(service, path)
+    if identity is None:
+        return None
+    key = (service["service_unit_id"], *identity)
+    if report.get("source_isolation"):
+        return key
+    legacy_key = key[:2]
+    return legacy_key
+
+
+def _under_declared_input(path, services):
+    return any(
+        path == Path(service[key]) or path.is_relative_to(Path(service[key]))
+        for service in services
+        for key in ("source_root", "config_root")
+    )
 
 
 def _path(position, services):
@@ -391,6 +429,21 @@ def _attribute_blockers(report, services, tenants, paths, positions):
             if matches:
                 depth = max(len(p.parts) for p, _ in matches)
                 owners = {k for p, k in matches if len(p.parts) == depth}
+        if not owners and path is not None:
+            for service in services:
+                if not _under_declared_input(path, [service]):
+                    continue
+                owner = _candidate_key(report, service, path)
+                if owner is not None:
+                    tenants.setdefault(owner, [])
+                    owners = {owner}
+                else:
+                    # An input under a declared root without a verified source
+                    # owner is outside the migration set.
+                    owners = set()
+                break
+            if not owners and _under_declared_input(path, services):
+                continue
         if not owners:
             affected = {
                 s["service_unit_id"]

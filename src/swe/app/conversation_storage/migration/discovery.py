@@ -214,8 +214,18 @@ def _workspace_path(value, config_path, service):
 
 def _profiles(service, report):
     workspaces = []
+    config_root = Path(service["config_root"])
     configs = config_candidates(service["config_root"])
     for config in configs:
+        # The service-root config is project bootstrap state. It has no
+        # tenant/source ownership and is never a conversation input.
+        if config == config_root / "config.json":
+            continue
+        try:
+            tenant, source = _identity(config, service)
+        except (ValueError, TypeError, KeyError):
+            # A config without an explicit source is outside this migration.
+            continue
         if config.parent.is_symlink() or config.is_symlink():
             _block(
                 report,
@@ -232,7 +242,6 @@ def _profiles(service, report):
                 raise ValueError("agent profiles must be a mapping")
             if not profiles:
                 continue
-            tenant, source = _identity(config, service)
             for key, profile in sorted(profiles.items()):
                 if key != profile["id"]:
                     raise ValueError("profile key and Agent ID disagree")
@@ -389,6 +398,10 @@ def _coverage(service, known, report, overrides):
                 overrides,
                 report,
             ):
+                from .tenant_discovery import _candidate_identity
+
+                if _candidate_identity(service, path) is None:
+                    continue
                 _block(
                     report,
                     "unregistered_workspace",

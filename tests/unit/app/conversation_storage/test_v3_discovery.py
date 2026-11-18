@@ -123,7 +123,7 @@ def test_new_discovery_avoids_fingerprints_and_keeps_service_authority(
     assert manifest.data["source_change_blockers"] == [blocker]
 
 
-def test_unregistered_workspace_is_blocker(tmp_path):
+def test_unregistered_workspace_without_profile_is_ignored(tmp_path):
     from swe.app.conversation_storage.migration.discovery import (
         discover_services,
     )
@@ -138,10 +138,74 @@ def test_unregistered_workspace_is_blocker(tmp_path):
     extra.chmod(0o555)
     root.chmod(0o555)
     report = discover_services([service])
-    assert not report["ready"]
-    assert any(
+    assert report["ready"], report["blockers"]
+    assert not any(
         item["code"] == "unregistered_workspace" for item in report["blockers"]
     )
+
+
+def test_service_root_config_is_ignored(tmp_path):
+    from swe.app.conversation_storage.migration.discovery import (
+        discover_services,
+    )
+
+    service = fixture_service(tmp_path)
+    root = Path(service["source_root"])
+    root.chmod(0o755)
+    (root / "config.json").write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "profiles": {
+                        "missing": {
+                            "id": "missing",
+                            "workspace_dir": str(root / "missing"),
+                        },
+                    },
+                },
+            },
+        ),
+    )
+    (root / "config.json").chmod(0o444)
+    root.chmod(0o555)
+    report = discover_services([service])
+    assert report["ready"], report["blockers"]
+    assert len(report["workspaces"]) == 1
+
+
+def test_unregistered_scoped_workspace_fails_only_its_source(tmp_path):
+    from swe.app.conversation_storage.migration.discovery import (
+        discover_services,
+    )
+
+    service = fixture_service(tmp_path)
+    root = Path(service["source_root"])
+    root.chmod(0o755)
+    extra = root / "default_ORPHAN" / "workspaces" / "default"
+    extra.mkdir(parents=True)
+    (extra / "chats.json").write_text('{"chats": []}')
+    (extra / "chats.json").chmod(0o444)
+    for path in (extra, extra.parent, root / "default_ORPHAN"):
+        path.chmod(0o555)
+    root.chmod(0o555)
+    report = discover_services(
+        [service],
+        tenant_isolation=True,
+        source_isolation=True,
+    )
+    orphan = next(
+        item
+        for item in report["tenants"]
+        if item["tenant_id"] == "default" and item["source_id"] == "ORPHAN"
+    )
+    assert orphan["state"] == "failed"
+    assert any(
+        item["code"] == "unregistered_workspace" for item in orphan["blockers"]
+    )
+    existing = next(
+        item for item in report["tenants"] if item["source_id"] == "SRC"
+    )
+    assert existing["state"] == "discovered"
 
 
 def test_service_without_workspaces_is_retained_for_share_only_job(tmp_path):
