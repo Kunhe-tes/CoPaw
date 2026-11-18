@@ -51,3 +51,5 @@ Priority: P0
 2026-11-18：新增历史精确身份 MySQL/API 合同：Inbox 写入一条 7 天前的已结束 Run 和 Attempt，经 Projector 后验证默认最近 24 小时列表不返回该 Run，而按完整 `run_id` 或 `attempt_id` 查询均由 manager 授权 API 精确返回它。随机 `_test` schema 安装当前观测 DDL 后通过（1 passed，74.12s），测试结束删除 schema 并查询确认不存在。大规模查询资源报告和浏览器验收仍未完成。
 
 同日整理：为避免将该合同混入共享 pipeline 文件中的其他未提交覆盖，迁移为独立 `test_historical_run_query_mysql.py`；独立合同在同样的隔离 DDL/schema 流程通过（1 passed，6.71s），测试后删除并验证 schema 不存在。目标 pre-commit 全绿。
+
+2026-11-18：针对 Run 列表候选扫描另建随机 `_test` schema，批量插入 50,001 条同 Source、同一 12 秒窗口的合成 Run，且全部命中查询条件，作为非选择性的最坏候选集。对生产 `count_run_candidates` 与首屏 `list_runs(limit=51)` 各执行7次：候选计数始终截到50,001，P50=240.56ms、nearest-rank P95=250.62ms；首屏每次51条，P50=285.57ms、P95=316.66ms。授权 Run List API 对同一范围返回 `422 range_too_large`。MySQL 8.0.46 EXPLAIN：候选查询选 `ix_agentobs_runs_question`（仅使用 service/source 前缀，估算25,000行）；首屏选 `ix_agentobs_runs_scope_time` 并出现 `Using filesort`（估算25,000行）。该次仅一个Source和单次 schema 装载，测得 Python client CPU 0.1104s；没有 MySQL 主机 CPU 归因，也没有采集服务器内存数据，因此不代表生产 SLA、选择性时间窗或并发容量。随机 `_test` schema 已删除并查询确认不存在。
