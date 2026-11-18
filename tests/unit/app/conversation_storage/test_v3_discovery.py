@@ -231,6 +231,20 @@ def test_default_tenant_keeps_legacy_scope_directory_over_encoded_alias(
     )
 
 
+def test_default_scope_encoding_ignores_invalid_decoded_identity():
+    import base64
+
+    from swe.app.conversation_storage.migration.discovery import (
+        _is_default_scope_encoding,
+    )
+
+    invalid_tenant = base64.urlsafe_b64encode(b"..").decode().rstrip("=")
+    encoded_source = base64.urlsafe_b64encode(b"SRC").decode().rstrip("=")
+    assert not _is_default_scope_encoding(
+        invalid_tenant + "." + encoded_source,
+    )
+
+
 def test_unregistered_scoped_workspace_fails_only_its_source(tmp_path):
     from swe.app.conversation_storage.migration.discovery import (
         discover_services,

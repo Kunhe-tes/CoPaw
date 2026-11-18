@@ -188,7 +188,10 @@ def _is_default_scope_encoding(component):
         tenant, source = decode_scope_id(component)
     except (ValueError, UnicodeError):
         return False
-    encoded = encode_scope_id(tenant, source)
+    try:
+        encoded = encode_scope_id(tenant, source)
+    except ValueError:
+        return False
     return tenant == "default" and component in (
         encoded,
         "scope.v1." + encoded,
