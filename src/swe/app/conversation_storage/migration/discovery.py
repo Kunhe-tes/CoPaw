@@ -180,6 +180,21 @@ def _identity(config_path, service):
     raise ValueError("root config requires explicit source ownership evidence")
 
 
+def _is_default_scope_encoding(component):
+    """Identify encoded scope directories for the logical default tenant."""
+    from swe.config.context import decode_scope_id, encode_scope_id
+
+    try:
+        tenant, source = decode_scope_id(component)
+    except (ValueError, UnicodeError):
+        return False
+    encoded = encode_scope_id(tenant, source)
+    return tenant == "default" and component in (
+        encoded,
+        "scope.v1." + encoded,
+    )
+
+
 def _workspace_path(value, config_path, service):
     original = Path(service["original_root"])
     source = Path(service["source_root"])
@@ -220,6 +235,9 @@ def _profiles(service, report):
         # The service-root config is project bootstrap state. It has no
         # tenant/source ownership and is never a conversation input.
         if config == config_root / "config.json":
+            continue
+        component = config.parent.relative_to(config_root).parts[0]
+        if _is_default_scope_encoding(component):
             continue
         try:
             tenant, source = _identity(config, service)

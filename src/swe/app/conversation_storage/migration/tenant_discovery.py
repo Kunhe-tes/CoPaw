@@ -181,7 +181,7 @@ def map_tenant_calls(items, function, *, workers=4, io_workers=4):
 
 
 def _source_configs(service):
-    from .discovery import _identity
+    from .discovery import _identity, _is_default_scope_encoding
 
     root = Path(service["config_root"])
     from .failure_scope import config_candidates
@@ -189,6 +189,9 @@ def _source_configs(service):
     candidates = config_candidates(root)
     for path in candidates:
         if path == root / "config.json":
+            continue
+        component = path.parent.relative_to(root).parts[0]
+        if _is_default_scope_encoding(component):
             continue
         if (
             not path.parent.is_symlink()
@@ -216,13 +219,15 @@ def _configs(service):
 
 def _candidate_identity(service, path):
     """Return a candidate's explicit tenant/source identity, if available."""
-    from .discovery import _identity
+    from .discovery import _identity, _is_default_scope_encoding
 
     try:
         relative = Path(path).relative_to(Path(service["source_root"]))
     except ValueError:
         return None
     if not relative.parts:
+        return None
+    if _is_default_scope_encoding(relative.parts[0]):
         return None
     config = Path(service["config_root"]) / relative.parts[0] / "config.json"
     try:

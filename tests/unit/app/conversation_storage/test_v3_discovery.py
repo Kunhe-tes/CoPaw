@@ -173,6 +173,64 @@ def test_service_root_config_is_ignored(tmp_path):
     assert len(report["workspaces"]) == 1
 
 
+def test_default_tenant_keeps_legacy_scope_directory_over_encoded_alias(
+    tmp_path,
+):
+    from swe.app.conversation_storage.migration.discovery import (
+        discover_services,
+    )
+    from swe.config.context import encode_scope_id
+
+    service = fixture_service(tmp_path)
+    source = Path(service["source_root"])
+    source.chmod(0o755)
+    encoded = encode_scope_id("default", "SRC")
+    encoded_workspace = source / encoded / "workspaces" / "agent"
+    encoded_workspace.mkdir(parents=True)
+    encoded_runtime = (
+        Path(service["original_root"]) / encoded / "workspaces" / "agent"
+    )
+    encoded_config = source / encoded / "config.json"
+    encoded_config.write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "profiles": {
+                        "agent": {
+                            "id": "agent",
+                            "workspace_dir": str(encoded_runtime),
+                        },
+                    },
+                },
+            },
+        ),
+    )
+    (encoded_workspace / "agent.json").write_text('{"id": "agent"}')
+    (encoded_workspace / "chats.json").write_text(
+        '{"version": 1, "chats": []}',
+    )
+    for path in source.rglob("*"):
+        path.chmod(0o555 if path.is_dir() else 0o444)
+    source.chmod(0o555)
+
+    report = discover_services(
+        [service],
+        tenant_isolation=True,
+        source_isolation=True,
+    )
+
+    assert report["ready"], report["blockers"]
+    assert len(report["workspaces"]) == 1
+    workspace = report["workspaces"][0]
+    assert workspace["root"] == str(
+        source / "default_SRC" / "workspaces" / "agent",
+    )
+    assert (workspace["tenant_id"], workspace["source_id"]) == (
+        "default",
+        "SRC",
+    )
+
+
 def test_unregistered_scoped_workspace_fails_only_its_source(tmp_path):
     from swe.app.conversation_storage.migration.discovery import (
         discover_services,
