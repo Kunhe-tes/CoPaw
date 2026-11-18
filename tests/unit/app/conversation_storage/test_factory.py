@@ -560,9 +560,11 @@ def test_runtime_default_single_user_uses_installed_default_identity(tmp_path):
     )
 
 
-async def test_mysql_runtime_refuses_unready_database_and_missing_mapping(
+async def test_mysql_runtime_refuses_unready_database_and_missing_job(
     monkeypatch,
 ):
+    from unittest.mock import AsyncMock
+
     from swe.app.conversation_storage.runtime import (
         configure_runtime,
         workspace_storage,
@@ -572,8 +574,15 @@ async def test_mysql_runtime_refuses_unready_database_and_missing_mapping(
     with pytest.raises(RuntimeError, match="connected"):
         await configure_runtime(None)
     monkeypatch.delenv("SWE_CONVERSATION_SCOPE_MANIFEST", raising=False)
-    with pytest.raises(RuntimeError, match="installed scopes"):
-        await configure_runtime(SimpleNamespace(is_connected=True))
+    monkeypatch.setenv("CMB_CAAS_SERVICEUNITID", "service")
+    monkeypatch.setenv("SWE_CONVERSATION_ARCHIVE_CURSOR_SECRET", "secret")
+    with pytest.raises(RuntimeError, match="exactly one tenant migration job"):
+        await configure_runtime(
+            SimpleNamespace(
+                is_connected=True,
+                fetch_one=AsyncMock(return_value={"tenant_controls": 0}),
+            ),
+        )
     with pytest.raises(RuntimeError, match="not ready"):
         workspace_storage(SimpleNamespace())
 

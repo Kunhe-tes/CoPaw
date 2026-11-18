@@ -6,7 +6,7 @@
 
 **新简化协议说明（2026-11-18）：**`prepare` 发现服务、租户、source、Agent 和 workspace 映射并检查目标表，不盘点会话输入。`migrate --apply` 先从 SQL 剪枝 published source，再逐 source 扫描 workspace 到有界临时记录，导入、验证并独立发布；不记录或比较 chats mtime，不计算输入或 manifest 摘要。未发布 source 的会话输入、sessions/dialog、身份配置和 manifest 固定映射须从 prepare 至发布保持不变。部署侧保证每个应用 schema 全局仅有一个迁移进程。详见 ADR 0052。
 
-**manifest 部署：**新作业的 jobs 表只保存简短模式标记，不保存完整 source 映射。`migrate` 在 runtime 输出目录生成 `manifest.json` 副本；部署时将该文件与当前服务的 `*.runtime.json` 一起放到 `SWE_CONVERSATION_SCOPE_MANIFEST` 指向的文件所在目录，并保持只读。各实例使用同一作业的 manifest；发布状态仍由数据库控制。
+**运行时准入：**新作业的 jobs 表只保存简短模式标记，不保存完整 source 映射。MySQL 模式启动时按服务标识从控制表选择唯一租户迁移作业，并从 SQL 绑定取得 NAS 根目录；不部署迁移 manifest/runtime 映射文件，也不设置 `SWE_CONVERSATION_SCOPE_MANIFEST`。访问 source 时只查询该 source 的 SQL 发布记录和 workspace proof。部署保证不同 source 的 workspace 与配置路径互不重叠，运行时不扫描全量 source 边界。
 
 ## 2026-11-16：新作业按 source 独立迁移与上线
 
@@ -18,7 +18,7 @@
 
 失败 JSON 增加 `source_id`；阶段结果包含 `source_isolation=true`、`counter_unit=sources`。兼容字段 `tenants`、`published`、`completed`、`failed` 在此模式均按 source 计数。共享 DB、EIO、磁盘耗尽、提交结果不确定仍停止整个命令。
 
-运行时逐次检查 SQL source published 状态；同 tenant 的未发布 source 返回 503，已发布 source 可正常读写。Chat/Session 元数据 CRUD 使用完整可信 `(service, tenant, source, agent)` scope。本次迁移不导入或验证旧分享记录；运行时永久分享 API 和存储合同不由本变更修改。详见 ADR 0049。本节覆盖本页历史租户粒度描述，旧作业继续原粒度。
+运行时逐次检查当前 source 的 SQL published 状态；同 tenant 的未发布 source 返回 503，已发布 source 可正常读写。Chat/Session 元数据 CRUD 使用完整可信 `(service, tenant, source, agent)` scope。部署保证 source 路径归属互不重叠，因此运行时不遍历其他 source 的目录边界。本次迁移不导入或验证旧分享记录；运行时永久分享 API 和存储合同不由本变更修改。详见 ADR 0049。本节覆盖本页历史租户粒度描述，旧作业继续原粒度。
 
 ## 首选操作：准备、执行两阶段
 
@@ -37,8 +37,7 @@
 
 # 首次执行与后续补迁均重跑这条；--apply 授权导入、校验和租户发布
 "$SWE_PYTHON" -m swe conversation-storage migrate \
-  --manifest "$AUDIT_DIR/manifest.json" \
-  --output-dir "$AUDIT_DIR/runtime" --apply "${CS_RESOURCES[@]}"
+  --manifest "$AUDIT_DIR/manifest.json" --apply "${CS_RESOURCES[@]}"
 ```
 
 `prepare` 发现身份及 workspace 位置并预检目标数据库，不解析会话正文、不导入业务行、不发布账号；输出 manifest 及相邻的 `<manifest文件名>.discovery.json`。输出文件必须不存在。可选 `--overrides` 使用已审核的完整记录；兼容的 `--shares-file` 只能指向空列表，非空时命令拒绝。检查发现的失败和 workspace 覆盖后，可让正常 source 进入 migrate。
@@ -185,7 +184,9 @@ CS_RESOURCES=(--workers 4 --io-workers 4 --memory-budget-mib 512
 
 会话输入预算只覆盖 `chats.json`、`sessions/`、`dialog/`、经审核的 session override 及关联 ledger，分享按明确记录路径读取。不递归业务附件/代码/技能目录。真正会话输入仍受字节、单条记录和条目预算约束；路径越界、软链接、特殊文件或未映射会话数据仍拒绝。
 
-## 4. 正常租户独立上线
+## 4. 历史细分流程：正常租户独立上线
+
+本节和其后的细分 `resume`、`verify`、`finalize`、runtime 文件部署步骤仅适用于历史兼容流程。新简化流程不生成 runtime 文件，直接按本页首选操作完成 source 发布。
 
 `finalize --apply` 对逐租户语义校验成功、源未变化、路径/目标结构正常的账号提交 `published`；该 SQL 状态是权威，`import` 或 `verify` 不会上线。部分失败时可正常生成每服务 SHA-256 文件名的 `*.runtime.json`，内容是程序签发的 version 3 部署引用，不能手造映射或编辑凭证。
 

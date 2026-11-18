@@ -2,7 +2,6 @@
 """Tenant-isolated direct migration, retaining the original job and SQL tickets."""
 
 from contextlib import nullcontext, asynccontextmanager
-from hashlib import sha256
 import json
 from pathlib import Path
 import shutil
@@ -574,24 +573,6 @@ def _write_failures(manifest, operation, failures):
     return str(destination)
 
 
-def _write_runtime(output, manifest):
-    from .conversation_storage_v3_cmd import _write_json
-
-    output.mkdir(parents=True, exist_ok=True)
-    destination = output / "manifest.json"
-    if manifest.path.resolve() != destination.resolve():
-        shutil.copyfile(manifest.path, destination)
-    for service in manifest.data["services"]:
-        document = {
-            "version": 3,
-            "migration_id": manifest.migration_id,
-            "service_unit_id": service["service_unit_id"],
-            "nas_root": service["nas_root"],
-        }
-        name = sha256(service["service_unit_id"].encode()).hexdigest()
-        _write_json(output / (name + ".runtime.json"), document)
-
-
 def _review_report(manifest, outcome):
     failures = outcome.get("failures", [])
     return {
@@ -1048,8 +1029,6 @@ async def _run_registered(
     )
     if changed != 1:
         raise ValueError("migration job completion was not confirmed")
-    if operation in ("finalize", "migrate"):
-        _write_runtime(output, manifest)
     return {
         "version": 3,
         "migration_id": manifest.migration_id,

@@ -19,7 +19,7 @@ No prepare-to-migrate file-change detection is performed. The operational precon
 ## User Stories
 
 1. As a migration operator, I want prepare to identify service, tenant, source, Agent, and workspace mappings without parsing conversation bodies, so that preparation time is spent on identity discovery and database readiness.
-2. As a migration operator, I want prepare to validate service roots and workspace ownership boundaries, so that overlapping or untrusted locations fail before import.
+2. As a migration operator, I want prepare to validate service roots and record workspace ownership, while deployments guarantee source paths do not overlap.
 3. As a migration operator, I want the manifest to record every workspace position and its resolved identity, so that migrate consumes a fixed mapping instead of rediscovering identity from mutable configuration.
 4. As a migration operator, I want prepare to omit semantic parsing of `chats.json`, sessions, dialog, and turn ledgers, so that those inputs are scanned only during migrate.
 5. As a migration operator, I want prepare to run database schema preflight without creating business rows or publishing a source, so that I can catch target setup errors before migration.
@@ -52,7 +52,8 @@ No prepare-to-migrate file-change detection is performed. The operational precon
 - If migration fails while scanning, that source remains unpublished and independent sources continue. If a later SQL/NAS/write/verification failure occurs after import has begun, existing tickets and bundles remain the retry authority; published sources remain untouched.
 - Target verification, transactional journal writes, uncertain-commit recovery, bundle durability, stable ticket identities, source failure isolation, and SQL-authoritative source publication remain unchanged.
 - The jobs row stores a small `manifest-v1` source-binding marker instead of the full source binding. The manifest is the only persisted complete source mapping. Migrate copies its current form into the runtime output directory beside each per-service runtime reference.
-- Runtime locates the colocated manifest using the directory of the existing `SWE_CONVERSATION_SCOPE_MANIFEST` file. No new environment variable is added. Runtime source admission still queries SQL publication state; it loads the complete manifest for workspace mappings and in-place cross-source write boundaries.
+- Runtime startup selects the unique tenant migration job for the service from SQL and obtains its NAS root from the target binding. It does not require a runtime mapping file or `SWE_CONVERSATION_SCOPE_MANIFEST`. Each source admission queries only that source's SQL publication proof. Deployments guarantee source workspace and configuration paths do not overlap, so runtime does not scan all source boundaries.
+- The migration command does not generate runtime mapping files and does not require `--output-dir`; SQL is the sole record of source publication state.
 - The deployment must install the same manifest for all instances of each migration and preserve it as read-only configuration. The existing guarantee of one migration process per application schema remains required.
 - Historical shares remain excluded from migration input. Existing source publication and DBA finalization contracts remain unchanged.
 

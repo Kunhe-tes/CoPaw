@@ -302,14 +302,13 @@ async def test_migrate_retry_keeps_failed_source_closed_and_skips_published_sour
         "migrate",
         "--manifest",
         str(manifest),
-        "--output-dir",
-        str(output),
         "--apply",
         *resource_args,
     ]
     code, migrated = await _invoke(migrate_args)
     assert code == 2
     assert migrated["published"] == 2 and migrated["failed"] == 1
+    assert not output.exists()
     assert migrated["verification_level"] == "fast"
     receipts = await db.fetch_all(
         "SELECT verification_text FROM swe_conversation_migration_sources "
@@ -324,10 +323,6 @@ async def test_migrate_retry_keeps_failed_source_closed_and_skips_published_sour
         db,
         failure_mode,
         imported_failures,
-    )
-    monkeypatch.setenv(
-        "SWE_CONVERSATION_SCOPE_MANIFEST",
-        str(output / "scopes.json"),
     )
     runtime = ConversationRuntime(
         db,
@@ -417,17 +412,11 @@ async def test_same_tenant_source_retry_preserves_published_sibling(
         "migrate",
         "--manifest",
         str(manifest),
-        "--output-dir",
-        str(output),
         "--apply",
         *resources,
     ]
     code, first = await _invoke(arguments)
     assert code == 2 and first["published"] == 1 and first["failed"] == 1
-    monkeypatch.setenv(
-        "SWE_CONVERSATION_SCOPE_MANIFEST",
-        str(output / "scopes.json"),
-    )
     runtime = ConversationRuntime(
         db,
         {

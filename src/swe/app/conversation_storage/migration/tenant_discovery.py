@@ -439,20 +439,3 @@ def _freeze_tenant_boundaries(report, *, freeze_identity_evidence=True):
                     tenant["state"] = "failed"
                     tenant["blockers"].append(blocker)
                     report["blockers"].append(blocker)
-    if report.get("in_place"):
-        from ..in_place_admission import tenant_write_boundaries
-        from ..errors import IntegrityError
-
-        for tenant in report["tenants"]:
-            key = unit_key(report, tenant)
-            try:
-                tenant_write_boundaries(report, tenant=key)
-            except IntegrityError as error:
-                blocker = {
-                    "code": "tenant_boundary_invalid",
-                    "position": json.dumps(key),
-                    "detail": str(error),
-                }
-                tenant["state"] = "failed"
-                tenant["blockers"].append(blocker)
-                report["blockers"].append(blocker)

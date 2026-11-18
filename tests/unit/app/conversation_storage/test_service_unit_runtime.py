@@ -57,19 +57,42 @@ async def test_configured_service_remains_bound_after_environment_change(
     tmp_path,
     monkeypatch,
 ):
-    path = tmp_path / "manifest.json"
-    path.write_text(json.dumps(manifest(tmp_path)))
     monkeypatch.setenv(runtime.AUTHORITY_ENV, "mysql")
-    monkeypatch.setenv(runtime.MAPPING_ENV, str(path))
     monkeypatch.setenv(runtime.CURSOR_ENV, "secret")
     monkeypatch.delenv("CMB_CAAS_SERVICEUNITID", raising=False)
     monkeypatch.setattr(runtime, "_runtime", None)
     database = SimpleNamespace(
         is_connected=True,
-        fetch_one=AsyncMock(return_value={"n": 0}),
+        fetch_one=AsyncMock(return_value={"schema_name": "target"}),
     )
     with pytest.raises(ValueError, match="CMB_CAAS_SERVICEUNITID"):
         await runtime.configure_runtime(database)
+
+    from swe.app.conversation_storage import tenant_admission
+
+    monkeypatch.setattr(
+        tenant_admission,
+        "partial_jobs",
+        AsyncMock(
+            return_value=[
+                (
+                    {"migration_id": b"00000000-0000-4000-8000-000000000001"},
+                    {"nas_roots": {"service-a": str(tmp_path)}},
+                ),
+            ],
+        ),
+    )
+
+    async def validate(admission):
+        admission.source_binding = {
+            "tenant_isolation": True,
+            "source_isolation": True,
+        }
+
+    monkeypatch.setattr(tenant_admission.TenantAdmission, "validate", validate)
+    from swe.app.conversation_storage.migration import preflight
+
+    monkeypatch.setattr(preflight, "check_tenant_schema", AsyncMock())
 
     async def verified(_self):
         return None

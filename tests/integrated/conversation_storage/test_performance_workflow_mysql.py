@@ -232,8 +232,6 @@ async def test_representative_prepare_migrate_metrics(
         "migrate",
         "--manifest",
         str(manifest),
-        "--output-dir",
-        str(output),
         "--apply",
         *resources,
     ]

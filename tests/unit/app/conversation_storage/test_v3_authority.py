@@ -242,23 +242,48 @@ def test_runtime_accepts_share_only_with_validated_authority(tmp_path):
     assert runtime.mappings == {}
 
 
-async def test_runtime_checks_authority_before_schema(tmp_path, monkeypatch):
+async def test_runtime_selects_database_job_without_scope_manifest(
+    tmp_path,
+    monkeypatch,
+):
     from swe.app.conversation_storage import runtime
+    from swe.app.conversation_storage import tenant_admission
 
-    proof = receipt(tmp_path)
-    (tmp_path / "workspace").mkdir()
-    path = tmp_path / "manifest.json"
-    path.write_text(json.dumps(document(tmp_path, proof)))
     monkeypatch.setenv(runtime.AUTHORITY_ENV, "mysql")
-    monkeypatch.setenv(runtime.MAPPING_ENV, str(path))
+    monkeypatch.delenv("SWE_CONVERSATION_SCOPE_MANIFEST", raising=False)
     monkeypatch.setenv(runtime.CURSOR_ENV, "secret")
     monkeypatch.setenv("CMB_CAAS_SERVICEUNITID", "svc")
-    db = Database(proof, "importing")
+    root = tmp_path / "nas"
+    root.mkdir()
+    db = Database()
     db.is_connected = True
+    db.fetch_one = AsyncMock(return_value={"schema_name": "target"})
+    monkeypatch.setattr(
+        tenant_admission,
+        "partial_jobs",
+        AsyncMock(
+            return_value=[
+                (
+                    {"migration_id": JOB.encode()},
+                    {"nas_roots": {"svc": str(root)}},
+                ),
+            ],
+        ),
+    )
+
+    async def validate(admission):
+        admission.source_binding = {
+            "tenant_isolation": True,
+            "source_isolation": True,
+        }
+
+    monkeypatch.setattr(tenant_admission.TenantAdmission, "validate", validate)
+    from swe.app.conversation_storage.migration import preflight
+
+    monkeypatch.setattr(preflight, "check_tenant_schema", AsyncMock())
     monkeypatch.setattr(runtime.ConversationRuntime, "verify", AsyncMock())
-    with pytest.raises(IntegrityError, match="ready"):
-        await runtime.configure_runtime(db)
-    runtime.ConversationRuntime.verify.assert_not_awaited()
+    await runtime.configure_runtime(db)
+    runtime.ConversationRuntime.verify.assert_awaited_once()
 
 
 def test_backup_v3_requires_scoped_authority(tmp_path):

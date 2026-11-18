@@ -3,14 +3,10 @@
 
 from contextlib import asynccontextmanager
 import json
-import os
-from pathlib import Path
 from uuid import UUID
 
 from .errors import IntegrityError, StorageUnavailable
 from .migration.authority import validate_source_verification
-
-MANIFEST_ENV = "SWE_CONVERSATION_SCOPE_MANIFEST"
 
 
 class TenantNotPublished(StorageUnavailable):
@@ -37,9 +33,11 @@ class TenantAdmission:
             raise IntegrityError("invalid partial migration identity")
         self.db = database
         self.document = dict(document)
-        self._source_manifest = None
+        self._validated = False
 
     async def validate(self):
+        if self._validated:
+            return
         doc = self.document
         job = await self.db.fetch_one(
             "SELECT target_binding_text,source_binding_text FROM "
@@ -51,7 +49,10 @@ class TenantAdmission:
         binding = json.loads(job["target_binding_text"])
         source = json.loads(job["source_binding_text"])
         if source.get("source_binding_storage") == "manifest-v1":
-            source = self._manifest_binding()
+            source = {
+                "tenant_isolation": True,
+                "source_isolation": source.get("source_isolation", True),
+            }
         self.source_binding = source
         identity = await self.db.fetch_one(
             "SELECT @@server_uuid AS server_uuid,DATABASE() AS schema_name",
@@ -65,46 +66,14 @@ class TenantAdmission:
             != doc["nas_root"]
         ):
             raise IntegrityError("partial migration authority binding differs")
-
-    def _manifest_binding(self):
-        if self._source_manifest is not None:
-            return self._source_manifest
-        path = os.environ.get(MANIFEST_ENV)
-        if not path:
-            raise IntegrityError(
-                "conversation scope manifest path is required",
-            )
-        from .chat_mutations import load_metadata_json
-
-        try:
-            source = load_metadata_json(
-                (Path(path).parent / "manifest.json").read_bytes(),
-            )
-        except (OSError, ValueError, TypeError) as error:
-            raise IntegrityError(
-                "migration manifest is unavailable",
-            ) from error
-        if (
-            not isinstance(source, dict)
-            or source.get("migration_id") != self.document["migration_id"]
-            or source.get("source_binding_storage") != "manifest-v1"
-        ):
-            raise IntegrityError("migration manifest identity differs")
-        self._source_manifest = source
-        return source
+        self._validated = True
 
     async def require(self, tenant_id, source_id=None):
         await self.validate()
         doc = self.document
-        from .in_place_admission import tenant_write_boundaries
-
         source_mode = self.source_binding.get("source_isolation", False)
         if source_mode and source_id is None:
             raise TenantNotPublished()
-        key = (doc["service_unit_id"], tenant_id)
-        if source_mode:
-            key += (source_id,)
-        tenant_write_boundaries(self.source_binding, tenant=key)
         row = await self.db.fetch_one(
             "SELECT state,verification_text FROM "
             + (
@@ -190,7 +159,7 @@ class TenantDatabase:
 
 
 async def partial_jobs(database, service_unit_id=None):
-    """Detect opt-in jobs without requiring the new table on legacy installs."""
+    """Find opt-in migration jobs without requiring controls on legacy installs."""
     exists = await database.fetch_one(
         "SELECT COUNT(*) AS tenant_controls FROM information_schema.TABLES "
         "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN "

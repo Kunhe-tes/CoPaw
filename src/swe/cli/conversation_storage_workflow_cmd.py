@@ -138,11 +138,6 @@ def register_workflow_commands(group):
         required=True,
         type=click.Path(exists=True, dir_okay=False),
     )
-    @click.option(
-        "--output-dir",
-        required=True,
-        type=click.Path(file_okay=False),
-    )
     @click.option("--apply", is_flag=True)
     def migrate_command(manifest, **options):
         try:

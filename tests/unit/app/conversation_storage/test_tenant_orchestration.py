@@ -79,7 +79,6 @@ def orchestration(monkeypatch, tmp_path):
     guard = SimpleNamespace(server_uuid="server", check=AsyncMock())
     writer = Mock(return_value="failures.json")
     monkeypatch.setattr(cli, "_write_failures", writer)
-    monkeypatch.setattr(cli, "_write_runtime", Mock())
     return SimpleNamespace(
         manifest=manifest,
         rows=rows,

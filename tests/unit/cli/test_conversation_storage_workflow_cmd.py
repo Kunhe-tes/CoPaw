@@ -112,41 +112,6 @@ def prepare_args(inputs):
     ]
 
 
-def test_write_runtime_copies_manifest_beside_service_references(tmp_path):
-    from types import SimpleNamespace
-
-    from swe.cli.conversation_storage_tenants import _write_runtime
-
-    source = tmp_path / "manifest.json"
-    source.write_text('{"migration_id":"job"}')
-    output = tmp_path / "runtime"
-    manifest = SimpleNamespace(
-        path=source,
-        migration_id="job",
-        data={"services": [{"service_unit_id": "svc", "nas_root": "/nas"}]},
-    )
-
-    _write_runtime(output, manifest)
-
-    assert (output / "manifest.json").read_text() == source.read_text()
-    assert len(list(output.glob("*.runtime.json"))) == 1
-
-
-def test_write_runtime_accepts_manifest_in_output_directory(tmp_path):
-    from swe.cli.conversation_storage_tenants import _write_runtime
-
-    source = tmp_path / "manifest.json"
-    source.write_text('{"migration_id":"job"}')
-    manifest = SimpleNamespace(
-        path=source,
-        migration_id="job",
-        data={"services": [{"service_unit_id": "svc", "nas_root": "/nas"}]},
-    )
-    _write_runtime(tmp_path, manifest)
-    assert source.read_text() == '{"migration_id":"job"}'
-    assert len(list(tmp_path.glob("*.runtime.json"))) == 1
-
-
 @pytest.mark.parametrize("invalid_chats", [False, True])
 def test_prepare_reuses_freeze_and_readonly_preflight(
     inputs,
@@ -248,8 +213,6 @@ def test_migrate_forwards_resources_without_splitting_workflow(
         "migrate",
         "--manifest",
         str(inputs["manifest"]),
-        "--output-dir",
-        str(inputs["manifest"].parent / "runtime"),
         "--workers",
         "3",
         "--io-workers",
@@ -283,8 +246,6 @@ def test_migrate_retains_partial_exit_code(inputs, monkeypatch):
             "migrate",
             "--manifest",
             str(inputs["manifest"]),
-            "--output-dir",
-            str(inputs["manifest"].parent / "runtime"),
             "--apply",
         ],
     )

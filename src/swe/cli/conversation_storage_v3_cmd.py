@@ -577,9 +577,10 @@ def run_v3_command(
     verification_level = "full" if full_audit else "fast"
     manifest = V3Manifest.load(manifest_path)
     output = None
-    if operation in ("finalize", "rollback-tenants", "migrate"):
-        if output_dir is None:
-            raise ValueError("finalize requires --output-dir")
+    needs_output = operation in ("finalize", "rollback-tenants")
+    if needs_output and output_dir is None:
+        raise ValueError(operation + " requires --output-dir")
+    if output_dir is not None:
         output = validate_output(output_dir, manifest.data)
     for service in manifest.data["services"]:
         nas = Path(service["nas_root"]).resolve()
