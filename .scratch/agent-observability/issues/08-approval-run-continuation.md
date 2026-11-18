@@ -50,3 +50,5 @@ Chromium 108.0.5359.29 实机页面检查被 dev server 的认证、有效配置
 独立复核指出缺少 scope 持久化断言；现已增加 `scope_id` 与 PendingApproval 身份一致，以及 tenant/source 精确断言。修复后隔离 MySQL 参数化合同再次 3 passed，单测 26 passed，目标 pre-commit 通过；复核确认 finding 已关闭，无其他可操作发现。完整外部通道/Runner 闭环和 Chromium108/360 验收仍未完成。
 
 2026-11-18：新增独立 `test_approval_terminal_mysql.py` 参数化合同，覆盖 denied→rejected 与 timed_out→timed_out 的 MySQL 投影和授权 Run Detail/Events API；验证等待 Attempt 保留、approval ID 与 Attempt 关联、请求早于决议、Run 仅终结一次。使用随机 `_test` schema 按设计 DDL 初始化后实测 2 passed，测试后删除并核验 schema 余数为 0；相关生命周期/query/audit 单测 54 passed，目标 pre-commit 与 diff check 通过。独立复核指出该合同从 lifecycle hooks 发射事件，验证投影/API，不经过 Runner 的真实审批决议分支；该缺口保留为后续真实 Runner 拒绝/超时集成验证，本合同不代表完整业务闭环。浏览器验收仍未完成。
+
+同日按复核意见升级上述合同：通过真实 `ApprovalService.create_pending` 创建待审批，并调用 `AgentRunner._resolve_pending_approval` 执行拒绝和超时分支；之后才将真实 Runner 发射的终态事件写入隔离 MySQL 并查询 API。针对内部状态 `timeout` 与观测决议 `timed_out` 分别断言。MySQL 2 passed（20.55s），随机 `_test` schema 清理回查为 0；目标 pre-commit 通过。此前“未经过 Runner 决议分支”的复核缺口已由此关闭；外部 HTTP/消息通道端到端和浏览器验收仍待完成。

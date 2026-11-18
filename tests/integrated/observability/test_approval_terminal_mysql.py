@@ -3,16 +3,18 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from io import StringIO
 import json
 import os
-from uuid import uuid4
+from types import SimpleNamespace
 
 import httpx
 from fastapi import FastAPI
 import pytest
 
+from swe.app.approvals.service import ApprovalService
+from swe.app.runner.runner import AgentRunner
+from swe.config.context import tenant_context
 from swe.database import DatabaseConnection
 from swe.observability import Observability, Scope, bind_context
 from swe.observability.emitter import JsonlEmitter
@@ -28,18 +30,79 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+async def _resolve_approval_with_runner(
+    approval_service,
+    pending,
+    attempt,
+    decision,
+):
+    runner = AgentRunner()
+    if decision == "timed_out":
+        runner._APPROVAL_TIMEOUT_SECONDS = -1
+    with (
+        tenant_context(
+            tenant_id="default",
+            source_id="agentobs-integration",
+        ),
+        bind_context(attempt),
+    ):
+        response, consumed, approved_tool_call = (
+            await runner._resolve_pending_approval(
+                pending.session_id,
+                f"/deny {pending.request_id}",
+            )
+        )
+        resolved = await approval_service.get_request(pending.request_id)
+    return response, consumed, approved_tool_call, resolved
+
+
+async def _project_and_query_run(connection, store, records, run_id):
+    async with connection.transaction() as session:
+        for record in records:
+            await session.insert(
+                "INSERT INTO swe_agentobs_inbox (payload_text) VALUES (%s)",
+                (json.dumps(record, separators=(",", ":")),),
+            )
+    projector = InboxProjector(store, poll_seconds=0.01)
+    while await projector.project_batch():
+        pass
+
+    api = FastAPI()
+    api.state.agent_observability_store = store
+
+    @api.middleware("http")
+    async def bind_source(request, call_next):
+        request.state.source_id = "agentobs-integration"
+        return await call_next(request)
+
+    api.include_router(observability_router)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=api),
+        base_url="http://agentobs.test",
+    ) as client:
+        detail = await client.get(
+            f"/agent-observability/runs/{run_id}",
+            headers={"X-User-Role": "manager"},
+        )
+        events = await client.get(
+            f"/agent-observability/runs/{run_id}/events",
+            headers={"X-User-Role": "manager"},
+        )
+    return detail, events
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("decision", "business_status", "expected_status"),
+    ("decision", "approval_status", "expected_status"),
     [
-        ("denied", "rejected", "rejected"),
-        ("timed_out", "timed_out", "timed_out"),
+        ("denied", "denied", "rejected"),
+        ("timed_out", "timeout", "timed_out"),
     ],
 )
 async def test_mysql_denied_or_timed_out_approval_ends_waiting_run(
     monkeypatch,
     decision,
-    business_status,
+    approval_status,
     expected_status,
 ):
     monkeypatch.setenv(
@@ -64,60 +127,52 @@ async def test_mysql_denied_or_timed_out_approval_ends_waiting_run(
             enabled=True,
         )
         attempt = observer.start_attempt(context)
-        approval_id = str(uuid4())
-        started_at = datetime.now(timezone.utc).timestamp() - 3
-        with bind_context(attempt):
-            runner_lifecycle.record_approval_requested(
-                attempt,
-                approval_id,
-                started_at=started_at,
+        approval_service = ApprovalService()
+        with tenant_context(
+            tenant_id="default",
+            source_id="agentobs-integration",
+        ):
+            pending = await approval_service.create_pending(
+                session_id="approval-terminal-session",
+                user_id="user-a",
+                channel="console",
+                tool_name="execute_shell_command",
+                result=SimpleNamespace(findings=[], findings_count=0),
             )
+        approval_id = pending.request_id
+        monkeypatch.setattr(
+            "swe.app.approvals.service._approval_service",
+            approval_service,
+        )
+        with bind_context(attempt):
+            runner_lifecycle.record_approval_requested(attempt, approval_id)
         runner_lifecycle.finish_query_run(
             context,
             attempt,
             "completed",
             waiting_for_approval=True,
         )
-        with bind_context(attempt):
-            runner_lifecycle.record_approval_resolved(
-                approval_id,
+        response, consumed, approved_tool_call, resolved = (
+            await _resolve_approval_with_runner(
+                approval_service,
+                pending,
+                attempt,
                 decision,
-                started_at=started_at,
             )
-        runner_lifecycle.finish_query_run(context, None, business_status)
+        )
+        assert response is not None
+        assert consumed is True
+        assert approved_tool_call is None
+        assert resolved is not None
+        assert resolved.status == approval_status
         assert emitter.close(timeout=1) == 0
         records = [json.loads(line) for line in sink.getvalue().splitlines()]
-        async with connection.transaction() as session:
-            for record in records:
-                await session.insert(
-                    "INSERT INTO swe_agentobs_inbox (payload_text) VALUES (%s)",
-                    (json.dumps(record, separators=(",", ":")),),
-                )
-        projector = InboxProjector(store, poll_seconds=0.01)
-        while await projector.project_batch():
-            pass
-
-        api = FastAPI()
-        api.state.agent_observability_store = store
-
-        @api.middleware("http")
-        async def bind_source(request, call_next):
-            request.state.source_id = "agentobs-integration"
-            return await call_next(request)
-
-        api.include_router(observability_router)
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=api),
-            base_url="http://agentobs.test",
-        ) as client:
-            detail = await client.get(
-                f"/agent-observability/runs/{context.obs_run_id}",
-                headers={"X-User-Role": "manager"},
-            )
-            events = await client.get(
-                f"/agent-observability/runs/{context.obs_run_id}/events",
-                headers={"X-User-Role": "manager"},
-            )
+        detail, events = await _project_and_query_run(
+            connection,
+            store,
+            records,
+            context.obs_run_id,
+        )
 
         assert detail.status_code == events.status_code == 200
         body = detail.json()
