@@ -222,7 +222,7 @@ export function createSidebarNavigation(
           key: "skill-config",
           label: t("nav.skillConfig", "Skill 配置"),
           icon: <SlidersHorizontal size={size} />,
-          visible: visibility.showSkillConfig,
+          // visible: visibility.showSkillConfig,
         },
         {
           key: "system-config-page",

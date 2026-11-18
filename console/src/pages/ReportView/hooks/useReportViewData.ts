@@ -1,3 +1,6 @@
+/**
+ * ！！！！注意代码不同步，不能合并
+ */
 import { useReducer, useCallback, useRef, useEffect } from "react";
 import Handlebars from "handlebars";
 import { useDynamicRender } from "@/components/agentscope-chat/DynamicRenderContext";
