@@ -105,6 +105,51 @@ def freeze_source(tmp_path, report):
     )
 
 
+async def test_manifest_source_inventory_ignores_mtime_changes(tmp_path):
+    import os
+    from swe.cli.conversation_storage_tenants import (
+        TenantManifest,
+        _inventory,
+        _spool,
+    )
+
+    report, paths = setup_source(tmp_path)
+    prepared = discovery.discover_services(
+        report["declared_services"],
+        tenant_isolation=True,
+        source_isolation=True,
+        in_place=True,
+        source_binding_storage="manifest-v1",
+        semantic_inventory=False,
+    )
+    manifest = freeze_source(tmp_path, prepared)
+    tenant = next(
+        t for t in manifest.data["tenants"] if t["tenant_id"] == "alice"
+    )
+    workspace = paths["alice"][1]
+    chats = workspace / "chats.json"
+    before = chats.stat()
+    os.utime(chats, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000))
+    view = TenantManifest(manifest, tenant)
+    resources = {
+        "workers": 1,
+        "io_workers": 1,
+        "memory_bytes": 16 * 1024 * 1024,
+    }
+    work = tmp_path / "work"
+    work.mkdir()
+    with _spool(work, view.data, resources["memory_bytes"], 1) as spool:
+        result = await _inventory(view, spool, resources)
+        assert result["ready"]
+        assert result["workspaces"][0]["scope"] == [
+            "svc",
+            "alice",
+            "SRC",
+            "agent",
+        ]
+    assert "chats_mtime_ns" not in manifest.data["workspaces"][0]
+
+
 @pytest.mark.parametrize("repair", [False, True])
 def test_failed_tenant_change_does_not_block_freeze(tmp_path, repair):
     report, paths = setup_source(tmp_path, broken=True)
@@ -236,6 +281,7 @@ def test_source_protocol_freezes_only_chats_mtime_and_skips_config_hash(
         == (paths[tenant["tenant_id"]][1] / "chats.json").stat().st_mtime_ns
     )
     assert "input_digest" not in tenant
+    assert "in_place_evidence" not in tenant
     config = paths[tenant["tenant_id"]][0]
     config.chmod(0o644)
     config.write_text("configuration bytes are not hashed")
@@ -279,6 +325,59 @@ def test_source_protocol_rejects_chats_mtime_change(tmp_path):
                 for key in ("service_unit_id", "tenant_id", "source_id")
             ),
         )
+
+
+def test_prepare_freezes_healthy_source_when_another_source_fails(
+    tmp_path,
+    monkeypatch,
+):
+    import os
+
+    from swe.app.conversation_storage.migration import inventory_v3
+
+    inventory_discovery = inventory_v3.inventory_discovery
+
+    def change_alice_registry(data):
+        result = inventory_discovery(data)
+        if data["workspaces"][0]["tenant_id"] == "alice":
+            registry = Path(data["workspaces"][0]["root"]) / "chats.json"
+            before = registry.stat()
+            registry.chmod(0o644)
+            os.utime(
+                registry,
+                ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000),
+            )
+            registry.chmod(0o444)
+        return result
+
+    monkeypatch.setattr(
+        inventory_v3,
+        "inventory_discovery",
+        change_alice_registry,
+    )
+    report, _paths = setup_source(tmp_path)
+    prepared = prepare_source(report)
+
+    states = {
+        tenant["tenant_id"]: tenant["state"] for tenant in prepared["tenants"]
+    }
+    assert states == {"alice": "failed", "bob": "discovered"}
+    failed_workspace = next(
+        workspace
+        for workspace in prepared["workspaces"]
+        if workspace["tenant_id"] == "alice"
+    )
+    healthy_workspace = next(
+        workspace
+        for workspace in prepared["workspaces"]
+        if workspace["tenant_id"] == "bob"
+    )
+    assert "chats_mtime_ns" not in failed_workspace
+    assert type(healthy_workspace["chats_mtime_ns"]) is int
+
+    manifest = freeze_source(tmp_path, prepared)
+
+    assert len(manifest.data["tenants"]) == 2
 
 
 async def test_automatic_review_only_accepts_prior_failed_tenant(

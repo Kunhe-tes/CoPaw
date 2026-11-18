@@ -263,7 +263,13 @@ def _collect_config_tenants(report, tenants, paths, evidence):
                 paths.append((Path(service["source_root"]) / relative, key))
 
 
-def isolate_discovery(report, shares, validator):
+def isolate_discovery(
+    report,
+    shares,
+    validator,
+    *,
+    semantic_inventory=True,
+):
     """Preserve all blockers and quarantine every affected tenant before parsing."""
     services = report["services"]
     tenants, paths, positions = {}, [], {}
@@ -320,34 +326,35 @@ def isolate_discovery(report, shares, validator):
             "shares": [s for s in report["shares"] if belongs(s, key)],
         }
 
-    mapper = getattr(validator, "map_tenants", None)
-    selected = [select(key) for key in keys]
-    results = (
-        mapper(selected)
-        if mapper is not None
-        else (_tenant_semantic(item, validator) for item in selected)
-    )
-    for key, item, semantic in zip(keys, selected, results):
-        if isinstance(semantic, Exception):
-            blocker = {
-                "code": "tenant_input_invalid",
-                "position": json.dumps(key),
-                "detail": str(semantic),
-            }
-            tenants[key].append(blocker)
-            report["blockers"].append(blocker)
-            continue
-        tenants[key].extend(semantic["blockers"])
-        report["blockers"].extend(semantic["blockers"])
-        for mapped, workspace in zip(
-            item["workspaces"],
-            semantic["workspaces"],
-        ):
-            mapped["counts"] = {
-                "sessions": len(workspace["sessions"]),
-                "chats": len(workspace["chats"]),
-            }
-            mapped["empty"] = not any(mapped["counts"].values())
+    if semantic_inventory:
+        mapper = getattr(validator, "map_tenants", None)
+        selected = [select(key) for key in keys]
+        results = (
+            mapper(selected)
+            if mapper is not None
+            else (_tenant_semantic(item, validator) for item in selected)
+        )
+        for key, item, semantic in zip(keys, selected, results):
+            if isinstance(semantic, Exception):
+                blocker = {
+                    "code": "tenant_input_invalid",
+                    "position": json.dumps(key),
+                    "detail": str(semantic),
+                }
+                tenants[key].append(blocker)
+                report["blockers"].append(blocker)
+                continue
+            tenants[key].extend(semantic["blockers"])
+            report["blockers"].extend(semantic["blockers"])
+            for mapped, workspace in zip(
+                item["workspaces"],
+                semantic["workspaces"],
+            ):
+                mapped["counts"] = {
+                    "sessions": len(workspace["sessions"]),
+                    "chats": len(workspace["chats"]),
+                }
+                mapped["empty"] = not any(mapped["counts"].values())
     report["tenants"] = [
         {
             "service_unit_id": key[0],
@@ -363,7 +370,10 @@ def isolate_discovery(report, shares, validator):
         }
         for key, failures in sorted(tenants.items())
     ]
-    _freeze_tenant_boundaries(report)
+    _freeze_tenant_boundaries(
+        report,
+        freeze_identity_evidence=semantic_inventory,
+    )
     report["status"] = "partial_success" if report["blockers"] else "success"
 
 
@@ -399,11 +409,15 @@ def _attribute_blockers(report, services, tenants, paths, positions):
             tenants[key].append(blocker)
 
 
-def _freeze_tenant_boundaries(report):
+def _freeze_tenant_boundaries(report, *, freeze_identity_evidence=True):
     from .source_inputs import SourceInputInvalid
     from .spool import MigrationCapacityError
 
-    if report.get("in_place"):
+    if (
+        report.get("in_place")
+        and freeze_identity_evidence
+        and not report.get("freshness_protocol")
+    ):
         from .in_place_source import freeze_evidence
 
         for tenant in report["tenants"]:

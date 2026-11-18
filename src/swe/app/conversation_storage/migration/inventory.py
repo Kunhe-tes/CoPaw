@@ -18,7 +18,11 @@ from ..identity import (
 from ..bundle import MAX_READ_BYTES
 from .legacy import read_archive, read_session
 from .manifest import SourceBoundary
-from .source_inputs import safe_input_entries, workspace_entries
+from .source_inputs import (
+    SourceInputInvalid,
+    safe_input_entries,
+    workspace_entries,
+)
 
 
 @dataclass(frozen=True)
@@ -55,11 +59,11 @@ class WorkspaceMapping:
 def _source_files(mapping):
     root = Path(mapping.root)
     if root.is_symlink():
-        raise ValueError("source root is a symlink")
+        raise SourceInputInvalid("source root is a symlink")
     entries = workspace_entries(mapping)
     for path in entries:
         if stat.S_IMODE(path.stat().st_mode) & 0o222:
-            raise ValueError(
+            raise SourceInputInvalid(
                 "source snapshot must be read-only before inventory",
             )
     return [path for path in entries if path.is_file()]

@@ -35,6 +35,22 @@ def manifest():
     )
 
 
+def test_manifest_binding_does_not_serialize_source_mappings():
+    import json
+    from swe.app.conversation_storage.migration.journal import MigrationJournal
+
+    item = manifest()
+    item.data["source_binding_storage"] = "manifest-v1"
+    item.data["workspaces"] = [{"tenant_id": str(i)} for i in range(10000)]
+    _, source = MigrationJournal(None, item)._bindings()
+    assert json.loads(source) == {
+        "source_binding_storage": "manifest-v1",
+        "tenant_isolation": True,
+        "source_isolation": True,
+    }
+    assert len(source) < 128
+
+
 class Database:
     def __init__(self):
         self.next_id = 83

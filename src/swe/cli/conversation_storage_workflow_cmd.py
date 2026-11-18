@@ -60,8 +60,8 @@ def prepare_workflow(
         tenant_isolation=True,
         source_isolation=True,
         in_place=in_place,
-        freshness_protocol="chats-mtime-v1",
-        semantic_validator=_semantic_validator(**resources),
+        source_binding_storage="manifest-v1",
+        semantic_inventory=False,
     )
     if not report.get("tenants"):
         raise ValueError("prepare requires at least one discovered tenant")

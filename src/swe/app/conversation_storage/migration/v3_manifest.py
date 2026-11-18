@@ -63,7 +63,9 @@ class V3Manifest(MigrationManifest):
                     raise ValueError("duplicate or undeclared frozen tenant")
                 tenant_scopes.add(key)
         self._validate_protocol_and_source_metadata()
-        if not self.data.get("freshness_protocol"):
+        if not self.data.get("freshness_protocol") and not self.data.get(
+            "source_binding_storage",
+        ):
             self._validate_in_place_evidence()
         if self.data["shares"] or self.data.get("source_shares", []):
             raise ValueError(
@@ -104,6 +106,11 @@ class V3Manifest(MigrationManifest):
             raise ValueError("invalid batch state")
 
     def _validate_protocol_and_source_metadata(self):
+        storage = self.data.get("source_binding_storage")
+        if storage is not None and (
+            storage != "manifest-v1" or not self.data.get("source_isolation")
+        ):
+            raise ValueError("unsupported source binding storage")
         freshness_protocol = self.data.get("freshness_protocol")
         if freshness_protocol is not None:
             if freshness_protocol != "chats-mtime-v1" or not self.data.get(
@@ -270,6 +277,7 @@ class V3Manifest(MigrationManifest):
             "tenant_isolation",
             "source_isolation",
             "freshness_protocol",
+            "source_binding_storage",
             "in_place",
             "tenants",
             "source_shares",

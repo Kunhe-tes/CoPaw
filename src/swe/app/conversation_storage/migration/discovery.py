@@ -594,8 +594,18 @@ def _set_freshness_protocol(report, freshness_protocol, source_isolation):
     report["freshness_protocol"] = freshness_protocol
 
 
+def _set_source_binding_storage(report, storage, source_isolation):
+    if storage is None:
+        return
+    if storage != "manifest-v1" or not source_isolation:
+        raise ValueError("unsupported source binding storage")
+    report["source_binding_storage"] = storage
+
+
 def _capture_discovery_digests(report, semantic_validator):
-    if report.get("freshness_protocol"):
+    if report.get("freshness_protocol") or report.get(
+        "source_binding_storage",
+    ):
         return
     from .tenant_inputs import capture_input_digests
 
@@ -603,6 +613,13 @@ def _capture_discovery_digests(report, semantic_validator):
         report,
         mapper=getattr(semantic_validator, "map_input_digests", None),
     )
+
+
+def _validate_isolation_options(tenant_isolation, source_isolation, in_place):
+    if source_isolation and not tenant_isolation:
+        raise ValueError("source isolation requires tenant isolation")
+    if in_place and not tenant_isolation:
+        raise ValueError("in-place migration requires tenant isolation")
 
 
 @isolated_discovery
@@ -616,12 +633,11 @@ def discover_services(
     source_isolation=False,
     in_place=False,
     freshness_protocol=None,
+    source_binding_storage=None,
+    semantic_inventory=True,
 ):
     """Return complete discovery evidence without opening a DB or modifying inputs."""
-    if source_isolation and not tenant_isolation:
-        raise ValueError("source isolation requires tenant isolation")
-    if in_place and not tenant_isolation:
-        raise ValueError("in-place migration requires tenant isolation")
+    _validate_isolation_options(tenant_isolation, source_isolation, in_place)
     report = {
         "version": 3,
         "discovery_version": 1,
@@ -648,6 +664,11 @@ def discover_services(
     if in_place:
         report["in_place"] = True
     _set_freshness_protocol(report, freshness_protocol, source_isolation)
+    _set_source_binding_storage(
+        report,
+        source_binding_storage,
+        source_isolation,
+    )
     for item in services:
         try:
             service = _service(item)
@@ -733,8 +754,14 @@ def discover_services(
     if tenant_isolation:
         from .tenant_discovery import isolate_discovery
 
-        isolate_discovery(report, shares, semantic_validator)
-        _capture_discovery_digests(report, semantic_validator)
+        isolate_discovery(
+            report,
+            shares,
+            semantic_validator,
+            semantic_inventory=semantic_inventory,
+        )
+        if semantic_inventory:
+            _capture_discovery_digests(report, semantic_validator)
     elif not report["blockers"]:
         from .inventory_v3 import inventory_discovery
 
@@ -850,7 +877,16 @@ def freeze_discovery(
                 "discovery report differs from verified source evidence",
             )
     elif report.get("freshness_protocol"):
+        from .isolation import unit_key
+
+        failed = {
+            unit_key(report, tenant)
+            for tenant in report.get("tenants", [])
+            if tenant.get("state") == "failed"
+        }
         for workspace in report["workspaces"]:
+            if unit_key(report, workspace) in failed:
+                continue
             registry = Path(workspace["root"]) / workspace.get(
                 "registry_path",
                 "chats.json",

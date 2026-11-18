@@ -107,7 +107,7 @@ def input_digest(data, key):
 
 
 def verify_input_digest(data, key):
-    if data.get("freshness_protocol"):
+    if data.get("freshness_protocol") or data.get("source_binding_storage"):
         return
     tenant = next(t for t in data["tenants"] if _key(t)[: len(key)] == key)
     expected = tenant.get("input_digest")

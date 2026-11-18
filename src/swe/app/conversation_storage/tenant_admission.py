@@ -3,10 +3,14 @@
 
 from contextlib import asynccontextmanager
 import json
+import os
+from pathlib import Path
 from uuid import UUID
 
 from .errors import IntegrityError, StorageUnavailable
 from .migration.authority import validate_source_verification
+
+MANIFEST_ENV = "SWE_CONVERSATION_SCOPE_MANIFEST"
 
 
 class TenantNotPublished(StorageUnavailable):
@@ -33,6 +37,7 @@ class TenantAdmission:
             raise IntegrityError("invalid partial migration identity")
         self.db = database
         self.document = dict(document)
+        self._source_manifest = None
 
     async def validate(self):
         doc = self.document
@@ -45,6 +50,8 @@ class TenantAdmission:
             raise IntegrityError("partial migration job is missing")
         binding = json.loads(job["target_binding_text"])
         source = json.loads(job["source_binding_text"])
+        if source.get("source_binding_storage") == "manifest-v1":
+            source = self._manifest_binding()
         self.source_binding = source
         identity = await self.db.fetch_one(
             "SELECT @@server_uuid AS server_uuid,DATABASE() AS schema_name",
@@ -58,6 +65,33 @@ class TenantAdmission:
             != doc["nas_root"]
         ):
             raise IntegrityError("partial migration authority binding differs")
+
+    def _manifest_binding(self):
+        if self._source_manifest is not None:
+            return self._source_manifest
+        path = os.environ.get(MANIFEST_ENV)
+        if not path:
+            raise IntegrityError(
+                "conversation scope manifest path is required",
+            )
+        from .chat_mutations import load_metadata_json
+
+        try:
+            source = load_metadata_json(
+                (Path(path).parent / "manifest.json").read_bytes(),
+            )
+        except (OSError, ValueError, TypeError) as error:
+            raise IntegrityError(
+                "migration manifest is unavailable",
+            ) from error
+        if (
+            not isinstance(source, dict)
+            or source.get("migration_id") != self.document["migration_id"]
+            or source.get("source_binding_storage") != "manifest-v1"
+        ):
+            raise IntegrityError("migration manifest identity differs")
+        self._source_manifest = source
+        return source
 
     async def require(self, tenant_id, source_id=None):
         await self.validate()

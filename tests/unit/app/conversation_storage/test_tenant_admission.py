@@ -73,6 +73,44 @@ def database(state="failed", tenant="alice", *, source_mode=False):
     return db, admission
 
 
+async def test_manifest_binding_uses_existing_runtime_path(
+    tmp_path,
+    monkeypatch,
+):
+    db, admission = database("published", source_mode=True)
+    original_fetch = db.fetch_one.side_effect
+    manifest = {
+        "migration_id": JOB,
+        "source_binding_storage": "manifest-v1",
+        "tenant_isolation": True,
+        "source_isolation": True,
+        "services": [],
+        "workspaces": [],
+        "tenants": [],
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    monkeypatch.setenv(
+        "SWE_CONVERSATION_SCOPE_MANIFEST",
+        str(tmp_path / "scopes.json"),
+    )
+
+    async def fetch(query, params=None):
+        result = await original_fetch(query, params)
+        if "migration_jobs" in query:
+            result["source_binding_text"] = json.dumps(
+                {
+                    "source_binding_storage": "manifest-v1",
+                    "tenant_isolation": True,
+                    "source_isolation": True,
+                },
+            )
+        return result
+
+    db.fetch_one.side_effect = fetch
+    assert await admission.require("alice", "SRC")
+    assert admission.source_binding == manifest
+
+
 @pytest.mark.parametrize(
     "operation",
     ["authority", "capture", "gc", "rollback"],

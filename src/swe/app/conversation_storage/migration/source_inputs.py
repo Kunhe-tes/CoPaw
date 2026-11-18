@@ -156,13 +156,20 @@ def session_input_roots(
             or path.stat().st_size > max_session_bytes
         ):
             continue
-        state = load_metadata_json(path.read_bytes())
+        try:
+            state = load_metadata_json(path.read_bytes())
+        except (ValueError, UnicodeError) as error:
+            raise SourceInputInvalid("Session override is invalid") from error
         if isinstance(state, dict) and state.get("schema_version") == 3:
             generation = state.get("session_generation")
-            if (
-                not isinstance(generation, str)
-                or str(uuid.UUID(generation)) != generation
-            ):
+            try:
+                valid_generation = (
+                    isinstance(generation, str)
+                    and str(uuid.UUID(generation)) == generation
+                )
+            except ValueError:
+                valid_generation = False
+            if not valid_generation:
                 raise SourceInputInvalid("Invalid session ledger generation")
             roots.append(relative.parent / ".turn-ledger" / generation)
     return tuple(roots)

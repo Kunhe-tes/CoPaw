@@ -1,6 +1,9 @@
 ---
 status: accepted
+superseded-by: 0052
 ---
+
+This decision is superseded for newly prepared jobs by ADR 0052.
 
 # Conversation Source Migration Uses Chat Registry Mtime Freshness
 
@@ -30,11 +33,17 @@ physical connection is checked against the job's server UUID and schema when
 leased. A database identity mismatch stops the job globally.
 
 The freshness protocol is explicitly versioned in the manifest. Existing
-manifests retain their established digest, review, lock, and retry behavior and
-must not be converted by editing the manifest or clearing SQL state. A failed
-new-protocol source remains closed on retry if its frozen mtime no longer
-matches; accepting corrected input requires a separately audited revision and
-is not performed by ordinary migrate.
+new-protocol jobs store only a short `manifest-v1` mode marker in
+`source_binding_text`; the manifest itself is the sole persisted source mapping
+and no manifest binding digest is calculated. `migrate` copies the current
+manifest into the runtime output directory beside service runtime references.
+Runtime uses the existing `SWE_CONVERSATION_SCOPE_MANIFEST` path to locate the
+directory and loads the colocated `manifest.json`. Source publication state
+continues to come from SQL. New-protocol prepare does not hash identity evidence
+files, and temporary migration spool records do not calculate checksums.
+
+A failed new-protocol source remains closed on retry if its frozen mtime no
+longer matches; accepting corrected input is outside ordinary migrate.
 
 ## Consequences
 

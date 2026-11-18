@@ -391,6 +391,38 @@ async def test_unsafe_tenant_source_path_is_isolated_before_next_tenant(
     assert visited == ["b", "c"] and result["failed"] == 1
 
 
+@pytest.mark.parametrize(
+    "content",
+    ["{invalid", '{"schema_version":3,"session_generation":"invalid"}'],
+)
+async def test_invalid_session_override_isolated_before_next_tenant(
+    monkeypatch,
+    orchestration,
+    tmp_path,
+    content,
+):
+    from swe.app.conversation_storage.migration.source_inputs import (
+        session_input_roots,
+    )
+
+    (tmp_path / "override.json").write_text(content)
+    visited = []
+
+    async def inventory(view, spool, **resources):
+        visited.append(view.key[1])
+        if view.key[1] == "b":
+            session_input_roots(tmp_path, ["override.json"])
+        return {"ready": True, "blockers": [], "workspaces": []}
+
+    async def one(operation, view, *_args):
+        await cli._inventory(view, None, {})
+
+    monkeypatch.setattr(cli, "inventory_v3_spooled", inventory)
+    monkeypatch.setattr(cli, "_one_tenant", one)
+    result = await run(orchestration)
+    assert visited == ["b", "c"] and result["failed"] == 1
+
+
 async def test_failed_full_audit_is_persisted_and_reported_without_raw_blockers():
     calls = []
 

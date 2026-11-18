@@ -4,17 +4,19 @@
 
 **迁移范围说明（2026-11-17）：**历史分享记录不属于本次迁移输入。`discover` / `prepare` 不读取分享表；`shares-file` 若提供必须为空；inventory、导入、fast/full verify 和发布均不读取或复制旧分享记录。报告通过 `excluded_scopes: ["historical_shares"]` 标明范围。该决定不更改新版运行时永久分享功能及分享表 schema 要求。
 
-**新简化协议说明（2026-11-17）：**新 `prepare` 作业标记 `freshness_protocol="chats-mtime-v1"`，发现与语义盘点一次后冻结每个 workspace 的 `chats.json` `st_mtime_ns`；不生成输入摘要，不在 freeze 阶段重复发现。新协议 `migrate --apply` 先从 SQL 剪枝 published source，再逐 source 串行解析、导入、目标验证，并在导入前和发布前比较 chats mtime；不自动重发现、失败证据重审或完整源重盘。未发布 source 的会话输入、sessions/dialog 和身份配置须从 prepare 至发布保持只读不变。新协议由部署侧保证每个应用 schema 全局仅有一个迁移进程，不获取 MySQL schema 命名锁；事务仍固定在单连接，连接池每次借出物理连接时校验 server UUID/schema。旧 manifest/job 继续本页原有 digest、review 和 named-lock 行为，不可手改转换。详见 ADR 0051。
+**新简化协议说明（2026-11-18）：**`prepare` 发现服务、租户、source、Agent 和 workspace 映射并检查目标表，不盘点会话输入。`migrate --apply` 先从 SQL 剪枝 published source，再逐 source 扫描 workspace 到有界临时记录，导入、验证并独立发布；不记录或比较 chats mtime，不计算输入或 manifest 摘要。未发布 source 的会话输入、sessions/dialog、身份配置和 manifest 固定映射须从 prepare 至发布保持不变。部署侧保证每个应用 schema 全局仅有一个迁移进程。详见 ADR 0052。
+
+**manifest 部署：**新作业的 jobs 表只保存简短模式标记，不保存完整 source 映射。`migrate` 在 runtime 输出目录生成 `manifest.json` 副本；部署时将该文件与当前服务的 `*.runtime.json` 一起放到 `SWE_CONVERSATION_SCOPE_MANIFEST` 指向的文件所在目录，并保持只读。各实例使用同一作业的 manifest；发布状态仍由数据库控制。
 
 ## 2026-11-16：新作业按 source 独立迁移与上线
 
-新版 `prepare --tenant-isolation` 固定 `source_isolation=true`，发布、失败记录和自动重审单位细化为 `(service_unit_id, tenant_id, source_id)`。同 tenant 的 source=A、B、C 中，B 输入损坏仅记录 B，A、C 继续导入、验证和独立上线。一个 source 内全部 Agent 和 workspace 仍须一起通过。操作仍为 prepare、migrate 两条主命令，资源参数及四个旧 root 同路径、nas_root 独立的原地模式保持不变。下文“账号/租户”在新作业中均指该三元隔离单位。
+新版 `prepare --tenant-isolation` 固定 `source_isolation=true`，发布和失败记录单位细化为 `(service_unit_id, tenant_id, source_id)`。同 tenant 的 source=A、B、C 中，B 输入损坏仅记录 B，A、C 继续导入、验证和独立上线。一个 source 内全部 Agent 和 workspace 仍须一起通过。操作仍为 prepare、migrate 两条主命令，资源参数及四个旧 root 同路径、nas_root 独立的原地模式保持不变。下文“账号/租户”在新作业中均指该三元隔离单位。
 
 新作业须由 DBA 预建 `swe_conversation_migration_sources`：新环境执行最新 `scripts/sql/conversation_migration_control_tables.sql`；已有控制表环境可增量执行 `scripts/sql/conversation_migration_source_tables.sql`。CLI 不执行 DDL。所有 source 发布后，分享字段收口使用 `scripts/sql/conversation_source_publication_finalize.sql`；只有部分 source 发布时不执行全库收口，正常 source 可先上线。
 
 旧 manifest 未声明 `source_isolation=true` 时保持 `(service_unit_id, tenant_id)` 语义，不能手改 manifest 或切换控制表。已有 SQL 票据或业务行的作业不可重建身份来绕过。历史细分 discover/freeze 入口保持兼容，不自动升级粒度；新 source 作业使用首选 prepare。
 
-失败 JSON 增加 `source_id`；阶段结果包含 `source_isolation=true`、`counter_unit=sources`。兼容字段 `tenants`、`published`、`completed`、`failed` 在此模式均按 source 计数。共享 DB、EIO、磁盘耗尽、锁丢失、提交结果不确定仍停止整个命令。
+失败 JSON 增加 `source_id`；阶段结果包含 `source_isolation=true`、`counter_unit=sources`。兼容字段 `tenants`、`published`、`completed`、`failed` 在此模式均按 source 计数。共享 DB、EIO、磁盘耗尽、提交结果不确定仍停止整个命令。
 
 运行时逐次检查 SQL source published 状态；同 tenant 的未发布 source 返回 503，已发布 source 可正常读写。Chat/Session 元数据 CRUD 使用完整可信 `(service, tenant, source, agent)` scope。本次迁移不导入或验证旧分享记录；运行时永久分享 API 和存储合同不由本变更修改。详见 ADR 0049。本节覆盖本页历史租户粒度描述，旧作业继续原粒度。
 
@@ -22,7 +24,7 @@
 
 本分支新增 `prepare` / `migrate`，常规显式租户隔离迁移优先使用本节。下文细分命令保留作诊断与兼容入口；不要将同一个作业反复 prepare，也不要手改 migration ID。先完成第 1、2 节的备份、旧 writer 停止、只读输入、目标库 DDL/DML 权限和独立 NAS 准备，再执行以下命令。
 
-对操作人员只有这两个迁移阶段。发现、冻结复核、盘点、预检是 prepare 的内部步骤；导入、验证、最终源复查、发布是 migrate 的内部步骤，无需再分别调用对应命令。下文第 3 节整组细分命令是兼容流程，不是执行两阶段后追加的操作。第 4 节的发布说明同样适用于 migrate 自动发布；部署、开放流量和 DBA 最终 DDL 仍是外部操作。
+对操作人员只有这两个迁移阶段。映射发现和数据库预检在 prepare 中完成；会话扫描、导入、目标验证和发布在 migrate 中完成。下文第 3 节细分命令是兼容流程，不是执行两阶段后追加的操作；部署、开放流量和 DBA 最终 DDL 仍是外部操作。
 
 ```bash
 # 仅首次准备；原地模式保留 --in-place，冻结副本模式去掉它
@@ -39,23 +41,23 @@
   --output-dir "$AUDIT_DIR/runtime" --apply "${CS_RESOURCES[@]}"
 ```
 
-`prepare` 合并发现、证据固化、盘点和预检，读取目标库，不导入业务行、不发布账号；输出 manifest 及相邻的 `<manifest文件名>.discovery.json`。输出文件必须不存在。可选 `--overrides` 使用已审核的完整记录；兼容的 `--shares-file` 只能指向空列表，非空时命令拒绝。部分失败仍保留可归属租户和固定作业身份，检查结果后可让正常租户进入 migrate。
+`prepare` 发现身份及 workspace 位置并预检目标数据库，不解析会话正文、不导入业务行、不发布账号；输出 manifest 及相邻的 `<manifest文件名>.discovery.json`。输出文件必须不存在。可选 `--overrides` 使用已审核的完整记录；兼容的 `--shares-file` 只能指向空列表，非空时命令拒绝。检查发现的失败和 workspace 覆盖后，可让正常 source 进入 migrate。
 
-`migrate --apply` 对每个可执行账号按依赖顺序完成导入/续跑、快速结构验证、最后源复查和发布；无需再人工运行 verify/finalize 才发布正常账号。已发布账号从 SQL 读取并跳过其旧输入。它不会部署应用、改变外部流量、停止 writer 或自动 chmod。新版服务仍按 SQL published 与凭证动态准入。
+`migrate --apply` 对每个可执行 source 扫描会话输入到有界临时记录，再完成导入/续跑、快速结构验证和发布；无需再人工运行 verify/finalize 才发布正常 source。已发布 source 从 SQL 读取并跳过其旧输入。它不会部署应用、改变外部流量、停止 writer 或自动 chmod。新版服务仍按 SQL published 与凭证动态准入。
 
 `migrate --apply` 默认执行快速结构验证。单独运行 `verify` 也默认快速验证；需要核对正文与冻结源的完整语义审计时，显式添加 `--full-audit`。快速验证不证明正文逐字节相等；full audit 失败不会抹掉已有快速验证证据，也不会授权发布。
 
-每次 migrate 自动重审**进入命令前已失败**的未发布账号，每账号每次至多一次。零业务数据、零迁移票据者才可接受修订后的输入；已有部分提交者保留旧证据和票据，输入未变时核对后续跑，输入改变时报告失败，不自动删除/重绑。准备时正常但执行前发生输入变化的账号，本次隔离并记录失败，下一次执行才进入自动重审，不能在同一次执行静默接纳新输入。
+普通 migrate 不自动重审或重绑定 prepare 时失败的 source。处理期间失败的 source 保留 SQL 票据和已提交结果；在输入和 manifest 映射保持不变的前提下重跑同一命令续跑。已发布 source 不读取旧输入。
 
-准备、自动重审和执行读取使用作业级有界并发：独立租户的解析、会话正文 IO 和摘要计算可以重叠。执行采用只读 inventory 预取与 owner 导入/校验流水线；所有账号共享 `io-workers` 线程池与解析内存预算，`workers=1` 时无跨租户预取。该预算是解析分配门禁，并非进程 RSS 硬上限；清单摘要及 Python/数据库运行时还有常驻开销。SQL、事务、manifest/journal 权威更新及租户发布仍由单 owner 串行执行；同一账号导入→校验→最后源复查→发布不可乱序，不能用多个命令进程绕过同库命名锁。
+新流程按 source 串行处理；单个 source 的 workspace 解析和导入可使用 `workers` 和 `io-workers`。资源预算约束解析和临时记录，不是进程 RSS 硬上限。所有 SQL 及发布由单 owner 执行，不能同时运行多个迁移进程。
 
-prepare 的最终预检（以及独立 preflight/预览）在排除已发布和发现失败账号后，最多并行盘点 workers 个账号，共用 IO 池和每槽解析预算。migrate 最多保留 workers-1 个后续账号预读；当前账号获得其余 worker 和对应内存额度，传给 workspace 导入、验证及最终盘点。例如 workers=4，尚有三个预读账号时当前账号使用 1 槽；只剩一个当前账号时使用 4 槽。已预读完但尚未消费的账号仍占一份额度，防止驻留数据预算超配。分配在当前账号开始处理时确定，不在账号处理中途抢占或重新分配。
-
-退出 `0` 表示该阶段全部完成；退出 `2` 且有效 JSON 为 `status=partial_success` 表示处理完所有可执行独立租户但仍有失败，查看结果中的 `failure_report`，已发布账号不撤销。共享数据库/磁盘/锁故障、取消、提交结果不确定等是致命停止，不能当作坏租户跳过。Click 参数错误也可能退出 2，必须核对结构化结果，不能只判断退出数字。失败报告只含服务、账号、阶段、代码和安全原因；完整审计材料保存在受限目录。
+退出 `0` 表示该阶段全部完成；退出 `2` 且有效 JSON 为 `status=partial_success` 表示处理完所有可执行独立租户但仍有失败，查看结果中的 `failure_report`，已发布账号不撤销。共享数据库/磁盘故障、取消、提交结果不确定等是致命停止，不能当作坏租户跳过。Click 参数错误也可能退出 2，必须核对结构化结果，不能只判断退出数字。失败报告只含服务、账号、阶段、代码和安全原因；完整审计材料保存在受限目录。
 
 全部账号发布后仍须执行第 6 节专用 schema 收口，由 DBA 执行 DDL；之后可重跑 migrate 核对作业状态，已发布账号不重盘。真实 NAS、停写/备份及固定旧镜像回滚验收仍是现场责任。
 
 ## 1. 边界与上线单位
+
+以下细分命令及其锁、重审、输入摘要和源复查说明适用于历史兼容流程；新作业以本页“首选操作”和 ADR 0052 为准。
 
 ### 性能诊断
 
@@ -110,11 +112,11 @@ prepare 的最终预检（以及独立 preflight/预览）在排除已发布和�
 
 原地不要求复制 workspace，也不要求把整个业务树都设为只读。但所有旧 writer 必须停止，未发布账号的会话输入和精确配置/Agent 证据文件须持续只读、内容不变；必要会话入口目录也保持只读。初次发现前准备这些文件和目录的权限，不能在导入时恢复所有账号的写权限。共享业务根及普通业务目录可以可写。发布 A 后仅恢复 A 的在线配置/业务目录所需权限，B 的未发布输入保持原状。CLI 不自动 chmod 或停止服务。
 
-程序跳过已发布 A 的源盘点；A 更新自己的配置、新建 Agent、写新会话以及共享服务根 mtime 变化，不影响未发布 B 的正常续跑。B 自身会话入口成员变化仍检查，配置/Agent 证据另有 SHA-256 与读取前后文件身份核验，不能用保留 mtime 绕过。任意跨账号共享/嵌套 workspace、配置文件或账号目录会使涉及账号失败，其他独立账号继续。
+新作业跳过已发布 A 的源盘点；A 更新自己的配置、新建 Agent、写新会话以及共享服务根 mtime 变化，不影响未发布 B 的正常续跑。未发布 B 的输入和身份配置须由部署侧保持不变；新版不计算输入摘要或比较 mtime。任意跨账号共享/嵌套 workspace、配置文件或账号目录会使涉及账号失败，其他独立账号继续。
 
 原地模式同样在各阶段只记录可归属的坏租户并继续正常组；数据库/锁/共享 NAS 故障仍中止本次命令。失败账号没有 legacy 回退。恢复 B 输入后，如原数据已有业务行/票据，不允许随意改内容；遵循第 5 节的原样 resume 或零数据证据重审。
 
-原地重审：将原 discovery 完整报告另存为新的审核输入，保留原 `declared_services` 和审核 overrides；新版 source manifest 的 `source_shares` 必须为空。该文件用于明确授权重审输入，程序在锁内重新发现未发布组并落完整新证据审计；已发布目录仅按旧可信目录映射剪枝，不再读 A 在线配置/正文。新增未知账号、服务/root 变化或无法证明已发布账号独占目录等全局证据问题，会使该次重审拒绝。能归属到 B 的候选边界冲突（包括指向已发布 A 的目录）则拒绝 B 的候选修订，恢复 B 原有映射与证据并记录失败，其他独立 D 继续重审；不会改动 A。B 已有业务行/票据时，保留 B 完整旧记录、不修订其证据并报告 B 失败，其他独立组仍可继续。
+历史兼容流程的原地重审见第 5 节；新简化协议不自动重审或重绑定输入。
 
 原地不是独立快照，仍需迁移前数据库和 NAS 备份。上线后的整体回滚必须合成 A 最新状态与 B 保留输入，不能直接让旧版读取混合运行目录。
 

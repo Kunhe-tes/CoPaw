@@ -135,6 +135,8 @@ def _prepare_sources(tmp_path, failure_mode, *, same_tenant=False):
         state = json.loads(session_b.read_text())
         state["turn_states"] = {"running-turn": {"status": "running"}}
         session_b.write_text(json.dumps(state))
+    elif failure_mode == "invalid_chats":
+        (workspaces["bob"] / "chats.json").write_text("invalid json")
     for path in source.rglob("*"):
         path.chmod(0o555 if path.is_dir() else 0o444)
     source.chmod(0o555)
@@ -201,15 +203,7 @@ def _prepare_sources(tmp_path, failure_mode, *, same_tenant=False):
     )
 
 
-def _observe_import_failure(monkeypatch, failure_mode, chats_b):
-    if failure_mode == "changed_chats_mtime":
-        before = chats_b.stat()
-        import os
-
-        os.utime(
-            chats_b,
-            ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000),
-        )
+def _observe_import_failure(monkeypatch):
     imported_failures = []
     from swe.app.conversation_storage.migration.tenant_errors import (
         TenantInputError,
@@ -239,7 +233,7 @@ async def _assert_failed_tenant_has_no_commits(
         assert imported_failures == [
             (("svc", "bob"), "unsettled legacy Turn blocks offline import"),
         ]
-    if failure_mode in ("running_turn", "changed_chats_mtime"):
+    if failure_mode in ("running_turn", "invalid_chats"):
         bob_scope = ["svc", "bob", "SRC", "agent"]
         tickets = await db.fetch_all(
             "SELECT entry_kind,source_key,details_text FROM swe_conversation_migration_entries",
@@ -260,7 +254,7 @@ async def _assert_failed_tenant_has_no_commits(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure_mode",
-    ["config", "running_turn", "changed_chats_mtime"],
+    ["config", "running_turn", "invalid_chats"],
 )
 async def test_migrate_retry_keeps_failed_source_closed_and_skips_published_source(
     conversation_test_database,
@@ -303,11 +297,7 @@ async def test_migrate_retry_keeps_failed_source_closed_and_skips_published_sour
     assert code == (2 if failure_mode == "config" else 0)
     assert prepared["failed"] == int(failure_mode == "config")
     assert await db.fetch_all("SELECT * FROM swe_conversation_chats") == []
-    imported_failures = _observe_import_failure(
-        monkeypatch,
-        failure_mode,
-        workspaces["bob"] / "chats.json",
-    )
+    imported_failures = _observe_import_failure(monkeypatch)
     migrate_args = [
         "migrate",
         "--manifest",
@@ -335,6 +325,10 @@ async def test_migrate_retry_keeps_failed_source_closed_and_skips_published_sour
         failure_mode,
         imported_failures,
     )
+    monkeypatch.setenv(
+        "SWE_CONVERSATION_SCOPE_MANIFEST",
+        str(output / "scopes.json"),
+    )
     runtime = ConversationRuntime(
         db,
         {
@@ -346,9 +340,9 @@ async def test_migrate_retry_keeps_failed_source_closed_and_skips_published_sour
         b"cursor",
         service_unit_id="svc",
     )
-    await runtime.admit("alice")
+    await runtime.admit("alice", "SRC")
     with pytest.raises(TenantNotPublished):
-        await runtime.admit("bob")
+        await runtime.admit("bob", "SRC")
     config_a, current, online = await _write_online_alice(
         db,
         runtime,
@@ -376,7 +370,7 @@ async def test_migrate_retry_keeps_failed_source_closed_and_skips_published_sour
     )
     assert config_a.read_text() == json.dumps(current)
     with pytest.raises(TenantNotPublished):
-        await runtime.admit("bob")
+        await runtime.admit("bob", "SRC")
 
 
 @pytest.mark.asyncio
@@ -430,6 +424,10 @@ async def test_same_tenant_source_retry_preserves_published_sibling(
     ]
     code, first = await _invoke(arguments)
     assert code == 2 and first["published"] == 1 and first["failed"] == 1
+    monkeypatch.setenv(
+        "SWE_CONVERSATION_SCOPE_MANIFEST",
+        str(output / "scopes.json"),
+    )
     runtime = ConversationRuntime(
         db,
         {

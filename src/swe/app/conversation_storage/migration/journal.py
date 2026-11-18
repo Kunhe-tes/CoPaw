@@ -97,27 +97,34 @@ class MigrationJournal:
             raise ValueError(
                 "migration target must be bound before preparing SQL journal",
             )
-        source = {
-            key: data[key]
-            for key in (
-                "source_boundary",
-                "services",
-                "workspaces",
-                "fingerprints",
-                "tenant_sync_started_at_ns",
-                "shares",
-                "discovery_version",
-                "tenant_isolation",
-                "source_isolation",
-                "freshness_protocol",
-                "in_place",
-                "tenant_review_revision",
-                "tenants",
-                "source_shares",
-                "declared_services",
-            )
-            if key in data
-        }
+        if data.get("source_binding_storage") == "manifest-v1":
+            source = {
+                "source_binding_storage": "manifest-v1",
+                "tenant_isolation": True,
+                "source_isolation": True,
+            }
+        else:
+            source = {
+                key: data[key]
+                for key in (
+                    "source_boundary",
+                    "services",
+                    "workspaces",
+                    "fingerprints",
+                    "tenant_sync_started_at_ns",
+                    "shares",
+                    "discovery_version",
+                    "tenant_isolation",
+                    "source_isolation",
+                    "freshness_protocol",
+                    "in_place",
+                    "tenant_review_revision",
+                    "tenants",
+                    "source_shares",
+                    "declared_services",
+                )
+                if key in data
+            }
         target = dict(data["target"])
         if self.server_uuid is not None:
             target["server_uuid"] = self.server_uuid

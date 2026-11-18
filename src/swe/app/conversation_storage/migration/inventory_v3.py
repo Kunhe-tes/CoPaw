@@ -253,17 +253,21 @@ def _verify_tenant_evidence(data):
 
 
 def _verify_discovery_tenant_evidence(data):
-    if not data.get("freshness_protocol"):
+    if not data.get("freshness_protocol") and not data.get(
+        "source_binding_storage",
+    ):
         _verify_tenant_evidence(data)
 
 
 def _verify_discovery_workspace_evidence(data, mapped):
-    if not data.get("freshness_protocol"):
+    if not data.get("freshness_protocol") and not data.get(
+        "source_binding_storage",
+    ):
         verify_evidence(data, mapped)
 
 
 def _legacy_source_cutoff(data, mapping):
-    if data.get("freshness_protocol"):
+    if data.get("freshness_protocol") or data.get("source_binding_storage"):
         return None
     key = (
         tenant_key(*mapping.scope.values[:3])

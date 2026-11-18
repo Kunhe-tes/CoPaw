@@ -423,7 +423,9 @@ class ConversationImporter:
         self._batch_committed(position)
 
     def _assert_source_fresh(self, report):
-        if self.manifest.data.get("freshness_protocol"):
+        if self.manifest.data.get(
+            "freshness_protocol",
+        ) or self.manifest.data.get("source_binding_storage"):
             return
         from .freshness import changed_source, tenant_key
 

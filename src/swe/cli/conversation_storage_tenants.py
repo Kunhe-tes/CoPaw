@@ -61,6 +61,10 @@ def _states(db, manifest):
     return state_store(db, manifest)
 
 
+def _manifest_source_binding(data):
+    return data.get("source_binding_storage") == "manifest-v1"
+
+
 class TenantFailure(ValueError):
     """An explicitly identified tenant data failure, never a shared SQL error."""
 
@@ -210,6 +214,7 @@ def _spool(base, data, memory_bytes, workers):
         base,
         max_bytes=shutil.disk_usage(base).free * 3 // 4,
         record_limit=memory_bytes // workers,
+        checksum=data.get("source_binding_storage") != "manifest-v1",
         protected=[
             s[k]
             for s in data["services"]
@@ -246,9 +251,7 @@ async def _inventory(view, spool, resources):
                 return function(*args)
             return await io.call(function, *args)
 
-    if view.data.get("in_place") and not view.data.get(
-        "freshness_protocol",
-    ):
+    if view.data.get("in_place") and not _manifest_source_binding(view.data):
         from swe.app.conversation_storage.in_place_admission import (
             tenant_write_boundaries,
         )
@@ -286,10 +289,13 @@ async def _inventory(view, spool, resources):
             verify_input_digest,
         )
 
-        if view.data.get("freshness_protocol"):
-            await inspect(verify_chats_mtimes, view.data, view.key)
-        else:
-            await inspect(verify_input_digest, view.data, view.key)
+        if not _manifest_source_binding(view.data):
+            function = (
+                verify_chats_mtimes
+                if view.data.get("freshness_protocol")
+                else verify_input_digest
+            )
+            await inspect(function, view.data, view.key)
         result = await inventory_v3_spooled(
             view,
             spool,
@@ -380,6 +386,8 @@ async def _verify(
 
 
 async def _final_source_check(view, inventory, base, resources):
+    if _manifest_source_binding(view.data):
+        return
     if view.data.get("freshness_protocol"):
         from swe.app.conversation_storage.migration.tenant_inputs import (
             verify_chats_mtimes,
@@ -570,6 +578,9 @@ def _write_runtime(output, manifest):
     from .conversation_storage_v3_cmd import _write_json
 
     output.mkdir(parents=True, exist_ok=True)
+    destination = output / "manifest.json"
+    if manifest.path.resolve() != destination.resolve():
+        shutil.copyfile(manifest.path, destination)
     for service in manifest.data["services"]:
         document = {
             "version": 3,
@@ -651,7 +662,9 @@ async def _migration_sql_owner(control, schema, manifest):
     )
 
     db = DMLDatabase(control)
-    if manifest.data.get("freshness_protocol"):
+    if _manifest_source_binding(manifest.data) or manifest.data.get(
+        "freshness_protocol",
+    ):
         identity = await db.fetch_one(
             "SELECT @@server_uuid AS server_uuid,DATABASE() AS schema_name",
         )
@@ -734,13 +747,19 @@ async def run_tenants(
                 review_retry,
             )
 
-            if not manifest.data.get("freshness_protocol"):
+            if not (
+                _manifest_source_binding(manifest.data)
+                or manifest.data.get("freshness_protocol")
+            ):
                 await recover_pending_review(db, manifest)
             # Fix cutoffs under the same lock before first recording SQL binding.
             if (
                 operation in ("import", "resume", "migrate")
                 and apply
-                and not manifest.data.get("freshness_protocol")
+                and not (
+                    _manifest_source_binding(manifest.data)
+                    or manifest.data.get("freshness_protocol")
+                )
             ):
                 manifest.begin_tenant_syncs(
                     [
@@ -752,7 +771,10 @@ async def run_tenants(
             if operation == "migrate":
                 if not apply:
                     raise ValueError("migrate requires --apply")
-                if not manifest.data.get("freshness_protocol"):
+                if not (
+                    _manifest_source_binding(manifest.data)
+                    or manifest.data.get("freshness_protocol")
+                ):
                     _stage("automatic_review")
                     resources["_retained_attempts"] = await _auto_review(
                         db,
@@ -786,6 +808,34 @@ async def run_tenants(
                     rollback_inputs,
                 )
             if operation == "preflight":
+                if _manifest_source_binding(manifest.data):
+                    failures = [
+                        _failure(tenant, "discover")
+                        for tenant in manifest.data["tenants"]
+                        if tenant.get("state") == "failed"
+                    ]
+                    return {
+                        "version": 3,
+                        "operation": "preflight",
+                        "status": (
+                            "partial_success" if failures else "success"
+                        ),
+                        "migration_id": manifest.migration_id,
+                        "tenant_isolation": True,
+                        "source_isolation": True,
+                        "passed": not failures,
+                        "state": "preflight_passed",
+                        "tenants": len(manifest.data["tenants"]),
+                        "published": 0,
+                        "completed": 0,
+                        "failed": len(failures),
+                        "pending_schema_finalize": False,
+                        "failure_report": _write_failures(
+                            manifest,
+                            "prepare",
+                            failures,
+                        ),
+                    }
                 if manifest.data.get("freshness_protocol"):
                     return {
                         "version": 3,
@@ -927,6 +977,7 @@ async def _run_registered(
         tenant_pipeline(selected, base, manifest, resources)
         if operation == "migrate"
         and not manifest.data.get("freshness_protocol")
+        and not _manifest_source_binding(manifest.data)
         else _serial_tenants(selected, resources)
     )
     async with context as results:
@@ -1101,6 +1152,8 @@ def _validate_tenant_roots(data):
 
 
 async def _recheck_prefetched(view, resources):
+    if _manifest_source_binding(view.data):
+        return
     from swe.app.conversation_storage.migration.tenant_inputs import (
         verify_chats_mtimes,
         verify_input_digest,

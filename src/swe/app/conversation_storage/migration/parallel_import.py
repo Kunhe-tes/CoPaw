@@ -320,6 +320,7 @@ class ParallelImportPrototype:
                     "tenant_sync_started_at_ns",
                     "source_boundary",
                     "source_isolation",
+                    "source_binding_storage",
                 )
                 if key in manifest_data
             },
@@ -357,7 +358,9 @@ class ParallelImportPrototype:
                     else tenant_key(*scope[:2])
                 ),
             )
-            if type(cutoff) is not int or cutoff <= 0:
+            if not self._manifest_data.get("source_binding_storage") and (
+                type(cutoff) is not int or cutoff <= 0
+            ):
                 raise ValueError(
                     "tenant cutoff must be fixed before parallel import",
                 )
