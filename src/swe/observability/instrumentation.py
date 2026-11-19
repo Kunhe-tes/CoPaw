@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
+from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Literal
 
@@ -66,27 +68,70 @@ class SpanHandle:
         }
         self._ended = False
         self._context_binding = None
-        self._event_sequences: dict[str, int] = {}
+        self._event_sequence = 0
+        self._compacted_tool_output_ids: set[str] = set()
 
     def event(self, name: str, **attributes: Any) -> bool:
-        if self._ended:
+        if self._ended and name not in {"evidence.pending", "evidence.linked"}:
             return False
-        phase_key = name[:64]
-        local_seq = self._event_sequences.get(phase_key, 0)
-        self._event_sequences[phase_key] = local_seq + 1
+        local_seq = self._event_sequence
+        self._event_sequence += 1
         return self._emitter.emit(
             MetadataEvent(
                 event_name="span.event",
                 obs_context=self._context,
                 entity_kind="span",
                 entity_id=self.span_id,
-                phase_key=phase_key,
+                phase_key="event",
                 local_seq=local_seq,
                 attributes={
                     **self._base,
-                    "event_kind": name[:64],
                     **attributes,
+                    "event_type": name[:64],
                 },
+            ),
+        )
+
+    def mark_tool_output_compacted(self, message_id: str) -> bool:
+        if self._ended or not isinstance(message_id, str) or not message_id:
+            return False
+        self._compacted_tool_output_ids.add(message_id)
+        return True
+
+    def tool_output_was_compacted(self, message_id: str) -> bool:
+        return message_id in self._compacted_tool_output_ids
+
+    def asset_used(
+        self,
+        asset_type: str,
+        asset_id: str,
+        *,
+        source: str,
+        version: str | None = None,
+        digest: str | None = None,
+    ) -> bool:
+        if self._ended:
+            return False
+        asset = {
+            "asset_type": asset_type,
+            "asset_id": asset_id,
+            "asset_source": source,
+        }
+        if version:
+            asset["asset_version"] = version
+        if digest:
+            asset["asset_digest"] = digest
+        return self._emitter.emit(
+            MetadataEvent(
+                event_name="asset.used",
+                obs_context=self._context.with_updates(
+                    parent_obs_span_id=self.span_id,
+                ),
+                entity_kind="asset",
+                entity_id=new_id(),
+                phase_key="used",
+                local_seq=0,
+                attributes={"asset": asset},
             ),
         )
 
@@ -158,6 +203,17 @@ class SpanHandle:
             ),
         )
 
+    def to_carrier(self) -> dict[str, Any]:
+        """Transfer this started Span's end ownership across a worker boundary."""
+        return {
+            "schema_version": 1,
+            "context": self._context.to_carrier(),
+            "obs_span_id": self.span_id,
+            "parent_obs_span_id": self._context.parent_obs_span_id,
+            "started_at": self._started_at,
+            "attributes": dict(self._base),
+        }
+
     def __enter__(self) -> "SpanHandle":
         self._context_binding = bind_context(
             self._context.with_updates(parent_obs_span_id=self.span_id),
@@ -190,24 +246,267 @@ _current_model_span: ContextVar[SpanHandle | None] = ContextVar(
     "agentobs_current_model_span",
     default=None,
 )
+_current_tool_span: ContextVar[SpanHandle | None] = ContextVar(
+    "agentobs_current_tool_span",
+    default=None,
+)
+_pending_model_response_spans: ContextVar[
+    dict[tuple[str, str], SpanHandle | None] | None
+] = ContextVar(
+    "agentobs_pending_model_response_spans",
+    default=None,
+)
+_current_model_request_attempt: ContextVar[SpanHandle | None] = ContextVar(
+    "agentobs_current_model_request_attempt",
+    default=None,
+)
+
+
+@contextmanager
+def bind_tool_span(span: SpanHandle | None):
+    """Expose the active Tool Span to durable message publication hooks."""
+    token = _current_tool_span.set(span)
+    try:
+        yield
+    finally:
+        _current_tool_span.reset(token)
+
+
+def emit_tool_output_evidence(
+    *,
+    chat_id: str,
+    message_id: str,
+    saved_state: str = "available",
+    occurrence_id: int | None = None,
+    reference_id: str | None = None,
+) -> bool:
+    """Record pending or committed tool-result evidence on its active Span."""
+    span = _current_tool_span.get()
+    if span is None:
+        return False
+    try:
+        attributes: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "content_type": "tool_output",
+            "saved_state": saved_state,
+        }
+        if type(occurrence_id) is int and occurrence_id >= 0:
+            attributes["occurrence_id"] = occurrence_id
+        if reference_id:
+            attributes["reference_id"] = reference_id
+        return span.event(
+            (
+                "evidence.pending"
+                if saved_state == "pending"
+                else "evidence.linked"
+            ),
+            **attributes,
+        )
+    except Exception:
+        return False
+
+
+def mark_tool_output_compacted(message_id: str) -> bool:
+    """Mark a durable Tool result whose saved display was compacted."""
+    span = _current_tool_span.get()
+    if span is None:
+        return False
+    try:
+        return span.mark_tool_output_compacted(message_id)
+    except Exception:
+        return False
+
+
+def tool_output_was_compacted(message_id: str) -> bool:
+    span = _current_tool_span.get()
+    return bool(span and span.tool_output_was_compacted(message_id))
+
+
+def emit_tool_asset_used(
+    *,
+    asset_type: str,
+    asset_id: str,
+    source: str,
+    version: str | None = None,
+    digest: str | None = None,
+) -> bool:
+    """Attribute an immutable asset snapshot to its active Tool Span."""
+    span = _current_tool_span.get()
+    if span is None:
+        return False
+    try:
+        return span.asset_used(
+            asset_type,
+            asset_id,
+            source=source,
+            version=version,
+            digest=digest,
+        )
+    except Exception:
+        return False
+
+
+def _remember_model_response_span(
+    span: SpanHandle,
+    response_id: Any,
+) -> None:
+    if not isinstance(response_id, str) or not response_id:
+        return
+    key = (span._context.obs_run_id, response_id)
+    pending = dict(_pending_model_response_spans.get() or {})
+    if key in pending:
+        pending[key] = None
+    else:
+        pending[key] = span
+    while len(pending) > 32:
+        pending.pop(next(iter(pending)))
+    _pending_model_response_spans.set(pending)
+
+
+def emit_assistant_answer_evidence(
+    *,
+    chat_id: str,
+    message_id: str,
+    invocation_id: str,
+    has_tool_use: bool,
+    has_visible_answer: bool,
+    saved_state: str = "available",
+    occurrence_id: int | None = None,
+    reference_id: str | None = None,
+) -> bool:
+    """Record answer evidence on its exact invocation before or after commit."""
+    context = current_context()
+    if context is None or not invocation_id:
+        return False
+    key = (context.obs_run_id, invocation_id)
+    pending = dict(_pending_model_response_spans.get() or {})
+    if key not in pending:
+        return False
+    span = pending.get(key)
+    if (
+        span is None
+        or has_tool_use
+        or not has_visible_answer
+        or span._context.business_ref.get("chat_id") != chat_id
+    ):
+        return False
+    if saved_state == "available":
+        pending.pop(key)
+        _pending_model_response_spans.set(pending)
+    try:
+        attributes: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "content_type": "assistant_answer",
+            "saved_state": saved_state,
+        }
+        if type(occurrence_id) is int and occurrence_id >= 0:
+            attributes["occurrence_id"] = occurrence_id
+        if reference_id:
+            attributes["reference_id"] = reference_id
+        return span.event(
+            (
+                "evidence.pending"
+                if saved_state == "pending"
+                else "evidence.linked"
+            ),
+            **attributes,
+        )
+    except Exception:
+        return False
+
+
+_current_agent_step_index: ContextVar[int | None] = ContextVar(
+    "agentobs_current_agent_step_index",
+    default=None,
+)
+
+
+@contextmanager
+def bind_agent_step_index(step_index: int):
+    token = _current_agent_step_index.set(step_index)
+    try:
+        yield
+    finally:
+        _current_agent_step_index.reset(token)
+
+
+def current_agent_step_index() -> int | None:
+    return _current_agent_step_index.get()
 
 
 def record_model_retry(
     attempt: int,
-    max_attempts: int,
     error_type: str,
     delay_seconds: float,
 ) -> None:
     span = _current_model_span.get()
     if span is None:
         return
+    _finish_model_request_attempt(
+        status="failed",
+        technical_status="ERROR",
+        has_error=True,
+        error_type=error_type,
+        clear=False,
+    )
     span.event(
-        "retry",
+        "model.retry_scheduled",
         retries=attempt,
-        loop_count=max_attempts,
         error_type=error_type,
         metrics={"delay_ms": max(0, int(delay_seconds * 1000))},
     )
+
+
+def record_model_request_attempt(attempt: int, *, streaming: bool) -> None:
+    logical_span = _current_model_span.get()
+    if logical_span is None:
+        return
+    previous = _current_model_request_attempt.get()
+    attributes: dict[str, Any] = {
+        "request_attempt_index": attempt,
+        "streaming": streaming,
+    }
+    if previous is not None:
+        if not previous._ended:
+            previous.end(
+                status="failed",
+                technical_status="ERROR",
+                has_error=True,
+                error_type="model_retry",
+                phase="model_request",
+            )
+        attributes["links"] = [
+            {"relation_type": "retry_of", "obs_span_id": previous.span_id},
+        ]
+    for key in ("provider_key", "request_model_key", "step_index"):
+        value = logical_span._base.get(key)
+        if value is not None:
+            attributes[key] = value
+    attempt_span = Observability().span(
+        "LLM",
+        "request_attempt",
+        name="model.request_attempt",
+        kind="CLIENT",
+        parent_span_id=logical_span.span_id,
+        **attributes,
+    )
+    _current_model_request_attempt.set(attempt_span)
+
+
+def _finish_model_request_attempt(
+    *,
+    clear: bool = True,
+    **attributes: Any,
+) -> None:
+    span = _current_model_request_attempt.get()
+    if span is None:
+        return
+    if not span._ended:
+        span.end(**attributes)
+    if clear:
+        _current_model_request_attempt.set(None)
 
 
 class ObservabilityModelWrapper:
@@ -239,17 +538,59 @@ class ObservabilityModelWrapper:
         context = current_context()
         if context is None or not context.capture_enabled:
             return await self._model(messages, *args, **kwargs)
+        attributes = {
+            "provider_key": self._provider_key,
+            "request_model_key": self._model_key,
+            "streaming": bool(getattr(self._model, "stream", False)),
+        }
+        step_index = current_agent_step_index()
+        if step_index is not None:
+            attributes["step_index"] = step_index
         handle = Observability().span(
             "LLM",
             "chat",
             name="model.call",
             kind="CLIENT",
-            provider_key=self._provider_key,
-            request_model_key=self._model_key,
-            streaming=bool(getattr(self._model, "stream", False)),
+            **attributes,
         )
         if handle is None:
             return await self._model(messages, *args, **kwargs)
+        handle.asset_used(
+            "model",
+            f"{self._provider_key}/{self._model_key}",
+            source="runtime_resolved",
+            version="unknown",
+        )
+        try:
+            prompt_digest = _system_prompt_digest(messages)
+        except Exception:
+            prompt_digest = None
+        if prompt_digest is not None:
+            handle.asset_used(
+                "prompt",
+                "system_prompt",
+                source="runtime_model_request",
+                version="unknown",
+                digest=prompt_digest,
+            )
+        chat_id = context.business_ref.get("chat_id")
+        question_id = context.business_ref.get("root_question_msgid")
+        if isinstance(chat_id, str) and isinstance(question_id, str):
+            handle.event(
+                "evidence.linked",
+                chat_id=chat_id,
+                message_id=question_id,
+                content_type="user_question",
+                saved_state="available",
+            )
+        if isinstance(chat_id, str):
+            handle.event(
+                "evidence.linked",
+                chat_id=chat_id,
+                content_type="model_input",
+                saved_state="not_saved",
+                reference_id=handle.span_id,
+            )
         started = time.monotonic_ns()
         token = _current_model_span.set(handle)
         try:
@@ -259,6 +600,11 @@ class ObservabilityModelWrapper:
             response_metadata = _model_response_metadata(result)
             if "model_key_source" not in response_metadata:
                 response_metadata["model_key_source"] = "request_fallback"
+            _remember_model_response_span(
+                handle,
+                getattr(result, "id", None),
+            )
+            _finish_model_request_attempt(status="succeeded")
             handle.end(
                 status="succeeded",
                 metrics=_usage_metrics(result),
@@ -266,12 +612,20 @@ class ObservabilityModelWrapper:
             )
             return result
         except asyncio.CancelledError:
+            _finish_model_request_attempt(status="cancelled")
             handle.end(status="cancelled", technical_status="cancelled")
             raise
         except Exception as exc:
+            _finish_model_request_attempt(
+                status="failed",
+                technical_status="ERROR",
+                has_error=True,
+                error_type=type(exc).__name__,
+                phase="model_request",
+            )
             handle.end(
                 status="failed",
-                technical_status="error",
+                technical_status="ERROR",
                 has_error=True,
                 error_type=type(exc).__name__,
             )
@@ -284,9 +638,11 @@ class ObservabilityModelWrapper:
         first_visible_text_us = None
         latest_metrics: dict[str, Any] = {}
         response_metadata: dict[str, Any] = {}
+        response_id = None
         token = _current_model_span.set(handle)
         try:
             async for chunk in stream:
+                response_id = getattr(chunk, "id", None)
                 if first_chunk_us is None and _has_model_output(chunk):
                     first_chunk_us = max(
                         0,
@@ -309,21 +665,32 @@ class ObservabilityModelWrapper:
                 metrics["first_visible_text_us"] = first_visible_text_us
             if "model_key_source" not in response_metadata:
                 response_metadata["model_key_source"] = "request_fallback"
+            _remember_model_response_span(handle, response_id)
+            _finish_model_request_attempt(status="succeeded")
             handle.end(
                 status="succeeded",
                 metrics=metrics,
                 **response_metadata,
             )
         except asyncio.CancelledError:
+            _finish_model_request_attempt(status="cancelled")
             handle.end(status="cancelled", technical_status="cancelled")
             raise
         except GeneratorExit:
+            _finish_model_request_attempt(status="cancelled")
             handle.end(status="cancelled", technical_status="cancelled")
             raise
         except Exception as exc:
+            _finish_model_request_attempt(
+                status="failed",
+                technical_status="ERROR",
+                has_error=True,
+                error_type=type(exc).__name__,
+                phase="model_request",
+            )
             handle.end(
                 status="failed",
-                technical_status="error",
+                technical_status="ERROR",
                 has_error=True,
                 error_type=type(exc).__name__,
             )
@@ -408,6 +775,36 @@ def _model_response_metadata(value: Any) -> dict[str, Any]:
     return result
 
 
+def _system_prompt_digest(messages: Any) -> str | None:
+    if not isinstance(messages, (list, tuple)):
+        return None
+    digest = hashlib.sha256()
+    found = False
+    for message in messages:
+        role = (
+            message.get("role")
+            if isinstance(message, dict)
+            else getattr(message, "role", None)
+        )
+        if role != "system":
+            continue
+        content = (
+            message.get("content")
+            if isinstance(message, dict)
+            else getattr(message, "content", None)
+        )
+        if not isinstance(content, str):
+            return None
+        try:
+            encoded = content.encode("utf-8")
+        except UnicodeEncodeError:
+            return None
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+        found = True
+    return f"sha256:{digest.hexdigest()}" if found else None
+
+
 class Observability:
     """Independent facade; disabled calls avoid copying attributes or payloads."""
 
@@ -424,6 +821,39 @@ class Observability:
             return self._provided_emitter or default_emitter()
         except Exception:
             return None
+
+    def asset_used(
+        self,
+        asset_type: str,
+        asset_id: str,
+        *,
+        source: str,
+        digest: str | None = None,
+    ) -> bool:
+        context = current_context()
+        if context is None:
+            return False
+        emitter = self._emitter_for(context)
+        if emitter is None:
+            return False
+        asset = {
+            "asset_type": asset_type,
+            "asset_id": asset_id,
+            "asset_source": source,
+        }
+        if digest:
+            asset["asset_digest"] = digest
+        return emitter.emit(
+            MetadataEvent(
+                event_name="asset.used",
+                obs_context=context,
+                entity_kind="asset",
+                entity_id=new_id(),
+                phase_key="used",
+                local_seq=0,
+                attributes={"asset": asset},
+            ),
+        )
 
     def admit_run(
         self,
@@ -456,7 +886,7 @@ class Observability:
     def accept_run(self, context: ObservabilityContext) -> bool:
         emitter = self._emitter_for(context)
         if emitter is not None:
-            return emitter.emit(
+            accepted = emitter.emit(
                 MetadataEvent(
                     event_name="run.accepted",
                     obs_context=context,
@@ -470,6 +900,25 @@ class Observability:
                     },
                 ),
             )
+            emitter.emit(
+                MetadataEvent(
+                    event_name="asset.used",
+                    obs_context=context,
+                    entity_kind="asset",
+                    entity_id=new_id(),
+                    phase_key="used",
+                    local_seq=0,
+                    attributes={
+                        "asset": {
+                            "asset_type": "agent",
+                            "asset_id": context.scope.agent_id,
+                            "asset_version": "unknown",
+                            "asset_source": "runtime_identity",
+                        },
+                    },
+                ),
+            )
+            return accepted
         return False
 
     def start_attempt(
@@ -520,6 +969,84 @@ class Observability:
         )
         handle.start()
         return handle
+
+    def end_carried_span(
+        self,
+        carrier: dict[str, Any],
+        *,
+        status: str,
+        **attributes: Any,
+    ) -> bool:
+        """End a Span whose started slot was transferred to this process."""
+        try:
+            if carrier.get("schema_version") != 1:
+                return False
+            context_data = carrier.get("context")
+            base = carrier.get("attributes")
+            span_id = carrier.get("obs_span_id")
+            started_at = carrier.get("started_at")
+            if (
+                not isinstance(context_data, dict)
+                or not isinstance(base, dict)
+                or not isinstance(span_id, str)
+                or not isinstance(started_at, str)
+            ):
+                return False
+            context = ObservabilityContext.from_carrier(context_data)
+            if not context.capture_enabled:
+                return False
+            emitter = self._emitter_for(context)
+            if emitter is None:
+                return False
+            reserved = {
+                "obs_run_id",
+                "obs_attempt_id",
+                "obs_span_id",
+                "parent_obs_span_id",
+                "event_name",
+                "entity_id",
+                "entity_kind",
+                "phase_key",
+                "local_seq",
+                "started_at",
+                "ended_at",
+                "status",
+                "metrics",
+                "quality",
+            }
+            optional = {
+                key: value
+                for key, value in attributes.items()
+                if key not in reserved
+            }
+            return emitter.emit(
+                MetadataEvent(
+                    event_name="span.ended",
+                    obs_context=context,
+                    entity_kind="span",
+                    entity_id=span_id,
+                    phase_key="ended",
+                    local_seq=0,
+                    attributes={
+                        **{
+                            key: value
+                            for key, value in base.items()
+                            if key not in reserved
+                        },
+                        "started_at": started_at,
+                        "ended_at": utc_now(),
+                        "status": status,
+                        "metrics": {},
+                        "quality": {
+                            "start_observed": True,
+                            "end_observed": True,
+                        },
+                        **optional,
+                    },
+                ),
+            )
+        except Exception:
+            return False
 
     def end_attempt(
         self,
@@ -591,5 +1118,62 @@ class Observability:
                 phase_key=f"state:{status}",
                 local_seq=0,
                 attributes={"status": status},
+            ),
+        )
+
+    def approval_requested(
+        self,
+        context: ObservabilityContext,
+        approval_request_id: str,
+        *,
+        started_at: str | None = None,
+    ) -> bool:
+        emitter = self._emitter_for(context)
+        if emitter is None:
+            return False
+        occurred_at = started_at or utc_now()
+        return emitter.emit(
+            MetadataEvent(
+                event_name="approval.requested",
+                obs_context=context,
+                entity_kind="approval",
+                entity_id=approval_request_id,
+                phase_key="requested",
+                local_seq=0,
+                occurred_at=occurred_at,
+                attributes={
+                    "approval_request_id": approval_request_id,
+                    "started_at": occurred_at,
+                },
+            ),
+        )
+
+    def approval_resolved(
+        self,
+        context: ObservabilityContext,
+        approval_request_id: str,
+        *,
+        decision: str,
+        started_at: str | None = None,
+    ) -> bool:
+        emitter = self._emitter_for(context)
+        if emitter is None:
+            return False
+        ended_at = utc_now()
+        return emitter.emit(
+            MetadataEvent(
+                event_name="approval.resolved",
+                obs_context=context,
+                entity_kind="approval",
+                entity_id=approval_request_id,
+                phase_key="resolved",
+                local_seq=0,
+                occurred_at=ended_at,
+                attributes={
+                    "approval_request_id": approval_request_id,
+                    "decision": decision,
+                    "started_at": started_at or ended_at,
+                    "ended_at": ended_at,
+                },
             ),
         )

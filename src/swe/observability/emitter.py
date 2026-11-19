@@ -16,7 +16,7 @@ from .config import EmitterConfig
 from .models import MetadataEvent
 
 _ALLOWED_KEYS = frozenset(
-    "schema_version event_id event_name occurred_at producer_id obs_run_id obs_attempt_id obs_span_id parent_obs_span_id entity_kind entity_id phase_key local_seq scope business_ref service_unit_id source_id tenant_id agent_id chat_id session_id channel root_question_msgid current_question_msgid run_started_at attempt_started_at capture_enabled span_type operation kind name step_index started_at ended_at status technical_status has_error reason_code metrics quality model tool asset approval_request_id subagent links events predecessor_attempt_id attempt_index terminal_fact_source decision content_ref content_kind saved_state metadata_truncated error_type phase cause_id recovery_id event_kind event_type relation_type duration_us usage_known input_tokens output_tokens total_tokens first_chunk_us first_visible_text_us start_observed end_observed truncated provider_key request_model_key response_model_key model_key_source finish_reason streaming tool_key tool_call_id tool_execution_id executor_kind timeout_budget_ms retry_index exit_code request_attempt_index skill_key agent_key prompt_id prompt_version occurrence_id message_id content_type reference_id business_subagent_key result_status mode execution_agent_key attempt_ordinal retries loop_count tool_count".split(),
+    "schema_version event_id event_name occurred_at producer_id obs_run_id obs_attempt_id obs_span_id parent_obs_span_id entity_kind entity_id phase_key local_seq scope business_ref service_unit_id source_id tenant_id agent_id chat_id session_id channel root_question_msgid current_question_msgid run_started_at attempt_started_at capture_enabled span_type operation kind name step_index started_at ended_at status technical_status has_error reason_code metrics quality model tool asset asset_type asset_id asset_version asset_digest asset_source approval_request_id subagent links events predecessor_attempt_id attempt_index terminal_fact_source decision content_ref content_kind saved_state metadata_truncated error_type phase cause_id recovery_id event_kind event_type relation_type duration_us usage_known input_tokens output_tokens total_tokens first_chunk_us first_visible_text_us start_observed end_observed truncated provider_key request_model_key response_model_key model_key_source finish_reason streaming tool_key tool_call_id tool_execution_id executor_kind timeout_budget_ms retry_index exit_code request_attempt_index skill_key agent_key prompt_id prompt_version occurrence_id message_id content_type reference_id business_subagent_key result_status mode execution_agent_key attempt_ordinal retries loop_count tool_count".split(),
 )
 _FORBIDDEN_KEYS = frozenset(
     "prompt messages input output content body text query parameters arguments result exception traceback api_key password secret".split(),
@@ -35,7 +35,7 @@ _REQUIRED_FIELDS = frozenset(
     },
 )
 _TOKEN_FIELDS = frozenset(
-    "event_name producer_id obs_run_id obs_attempt_id obs_span_id parent_obs_span_id entity_kind entity_id phase_key service_unit_id source_id tenant_id agent_id chat_id session_id channel root_question_msgid current_question_msgid span_type operation kind name status technical_status reason_code decision error_type phase provider_key request_model_key response_model_key model_key_source finish_reason tool_key tool_call_id tool_execution_id executor_kind event_type relation_type skill_key agent_key prompt_id prompt_version occurrence_id message_id content_type reference_id business_subagent_key result_status mode execution_agent_key attempt_ordinal terminal_fact_source saved_state".split(),
+    "event_name producer_id obs_run_id obs_attempt_id obs_span_id parent_obs_span_id entity_kind entity_id phase_key service_unit_id source_id tenant_id agent_id chat_id session_id channel root_question_msgid current_question_msgid span_type operation kind name status technical_status reason_code decision error_type phase provider_key request_model_key response_model_key model_key_source finish_reason tool_key tool_call_id tool_execution_id executor_kind event_type relation_type skill_key agent_key prompt_id prompt_version occurrence_id message_id content_type reference_id business_subagent_key result_status mode execution_agent_key attempt_ordinal terminal_fact_source saved_state asset_type asset_id asset_version asset_digest asset_source".split(),
 )
 _TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_.:@/-]{1,256}$")
 _ENUM_FIELDS = {
@@ -83,6 +83,7 @@ _ENUM_FIELDS = {
             "model.request_attempt_started",
             "tool.retry_scheduled",
             "tool.recovered",
+            "evidence.pending",
             "evidence.linked",
             "link.added",
             "retry",
@@ -94,6 +95,7 @@ _ENUM_FIELDS = {
             "model.request_attempt_started",
             "tool.retry_scheduled",
             "tool.recovered",
+            "evidence.pending",
             "evidence.linked",
             "link.added",
             "retry",

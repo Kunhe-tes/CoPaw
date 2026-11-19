@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import io
+import hashlib
 import json
 import threading
 import asyncio
@@ -19,6 +20,13 @@ from swe.observability.emitter import JsonlEmitter
 from swe.observability.instrumentation import (
     ObservabilityModelWrapper,
     Observability as ObservabilityFacade,
+    _system_prompt_digest,
+    record_model_request_attempt,
+)
+from swe.providers.retry_chat_model import (
+    RateLimitConfig,
+    RetryChatModel,
+    RetryConfig,
 )
 
 
@@ -32,6 +40,55 @@ class BlockingStream(io.StringIO):
         self.entered.set()
         self.release.wait(1)
         return super().write(value)
+
+
+def test_system_prompt_digest_preserves_scope_order_and_boundaries():
+    digest = _system_prompt_digest(
+        [
+            {"role": "user", "content": "ignored"},
+            {"role": "system", "content": "ab"},
+            {"role": "assistant", "content": "ignored too"},
+            {"role": "system", "content": "c"},
+        ],
+    )
+    expected = hashlib.sha256(
+        len(b"ab").to_bytes(8, "big")
+        + b"ab"
+        + len(b"c").to_bytes(8, "big")
+        + b"c",
+    ).hexdigest()
+
+    assert digest == f"sha256:{expected}"
+    assert digest != _system_prompt_digest(
+        [
+            {"role": "system", "content": "c"},
+            {"role": "system", "content": "ab"},
+        ],
+    )
+    assert digest != _system_prompt_digest(
+        [{"role": "system", "content": "abc"}],
+    )
+    assert (
+        _system_prompt_digest([{"role": "user", "content": "ignored"}]) is None
+    )
+    assert (
+        _system_prompt_digest(
+            [{"role": "system", "content": "invalid surrogate: \ud800"}],
+        )
+        is None
+    )
+    assert (
+        _system_prompt_digest(
+            [
+                {"role": "system", "content": "text"},
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": "block"}],
+                },
+            ],
+        )
+        is None
+    )
 
 
 def test_context_carrier_and_nested_binding_are_isolated():
@@ -97,7 +154,7 @@ def test_span_emits_self_contained_end_and_preserves_exception():
         with bind_context(attempt):
             with obs.span("Tool", "execute", name="registered.tool") as span:
                 assert span.event("retry")
-                assert span.event("retry")
+                assert span.event("model.retry_scheduled")
                 raise RuntimeError("business failure")
     obs.end_run(context, status="failed")
     assert emitter.close() == 0
@@ -115,8 +172,42 @@ def test_span_emits_self_contained_end_and_preserves_exception():
     incremental = [
         record for record in records if record["event_name"] == "span.event"
     ]
+    assert [record["phase_key"] for record in incremental] == [
+        "event",
+        "event",
+    ]
     assert [record["local_seq"] for record in incremental] == [0, 1]
     assert records[-1]["producer_id"]
+
+
+def test_run_asset_fact_contains_only_safe_identity_and_digest():
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    observer = Observability(emitter)
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("svc", "source", "tenant", "agent"),
+    )
+
+    with bind_context(context):
+        assert observer.asset_used(
+            "skill",
+            "research",
+            source="runtime_snapshot",
+            digest="sha256:abc123",
+        )
+    emitter.close()
+
+    event = json.loads(stream.getvalue().splitlines()[0])
+    assert event["event_name"] == "asset.used"
+    assert "parent_obs_span_id" not in event
+    assert event["asset"] == {
+        "asset_type": "skill",
+        "asset_id": "research",
+        "asset_source": "runtime_snapshot",
+        "asset_digest": "sha256:abc123",
+    }
+    assert "content" not in event["asset"]
 
 
 def test_run_end_uses_local_monotonic_duration(monkeypatch):
@@ -158,6 +249,25 @@ def test_run_end_omits_uncomparable_cross_process_duration():
     assert "metrics" not in ended
 
 
+def _assert_not_saved_model_input(payload, *, chat_id, span_id):
+    model_input = next(
+        json.loads(line)
+        for line in payload.splitlines()
+        if '"content_type":"model_input"' in line
+    )
+    assert model_input["event_type"] == "evidence.linked"
+    assert model_input["chat_id"] == chat_id
+    assert model_input["saved_state"] == "not_saved"
+    assert model_input["reference_id"] == span_id
+    assert "message_id" not in model_input
+    assert "private system instructions" not in json.dumps(model_input)
+    from swe.observability.projector import _validate_payload
+
+    assert _validate_payload(json.dumps(model_input))["event_type"] == (
+        "evidence.linked"
+    )
+
+
 @pytest.mark.asyncio
 async def test_model_wrapper_records_usage_without_payload(monkeypatch):
     stream = io.StringIO()
@@ -168,12 +278,13 @@ async def test_model_wrapper_records_usage_without_payload(monkeypatch):
     )
 
     class Model:
+        model_name = "retry-model"
         stream = False
 
         async def __call__(self, *_args, **_kwargs):
             from swe.observability.instrumentation import record_model_retry
 
-            record_model_retry(1, 2, "TimeoutError", 0.01)
+            record_model_retry(1, "TimeoutError", 0.01)
             return SimpleNamespace(
                 content=[{"type": "text", "text": "private answer"}],
                 usage=SimpleNamespace(input_tokens=3, output_tokens=4),
@@ -185,6 +296,10 @@ async def test_model_wrapper_records_usage_without_payload(monkeypatch):
 
     context = Observability().admit_run(
         scope=Scope("svc", "src", "tenant", "agent"),
+        business_ref={
+            "chat_id": "chat-1",
+            "root_question_msgid": "question-1",
+        },
         enabled=True,
     )
     with bind_context(context):
@@ -192,7 +307,7 @@ async def test_model_wrapper_records_usage_without_payload(monkeypatch):
             Model(),
             provider_key="provider",
             model_key="model",
-        )([])
+        )([{"role": "system", "content": "private system instructions"}])
     emitter.close()
     payload = stream.getvalue()
     assert "private answer" not in payload
@@ -207,13 +322,393 @@ async def test_model_wrapper_records_usage_without_payload(monkeypatch):
     assert ended["response_model_key"] == "actual-response-model"
     assert ended["model_key_source"] == "response"
     assert ended["finish_reason"] == "stop"
+    assets = [
+        json.loads(line)
+        for line in payload.splitlines()
+        if '"event_name":"asset.used"' in line
+    ]
+    model_asset = next(
+        record for record in assets if record["asset"]["asset_type"] == "model"
+    )
+    prompt_asset = next(
+        record
+        for record in assets
+        if record["asset"]["asset_type"] == "prompt"
+    )
+    agent_asset = next(
+        record for record in assets if record["asset"]["asset_type"] == "agent"
+    )
+    assert model_asset["asset"]["asset_id"] == "provider/model"
+    assert model_asset["parent_obs_span_id"] == ended["obs_span_id"]
+    assert model_asset["asset"]["asset_version"] == "unknown"
+    prompt_bytes = b"private system instructions"
+    prompt_digest = hashlib.sha256(
+        len(prompt_bytes).to_bytes(8, "big") + prompt_bytes,
+    ).hexdigest()
+    assert prompt_asset["parent_obs_span_id"] == ended["obs_span_id"]
+    assert prompt_asset["asset"] == {
+        "asset_type": "prompt",
+        "asset_id": "system_prompt",
+        "asset_source": "runtime_model_request",
+        "asset_version": "unknown",
+        "asset_digest": f"sha256:{prompt_digest}",
+    }
+    from swe.observability.projector import _validate_payload
+
+    assert _validate_payload(json.dumps(prompt_asset))["event_name"] == (
+        "asset.used"
+    )
+    assert agent_asset["asset"]["asset_id"] == "agent"
+    assert agent_asset["asset"]["asset_version"] == "unknown"
+    assert "private answer" not in json.dumps(assets)
+    assert "private system instructions" not in json.dumps(assets)
     retry = next(
         json.loads(line)
         for line in payload.splitlines()
-        if '"event_name":"span.event"' in line
+        if '"event_type":"model.retry_scheduled"' in line
     )
-    assert retry["event_kind"] == "retry"
+    assert retry["event_type"] == "model.retry_scheduled"
     assert retry["error_type"] == "TimeoutError"
+    evidence = next(
+        json.loads(line)
+        for line in payload.splitlines()
+        if '"event_type":"evidence.linked"' in line
+    )
+    assert evidence["chat_id"] == "chat-1"
+    assert evidence["message_id"] == "question-1"
+    assert evidence["content_type"] == "user_question"
+    assert evidence["saved_state"] == "available"
+    assert evidence["obs_span_id"] == ended["obs_span_id"]
+    assert "private answer" not in json.dumps(evidence)
+    _assert_not_saved_model_input(
+        payload,
+        chat_id="chat-1",
+        span_id=ended["obs_span_id"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_assistant_evidence_does_not_guess_reused_response_id(
+    monkeypatch,
+):
+    from swe.observability.instrumentation import (
+        emit_assistant_answer_evidence,
+    )
+
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+
+    class Model:
+        model_name = "test-model"
+        stream = False
+
+        async def __call__(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                id="provider-reused-response-id",
+                content=[{"type": "text", "text": "private answer"}],
+            )
+
+    context = Observability().admit_run(
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+        business_ref={"chat_id": "chat-a"},
+        enabled=True,
+    )
+    with bind_context(context):
+        wrapper = ObservabilityModelWrapper(
+            Model(),
+            provider_key="provider",
+            model_key="test-model",
+        )
+        first = await wrapper([])
+        second = await wrapper([])
+        assert first.id == second.id
+        assert not emit_assistant_answer_evidence(
+            chat_id="chat-a",
+            message_id="message-a",
+            invocation_id=first.id,
+            has_tool_use=False,
+            has_visible_answer=True,
+        )
+    emitter.close()
+
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    assert not any(
+        event.get("event_type") == "evidence.linked"
+        and event.get("content_type") == "assistant_answer"
+        for event in events
+    )
+    assert "private answer" not in stream.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_model_span_uses_bound_react_step_index(monkeypatch):
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+
+    class Model:
+        model_name = "step-model"
+        stream = False
+
+        async def __call__(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                content=[{"type": "text", "text": "private answer"}],
+                usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+                metadata={},
+            )
+
+    context = Observability().admit_run(
+        scope=Scope("svc", "src", "tenant", "agent"),
+        enabled=True,
+    )
+    from swe.observability.instrumentation import bind_agent_step_index
+
+    with bind_context(context), bind_agent_step_index(3):
+        await ObservabilityModelWrapper(
+            Model(),
+            provider_key="provider",
+            model_key="step-model",
+        )([])
+    emitter.close()
+    records = [json.loads(line) for line in stream.getvalue().splitlines()]
+    started = next(
+        record
+        for record in records
+        if record["event_name"] == "span.started"
+        and record.get("span_type") == "LLM"
+    )
+    assert started["step_index"] == 3
+    assert "private answer" not in stream.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_model_wrapper_records_model_call_exception_without_details(
+    monkeypatch,
+):
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+
+    class Model:
+        model_name = "retry-model"
+        stream = False
+
+        async def __call__(self, *_args, **_kwargs):
+            raise RuntimeError("private provider detail")
+
+    async def on_attempt(index, streaming):
+        record_model_request_attempt(index, streaming=streaming)
+
+    retried = RetryChatModel(
+        Model(),
+        retry_config=RetryConfig(enabled=False, max_retries=1),
+        rate_limit_config=RateLimitConfig(max_qpm=0),
+        on_request_attempt=on_attempt,
+    )
+    context = Observability().admit_run(
+        scope=Scope("svc", "src", "tenant", "agent"),
+        enabled=True,
+    )
+    with bind_context(Observability().start_attempt(context)):
+        with pytest.raises(RuntimeError, match="private provider detail"):
+            await ObservabilityModelWrapper(
+                retried,
+                provider_key="provider",
+                model_key="retry-model",
+            )([])
+    assert emitter.close() == 0
+    payload = stream.getvalue()
+    records = [json.loads(line) for line in payload.splitlines()]
+    ended = [
+        record for record in records if record["event_name"] == "span.ended"
+    ]
+    assert {
+        (
+            record["operation"],
+            record["status"],
+            record["technical_status"],
+            record["error_type"],
+        )
+        for record in ended
+    } == {
+        ("chat", "failed", "ERROR", "RuntimeError"),
+        ("request_attempt", "failed", "ERROR", "RuntimeError"),
+    }
+    assert "private provider detail" not in payload
+
+
+@pytest.mark.asyncio
+async def test_model_wrapper_records_stream_iteration_exception_and_closes_source(
+    monkeypatch,
+):
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+    source_closed = asyncio.Event()
+
+    class Model:
+        model_name = "retry-model"
+        stream = True
+
+        async def __call__(self, *_args, **_kwargs):
+            async def chunks():
+                try:
+                    yield SimpleNamespace(
+                        content=[
+                            {"type": "text", "text": "private visible text"},
+                        ],
+                    )
+                    raise RuntimeError("private stream detail")
+                finally:
+                    source_closed.set()
+
+            return chunks()
+
+    async def on_attempt(index, streaming):
+        record_model_request_attempt(index, streaming=streaming)
+
+    retried = RetryChatModel(
+        Model(),
+        retry_config=RetryConfig(enabled=False, max_retries=1),
+        rate_limit_config=RateLimitConfig(max_qpm=0),
+        on_request_attempt=on_attempt,
+    )
+    context = Observability().admit_run(
+        scope=Scope("svc", "src", "tenant", "agent"),
+        enabled=True,
+    )
+    with bind_context(Observability().start_attempt(context)):
+        chunks = await ObservabilityModelWrapper(
+            retried,
+            provider_key="provider",
+            model_key="retry-model",
+        )([])
+        with pytest.raises(RuntimeError, match="private stream detail"):
+            async for _chunk in chunks:
+                pass
+    assert emitter.close() == 0
+    payload = stream.getvalue()
+    records = [json.loads(line) for line in payload.splitlines()]
+    ended = [
+        record for record in records if record["event_name"] == "span.ended"
+    ]
+    assert {
+        (
+            record["operation"],
+            record["status"],
+            record["technical_status"],
+            record["error_type"],
+        )
+        for record in ended
+    } == {
+        ("chat", "failed", "ERROR", "RuntimeError"),
+        ("request_attempt", "failed", "ERROR", "RuntimeError"),
+    }
+    assert source_closed.is_set()
+    assert "private stream detail" not in payload
+    assert "private visible text" not in payload
+
+
+@pytest.mark.asyncio
+async def test_model_retry_projects_request_attempt_spans_without_duplicate_usage(
+    monkeypatch,
+):
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+
+    class Model:
+        model_name = "retry-model"
+        stream = False
+
+        def __init__(self):
+            self.calls = 0
+
+        async def __call__(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return SimpleNamespace(content=[])
+            return SimpleNamespace(
+                content=[{"type": "text", "text": "private answer"}],
+            )
+
+    async def on_attempt(index, streaming):
+        record_model_request_attempt(index, streaming=streaming)
+
+    model = Model()
+    retried = RetryChatModel(
+        model,
+        retry_config=RetryConfig(enabled=False, max_retries=1),
+        rate_limit_config=RateLimitConfig(max_qpm=0),
+        on_request_attempt=on_attempt,
+    )
+    context = Observability().admit_run(
+        scope=Scope("svc", "src", "tenant", "agent"),
+        enabled=True,
+    )
+    with bind_context(Observability().start_attempt(context)):
+        await ObservabilityModelWrapper(
+            retried,
+            provider_key="provider",
+            model_key="retry-model",
+        )([])
+    assert emitter.close() == 0
+    records = [json.loads(line) for line in stream.getvalue().splitlines()]
+    attempt_starts = [
+        record
+        for record in records
+        if record.get("span_type") == "LLM"
+        and record.get("operation") == "request_attempt"
+        and record["event_name"] == "span.started"
+    ]
+    attempt_ends = [
+        record
+        for record in records
+        if record.get("span_type") == "LLM"
+        and record.get("operation") == "request_attempt"
+        and record["event_name"] == "span.ended"
+    ]
+    assert model.calls == 2
+    assert [record["request_attempt_index"] for record in attempt_starts] == [
+        1,
+        2,
+    ]
+    assert [record["status"] for record in attempt_ends] == [
+        "failed",
+        "succeeded",
+    ]
+    assert attempt_starts[1]["links"] == [
+        {
+            "relation_type": "retry_of",
+            "obs_span_id": attempt_starts[0]["obs_span_id"],
+        },
+    ]
+    logical_end = next(
+        record
+        for record in records
+        if record.get("span_type") == "LLM"
+        and record.get("operation") == "chat"
+        and record["event_name"] == "span.ended"
+    )
+    assert logical_end["metrics"].get("input_tokens") is None
+    assert logical_end["metrics"].get("output_tokens") is None
+    assert "private answer" not in stream.getvalue()
 
 
 @pytest.mark.asyncio
@@ -371,6 +866,52 @@ async def test_model_wrapper_keeps_empty_stream_usage_unknown(
     assert "usage_known" not in ended["metrics"]
     assert "first_chunk_us" not in ended["metrics"]
     assert "first_visible_text_us" not in ended["metrics"]
+
+
+@pytest.mark.asyncio
+async def test_model_wrapper_records_nonstreaming_request_cancellation(
+    monkeypatch,
+):
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+    request_started = asyncio.Event()
+
+    class Model:
+        stream = False
+
+        async def __call__(self, *_args, **_kwargs):
+            request_started.set()
+            await asyncio.Event().wait()
+
+    context = Observability().admit_run(
+        scope=Scope("svc", "src", "tenant", "agent"),
+        enabled=True,
+    )
+    with bind_context(context):
+        task = asyncio.create_task(
+            ObservabilityModelWrapper(
+                Model(),
+                provider_key="provider",
+                model_key="model",
+            )([{"text": "private request body"}]),
+        )
+    await asyncio.wait_for(request_started.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert emitter.close() == 0
+    records = [json.loads(line) for line in stream.getvalue().splitlines()]
+    ended = [
+        record for record in records if record["event_name"] == "span.ended"
+    ]
+    assert len(ended) == 1
+    assert ended[0]["operation"] == "chat"
+    assert ended[0]["status"] == "cancelled"
+    assert "private request body" not in stream.getvalue()
 
 
 @pytest.mark.asyncio
@@ -668,7 +1209,9 @@ def test_event_attributes_cannot_replace_envelope_identity():
         )
     emitter.close()
     start, end = [
-        json.loads(line) for line in stream.getvalue().splitlines()[1:]
+        record
+        for record in map(json.loads, stream.getvalue().splitlines())
+        if record["event_name"] in {"span.started", "span.ended"}
     ]
     assert start["obs_run_id"] == context.obs_run_id
     assert start["event_name"] == "span.started"

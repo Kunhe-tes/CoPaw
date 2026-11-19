@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable, Iterator
 
 from ..config.context import (
     get_current_effective_tenant_id,
@@ -17,6 +19,9 @@ from .instrumentation import Observability
 from .models import ObservabilityContext, Scope
 
 _OBSERVABILITY = Observability()
+_APPROVAL_RESOLUTION_OBSERVER: ContextVar[
+    Callable[[ObservabilityContext | None, str, bool], None] | None
+] = ContextVar("agentobs_approval_resolution_observer", default=None)
 _TERMINAL_RUN_STATUS = {
     "completed": "succeeded",
     "failed": "failed",
@@ -25,6 +30,30 @@ _TERMINAL_RUN_STATUS = {
     "timed_out": "timed_out",
     "rejected": "rejected",
 }
+
+
+@contextmanager
+def observe_approval_resolution(
+    callback: Callable[[ObservabilityContext | None, str, bool], None],
+) -> Iterator[None]:
+    token: Token = _APPROVAL_RESOLUTION_OBSERVER.set(callback)
+    try:
+        yield
+    finally:
+        _APPROVAL_RESOLUTION_OBSERVER.reset(token)
+
+
+def report_approval_resolution(
+    context: ObservabilityContext | None,
+    decision: str,
+    changed: bool,
+) -> None:
+    callback = _APPROVAL_RESOLUTION_OBSERVER.get()
+    if callback is not None:
+        try:
+            callback(context, decision, changed)
+        except Exception:
+            return
 
 
 def prepare_query_run(

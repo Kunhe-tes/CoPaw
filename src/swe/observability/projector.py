@@ -93,7 +93,7 @@ _REQUIRED_EVENT_FIELDS = {
         "metrics",
         "quality",
     ),
-    "span.event": ("obs_span_id", "event_kind"),
+    "span.event": ("obs_span_id", "event_type"),
     "approval.requested": ("approval_request_id",),
     "approval.resolved": ("approval_request_id", "decision", "ended_at"),
     "subagent.started": ("obs_span_id", "subagent"),
@@ -102,6 +102,9 @@ _REQUIRED_EVENT_FIELDS = {
 }
 _RUN_TERMINAL_STATUSES = frozenset(
     {"succeeded", "failed", "cancelled", "timed_out", "rejected"},
+)
+_APPROVAL_DECISIONS = frozenset(
+    {"approved", "denied", "timed_out", "superseded"},
 )
 _TERMINAL_FACT_SOURCES = frozenset({"business_settlement"})
 
@@ -113,6 +116,60 @@ def _timestamp(value: Any) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError("timestamp timezone missing")
     return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _attempt_interval_union_us(rows: list[dict[str, Any]]) -> int | None:
+    if not rows:
+        return None
+    intervals = []
+    for row in rows:
+        started = row.get("started_at")
+        ended = row.get("ended_at")
+        if (
+            not isinstance(started, datetime)
+            or not isinstance(ended, datetime)
+            or ended < started
+        ):
+            return None
+        intervals.append((started, ended))
+    intervals.sort()
+
+    def elapsed_us(started: datetime, ended: datetime) -> int:
+        delta = ended - started
+        return (
+            delta.days * 86_400_000_000
+            + delta.seconds * 1_000_000
+            + delta.microseconds
+        )
+
+    total = 0
+    current_start, current_end = intervals[0]
+    for started, ended in intervals[1:]:
+        if started <= current_end:
+            current_end = max(current_end, ended)
+            continue
+        total += elapsed_us(current_start, current_end)
+        current_start, current_end = started, ended
+    total += elapsed_us(current_start, current_end)
+    return total
+
+
+async def _refresh_active_duration(session, run_id: str) -> None:
+    run = await session.fetch_one(
+        "SELECT ended_at FROM swe_agentobs_runs WHERE run_id=%s FOR UPDATE",
+        (run_id,),
+    )
+    if run is None or run["ended_at"] is None:
+        return
+    attempts = await session.fetch_all(
+        "SELECT started_at,ended_at FROM swe_agentobs_attempts "
+        "WHERE run_id=%s ORDER BY started_at ASC,ended_at ASC,attempt_id ASC",
+        (run_id,),
+    )
+    await session.execute(
+        "UPDATE swe_agentobs_runs SET active_duration_us=%s WHERE run_id=%s",
+        (_attempt_interval_union_us(attempts), run_id),
+    )
 
 
 def _validate_payload(raw: str) -> dict[str, Any]:
@@ -136,15 +193,28 @@ def _validate_event_fields(event: dict[str, Any]) -> None:
             raise ValueError("invalid_run_terminal_status")
         if event["terminal_fact_source"] not in _TERMINAL_FACT_SOURCES:
             raise ValueError("invalid_terminal_fact_source")
+    if name == "approval.resolved":
+        if event["decision"] not in _APPROVAL_DECISIONS:
+            raise ValueError("invalid_approval_decision")
+    if name == "span.ended":
+        quality = event.get("quality")
+        if not isinstance(quality, dict) or any(
+            key in quality and not isinstance(quality[key], bool)
+            for key in ("start_observed", "end_observed")
+        ):
+            raise ValueError("invalid_span_quality")
     if name in {"attempt.ended", "span.ended", "subagent.ended"}:
-        if event["status"] not in {
+        allowed_statuses = {
             "succeeded",
             "failed",
             "cancelled",
             "timed_out",
             "rejected",
             "waiting_approval",
-        }:
+        }
+        if name == "span.ended":
+            allowed_statuses.add("partial")
+        if event["status"] not in allowed_statuses:
             raise ValueError("invalid_operation_terminal_status")
 
 
@@ -318,6 +388,36 @@ def _validate_lifecycle_values(event: dict[str, Any]) -> None:
         "request_fallback",
     }:
         raise ValueError("invalid_model_key_source")
+    if event["event_name"] == "span.event":
+        if event.get("phase_key") != "event":
+            raise ValueError("invalid_event_slot")
+        if event.get("event_type") not in {
+            "model.retry_scheduled",
+            "model.request_attempt_started",
+            "tool.retry_scheduled",
+            "tool.recovered",
+            "evidence.pending",
+            "evidence.linked",
+            "link.added",
+            "retry",
+        }:
+            raise ValueError("invalid_event_type")
+    if event["event_name"] == "asset.used":
+        asset = event.get("asset")
+        if not isinstance(asset, dict) or not asset:
+            raise ValueError("invalid_asset")
+        for key in (
+            "asset_type",
+            "asset_id",
+            "asset_version",
+            "asset_digest",
+            "asset_source",
+        ):
+            value = asset.get(key)
+            if value is not None and (
+                not isinstance(value, str) or not _TOKEN.fullmatch(value)
+            ):
+                raise ValueError("invalid_asset")
     tool = event.get("tool")
     if (
         event.get("span_type") == "Tool"
@@ -327,9 +427,10 @@ def _validate_lifecycle_values(event: dict[str, Any]) -> None:
         raise ValueError("invalid_tool_metadata")
     if tool is not None:
         _validate_tool_fields(event, tool)
+    _validate_links(event)
     _timestamp(event.get("occurred_at"))
     _timestamp(event.get("run_started_at"))
-    for key in ("attempt_index", "step_index"):
+    for key in ("attempt_index", "step_index", "request_attempt_index"):
         value = event.get(key)
         if value is not None and (
             isinstance(value, bool)
@@ -364,10 +465,40 @@ def _validate_lifecycle_values(event: dict[str, Any]) -> None:
         raise ValueError("event_too_large")
 
 
+def _validate_links(event: dict[str, Any]) -> None:
+    links = event.get("links")
+    if links is None:
+        return
+    if not isinstance(links, list) or len(links) > 32:
+        raise ValueError("invalid_links")
+    for link in links:
+        if not isinstance(link, dict):
+            raise ValueError("invalid_link")
+        if link.get("relation_type") not in {
+            "retry_of",
+            "retry_next",
+            "cause",
+            "recovered_by",
+        }:
+            raise ValueError("invalid_link_relation")
+        if link.get("obs_run_id", event["obs_run_id"]) != event["obs_run_id"]:
+            raise ValueError("cross_run_link_not_supported")
+        targets = [link.get("obs_attempt_id"), link.get("obs_span_id")]
+        if sum(target is not None for target in targets) != 1:
+            raise ValueError("invalid_link_target")
+        for target in targets:
+            if target is not None:
+                try:
+                    if str(UUID(target)) != target:
+                        raise ValueError("invalid_link_target")
+                except (ValueError, TypeError) as exc:
+                    raise ValueError("invalid_link_target") from exc
+
+
 def _validate_tool_fields(event: dict[str, Any], tool: Any) -> None:
     if not isinstance(tool, dict):
         raise ValueError("invalid_tool_metadata")
-    if event.get("span_type") != "Tool":
+    if event.get("span_type") not in {"Tool", "Guard"}:
         raise ValueError("tool_metadata_on_non_tool_span")
     if not isinstance(tool.get("tool_key"), str) or not _TOKEN.fullmatch(
         tool["tool_key"],
@@ -377,11 +508,17 @@ def _validate_tool_fields(event: dict[str, Any], tool: Any) -> None:
         tool["tool_call_id"],
     ):
         raise ValueError("invalid_tool_identity")
-    try:
-        if str(UUID(tool["tool_execution_id"])) != tool["tool_execution_id"]:
-            raise ValueError("invalid_tool_identity")
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("invalid_tool_identity") from exc
+    if event.get("span_type") == "Tool":
+        try:
+            if (
+                str(UUID(tool["tool_execution_id"]))
+                != tool["tool_execution_id"]
+            ):
+                raise ValueError("invalid_tool_identity")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("invalid_tool_identity") from exc
+    elif "tool_execution_id" in tool:
+        raise ValueError("guard_must_not_claim_tool_execution")
     if tool.get("executor_kind") not in {"agent_tool", "mcp_tool"}:
         raise ValueError("invalid_tool_executor")
     for key, minimum, maximum in (
@@ -629,9 +766,9 @@ class InboxProjector:
         is_run_fact = name.startswith("run.")
         await session.execute(
             "INSERT IGNORE INTO swe_agentobs_runs "
-            "(run_id,service_unit_key,source_key,tenant_key,agent_key,chat_key,root_question_key,capture_enabled,"
+            "(run_id,service_unit_key,source_key,tenant_key,agent_key,chat_key,root_question_key,session_key,capture_enabled,"
             "started_at,ended_at,status,quality,terminal_fact_source,metadata_text) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (
                 run_id,
                 scope["service_unit_id"].encode(),
@@ -640,6 +777,7 @@ class InboxProjector:
                 scope["agent_id"].encode(),
                 business.get("chat_id", "").encode(),
                 business.get("root_question_msgid", "").encode(),
+                business.get("session_id", "").encode() or None,
                 int(bool(event["capture_enabled"])),
                 _timestamp(event["run_started_at"]),
                 (
@@ -654,7 +792,7 @@ class InboxProjector:
             ),
         )
         stored = await session.fetch_one(
-            "SELECT service_unit_key,source_key,tenant_key,agent_key,chat_key,root_question_key,"
+            "SELECT service_unit_key,source_key,tenant_key,agent_key,chat_key,root_question_key,session_key,"
             "capture_enabled,ended_at,status FROM swe_agentobs_runs WHERE run_id=%s FOR UPDATE",
             (run_id,),
         )
@@ -673,6 +811,7 @@ class InboxProjector:
         for column, field in (
             ("chat_key", "chat_id"),
             ("root_question_key", "root_question_msgid"),
+            ("session_key", "session_id"),
         ):
             value = business.get(field)
             if value and stored[column] != value.encode():
@@ -704,9 +843,9 @@ class InboxProjector:
             is_run_fact = name.startswith("run.")
             await session.execute(
                 "INSERT INTO swe_agentobs_runs "
-                "(run_id,service_unit_key,source_key,tenant_key,agent_key,chat_key,root_question_key,capture_enabled,"
+                "(run_id,service_unit_key,source_key,tenant_key,agent_key,chat_key,root_question_key,session_key,capture_enabled,"
                 "started_at,ended_at,status,quality,terminal_fact_source,duration_us,metadata_text) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON DUPLICATE KEY UPDATE status=IF(VALUES(ended_at) IS NOT NULL,COALESCE(VALUES(status),status),"
                 "IF(ended_at IS NULL AND VALUES(status) IS NOT NULL AND "
                 "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(VALUES(metadata_text),'$.occurred_at')),'') > "
@@ -728,6 +867,7 @@ class InboxProjector:
                     scope["agent_id"].encode(),
                     business.get("chat_id", "").encode(),
                     business.get("root_question_msgid", "").encode(),
+                    business.get("session_id", "").encode() or None,
                     int(bool(event["capture_enabled"])),
                     started,
                     (
@@ -838,7 +978,10 @@ class InboxProjector:
                     (
                         "observed"
                         if is_end
-                        and event.get("started_at")
+                        and (event.get("quality") or {}).get(
+                            "start_observed",
+                            bool(event.get("started_at")),
+                        )
                         and event.get("ended_at")
                         else "partial"
                     ),
@@ -863,3 +1006,37 @@ class InboxProjector:
                     metadata,
                 ),
             )
+            if (
+                is_end
+                and event.get("span_type") == "LLM"
+                and event.get("operation") == "chat"
+            ):
+                await session.execute(
+                    "UPDATE swe_agentobs_runs SET "
+                    "llm_calls=(SELECT COUNT(*) FROM swe_agentobs_spans "
+                    "WHERE run_id=%s AND span_type='LLM' AND operation='chat' "
+                    "AND ended_at IS NOT NULL), "
+                    "input_tokens=(SELECT CASE WHEN COUNT(*)=COUNT(input_tokens) "
+                    "THEN COALESCE(SUM(input_tokens),0) ELSE NULL END "
+                    "FROM swe_agentobs_spans WHERE run_id=%s AND span_type='LLM' "
+                    "AND operation='chat' AND ended_at IS NOT NULL), "
+                    "output_tokens=(SELECT CASE WHEN COUNT(*)=COUNT(output_tokens) "
+                    "THEN COALESCE(SUM(output_tokens),0) ELSE NULL END "
+                    "FROM swe_agentobs_spans WHERE run_id=%s AND span_type='LLM' "
+                    "AND operation='chat' AND ended_at IS NOT NULL), "
+                    "agent_loops=(SELECT CASE "
+                    "WHEN COUNT(*)=COUNT(step_index) "
+                    "THEN COUNT(DISTINCT CONCAT("
+                    "COALESCE(parent_span_id,attempt_id), ':', step_index)) "
+                    "ELSE NULL END FROM swe_agentobs_spans "
+                    "WHERE run_id=%s AND span_type='LLM' AND operation='chat' "
+                    "AND ended_at IS NOT NULL) "
+                    "WHERE run_id=%s",
+                    (run_id, run_id, run_id, run_id, run_id),
+                )
+        if run_id and (
+            name == "run.ended"
+            or name == "attempt.started"
+            or (name == "attempt.ended" and event.get("ended_at"))
+        ):
+            await _refresh_active_duration(session, run_id)

@@ -81,6 +81,7 @@ def test_query_run_uses_safe_scope_and_emits_accepted_running_and_terminal(
     names = [event["event_name"] for event in emitter.events]
     assert names == [
         "run.accepted",
+        "asset.used",
         "run.state",
         "attempt.started",
         "attempt.ended",
@@ -108,6 +109,43 @@ def test_query_run_uses_safe_scope_and_emits_accepted_running_and_terminal(
     )
 
 
+@pytest.mark.parametrize(
+    ("admission_enabled", "later_enabled", "expected_events"),
+    [
+        (True, False, True),
+        (False, True, False),
+    ],
+)
+def test_query_run_keeps_admission_capture_snapshot(
+    monkeypatch,
+    admission_enabled,
+    later_enabled,
+    expected_events,
+):
+    emitter = _setup(monkeypatch)
+    monkeypatch.setattr(
+        runner_lifecycle,
+        "capture_enabled",
+        lambda: admission_enabled,
+    )
+    context = runner_lifecycle.admit_query_run(
+        SimpleNamespace(agent_id="agent-a"),
+        _request(),
+        [_message()],
+    )
+    monkeypatch.setattr(
+        runner_lifecycle,
+        "capture_enabled",
+        lambda: later_enabled,
+    )
+    attempt = runner_lifecycle.start_query_attempt(context)
+    runner_lifecycle.finish_query_run(context, attempt, "completed")
+
+    assert bool(emitter.events) is expected_events
+    if context is not None:
+        assert context.capture_enabled is admission_enabled
+
+
 def test_query_waiting_for_approval_does_not_end_run(monkeypatch):
     emitter = _setup(monkeypatch)
     context = runner_lifecycle.admit_query_run(
@@ -126,6 +164,7 @@ def test_query_waiting_for_approval_does_not_end_run(monkeypatch):
 
     assert [event["event_name"] for event in emitter.events] == [
         "run.accepted",
+        "asset.used",
         "run.state",
         "attempt.started",
         "run.state",
@@ -398,7 +437,7 @@ async def test_consecutive_approvals_keep_root_run_and_attempt_chain(
             query=f"/approve {approval_id}",
         )
         assert duplicate is None
-        assert duplicate_decision is None
+        assert duplicate_decision == "unresolved"
         service.pending.status = "pending"
         predecessor = current_attempt
 
