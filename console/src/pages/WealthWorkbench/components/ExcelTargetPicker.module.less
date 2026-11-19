@@ -3,7 +3,8 @@
 .methods {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px 20px;
+  align-items: center;
+  gap: 8px 24px;
   margin: 0 0 16px;
   padding: 0;
   border: 0;
@@ -11,10 +12,11 @@
   color: var(--ink);
 }
 
-.methods legend {
-  margin-bottom: 6px;
-  color: var(--text);
+.methodLabel {
+  color: var(--text, #50658f);
   font-size: 13px;
+  font-weight: 400;
+  line-height: 32px;
 }
 
 .methods label {
@@ -22,11 +24,19 @@
   gap: 6px;
   align-items: center;
   min-height: 32px;
+  font-size: 14px;
+  font-weight: 400;
+  white-space: nowrap;
   cursor: pointer;
 }
 
 .methods input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  flex: none;
   accent-color: var(--blue);
+  cursor: pointer;
 }
 
 .panel {
@@ -192,4 +202,8 @@ details.feedback {
 
 .importReview .actions {
   margin-top: 10px;
+}
+
+.roster .missingOrg {
+  color: #8b5e00;
 }

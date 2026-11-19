@@ -1290,8 +1290,17 @@ export default function Create() {
               </h3>
               {excelAllowed ? (
                 <>
-                  <fieldset className={excelStyles.methods}>
-                    <legend>分发方式</legend>
+                  <div
+                    className={excelStyles.methods}
+                    role="radiogroup"
+                    aria-labelledby="wealth-distribution-label"
+                  >
+                    <span
+                      id="wealth-distribution-label"
+                      className={excelStyles.methodLabel}
+                    >
+                      分发方式
+                    </span>
                     <label>
                       <input
                         type="radio"
@@ -1321,7 +1330,7 @@ export default function Create() {
                       />
                       {editingId ? "Excel 名单管理" : "上传 Excel 名单"}
                     </label>
-                  </fieldset>
+                  </div>
                   {selection.visitedInstitution && (
                     <div hidden={useExcel}>
                       <TargetPicker key={planFormVersion} />

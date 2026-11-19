@@ -11,13 +11,16 @@
 - 使用真实登录 SAP 用户 ID 判断白名单权限，默认关闭。仅在已有分发目标选择权限的角色中开放。运维模式切换后的分行和角色不授予导入能力。外部服务必须依据真实登录身份落实授权，前端负责入口和提交路径控制。
 - 对符合资格的用户，在分发步骤顶部展示互斥单选。新建默认 Excel，切换时保留当前表单中的两份选择，发布确认只读取当前方式。白名单用户编辑时默认在 Excel 名单管理中回显已保存的收件人，可直接移除人员。上传增量表后按 ID 跳过当前名单已有人员，确认后追加。上传完整表经过确认后整体替换。取消导入保留当前名单，预览期间先确认或取消再按 Excel 方式保存。新建、关闭和上下文切换时清理导入状态。
 - Excel 区域提供模板下载、上传和更换文件。核对区默认展示全部人员卡片，每页 24 人。每张卡片展示姓名、SAP 用户 ID、分行和机构。支持全文搜索、分行下拉筛选和逐人移除，发布确认使用剩余名单。更换文件整体替换名单。异常仍按行号提示。
-- 固定模板使用一张名单表，A 列为文本格式的客户经理ID，B 列客户经理姓名选填。外部服务按 ID 匹配和去重，预览姓名以服务返回为准。服务端应兼容原单列 SAP 用户 ID 模板并保留前导零。
+- 固定模板使用一张名单表，A 列为文本格式的客户经理ID，B 列客户经理姓名，两列均为必填。外部服务按 ID 匹配和去重，预览姓名以服务返回为准。服务端校验 ID 和姓名不能为空且内容有效，ID 保留前导零。
 - 前端只检查文件扩展名和 5 MB 文件上限。通过统一请求和鉴权一次上传原始文件，由外部服务解析工作簿、检查解压体积和行格式、匹配人员并返回预览结果。前端映射为现有目标结构，展示逐行错误；请求失败可重试，过期请求不能覆盖当前文件或表单。
 - 将当前确认的收件人交给现有发布流程。修改确认显示相对原名单的新增人数、移除人数和最终人数。规划与场景仍以发起上下文为准。Excel 目标使用各自的分行和机构编码。
 
 ## Risks and verification
 
-- 前端白名单配置为 `wealthExcelDistributionUsers`。暂定接口为 `POST /agent/workspace/users/import-excel`，`multipart/form-data` 的 `file` 字段传原始文件。成功响应为 `{ code: "200", data: { users, errors?, duplicates? } }`。人员字段沿用智拓命名 `sapID`、`userName`、`branchID`、`subBranchID`、`branchName`、`subBranchName`。逐行错误为带行号的字符串列表，重复数为非负整数。接口路径、字段及上传权限仍需外部服务联调。
+- 前端白名单配置为 `wealthExcelDistributionUsers`。Excel 解析接口为 `POST /agent/workspace/claw-customer-list/parse`，`multipart/form-data` 的 `file` 字段传原始文件。响应为 `{ code: "200", message, success, data: { successList, successCount, failedCount, failedRows } }`。
+- 人员字段 `sapId/sapName` 映射为发布目标 `sapId/name`。一级分行 `frsBbkOrgId/frsBbkOrgNm` 映射为 `bbkId/branchName`。机构按网点 `brnOrgId/brnOrgNm`、综合支行 `cprhBrnOrgId/cprhBrnOrgNm`、二级分行 `bbkOrgId/bbkOrgNm`、一级分行的顺序选择首个有效机构编码，名称使用对应层级，缺少名称时显示该编码。选中编码映射为发布目标 `bbkOrgId`。
+- `successList` 包括查询状态为 0 的条目。`queryStatus=0` 代表机构未查到，仍按返回的 ID 和姓名正常展示、追加和发布，机构编码留空，卡片和汇总标注「机构信息未查到」，这类人员不计入分行数。状态为 1 但缺少必要机构编码时提示异常。重复 ID 信息一致时去重，否则提示冲突。
+- `failedRows` 为数字行号数组，例如 `[1,3,5]`。提示对应 Excel 行的客户经理ID或姓名为空或有误，请核对后重新上传。前端不根据 `successCount` 推断所有人员都能分发。
 - 外部服务应独立校验真实登录人的 Excel 导入授权、原始文件大小和解压体积。现有发布接口的跨分行支持和授权校验仍是启用白名单的前置条件。
 - 使用真实 Chromium 108 或对应 360 内核、当前浏览器及适用的 `hideMenu=true` 场景验收上传、预览和发布。
 - 白名单启用前先验证非白名单的普通和运维流程，以及跨分行收件人确实进入下发范围。

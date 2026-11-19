@@ -118,8 +118,8 @@ export function ExcelTargetPicker({
           </strong>
           <p>
             {editing
-              ? "追加时仅填写要新增的人员，替换时填写最终的完整名单。"
-              : "按模板填写文本格式的客户经理ID，姓名选填。每行一人。"}
+              ? "追加时填写新增人员，替换时填写完整名单。客户经理ID和姓名均为必填。"
+              : "客户经理ID和姓名均为必填，ID使用文本格式。每行一人。"}
             文件不超过 {MAX_EXCEL_FILE_MB} MB。
           </p>
         </div>
@@ -182,9 +182,7 @@ export function ExcelTargetPicker({
       )}
       {issues.length > 0 && (
         <details className={styles.feedback} open>
-          <summary>
-            有 {issues.length} 行待修正，请修改 Excel 后重新上传
-          </summary>
+          <summary>名单有待处理问题，请核对后重新上传</summary>
           <ul
             className={styles.scrollList}
             tabIndex={0}
@@ -304,7 +302,7 @@ export function ExcelRosterSummary({
       groups.set(id, group);
     }
     for (const [id, group] of groups) {
-      group.name ||= BBK_ID_TO_NAME_MAP[id] || id || "未提供分行";
+      group.name ||= BBK_ID_TO_NAME_MAP[id] || id || "机构信息未查到";
     }
     return groups;
   }, [people]);
@@ -334,7 +332,8 @@ export function ExcelRosterSummary({
         <strong>
           {countLabel} {people.length} 人
         </strong>{" "}
-        · {branches.size} 家分行
+        · {branches.size - (branches.has("") ? 1 : 0)} 家分行
+        {branches.has("") && ` · ${branches.get("")!.count} 人机构信息未查到`}
         {duplicates > 0 && ` · 已去除 ${duplicates} 条重复记录`}
       </p>
       {people.length ? (
@@ -383,6 +382,7 @@ export function ExcelRosterSummary({
                   (currentPage + 1) * PEOPLE_PER_PAGE,
                 )
                 .map((person) => {
+                  const missingOrg = !person.bbkId && !person.bbkOrgId;
                   const branchName = branches.get(person.bbkId ?? "")?.name;
                   const org = person.orgName.trim() || person.bbkOrgId;
                   const metadata = [
@@ -405,7 +405,11 @@ export function ExcelRosterSummary({
                         title={`${person.name} · ${metadata}`}
                       >
                         <strong>{person.name}</strong>
-                        <small>{metadata}</small>
+                        <small
+                          className={missingOrg ? styles.missingOrg : undefined}
+                        >
+                          {metadata}
+                        </small>
                       </span>
                       {onRemove && (
                         <button
