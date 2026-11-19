@@ -88,36 +88,33 @@ async def test_session_insert_uses_explicit_shared_ticket():
     assert params[0] == 1 and params[1] == b"svc"
 
 
-async def test_message_batch_uses_explicit_shared_tickets(monkeypatch):
+async def test_message_batch_only_updates_session_watermark():
     db = Database()
-    captured = []
-
-    async def prepared(template, rows):
-        assert "(id,service_unit_key" in template.prefix
-        captured.extend(rows)
-
-    db.insert_prepared = prepared
     db.execute = AsyncMock()
-    monkeypatch.setattr(
-        message_installs,
-        "_message_values",
-        lambda *args, **kwargs: {
-            key: None for key in message_installs.MESSAGE_FIELDS
+    messages = [
+        message_installs.MessageInstall(f"body:{index}", "memory", "user")
+        for index in range(2)
+    ]
+    request = SimpleNamespace(session_id=10, chat_id=None, turn_id=None)
+    index = SimpleNamespace(
+        blocks={
+            item.block_name: SimpleNamespace(kind="message")
+            for item in messages
         },
     )
-    messages = [
-        SimpleNamespace(layer="memory", context_epoch=0) for _ in range(2)
-    ]
-    request = SimpleNamespace(session_id=10, chat_id=None)
     await message_installs.install_messages(
         SharedIdDatabase(db, JOB),
         request,
         messages,
         None,
-        None,
+        index,
         ({"history_high": 0, "context_epoch": 0}, None, None),
     )
-    assert [row[0] for row in captured] == [1, 2]
+    assert not db.tickets
+    db.execute.assert_awaited_once_with(
+        "UPDATE swe_conversation_sessions SET history_high=%s WHERE id=%s",
+        (2, 10),
+    )
 
 
 async def test_outer_tenant_wrapper_checks_admission_before_ticket_allocation():

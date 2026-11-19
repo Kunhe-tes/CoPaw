@@ -26,7 +26,7 @@ def frozen_manifest():
 
 @pytest.mark.parametrize(
     "kind",
-    ["message", "turn", "session", "chat", "publication"],
+    ["turn", "session", "chat", "publication"],
 )
 async def test_mysql_mixed_tickets_preserve_real_noncontiguous_identities(
     conversation_test_database,
@@ -54,7 +54,7 @@ async def test_mysql_mixed_tickets_preserve_real_noncontiguous_identities(
         journal = MigrationJournal(DMLDatabase(session, owner=db), frozen)
         first = await journal.allocate(
             kind,
-            "svc/source/session/message:0",
+            "svc/source/entity:0",
             **options,
         )
     await db.execute(
@@ -76,7 +76,7 @@ async def test_mysql_mixed_tickets_preserve_real_noncontiguous_identities(
             frozen_manifest(),
         ).allocate_many(
             kind,
-            ["svc/source/session/message:0", "svc/source/session/message:1"],
+            ["svc/source/entity:0", "svc/source/entity:1"],
             **options,
         )
         repeated = await MigrationJournal(
@@ -87,8 +87,8 @@ async def test_mysql_mixed_tickets_preserve_real_noncontiguous_identities(
             list(resumed),
             **options,
         )
-    assert resumed["svc/source/session/message:0"] == first
-    assert resumed["svc/source/session/message:1"]["target_id"] > 10001
+    assert resumed["svc/source/entity:0"] == first
+    assert resumed["svc/source/entity:1"]["target_id"] > 10001
     assert repeated == resumed
     rows = await db.fetch_all(
         "SELECT id,target_id,source_key,operation_key FROM swe_conversation_migration_entries "

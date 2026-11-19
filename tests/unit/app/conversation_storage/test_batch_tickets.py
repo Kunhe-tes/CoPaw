@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""消息批量票据的身份、恢复与事务边界回归。"""
+"""实体批量票据的身份、恢复与事务边界回归。"""
 
 import asyncio
 from contextlib import asynccontextmanager
@@ -83,14 +83,21 @@ class TicketDatabase:
                 row["target_id"] = row["id"]
 
 
+async def test_message_tickets_are_rejected_before_sql():
+    db = TicketDatabase()
+    with pytest.raises(ValueError, match="entity kinds"):
+        await MigrationJournal(db, manifest()).allocate_many("message", ["a"])
+    assert not db.calls
+
+
 async def test_batch_tickets_use_actual_ids_and_resume_mixed_requests():
     db, frozen = TicketDatabase(), manifest()
     journal = MigrationJournal(db, frozen)
-    first = await journal.allocate_many("message", ["source/a", "source/b"])
+    first = await journal.allocate_many("chat", ["source/a", "source/b"])
     assert [first[key]["target_id"] for key in first] == [90, 97]
     restarted = manifest()
     resumed = await MigrationJournal(db, restarted).allocate_many(
-        "message",
+        "chat",
         ["source/b", "source/c"],
     )
     assert resumed["source/b"] == first["source/b"]
@@ -108,7 +115,7 @@ async def test_batch_tickets_do_not_mirror_failed_transaction(failure):
     db, frozen = TicketDatabase(), manifest()
     db.failure = failure
     with pytest.raises(type(failure)):
-        await MigrationJournal(db, frozen).allocate_many("message", ["a"])
+        await MigrationJournal(db, frozen).allocate_many("chat", ["a"])
     assert frozen.data["assignments"] == {}
     assert db.entries == {}
 
@@ -117,12 +124,12 @@ async def test_batch_tickets_reject_duplicates_and_existing_conflicts():
     db, frozen = TicketDatabase(), manifest()
     journal = MigrationJournal(db, frozen)
     with pytest.raises(ValueError, match="duplicate"):
-        await journal.allocate_many("message", ["a", "a"])
-    await journal.allocate_many("message", ["a"])
+        await journal.allocate_many("chat", ["a", "a"])
+    await journal.allocate_many("chat", ["a"])
     next(iter(db.entries.values()))["target_id"] = 999
     before = deepcopy(frozen.data)
     with pytest.raises(ValueError, match="mapping"):
-        await journal.allocate_many("message", ["a", "b"])
+        await journal.allocate_many("chat", ["a", "b"])
     assert frozen.data == before
     assert len(db.entries) == 1
 
@@ -131,14 +138,14 @@ async def test_batch_tickets_are_bounded_and_single_owner():
     db, frozen = TicketDatabase(), manifest()
     journal = MigrationJournal(db, frozen)
     result = await journal.allocate_many(
-        "message",
+        "chat",
         [str(i) for i in range(205)],
     )
     assert len(result) == 205
     assert db.commits == 3
     with pytest.raises(ValueError, match="owner"):
-        await asyncio.create_task(journal.allocate_many("message", ["other"]))
-    assert await journal.allocate_many("message", []) == {}
+        await asyncio.create_task(journal.allocate_many("chat", ["other"]))
+    assert await journal.allocate_many("chat", []) == {}
 
 
 async def test_batch_tickets_reject_packet_oversize_without_sql():
@@ -146,7 +153,7 @@ async def test_batch_tickets_reject_packet_oversize_without_sql():
     db.max_allowed_packet = 2048
     with pytest.raises(ValueError, match="packet"):
         await MigrationJournal(db, manifest()).allocate_many(
-            "message",
+            "chat",
             ["a" * 2048],
         )
     assert db.calls == []
@@ -164,11 +171,11 @@ async def test_unknown_commit_keeps_sql_but_never_updates_mirror():
 
     db, frozen = LostCommit(), manifest()
     with pytest.raises(UnknownCommit):
-        await MigrationJournal(db, frozen).allocate_many("message", ["a"])
+        await MigrationJournal(db, frozen).allocate_many("chat", ["a"])
     assert frozen.data["assignments"] == {}
     db.transaction = TicketDatabase.transaction.__get__(db)
     recovered = await MigrationJournal(db, manifest()).allocate_many(
-        "message",
+        "chat",
         ["a"],
     )
     assert recovered["a"]["target_id"] == 90
@@ -198,7 +205,7 @@ async def test_batch_tickets_read_packet_limit_from_pinned_lease():
 
     db = DMLDatabase(Connection())
     result = await MigrationJournal(db, manifest()).allocate_many(
-        "message",
+        "chat",
         ["a"],
     )
     assert result["a"]["target_id"] == 90
@@ -286,12 +293,12 @@ async def test_publication_batches_reject_changed_scope_and_location(
 @pytest.mark.parametrize("identity", [0, -1, True, "90"])
 async def test_entity_batches_reject_invalid_integer_identity(identity):
     db = TicketDatabase()
-    await MigrationJournal(db, manifest()).allocate_many("message", ["old"])
+    await MigrationJournal(db, manifest()).allocate_many("chat", ["old"])
     row = next(iter(db.entries.values()))
     row["id"] = row["target_id"] = identity
     with pytest.raises(ValueError, match="mapping"):
         await MigrationJournal(db, manifest()).allocate_many(
-            "message",
+            "chat",
             ["old"],
         )
 
