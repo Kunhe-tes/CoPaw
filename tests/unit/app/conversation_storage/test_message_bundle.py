@@ -113,3 +113,40 @@ def test_archive_manifest_selects_only_chunks_intersecting_requested_range():
     manifest["chunks"][1]["first_sequence"] = 23
     with pytest.raises(ValueError, match="range is invalid"):
         encode_archive_manifest(manifest)
+
+
+def test_archive_manifest_allows_local_chunk_and_reports_publication_dependencies():
+    from swe.app.conversation_storage.archive_bundle_reader import (
+        archive_manifest_dependencies,
+        validate_archive_manifest,
+    )
+
+    manifest = {
+        "format": "swe.archive-manifest.v1",
+        "chat_id": "chat-1",
+        "epoch": 0,
+        "first_sequence": 7,
+        "last_sequence": 8,
+        "chunks": [
+            {
+                "publication_id": 12,
+                "first_sequence": 7,
+                "last_sequence": 7,
+                "directory_block": "message_directory",
+            },
+            {
+                "publication_id": "self",
+                "first_sequence": 8,
+                "last_sequence": 8,
+                "directory_block": "message_directory",
+            },
+        ],
+    }
+
+    normalized, chunks = validate_archive_manifest(manifest)
+
+    assert len(chunks) == 2
+    assert archive_manifest_dependencies(
+        normalized,
+        boundary_publication_id=20,
+    ) == (12,)
