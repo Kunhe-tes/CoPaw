@@ -2148,6 +2148,8 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         Calls ``super()._reasoning`` to keep the ToolGuardMixin
         interception active.
         """
+        # 记录进入本次推理前的 step 索引，供媒体回退重试复用。
+        step_index_before = getattr(self, "_observability_step_index", 0) or 0
         with self.agent_phase(AgentPhase.REASONING, reason="reasoning"):
             # --- Proactive filtering layer ---
             if not get_active_model_supports_multimodal():
@@ -2187,6 +2189,8 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                     e,
                     n_stripped,
                 )
+                # 同一步内的重试不应占用新的 step，恢复首次调用前的索引。
+                self._observability_step_index = step_index_before
                 return await self._run_reasoning_with_internal_context(
                     tool_choice=tool_choice,
                 )
