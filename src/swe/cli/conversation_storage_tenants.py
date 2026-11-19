@@ -385,7 +385,15 @@ async def _verify(
             **{k: v for k, v in resources.items() if not k.startswith("_")},
         )
     if not result["passed"]:
-        raise VerificationFailure(result)
+        raise VerificationFailure(
+            {
+                **result,
+                "blockers": [
+                    {"position": item["position"], "detail": item["detail"]}
+                    for item in result.get("blockers", [])
+                ],
+            },
+        )
     return result
 
 
@@ -1079,6 +1087,7 @@ async def _record_tenant_failure(states, tenant, operation, error):
             "verification_level": error.result["verification_level"],
             "passed": False,
             "blocker_count": len(error.result.get("blockers", [])),
+            "blockers": error.result.get("blockers", []),
         }
     await states.fail(
         *unit_key({"source_isolation": "source_id" in tenant}, tenant),

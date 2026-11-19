@@ -6,6 +6,7 @@ import io
 import json
 from pathlib import Path
 import time
+import traceback
 
 from agentscope.message import Msg
 from click.testing import CliRunner
@@ -79,14 +80,27 @@ async def _measured_invoke(arguments):
             continue
         if isinstance(record, dict) and "status" in record:
             reports.append(record)
-    return (reports[-1] if reports else {}), {
+    final_report = reports[-1] if reports else {}
+    failure_path = final_report.get("failure_report")
+    failure_report = None
+    if failure_path and Path(failure_path).is_file():
+        failure_report = Path(failure_path).read_text()
+    return final_report, {
         "wall_seconds": round(time.perf_counter() - started, 3),
         "exit_code": result.exit_code,
         "exception_type": (
             type(result.exception).__name__ if result.exception else None
         ),
+        "exception_traceback": (
+            "".join(
+                traceback.format_exception(result.exception),
+            )
+            if result.exception
+            else None
+        ),
         "cli_output": result.output,
         "cli_stderr": result.stderr,
+        "failure_report": failure_report,
         **metrics,
     }
 
@@ -125,6 +139,18 @@ async def _target_row_counts(db):
     return counts
 
 
+def _add_archive_sample(workspace):
+    session = next((workspace / "sessions").glob("*.json"))
+    state = json.loads(session.read_text())
+    state["agent"]["memory"]["content"] = [
+        [Msg("assistant", "large body " + str(i), "assistant").to_dict(), []]
+        for i in range(257)
+    ]
+    session.chmod(0o644)
+    session.write_text(json.dumps(state))
+    session.chmod(0o444)
+
+
 @pytest.mark.parametrize(
     "failure_mode",
     ["none", "running_turn", "fast_verification"],
@@ -134,7 +160,7 @@ async def test_representative_prepare_migrate_metrics(
     tmp_path,
     monkeypatch,
     failure_mode,
-):
+):  # pylint: disable=too-many-statements
     db = conversation_test_database
     await _prepare_database(db, monkeypatch)
     prepared = _prepare_sources(
@@ -164,6 +190,7 @@ async def test_representative_prepare_migrate_metrics(
     session_a.chmod(0o644)
     session_a.write_text(json.dumps(state))
     session_a.chmod(0o444)
+    _add_archive_sample(workspaces["alice"])
     result, prepare_metrics = await _measured_invoke(
         [
             "prepare",
@@ -187,7 +214,7 @@ async def test_representative_prepare_migrate_metrics(
         }
         full_result = {}
     else:
-        _, import_metrics = await _measured_invoke(
+        import_result, import_metrics = await _measured_invoke(
             [
                 "import",
                 "--manifest",
@@ -196,6 +223,7 @@ async def test_representative_prepare_migrate_metrics(
                 *resources,
             ],
         )
+        assert import_metrics["exit_code"] == 0, import_metrics["cli_stderr"]
         _, fast_verify_metrics = await _measured_invoke(
             ["verify", "--manifest", str(manifest), *resources],
         )
@@ -208,8 +236,15 @@ async def test_representative_prepare_migrate_metrics(
                 *resources,
             ],
         )
-        assert fast_verify_metrics["exit_code"] == 0, fast_verify_metrics
-        assert full_verify_metrics["exit_code"] == 0, full_verify_metrics
+        assert fast_verify_metrics["exit_code"] == 0, (
+            fast_verify_metrics["failure_report"]
+            or fast_verify_metrics["cli_stderr"]
+        )
+        assert full_verify_metrics["exit_code"] == 0, (
+            full_result,
+            full_verify_metrics["failure_report"],
+            full_verify_metrics["cli_stderr"],
+        )
         assert full_result.get("passed") is True
     fail_fast_verification = [failure_mode == "fast_verification"]
     if fail_fast_verification[0]:
@@ -265,6 +300,18 @@ async def test_representative_prepare_migrate_metrics(
     assert result["published"] == 3 and result["failed"] == 0
     ticket_counts = await _assert_new_metadata_schema(db)
     target_counts = await _target_row_counts(db)
+    archive_counts = await db.fetch_one(
+        "SELECT COUNT(*) AS boundaries, COALESCE(SUM(archive_source_count),0) AS messages "
+        "FROM swe_conversation_publications WHERE boundary_key IS NOT NULL",
+    )
+    archive_chunks = await db.fetch_one(
+        "SELECT COUNT(*) AS n FROM swe_conversation_migration_entries "
+        "WHERE entry_kind=%s AND source_key LIKE %s",
+        (b"publication", b"%/chunk:%"),
+    )
+    assert archive_counts["messages"] == 0
+    assert archive_counts["boundaries"] == 1
+    assert archive_chunks["n"] >= 3
     assert first["db_statement_attempts"] > 0
     assert first["db_transaction_begins"] > 0
     print(
@@ -275,6 +322,9 @@ async def test_representative_prepare_migrate_metrics(
                 "sources": 3,
                 "workspaces": 3,
                 "input_messages": 128,
+                "archive_boundaries": archive_counts["boundaries"],
+                "archive_messages": archive_counts["messages"],
+                "archive_chunks": archive_chunks["n"],
                 "target_rows": {
                     **target_counts,
                     "tickets_by_kind": {

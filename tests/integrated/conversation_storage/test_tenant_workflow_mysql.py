@@ -231,7 +231,10 @@ async def _assert_failed_tenant_has_no_commits(
 ):
     if failure_mode == "running_turn":
         assert imported_failures == [
-            (("svc", "bob"), "unsettled legacy Turn blocks offline import"),
+            (
+                ("svc", "bob", "SRC"),
+                "unsettled legacy Turn blocks offline import",
+            ),
         ]
     if failure_mode in ("running_turn", "invalid_chats"):
         bob_scope = ["svc", "bob", "SRC", "agent"]

@@ -28,7 +28,7 @@ from tests.integrated.conversation_storage.test_migration_lock_loss_mysql import
 )
 
 
-def _lose_publication_commit_return(fault):
+def _lose_publication_commit_return(fault, *, before_commit):
     """Inject inside transaction's driver await, after confirmed server COMMIT.
 
     Unlike a proxy that raises after transaction.__aexit__, this exercises the
@@ -54,20 +54,19 @@ def _lose_publication_commit_return(fault):
         return result
 
     async def lose_return(connection, statement):
-        result = await execute(connection, statement)
         if (
             statement == "COMMIT"
             and connection is observed.get("connection")
             and not observed["commit_return_lost"]
         ):
-            # Server execution and driver OK parsing both completed. Suppress
-            # only the client's return, while still inside session._run.
+            if not before_commit:
+                await execute(connection, statement)
             observed["commit_return_lost"] = True
             raise InterfaceError(
                 msg="injected lost COMMIT response",
                 errno=2013,
             )
-        return result
+        return await execute(connection, statement)
 
     fault.setattr(DatabaseSession, "_query", observe_install)
     fault.setattr(ManagedMySQLConnection, "_execute_query", lose_return)
@@ -75,11 +74,13 @@ def _lose_publication_commit_return(fault):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("before_commit", [False, True])
 async def test_lost_driver_commit_response_resumes_original_manifest(
     conversation_test_database,
     tmp_path,
     monkeypatch,
     record_property,
+    before_commit,
 ):
     db = conversation_test_database
     record_property("owned_schema", db.config.database)
@@ -120,7 +121,10 @@ async def test_lost_driver_commit_response_resumes_original_manifest(
     )
     try:
         with monkeypatch.context() as fault:
-            observed = _lose_publication_commit_return(fault)
+            observed = _lose_publication_commit_return(
+                fault,
+                before_commit=before_commit,
+            )
             with pytest.raises(UnknownCommit) as failed:
                 await asyncio.to_thread(
                     run_v3_command,
@@ -136,17 +140,18 @@ async def test_lost_driver_commit_response_resumes_original_manifest(
             assert not observed["session"]._usable
             assert isinstance(failed.value.__cause__, InterfaceError)
             assert failed.value.__cause__.errno == 2013
-        # A separate real connection sees the committed row despite the caller's
-        # UnknownCommit. The failed transaction must not claim job readiness.
+        # Inspect SQL and NAS from a separate lease after the lost response.
         committed = await db.fetch_one(
             "SELECT id,operation_key,relative_path,state FROM swe_conversation_publications WHERE id=%s",
             (observed["publication_id"],),
         )
-        assert committed["state"] == "committed"
+        assert committed["state"] == (
+            "prepared" if before_commit else "committed"
+        )
         stopped = await db.fetch_one(
             "SELECT COUNT(*) AS total FROM swe_conversation_publications WHERE state='committed'",
         )
-        assert stopped["total"] == 1, "import advanced after unknown commit"
+        assert stopped["total"] == int(not before_commit)
         operation = committed["operation_key"].decode()
         assert failed.value.operation_key == operation
         job = await db.fetch_one(
@@ -171,9 +176,9 @@ async def test_lost_driver_commit_response_resumes_original_manifest(
             "SELECT id,operation_key,relative_path,state FROM swe_conversation_publications WHERE id=%s",
             (committed["id"],),
         )
-        assert current == committed
+        assert current == {**committed, "state": "committed"}
         assert sha256(path.read_bytes()).digest() == original_digest
-        for table in ("sessions", "chats", "messages"):
+        for table in ("sessions", "chats"):
             count = await db.fetch_one(
                 "SELECT COUNT(*) AS total FROM swe_conversation_" + table,
             )

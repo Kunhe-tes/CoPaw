@@ -498,11 +498,8 @@ class ConversationExporter:
             self._archive(destination, chat)
 
     def _archive_messages(self, publication):
-        from ..message_bundle import (
-            decode_archive_manifest,
-            decode_message_bodies,
-            decode_message_directory,
-        )
+        from ..archive_bundle_reader import validate_archive_manifest
+        from ..message_bundle import encode_message_directory
 
         raw = self.payload(
             publication["id"],
@@ -511,40 +508,43 @@ class ConversationExporter:
         )
         if isinstance(raw, list):
             return raw
-        manifest = decode_archive_manifest(raw)
+        _, chunks = validate_archive_manifest(raw)
         messages = []
-        for chunk in manifest["chunks"]:
-            target = self.publications.get(chunk["publication_id"])
+        body_blocks = {}
+        for chunk in chunks:
+            chunk_id = chunk["publication_id"]
+            if chunk_id == "self":
+                chunk_id = publication["id"]
+            target = self.publications.get(chunk_id)
             if target is None or target["chat_id"] != publication["chat_id"]:
                 raise IntegrityError("archive export chunk ownership differs")
-            path = _text(target["relative_path"])
-            index = self.bundles.inspect(
-                path,
-                expected_length=target["byte_length"],
-            )
-            directory_extent = index.blocks[chunk["directory_block"]]
-            directory = decode_message_directory(
-                self.bundles.read_extent(
-                    path,
-                    directory_extent.offset,
-                    directory_extent.length,
-                    expected_length=index.byte_length,
-                ),
-            )
-            body_extent = index.blocks["message_bodies"]
-            bodies = decode_message_bodies(
-                self.bundles.read_extent(
-                    path,
-                    body_extent.offset,
-                    body_extent.length,
-                    expected_length=index.byte_length,
-                ),
-            )
-            if len(directory) != len(bodies):
-                raise IntegrityError(
-                    "archive export directory/body count differs",
-                )
-            messages.extend(bodies)
+            directory = self.block(chunk_id, chunk["directory_block"])
+            encode_message_directory(directory)
+            for entry in directory:
+                locator = entry["body"]
+                identity = locator["publication_id"]
+                if identity == "self":
+                    identity = chunk_id
+                body = self.publications.get(identity)
+                if (
+                    body is None
+                    or body["session_id"] != publication["session_id"]
+                ):
+                    raise IntegrityError(
+                        "archive export body ownership differs",
+                    )
+                key = identity, locator["block_name"]
+                if key not in body_blocks:
+                    payload = self.block(*key)
+                    body_blocks[key] = (
+                        payload if isinstance(payload, list) else [payload]
+                    )
+                position = locator["position"]
+                if position >= len(body_blocks[key]):
+                    raise IntegrityError(
+                        "archive export body position differs",
+                    )
+                messages.append(body_blocks[key][position])
         if len(messages) != publication["archive_source_count"]:
             raise IntegrityError("archive export occurrence set is incomplete")
         return messages

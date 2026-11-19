@@ -249,7 +249,6 @@ async def test_complete_legacy_import_reentry_and_semantics(
             "swe_conversation_sessions",
             "swe_conversation_chats",
             "swe_conversation_turns",
-            "swe_conversation_messages",
             "swe_conversation_publications",
             "swe_chat_shares",
         )
@@ -267,7 +266,6 @@ async def test_complete_legacy_import_reentry_and_semantics(
             "swe_conversation_sessions",
             "swe_conversation_chats",
             "swe_conversation_turns",
-            "swe_conversation_messages",
             "swe_conversation_publications",
             "swe_chat_shares",
         )

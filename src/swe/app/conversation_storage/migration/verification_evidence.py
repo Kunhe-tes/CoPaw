@@ -6,7 +6,9 @@ import json
 
 def merge_verification(existing, result):
     current = (
-        json.loads(existing or "{}") if isinstance(existing, str) else existing
+        json.loads(existing or "{}")
+        if isinstance(existing, str) or existing is None
+        else existing
     )
     if not isinstance(current, dict):
         raise ValueError("invalid migration verification evidence")

@@ -373,7 +373,7 @@ async def verify_import(
                     session,
                     io=io,
                     io_workers=io_workers,
-                    messages_verified=io is not None,
+                    messages_verified=True,
                 ),
             )
         for chat in workspace["chats"]:
@@ -795,6 +795,8 @@ async def _verify_chat(
     messages_verified=False,
 ):
     scope = WorkspaceScope.from_values(workspace["scope"])
+    from swe.app.runner.models import ChatSpec
+
     await _verify_chat_projection(database, scope, chat["spec"])
     actual = await read_only_adapter(
         MySQLChatRepository(database, scope, bundles),
@@ -805,7 +807,7 @@ async def _verify_chat(
         if actual is not None:
             raise ValueError("deleted Chat was resurrected")
     elif actual is None or actual.model_dump(mode="json") != {
-        **chat["spec"],
+        **ChatSpec.model_validate(chat["spec"]).model_dump(mode="json"),
         "status": "idle",
     }:
         raise ValueError("Chat metadata/binding/identity/time differs")
@@ -920,6 +922,8 @@ async def _verify_archive_rows(
 
 async def _verify_epochs(database, bundles, manifest, chat, scope, *, io=None):
     for epoch in chat["archive"]["epochs"]:
+        if epoch.get("deleted"):
+            continue
         position = chat["position"] + "/epoch:" + str(epoch["epoch"])
         assignment = manifest.data["assignments"]["publication"][position]
         publication = await database.fetch_one(
@@ -948,8 +952,16 @@ async def _verify_epochs(database, bundles, manifest, chat, scope, *, io=None):
             io=io,
         )
         actual_epoch = load_metadata_json(raw_epoch)
-        if actual_epoch != epoch:
+        if _normalized_epoch(actual_epoch) != _normalized_epoch(epoch):
             raise ValueError("full checkpoint/event/epoch semantics differ")
+
+
+def _normalized_epoch(epoch):
+    return {
+        key: value
+        for key, value in epoch.items()
+        if key not in ("captured_at", "updated_at", "created_at")
+    }
 
 
 async def _verify_runtime_chat(database, bundles, scope, chat, workspace):

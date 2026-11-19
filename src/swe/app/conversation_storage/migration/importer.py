@@ -368,6 +368,7 @@ class ConversationImporter:
         self.chat_ids = {}
         self.turn_ids = {}
         self.session_message_refs = {}
+        self.session_message_directory = {}
 
     def assigned(self, kind, position):
         return self.manifest.allocate(kind, position)["target_id"]
@@ -905,6 +906,7 @@ class ConversationImporter:
                         "layer": item["layer"],
                         "turn_id": turn,
                         "chat_id": origin,
+                        "origin_chat_id": origin,
                         "visible": True,
                         "role": item["role"],
                         "kind": item["payload"].get("type") or "message",
@@ -930,8 +932,10 @@ class ConversationImporter:
                             else None
                         ),
                         "source_occurrence": item["source_occurrence_no"],
+                        "source_occurrence_no": item["source_occurrence_no"],
                         "timestamp": item["payload"].get("timestamp"),
                         "epoch": item["context_epoch"],
+                        "context_epoch": item["context_epoch"],
                         "in_context": item["in_context"],
                         "current_visible": True,
                         "body": {
@@ -968,7 +972,9 @@ class ConversationImporter:
                         "sessions": [sid],
                         "chats": sorted(set(chats.values())),
                         "turns": sorted(
-                            tid for tid in self.turn_ids.values() if tid
+                            tid
+                            for (session_id, _), tid in self.turn_ids.items()
+                            if session_id == sid
                         ),
                     },
                     session_id=sid,
@@ -978,15 +984,19 @@ class ConversationImporter:
                 session["position"],
                 {},
             )
+            directory = self.session_message_directory.setdefault(
+                session["position"],
+                [],
+            )
             for index, item in enumerate(batch, start=start):
                 key = (item["layer"], _json(item["payload"]))
-                refs.setdefault(key, []).append(
-                    {
-                        "publication_id": publication["id"],
-                        "block_name": "message_bodies",
-                        "position": index - start,
-                    },
-                )
+                locator = {
+                    "publication_id": publication["id"],
+                    "block_name": "message_bodies",
+                    "position": index - start,
+                }
+                refs.setdefault(key, []).append(locator)
+                directory.append({**entries[index - start], "body": locator})
             start += len(group)
         await self._root_and_turns(session, scope, chats, len(messages))
 
@@ -1232,21 +1242,6 @@ class ConversationImporter:
             cursors[key] += 1
             return options[cursor]
 
-        def resolve_turn(key, value):
-            turn_id = self.turn_ids.get((sid, key))
-            if turn_id is None:
-                return None
-            position = session["position"] + "/turn-record:" + str(turn_id)
-            assignment = self.manifest.data["assignments"]["publication"].get(
-                position,
-            )
-            if assignment is None:
-                return None
-            return {
-                "publication_id": assignment["target_id"],
-                "block_name": "recovery",
-            }
-
         root_position = session["position"] + "/recovery"
         root_assignment = await self._allocate(
             "publication",
@@ -1257,9 +1252,13 @@ class ConversationImporter:
             state,
             operation_key=root_assignment["operation_key"],
             resolve_message=resolve_message,
-            resolve_turn=resolve_turn,
         )
-        dependencies = list(projection.dependency_ids)
+        directory = self.session_message_directory.get(session["position"], [])
+        projection.envelope["message_directory"] = directory
+        dependencies = sorted(
+            set(projection.dependency_ids)
+            | {item["body"]["publication_id"] for item in directory},
+        )
         for dependency in dependencies:
             if dependency >= root_assignment["target_id"]:
                 raise TenantInputError(
@@ -1325,6 +1324,7 @@ class ConversationImporter:
     async def _archive(self, chat, scope):
         from ..bundle import BundleBlock
         from ..message_bundle import (
+            ARCHIVE_MANIFEST_FORMAT,
             encode_archive_manifest,
             encode_message_bodies,
             split_message_batches,
@@ -1418,6 +1418,7 @@ class ConversationImporter:
                     "archive_manifest",
                     encode_archive_manifest(
                         {
+                            "format": ARCHIVE_MANIFEST_FORMAT,
                             "chat_id": chat["spec"]["id"],
                             "epoch": batch["epoch"],
                             "first_sequence": first,
@@ -1642,6 +1643,7 @@ class ParallelWorkspaceImporter(ConversationImporter):
         self.chat_ids = {}
         self.turn_ids = {}
         self.session_message_refs = {}
+        self.session_message_directory = {}
 
     async def _allocate(
         self,

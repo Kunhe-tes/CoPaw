@@ -113,4 +113,6 @@ def read_only_adapter(adapter):
     )
     if hasattr(adapter, "chats"):
         read_only_adapter(adapter.chats)
+    if hasattr(adapter, "reader"):
+        read_only_adapter(adapter.reader)
     return adapter

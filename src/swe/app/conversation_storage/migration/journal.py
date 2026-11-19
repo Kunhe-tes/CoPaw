@@ -166,7 +166,7 @@ class MigrationJournal:
                         "SELECT id FROM " + table + " LIMIT 1",
                     ):
                         raise ValueError(
-                            "first migration requires six empty business tables; unknown rows found",
+                            "first migration requires five empty business tables; unknown rows found",
                         )
                 await self.db.execute(
                     "INSERT INTO "
@@ -367,7 +367,7 @@ class MigrationJournal:
 
         if kind not in TICKET_KINDS:
             raise ValueError(
-                "only five entity kinds may allocate integer tickets",
+                "only four entity kinds may allocate integer tickets",
             )
         if kind == "publication":
             if scope is None:
@@ -423,7 +423,7 @@ class MigrationJournal:
     ):
         if kind not in TICKET_KINDS:
             raise ValueError(
-                "only five entity kinds may allocate integer tickets",
+                "only four entity kinds may allocate integer tickets",
             )
         kind_key, key = self._key(kind, position)
         if kind == "publication":

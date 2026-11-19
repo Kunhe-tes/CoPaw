@@ -26,6 +26,10 @@ class DMLDatabase:
     def max_allowed_packet(self):
         return self._database.max_allowed_packet
 
+    @property
+    def _in_transaction(self):
+        return self._database._in_transaction
+
     @asynccontextmanager
     async def acquire(self):
         async with self._owner.acquire() as session:
