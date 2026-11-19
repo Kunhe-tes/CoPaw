@@ -36,7 +36,7 @@ async def test_commit_uses_set_queries_for_association_locks(tmp_path):
 
     db.fetch_all = fetch_all
     await store.commit(operation.operation_key)
-    assert db.messages
+    assert not db.messages
     # Commit preflight and the SQL transaction each validate associations.
     assert [params for _, params in queries] == [(1,), (2,), (3,)] * 2
     assert not any(" WHERE id=%s FOR UPDATE" in query for query in db.queries)
@@ -156,18 +156,20 @@ async def test_resume_retains_exact_legacy_plan_bytes(tmp_path, committed):
                 spec,
             )
         ).content == legacy.content
-    changed = plan_block(store.target, [], [], stored["locks"])
+    changed = plan_block(store.target, [], [], {"sessions": [9]})
     with pytest.raises(IntegrityError):
         retained_plan(store.bundles, row, narrow, changed)
 
 
-async def test_message_batches_declare_only_referenced_associations():
+async def test_message_batches_lock_shared_session_associations():
     from agentscope.message import Msg
 
     importer = ConversationImporter.__new__(ConversationImporter)
     importer.session_ids = {"session": 1}
     importer.chat_ids = {"chat-one": 2, "chat-two": 3}
     importer.turn_ids = {}
+    importer.session_message_refs = {}
+    importer.session_message_directory = {}
     importer.batch_size = 1
     importer._assigned = AsyncMock(side_effect=range(10, 30))
     importer._allocate_messages = AsyncMock(
@@ -177,7 +179,7 @@ async def test_message_batches_declare_only_referenced_associations():
     )
     importer._turn_identities = AsyncMock()
     importer._root_and_turns = AsyncMock()
-    importer._publish = AsyncMock()
+    importer._publish = AsyncMock(return_value={"id": 123})
     turns = {
         str(index): {
             "chat_id": "one" if index == 0 else "two",
@@ -223,8 +225,8 @@ async def test_message_batches_declare_only_referenced_associations():
         call.kwargs["spec"].locks for call in importer._publish.await_args_list
     ]
     assert len(declarations) == 20
-    assert declarations[0] == {"sessions": [1], "chats": [2], "turns": [10]}
-    assert declarations[-1] == {"sessions": [1], "chats": [3], "turns": [29]}
+    expected = {"sessions": [1], "chats": [2, 3], "turns": list(range(10, 30))}
+    assert all(item == expected for item in declarations)
 
 
 @pytest.mark.parametrize("packet,maximum", [(1024 * 1024, 100), (2048, 32)])

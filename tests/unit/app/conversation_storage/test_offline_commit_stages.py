@@ -103,20 +103,6 @@ async def prepared(tmp_path, kind="rows"):
         service_unit_id="schema-test-service",
     ).reserve(operation, plan)
     rows = []
-    if kind == "rows":
-        rows = [
-            {
-                "table": "messages",
-                "values": {
-                    "id": 100,
-                    "service_unit_key": "schema-test-service",
-                    "session_id": 1,
-                    "publication_id": {"publication": True},
-                    "byte_offset": {"block": "message", "part": "offset"},
-                    "byte_length": {"block": "message", "part": "length"},
-                },
-            },
-        ]
     updates = []
     if kind == "turn":
         updates = [
@@ -163,16 +149,8 @@ async def test_three_plans_separate_sql_and_nas(tmp_path, monkeypatch, kind):
     result = await store.commit_evidence(evidence)
     assert result["state"] == "committed"
     if kind == "rows":
-        assert database.messages == [
-            (
-                100,
-                b"schema-test-service",
-                1,
-                1,
-                evidence.index.blocks["message"].offset,
-                evidence.index.blocks["message"].length,
-            ),
-        ]
+        assert database.messages == []
+        assert "message" in evidence.index.blocks
     if kind == "share":
         installed.assert_awaited_once()
     if kind == "turn":
@@ -336,7 +314,8 @@ async def test_raw_first_turn_stays_raw_without_frozen_terminal_refs(
         "recovery",
         b'{"turn_states":{"new":{"status":"completed"}}}',
     )
-    assert await prepare_recovery_blocks(store, row, plan, [block]) == [block]
+    projected = await prepare_recovery_blocks(store, row, plan, [block])
+    assert b"swe-recovery-projection" in projected[0].content
     ticket = await store.prepare_commit(operation.operation_key)
     async with MigrationIO(1) as io:
         evidence = await store.read_commit_evidence(ticket, io)
