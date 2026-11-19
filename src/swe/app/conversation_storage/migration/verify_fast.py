@@ -70,13 +70,18 @@ def _read_publication_plan(
         extent = reader.index.blocks.get("import_plan")
         if extent is None or extent.kind != "import_plan":
             raise IntegrityError("committed import plan block is missing")
-        if extent.length * 8 > min(memory_allowance, MAX_READ_BYTES * 8):
-            raise ValueError(
-                "fast verification plan exceeds memory allowance",
-            )
+        if not store.bundles.unbounded and extent.length * 8 > min(
+            memory_allowance,
+            MAX_READ_BYTES * 8,
+        ):
+            raise ValueError("fast verification plan exceeds memory allowance")
         raw = reader.read_extents(
             (extent,),
-            max_bytes=min(memory_allowance, MAX_READ_BYTES),
+            max_bytes=(
+                store.bundles.max_read_bytes
+                if store.bundles.unbounded
+                else min(memory_allowance, MAX_READ_BYTES)
+            ),
         )[0]
         plan = load_metadata_json(raw)
         store._validate_plan(plan)
@@ -106,11 +111,12 @@ def _read_publication_plan(
             raise IntegrityError(
                 "committed publication block set is incomplete",
             )
-        record_count = sum(map(len, expected.values()))
-        if record_count * 16384 > memory_allowance:
-            raise ValueError(
-                "fast verification SQL evidence exceeds memory allowance",
-            )
+        if not store.bundles.unbounded:
+            record_count = sum(map(len, expected.values()))
+            if record_count * 16384 > memory_allowance:
+                raise ValueError(
+                    "fast verification SQL evidence exceeds memory allowance",
+                )
         return expected, len(plan["rows"]), len(plan["updates"])
 
 
@@ -353,7 +359,10 @@ async def verify_fast_publications(
                 service_unit_key,
                 table,
             ), expected in expected_by_table.items():
-                if (batch_records + len(expected)) * 16384 > memory_bytes:
+                if (
+                    not store.bundles.unbounded
+                    and (batch_records + len(expected)) * 16384 > memory_bytes
+                ):
                     raise ValueError(
                         "fast verification SQL evidence exceeds memory allowance",
                     )

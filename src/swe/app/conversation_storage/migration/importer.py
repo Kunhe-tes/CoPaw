@@ -710,6 +710,8 @@ class ConversationImporter:
             )
 
     async def _read_source_artifact(self, workspace, item):
+        if self.manifest.data.get("source_binding_storage") == "manifest-v1":
+            return _read_source_artifact(workspace, item, True)
         return _read_source_artifact(workspace, item)
 
     def _validate_source_binding(self, report):
@@ -1603,11 +1605,10 @@ class ParallelWorkspaceImporter(ConversationImporter):
         return await self.context.store("chat_session_id", chat_id)
 
     async def _read_source_artifact(self, workspace, item):
-        return await self.context.io.call(
-            _read_source_artifact,
-            workspace,
-            item,
-        )
+        arguments = (_read_source_artifact, workspace, item)
+        if self.manifest.data.get("source_binding_storage") == "manifest-v1":
+            return await self.context.io.call(*arguments, True)
+        return await self.context.io.call(*arguments)
 
     async def run_workspace(self, workspace):
         from ..identity import WorkspaceScope
@@ -1632,7 +1633,7 @@ class ParallelWorkspaceImporter(ConversationImporter):
             await self._archive(chat, scope)
 
 
-def _read_source_artifact(workspace, item):
+def _read_source_artifact(workspace, item, relaxed=False):
     from pathlib import Path
     from ..bundle import MAX_READ_BYTES
     import stat
@@ -1644,28 +1645,23 @@ def _read_source_artifact(workspace, item):
             "legacy artifact path escapes bound source root",
         )
     path = root / relative
-    if any(
-        part.is_symlink()
-        for part in (path, *path.parents)
-        if part.is_relative_to(root)
-    ):
-        raise TenantInputError("legacy artifact path contains symlink")
-    if (
-        not path.resolve(strict=True).is_relative_to(root)
+    if not path.resolve(strict=True).is_relative_to(root):
+        raise TenantInputError(
+            "legacy artifact is outside its bound source root",
+        )
+    if not relaxed and (
+        path.is_symlink()
         or stat.S_IMODE(path.stat().st_mode) & 0o222
+        or path.stat().st_size > MAX_READ_BYTES
     ):
         raise TenantInputError(
             "legacy artifact is not inside frozen read-only source",
         )
-    if path.stat().st_size > MAX_READ_BYTES:
-        raise TenantInputError(
-            "legacy artifact exceeds supported migration reader limit; split-file migration required",
-        )
     with path.open("rb") as stream:
-        raw = stream.read(MAX_READ_BYTES + 1)
-    if len(raw) != item["bytes"]:
+        raw = stream.read()
+    if not relaxed and "bytes" in item and len(raw) != item["bytes"]:
         raise TenantInputError(
-            "legacy artifact size changed after inventory",
+            "legacy artifact is not inside frozen read-only source",
         )
     return raw
 
@@ -1685,13 +1681,9 @@ def _json(value):
 
 
 def _block(name, kind, value):
-    from ..bundle import BundleBlock, MAX_READ_BYTES
+    from ..bundle import BundleBlock
 
     raw = _json(value).encode()
-    if len(raw) > MAX_READ_BYTES:
-        raise TenantInputError(
-            "legacy object exceeds supported migration reader limit; projection required",
-        )
     return BundleBlock(name, kind, raw)
 
 

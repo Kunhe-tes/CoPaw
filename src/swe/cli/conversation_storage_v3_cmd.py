@@ -12,7 +12,7 @@ import tempfile
 
 import click
 
-from swe.app.conversation_storage.bundle import BundleStore
+from swe.app.conversation_storage.bundle import BundleStore, UNBOUNDED
 from swe.app.conversation_storage.migration.direct_import import (
     DirectImporter,
     DirectTarget,
@@ -202,7 +202,11 @@ async def _execute(
         raise ValueError("configured application schema differs from manifest")
     target = DirectTarget(schema, schema, manifest.migration_id)
     bundles = {
-        item["service_unit_id"]: BundleStore(item["nas_root"])
+        item["service_unit_id"]: (
+            BundleStore(item["nas_root"], unbounded=True)
+            if manifest.data.get("source_binding_storage") == "manifest-v1"
+            else BundleStore(item["nas_root"])
+        )
         for item in manifest.data["services"]
     }
     binding = {
@@ -422,10 +426,12 @@ async def _execute_spooled(
             "work directory must be an existing canonical directory",
         )
     memory_bytes = memory_budget_mib * 1024 * 1024
-    record_limit = memory_bytes // workers
-    disk_limit = shutil.disk_usage(base).free * 3 // 4
-    if record_limit > disk_limit:
-        raise ValueError("work directory has insufficient free space")
+    disk_limit = (
+        UNBOUNDED
+        if manifest.data.get("source_binding_storage") == "manifest-v1"
+        else shutil.disk_usage(base).free * 3 // 4
+    )
+    record_limit = disk_limit
     with InventorySpool(
         base,
         max_bytes=disk_limit,

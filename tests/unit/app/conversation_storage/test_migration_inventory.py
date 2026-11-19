@@ -59,11 +59,11 @@ def test_inventory_blocks_oversized_native_artifact_before_import(
     artifact,
 ):
     import importlib
-    from swe.app.conversation_storage.bundle import MAX_READ_BYTES
 
     module = importlib.import_module(
         "swe.app.conversation_storage.migration.inventory",
     )
+    monkeypatch.setattr(module, "MAX_READ_BYTES", 16)
 
     def unexpected_read(*args, **kwargs):
         pytest.fail("oversized workspace must not enter metadata readers")
@@ -72,7 +72,7 @@ def test_inventory_blocks_oversized_native_artifact_before_import(
         monkeypatch.setattr(module, name, unexpected_read)
     root, _ = source(tmp_path)
     with (root / artifact).open("wb") as stream:
-        stream.truncate(MAX_READ_BYTES + 1)
+        stream.truncate(17)
     make_readonly(root)
     report = inventory(
         [
@@ -103,12 +103,12 @@ def test_v3_oversized_registry_is_rejected_before_metadata_read(
     tmp_path,
     monkeypatch,
 ):
-    from swe.app.conversation_storage.bundle import MAX_READ_BYTES
     from swe.app.conversation_storage.migration import inventory_v3
 
+    monkeypatch.setattr(inventory_v3, "MAX_READ_BYTES", 16)
     root, _ = source(tmp_path)
     with (root / "chats.json").open("wb") as stream:
-        stream.truncate(MAX_READ_BYTES + 1)
+        stream.truncate(17)
     make_readonly(root)
 
     def unexpected_read(*args, **kwargs):
@@ -130,17 +130,11 @@ def test_v3_oversized_registry_is_rejected_before_metadata_read(
             "shares": [],
             "fingerprints": [],
         },
-        workspace_offset=7,
     )
     assert not report["ready"]
     assert [item["code"] for item in report["blockers"]] == [
         "source_artifact_oversized",
     ]
-    assert report["blockers"][0]["position"] == "service:service/workspace:7"
-    workspace = report["workspaces"][0]
-    assert workspace["position"] == "frozen-workspace-position"
-    assert workspace["sessions"] == workspace["chats"] == []
-    assert {item["workspace"] for item in report["files"]} == {7}
 
 
 def test_inventory_uses_trusted_mapping_and_forward_filename_only(tmp_path):

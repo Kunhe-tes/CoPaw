@@ -14,6 +14,7 @@ from swe.app.conversation_storage.identity import WorkspaceScope
 from swe.app.conversation_storage.errors import IntegrityError
 from swe.app.conversation_storage.migration.verify import verify_import
 from swe.app.conversation_storage.migration.verify_fast import (
+    _read_publication_plan,
     _validate_locator_pairs,
     verify_fast_publications,
 )
@@ -192,6 +193,29 @@ def _inputs(
     }
     manifest = SimpleNamespace(data=manifest_data, migration_id=migration_id)
     return Database(), bundles, manifest, inventory, row
+
+
+def test_fast_plan_keeps_default_bundle_memory_limit(tmp_path):
+    _database, bundles, manifest, _inventory, row = _inputs(
+        tmp_path,
+        record_plan=True,
+    )
+    assignment = manifest.data["assignments"]["publication"]["publication"]
+    store = SimpleNamespace(
+        bundles=bundles,
+        _validate_plan=lambda _plan: None,
+        _resolve=lambda *_args: {},
+    )
+
+    with pytest.raises(ValueError, match="memory allowance"):
+        _read_publication_plan(
+            store,
+            row,
+            assignment,
+            manifest.migration_id,
+            "test_fast_verify",
+            memory_allowance=1,
+        )
 
 
 @pytest.mark.asyncio

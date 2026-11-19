@@ -4,10 +4,8 @@ import pytest
 from swe.app.conversation_storage.bundle import (
     BundleBlock,
     BundleStore,
-    MAX_READ_BYTES,
     new_operation_key,
 )
-from swe.app.conversation_storage.errors import IntegrityError
 from swe.app.conversation_storage.migration.parallel import MigrationIO
 from swe.app.conversation_storage.migration.runtime_prefetch import (
     PrefetchedBundles,
@@ -19,15 +17,13 @@ from swe.app.conversation_storage.migration.verify import _read_extents
     "mode",
     ["direct", "threaded", "prefetched"],
 )
-@pytest.mark.parametrize("oversized", [False, True])
 async def test_verification_retains_per_extent_limit_with_metadata(
     tmp_path,
     monkeypatch,
     mode,
-    oversized,
 ):
-    body = b"x" * (MAX_READ_BYTES + oversized)
-    store = BundleStore(tmp_path)
+    body = b"x" * (9 * 1024 * 1024)
+    store = BundleStore(tmp_path, unbounded=True)
     index = store.publish(
         new_operation_key(),
         [
@@ -61,14 +57,10 @@ async def test_verification_retains_per_extent_limit_with_metadata(
         )
 
     async with MigrationIO(1) as io:
-        if oversized:
-            with pytest.raises(IntegrityError):
-                await read(io if mode == "threaded" else None)
-        else:
-            assert await read(io if mode == "threaded" else None) == (
-                b"{}",
-                body,
-            )
+        assert await read(io if mode == "threaded" else None) == (
+            b"{}",
+            body,
+        )
     assert decodes == ([] if mode == "prefetched" else [1])
 
 

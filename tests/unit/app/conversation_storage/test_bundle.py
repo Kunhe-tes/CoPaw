@@ -55,6 +55,39 @@ def test_bundle_roundtrip_has_byte_extents_and_no_body_in_index(tmp_path):
     assert store.inspect(result.relative_path) == result
 
 
+def test_unbounded_limits_are_scoped_to_migration_store(tmp_path):
+    body = b"x" * (8 * 1024 * 1024 + 1)
+    operation = new_operation_key()
+    (tmp_path / "online").mkdir()
+    (tmp_path / "migration").mkdir()
+    online = BundleStore(tmp_path / "online")
+    migration = BundleStore(tmp_path / "migration", unbounded=True)
+
+    online_result = online.publish(
+        operation,
+        [BundleBlock("body", "message", body)],
+    )
+    with pytest.raises(IntegrityError):
+        online.read_extent(
+            online_result.relative_path,
+            online_result.blocks["body"].offset,
+            len(body),
+        )
+
+    migration_result = migration.publish(
+        operation,
+        [BundleBlock("body", "message", body)],
+    )
+    assert (
+        migration.read_extent(
+            migration_result.relative_path,
+            migration_result.blocks["body"].offset,
+            len(body),
+        )
+        == body
+    )
+
+
 def test_bundle_path_uses_tenant_source_scope_without_agent(tmp_path):
     first = WorkspaceScope(
         "tenant-a",
@@ -311,18 +344,19 @@ def test_file_fsync_failure_does_not_publish(tmp_path, monkeypatch):
     assert not (tmp_path / store.path_for(operation)).exists()
 
 
-def test_large_extent_requires_streaming(tmp_path):
-    from swe.app.conversation_storage.bundle import MAX_READ_BYTES
-
-    store = BundleStore(tmp_path)
-    payload = b"x" * (MAX_READ_BYTES + 1)
+def test_large_extent_can_be_read_without_a_size_limit(tmp_path):
+    tmp_path.mkdir(exist_ok=True)
+    store = BundleStore(tmp_path, unbounded=True)
+    payload = b"x" * (9 * 1024 * 1024)
     result = store.publish(
         new_operation_key(),
         [BundleBlock("root", "recovery", payload)],
     )
     extent = result.blocks["root"]
-    with pytest.raises(IntegrityError, match="streaming"):
+    assert (
         store.read_extent(result.relative_path, extent.offset, extent.length)
+        == payload
+    )
     chunks = list(
         store.iter_extent(result.relative_path, extent.offset, extent.length),
     )

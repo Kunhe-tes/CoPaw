@@ -129,10 +129,11 @@ async def test_runtime_prefetch_overlaps_nas_and_keeps_owner_and_pins(
     assert not pinned
 
 
-async def test_runtime_prefetch_budget_fails_before_body_read():
+async def test_runtime_prefetch_reads_body_without_memory_budget_rejection():
     class Bundles:
         open_reader = _fake_reader
         root = "/unused"
+        unbounded = True
 
         @staticmethod
         def _open(_path):
@@ -152,21 +153,22 @@ async def test_runtime_prefetch_budget_fails_before_body_read():
 
         @staticmethod
         def read_extent(*_args, **_kwargs):
-            pytest.fail("budget must fail before allocation")
+            return b"x" * 100
 
     async with MigrationIO(1) as io:
-        with pytest.raises(ValueError, match="memory allowance"):
-            await runtime_prefetch._prefetch(
-                Bundles(),
-                [{"relative_path": "one", "byte_length": 100}],
-                io,
-                10,
-            )
+        cache = await runtime_prefetch._prefetch(
+            Bundles(),
+            [{"relative_path": "one", "byte_length": 100}],
+            io,
+            10,
+        )
+    assert cache.blocks["one"] == [(0, b"x" * 100)]
 
 
-def test_runtime_index_budget_precedes_json_decoder():
+def test_runtime_index_read_ignores_workspace_memory_budget():
     class Bundles:
         open_reader = _fake_reader
+        unbounded = True
 
         @staticmethod
         def _open(_path):
@@ -176,10 +178,27 @@ def test_runtime_index_budget_precedes_json_decoder():
 
         @staticmethod
         def inspect(*_args, **_kwargs):
-            pytest.fail("JSON decoder must not run before budget check")
+            return SimpleNamespace(blocks={})
 
-    with pytest.raises(ValueError, match="index exceeds.*memory allowance"):
-        runtime_prefetch._read_bounded(Bundles(), "one", 8192, 65536)
+    index, blocks, _reservation = runtime_prefetch._read_bounded(
+        Bundles(),
+        "one",
+        8192,
+        1,
+    )
+    assert index.blocks == {}
+    assert blocks == []
+
+    class BoundedBundles(Bundles):
+        unbounded = False
+
+    with pytest.raises(ValueError, match="memory allowance"):
+        runtime_prefetch._read_bounded(
+            BoundedBundles(),
+            "one",
+            8192,
+            1,
+        )
 
 
 @pytest.mark.parametrize("kind", ["workspace", "share"])

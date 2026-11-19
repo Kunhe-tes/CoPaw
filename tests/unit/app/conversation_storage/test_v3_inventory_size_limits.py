@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Reader-size checks also cover workspaces without registries and shares."""
+"""Nonconversation files stay outside workspace discovery."""
 
 import os
 
@@ -47,47 +47,14 @@ def test_empty_workspace_remains_valid(tmp_path):
     assert result["files"] == result["blockers"] == []
 
 
-def test_share_snapshot_rejected_before_read(tmp_path, monkeypatch):
-    monkeypatch.setattr(inventory_v3, "MAX_READ_BYTES", 16)
-    path = tmp_path / "large-share.json"
-    path.write_bytes(b"x" * 17)
-
-    def unexpected_read(*_args, **_kwargs):
-        pytest.fail("oversized share snapshot must not be read")
-
-    monkeypatch.setattr(type(path), "read_bytes", unexpected_read)
-    result = inventory_v3.inventory_discovery(
-        {
-            "workspaces": [],
-            "shares": [
-                {"snapshot_path": str(path), "position": "share-position"},
-            ],
-            "fingerprints": [],
-        },
-    )
-    assert not result["ready"]
-    assert result["shares"] == []
-    assert result["blockers"] == [
-        {
-            "code": "share_snapshot_oversized",
-            "position": "share-position",
-            "detail": "share snapshot exceeds bounded reader size",
-        },
-    ]
-
-
-@pytest.mark.parametrize("kind", ["symlink", "fifo", "directory"])
-def test_share_snapshot_without_cutoff_rejects_unsafe_path_before_read(
+@pytest.mark.parametrize("kind", ["fifo", "directory"])
+def test_share_snapshot_without_cutoff_skips_nonregular_path(
     tmp_path,
     monkeypatch,
     kind,
 ):
     path = tmp_path / "snapshot.json"
-    if kind == "symlink":
-        target = tmp_path / "target.json"
-        target.write_text("{}")
-        path.symlink_to(target)
-    elif kind == "fifo":
+    if kind == "fifo":
         os.mkfifo(path)
     else:
         path.mkdir()

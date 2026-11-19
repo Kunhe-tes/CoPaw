@@ -56,16 +56,25 @@ class WorkspaceMapping:
         return self.path(str(Path(self.sessions_dir) / name))
 
 
-def _source_files(mapping):
+def _source_files(mapping, relative_roots=None, *, chats_authoritative=False):
     root = Path(mapping.root)
-    if root.is_symlink():
-        raise SourceInputInvalid("source root is a symlink")
-    entries = workspace_entries(mapping)
-    for path in entries:
-        if stat.S_IMODE(path.stat().st_mode) & 0o222:
-            raise SourceInputInvalid(
-                "source snapshot must be read-only before inventory",
-            )
+    if not chats_authoritative:
+        if root.is_symlink():
+            raise SourceInputInvalid("source root is a symlink")
+        entries = workspace_entries(mapping)
+        for path in entries:
+            if stat.S_IMODE(path.stat().st_mode) & 0o222:
+                raise SourceInputInvalid(
+                    "source snapshot must be read-only before inventory",
+                )
+    else:
+        entries = safe_input_entries(
+            root,
+            relative_roots or (),
+            trusted_root=root,
+            allow_in_root_symlinks=True,
+            skip_unselected_unsafe=True,
+        )
     return [path for path in entries if path.is_file()]
 
 
@@ -78,16 +87,25 @@ def _block(report, code, position, error):
     )
 
 
-def _sessions(mapping, chats, report, position, files):
+def _sessions(
+    mapping,
+    chats,
+    report,
+    position,
+    files=(),
+    *,
+    chats_authoritative=False,
+):
     grouped, paths, result = {}, {}, []
     candidates = [
         (chat.user_id, chat.channel, chat.session_id, index)
         for index, chat in enumerate(chats)
     ]
     known = {(user, channel, sid) for user, channel, sid, _ in candidates}
-    candidates.extend(
-        (*key, None) for key in mapping.session_paths if key not in known
-    )
+    if not chats_authoritative:
+        candidates.extend(
+            (*key, None) for key in mapping.session_paths if key not in known
+        )
     for user_id, channel, session_id, index in candidates:
         identity = SessionIdentity(
             mapping.scope,
@@ -97,7 +115,8 @@ def _sessions(mapping, chats, report, position, files):
         )
         key = identity.sql_values
         path = mapping.session_path(identity)
-        previous = paths.get(path)
+        canonical_path = path.resolve(strict=True) if path.exists() else path
+        previous = paths.get(canonical_path)
         if previous is not None and previous != key:
             _block(
                 report,
@@ -106,7 +125,7 @@ def _sessions(mapping, chats, report, position, files):
                 "distinct Session identities map to one source filename",
             )
             continue
-        paths[path] = key
+        paths[canonical_path] = key
         if key in grouped:
             if index is not None:
                 grouped[key]["chat_positions"].append(index)
@@ -127,23 +146,27 @@ def _sessions(mapping, chats, report, position, files):
         }
         grouped[key] = record
         try:
-            record["legacy"] = read_session(path)
+            record["legacy"] = read_session(
+                path,
+                trusted_root=mapping.root if chats_authoritative else None,
+                allow_in_root_symlinks=chats_authoritative,
+            )
         except (OSError, ValueError, KeyError, TypeError) as error:
             _block(report, "session_invalid", record["position"], error)
         result.append(record)
-    for path in _unmapped_session_files(mapping, files, paths, result):
-        _block(
-            report,
-            "unmapped_session",
-            position,
-            str(path.relative_to(Path(mapping.root).resolve())),
-        )
+    if not chats_authoritative:
+        for path in _unmapped_session_files(mapping, files, paths, result):
+            _block(
+                report,
+                "unmapped_session",
+                position,
+                str(path.relative_to(Path(mapping.root).resolve())),
+            )
     return result
 
 
 def _unmapped_session_files(mapping, files, mapped_paths, sessions):
     session_root = mapping.path(mapping.sessions_dir)
-    # The default ledger entrance has its own complete generation checks.
     ledger_roots = [session_root / ".turn-ledger"]
     for session in sessions:
         legacy_root = session.get("legacy", {}).get("root", {})
@@ -164,14 +187,43 @@ def _unmapped_session_files(mapping, files, mapped_paths, sessions):
     )
 
 
-def _archive_records(mapping, chats, report, position):
+def _archive_records(
+    mapping,
+    chats,
+    report,
+    position,
+    *,
+    chats_authoritative=False,
+):
     root = mapping.path(mapping.dialog_dir)
+    if chats_authoritative and root.exists():
+        selected = []
+        for chat in chats:
+            selected.extend(
+                (
+                    str(Path(mapping.dialog_dir) / chat.id),
+                    str(Path(mapping.dialog_dir) / ".deleted" / chat.id),
+                ),
+            )
+        safe_input_entries(
+            mapping.root,
+            selected,
+            trusted_root=mapping.root,
+            allow_in_root_symlinks=True,
+            skip_unselected_unsafe=True,
+        )
+        root = root.resolve(strict=True)
     result, known = [], {chat.id for chat in chats}
     for index, chat in enumerate(chats):
         try:
             chat_key_bytes(chat.id)
             record = (
-                read_archive(root, chat.id)
+                read_archive(
+                    root,
+                    chat.id,
+                    trusted_root=mapping.root if chats_authoritative else None,
+                    allow_in_root_symlinks=chats_authoritative,
+                )
                 if root.exists()
                 else {
                     "format": "absent",
@@ -196,7 +248,7 @@ def _archive_records(mapping, chats, report, position):
                 position + "/chat:" + str(index),
                 error,
             )
-    if root.exists():
+    if not chats_authoritative and root.exists():
         candidates = [
             path.name
             for path in root.iterdir()
@@ -208,7 +260,28 @@ def _archive_records(mapping, chats, report, position):
     return result
 
 
-def _workspace(mapping, report, index):
+def _selected_source_roots(mapping, chats, sessions):
+    roots = [mapping.registry_path]
+    for session in sessions:
+        legacy = session.get("legacy")
+        if legacy is None:
+            continue
+        session_path = Path(session["path"])
+        roots.append(str(session_path))
+        for relative in legacy.get("files", []):
+            roots.append(str(session_path.parent / relative))
+    for chat in chats:
+        chat_id = chat.id
+        for relative in (
+            Path(mapping.dialog_dir) / chat_id,
+            Path(mapping.dialog_dir) / ".deleted" / chat_id,
+        ):
+            mapping.path(str(relative))
+            roots.append(str(relative))
+    return roots
+
+
+def _workspace(mapping, report, index, *, chats_authoritative=False):
     position = (
         "service:" + mapping.scope.service_unit_id + "/workspace:" + str(index)
     )
@@ -225,35 +298,45 @@ def _workspace(mapping, report, index):
         "sessions": [],
         "chats": [],
     }
-    files = _source_files(mapping)
-    report["files"].extend(
-        {
-            "workspace": index,
-            "path": str(path.relative_to(root)),
-            "bytes": path.stat().st_size,
-        }
-        for path in files
-    )
-    oversized = False
-    for path in files:
-        if path.stat().st_size > MAX_READ_BYTES:
-            oversized = True
-            _block(
-                report,
-                "source_artifact_oversized",
-                position,
-                str(path.relative_to(root))
-                + ": exceeds supported migration reader limit; split-file migration required",
-            )
-        if "quarantine" in path.name:
-            _block(
-                report,
-                "source_quarantined",
-                position,
-                str(path.relative_to(root)),
-            )
-    if oversized:
-        return empty_workspace
+    files = []
+    if not chats_authoritative:
+        files = _source_files(mapping)
+        report["files"].extend(
+            {
+                "workspace": index,
+                "path": str(path.relative_to(root)),
+                "bytes": path.stat().st_size,
+            }
+            for path in files
+        )
+        oversized = False
+        for path in files:
+            if path.stat().st_size > MAX_READ_BYTES:
+                oversized = True
+                _block(
+                    report,
+                    "source_artifact_oversized",
+                    position,
+                    str(path.relative_to(root))
+                    + ": exceeds supported migration reader limit; split-file migration required",
+                )
+            if "quarantine" in path.name:
+                _block(
+                    report,
+                    "source_quarantined",
+                    position,
+                    str(path.relative_to(root)),
+                )
+        if oversized:
+            return empty_workspace
+    else:
+        safe_input_entries(
+            root,
+            [mapping.registry_path],
+            recursive=False,
+            trusted_root=root,
+            allow_in_root_symlinks=True,
+        )
     try:
         value = load_metadata_json(
             mapping.path(mapping.registry_path).read_text(encoding="utf-8"),
@@ -267,11 +350,36 @@ def _workspace(mapping, report, index):
         _block(report, "registry_invalid", position, error)
         return empty_workspace
     try:
-        sessions = _sessions(mapping, chats, report, position, files)
+        sessions = _sessions(
+            mapping,
+            chats,
+            report,
+            position,
+            files,
+            chats_authoritative=chats_authoritative,
+        )
     except (ValueError, TypeError) as error:
         _block(report, "identity_invalid", position, error)
         sessions = []
-    _ledger_generations(mapping, sessions, report, position)
+    archive_records = _archive_records(
+        mapping,
+        chats,
+        report,
+        position,
+        chats_authoritative=chats_authoritative,
+    )
+    if not chats_authoritative:
+        _ledger_generations(mapping, sessions, report, position)
+    else:
+        files = _source_files(
+            mapping,
+            _selected_source_roots(mapping, chats, sessions),
+            chats_authoritative=True,
+        )
+        report["files"].extend(
+            {"workspace": index, "path": str(path.relative_to(root))}
+            for path in files
+        )
     return {
         "position": position,
         "root": str(root),
@@ -282,7 +390,7 @@ def _workspace(mapping, report, index):
             mapping.scope.agent_id,
         ],
         "sessions": sessions,
-        "chats": _archive_records(mapping, chats, report, position),
+        "chats": archive_records,
     }
 
 

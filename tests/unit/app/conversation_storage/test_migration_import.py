@@ -514,12 +514,13 @@ async def test_verification_payloads_overlap_bounded_nas_reads_on_owner_sql_task
     assert sql_tasks == [owner]
 
 
-def test_large_recovery_is_explicitly_blocked_before_import():
+def test_large_recovery_object_is_not_limited_by_reader_size():
     from swe.app.conversation_storage.migration.importer import _block
-    from swe.app.conversation_storage.bundle import MAX_READ_BYTES
+    from swe.app.conversation_storage.bundle import BundleBlock
 
-    with pytest.raises(ValueError, match="projection required"):
-        _block("recovery", "recovery", {"huge": "x" * MAX_READ_BYTES})
+    block = _block("recovery", "recovery", {"huge": "x" * (9 * 1024 * 1024)})
+    assert isinstance(block, BundleBlock)
+    assert len(block.content) > 8 * 1024 * 1024
 
 
 def test_inventory_files_rebuilt_from_database_and_recovery_are_not_copied():

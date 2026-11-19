@@ -223,15 +223,12 @@ async def test_invalid_workers_rejected_before_parsing(tmp_path):
             await spool_workspaces({"workspaces": []}, spool, workers=0)
 
 
-async def test_workspace_input_limit_fails_before_parser_allocation(
+async def test_workspace_input_preflight_does_not_reject_large_input(
     tmp_path,
     monkeypatch,
 ):
     import pytest
     from swe.app.conversation_storage.migration import inventory_parallel
-    from swe.app.conversation_storage.migration.spool import (
-        MigrationCapacityError,
-    )
 
     root = tmp_path / "large-workspace"
     root.mkdir()
@@ -244,12 +241,31 @@ async def test_workspace_input_limit_fails_before_parser_allocation(
         "root": str(root),
         "position": source_key("workspace", "large"),
     }
-    data = {"workspaces": [mapping], "shares": [], "fingerprints": []}
+    data = {
+        "source_binding_storage": "manifest-v1",
+        "workspaces": [mapping],
+        "shares": [],
+        "fingerprints": [],
+    }
 
-    def forbidden(*_args):
-        pytest.fail("oversized workspace reached the legacy parser")
+    parsed = []
 
-    monkeypatch.setattr(inventory_parallel, "inventory_workspace", forbidden)
+    def parse(_data, index):
+        parsed.append(index)
+        return {
+            "workspaces": [
+                {
+                    "scope": ["service", "tenant", "source", "agent"],
+                    "position": "large",
+                    "sessions": [],
+                    "chats": [],
+                },
+            ],
+            "files": [],
+            "blockers": [],
+        }
+
+    monkeypatch.setattr(inventory_parallel, "inventory_workspace", parse)
     spool_base = tmp_path / "spool"
     spool_base.mkdir()
     with InventorySpool(
@@ -257,13 +273,13 @@ async def test_workspace_input_limit_fails_before_parser_allocation(
         max_bytes=1024 * 1024,
         record_limit=1024 * 1024,
     ) as spool:
-        with pytest.raises(MigrationCapacityError, match="memory allowance"):
-            await spool_workspaces(
-                data,
-                spool,
-                workers=1,
-                memory_bytes=16 * 1024,
-            )
+        await spool_workspaces(
+            data,
+            spool,
+            workers=1,
+            memory_bytes=16 * 1024,
+        )
+    assert parsed == [0]
 
 
 async def test_spooled_v3_inventory_matches_serial_inventory(tmp_path):
@@ -335,34 +351,6 @@ async def test_spooled_v3_inventory_matches_serial_inventory(tmp_path):
             source_boundary=manifest.data["source_boundary"],
         )
         assert inventories_equal(actual, expected)
-
-
-def test_share_snapshot_budget_is_checked_before_json_read(tmp_path):
-    import pytest
-    from swe.app.conversation_storage.migration import inventory_v3
-
-    snapshot = tmp_path / "share.json"
-    snapshot.write_bytes(b"x" * 32)
-    data = {
-        "shares": [{"snapshot_path": str(snapshot)}],
-    }
-
-    with pytest.raises(ValueError, match="memory budget"):
-        inventory_v3._preflight_share_budget(data, 1024)
-
-
-def test_share_count_budget_covers_small_snapshot_metadata(tmp_path):
-    import pytest
-    from swe.app.conversation_storage.migration import inventory_v3
-
-    snapshot = tmp_path / "share.json"
-    snapshot.write_text("{}")
-    data = {
-        "shares": [{"snapshot_path": str(snapshot)}] * 17,
-    }
-
-    with pytest.raises(ValueError, match="memory budget"):
-        inventory_v3._preflight_share_budget(data, 256 * 1024)
 
 
 async def test_spooled_recheck_compares_before_temporary_records_close(

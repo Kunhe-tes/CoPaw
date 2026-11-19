@@ -925,9 +925,16 @@ def freeze_discovery(
                 "registry_path",
                 "chats.json",
             )
+            manifest_v1 = report.get("source_binding_storage") == "manifest-v1"
             if (
-                registry.is_symlink()
-                or registry.lstat().st_mtime_ns
+                (registry.is_symlink() and not manifest_v1)
+                or (
+                    manifest_v1
+                    and not registry.resolve(strict=True).is_relative_to(
+                        Path(workspace["root"]).resolve(strict=True),
+                    )
+                )
+                or registry.stat().st_mtime_ns
                 != workspace.get("chats_mtime_ns")
             ):
                 raise ValueError("chats.json changed during preparation")

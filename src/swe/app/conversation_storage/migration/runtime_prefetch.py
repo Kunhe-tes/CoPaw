@@ -3,7 +3,7 @@
 
 from .parallel import MigrationCoordinator
 from .disk_manifest import DiskMap
-from ..bundle import BundleStore, MAX_READ_BYTES
+from ..bundle import BundleStore, MAX_READ_BYTES, UNBOUNDED
 from ..errors import IntegrityError
 
 
@@ -12,6 +12,12 @@ class PrefetchedBundles:
 
     def __init__(self, original):
         self.root = original.root
+        self.max_read_bytes = getattr(
+            original,
+            "max_read_bytes",
+            MAX_READ_BYTES,
+        )
+        self.unbounded = getattr(original, "unbounded", False)
         self.indexes = {}
         self.blocks = {}
 
@@ -45,7 +51,7 @@ class PrefetchedBundles:
             or type(length) is not int
             or offset < 0
             or length < 0
-            or length > MAX_READ_BYTES
+            or length > self.max_read_bytes
         ):
             raise IntegrityError("invalid prefetched extent")
         self.inspect(relative_path, expected_length=expected_length)
@@ -62,10 +68,11 @@ class PrefetchedBundles:
         extents,
         *,
         expected_length=None,
-        max_bytes=MAX_READ_BYTES,
+        max_bytes=None,
     ):
         """对缓存证据提供同等总字节预算的多块兼容接口。"""
         extents = tuple(extents)
+        max_bytes = self.max_read_bytes if max_bytes is None else max_bytes
         if sum(block.length for block in extents) > max_bytes:
             raise IntegrityError("prefetched multi-read exceeds byte budget")
         return tuple(
@@ -79,19 +86,22 @@ class PrefetchedBundles:
         )
 
 
-def _read_bounded(original, path, byte_length, allowance):
+def _read_bounded(original, path, byte_length, allowance, *, unbounded=None):
     """预留索引与正文膨胀预算后，在同一文件描述符中读取全部块。"""
+    if unbounded is None:
+        unbounded = getattr(original, "unbounded", False)
     with original.open_reader(
         path,
         expected_length=byte_length,
-        index_allowance=allowance,
+        index_allowance=UNBOUNDED if unbounded else allowance,
     ) as reader:
         index = reader.index
         extents = list(index.blocks.values())
         size = sum(block.length * 16 + 512 for block in extents)
         reservation = reader.index_reservation + size
-        if reservation > allowance or any(
-            block.length > MAX_READ_BYTES for block in extents
+        if not unbounded and (
+            reservation > allowance
+            or any(block.length > MAX_READ_BYTES for block in extents)
         ):
             raise ValueError(
                 "runtime body evidence exceeds workspace memory allowance",
@@ -109,16 +119,17 @@ def _read_bounded(original, path, byte_length, allowance):
 
 async def _prefetch(original, rows, io, allowance):
     cache = PrefetchedBundles(original)
-    # 共享 worker 额度同时覆盖 SQL 行、索引及运行时 JSON 膨胀。
-    used = len(rows) * 16384
+    used = 0 if cache.unbounded else len(rows) * 16384
     for row in rows:
+        remaining = UNBOUNDED if cache.unbounded else allowance - used
         path = original.validate_publication_locator(row)
         index, blocks, reservation = await io.call(
             _read_bounded,
             original,
             path,
             row["byte_length"],
-            allowance - used,
+            remaining,
+            unbounded=cache.unbounded,
         )
         used += reservation
         cache.indexes[path] = index
@@ -159,6 +170,7 @@ async def verify_prefetched_workspaces(
 
     async def locators(index):
         workspace = inventory["workspaces"][index]
+        original = stores.get(workspace["scope"][0])
         scope = tuple(value.encode() for value in workspace["scope"])
         rows = []
         after = None
@@ -183,7 +195,10 @@ async def verify_prefetched_workspaces(
                 )
                 pins.setdefault(index, []).append((retention, batch))
             rows.extend(page)
-            if len(rows) * 16384 > allowance:
+            if (
+                not getattr(original, "unbounded", False)
+                and len(rows) * 16384 > allowance
+            ):
                 raise ValueError(
                     "runtime locator evidence exceeds workspace memory allowance",
                 )

@@ -12,12 +12,12 @@ from .freshness import changed_source, tenant_key
 from .in_place_source import shared_service_roots
 from .parallel import MigrationCoordinator, MigrationResources
 from .progress import current_progress
-from .spool import MigrationCapacityError
 from .source_inputs import (
     SourceInputInvalid,
     safe_input_entries,
     session_input_roots,
 )
+from .spool import MigrationCapacityError
 
 
 @dataclass(frozen=True)
@@ -76,11 +76,13 @@ async def spool_workspaces(
 
         async def parse(index, _request):
             async with shared_resources.reserve() as allowance:
-                source_bytes = await io.call(
-                    _preflight_workspace,
-                    data["workspaces"][index],
-                    allowance,
-                )
+                source_bytes = 0
+                if data.get("source_binding_storage") != "manifest-v1":
+                    source_bytes = await io.call(
+                        _preflight_workspace,
+                        data["workspaces"][index],
+                        allowance,
+                    )
                 result = await io.call(inventory_workspace, data, index)
                 record = await io.call(spool.write, index, result)
                 workspace = result["workspaces"][0]

@@ -96,14 +96,15 @@ def _compact_tenant_inventory(data, allowance):
 
     summaries, references, blockers = [], [], []
     for index, workspace in enumerate(data["workspaces"]):
-        if data.get("freshness_protocol"):
-            _preflight_workspace(
-                workspace,
-                allowance,
-                require_readonly=True,
-            )
-        else:
-            _preflight_workspace(workspace, allowance)
+        if data.get("source_binding_storage") != "manifest-v1":
+            if data.get("freshness_protocol"):
+                _preflight_workspace(
+                    workspace,
+                    allowance,
+                    require_readonly=True,
+                )
+            else:
+                _preflight_workspace(workspace, allowance)
         result = inventory_workspace(data, index)
         parsed = result["workspaces"][0]
         summaries.append(
@@ -127,7 +128,8 @@ def _compact_tenant_inventory(data, allowance):
                 },
             )
         del result, parsed
-    _preflight_share_budget(data, allowance)
+    if data.get("source_binding_storage") != "manifest-v1":
+        _preflight_share_budget(data, allowance)
     for source in data["shares"]:
         report = {"workspaces": references, "blockers": [], "shares": []}
         _inventory_shares({**data, "shares": [source]}, report)

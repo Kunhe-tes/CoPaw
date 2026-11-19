@@ -123,22 +123,35 @@ def verify_chats_mtimes(data, key):
     for workspace in data["workspaces"]:
         if not belongs(workspace, key):
             continue
-        verify_workspace_chats_mtime(workspace)
+        verify_workspace_chats_mtime(
+            workspace,
+            allow_in_root_symlink=(
+                data.get("source_binding_storage") == "manifest-v1"
+            ),
+        )
 
 
-def verify_workspace_chats_mtime(workspace):
+def verify_workspace_chats_mtime(workspace, *, allow_in_root_symlink=False):
     registry = Path(workspace["root"]) / workspace.get(
         "registry_path",
         "chats.json",
     )
-    if registry.is_symlink():
+    if registry.is_symlink() and not allow_in_root_symlink:
         raise SourceInputInvalid("chats.json cannot be a symlink")
     try:
-        details = registry.lstat()
+        details = (
+            registry.stat() if allow_in_root_symlink else registry.lstat()
+        )
     except FileNotFoundError:
         raise SourceInputInvalid("chats.json is missing") from None
     if not stat.S_ISREG(details.st_mode):
         raise SourceInputInvalid("chats.json must be a regular file")
+    if allow_in_root_symlink and not registry.resolve(
+        strict=True,
+    ).is_relative_to(
+        Path(workspace["root"]).resolve(strict=True),
+    ):
+        raise SourceInputInvalid("chats.json symlink escapes workspace")
     if details.st_mtime_ns != workspace.get("chats_mtime_ns"):
         raise SourceChanged("chats.json changed after preparation")
 

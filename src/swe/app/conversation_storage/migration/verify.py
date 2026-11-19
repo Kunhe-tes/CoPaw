@@ -3,7 +3,7 @@
 
 import asyncio
 
-from ..bundle import BlockExtent, MAX_READ_BYTES
+from ..bundle import BlockExtent
 from ..chat_repository import MySQLChatRepository
 from ..chat_mutations import (
     load_metadata_json,
@@ -492,9 +492,10 @@ async def _verify_artifact(
         "workspace": item["workspace"],
         "scope": workspace["scope"],
         "relative_path": item["path"],
-        "bytes": item["bytes"],
         "snapshot_id": inventory["source_boundary"]["snapshot_id"],
     }
+    if "bytes" in item:
+        expected["bytes"] = item["bytes"]
     if io is None:
         index = bundles.inspect(
             assignment["relative_path"],
@@ -514,7 +515,8 @@ async def _verify_artifact(
         (meta, body),
         io=io,
     )
-    if load_metadata_json(metadata_raw) != expected:
+    metadata = load_metadata_json(metadata_raw)
+    if metadata != expected or metadata.get("bytes") != len(body_raw):
         raise ValueError("retained legacy artifact source identity differs")
     source_path = Path(workspace["root"]) / item["path"]
     source = (
@@ -522,7 +524,9 @@ async def _verify_artifact(
         if io is None
         else await io.call(source_path.read_bytes)
     )
-    if len(source) != item["bytes"] or body_raw != source:
+    if (
+        "bytes" in item and len(source) != item["bytes"]
+    ) or body_raw != source:
         raise ValueError("retained native legacy artifact bytes differ")
 
 
@@ -531,7 +535,12 @@ async def _read_extents(bundles, relative_path, extents, *, io):
         raise ValueError("verification reads at most two extents")
     arguments = (relative_path, extents)
     # Verification reads at most an artifact body and its metadata together.
-    kwargs = {"max_bytes": 2 * MAX_READ_BYTES}
+    max_read_bytes = (
+        bundles.max_read_bytes
+        if hasattr(bundles, "max_read_bytes")
+        else bundles.original.max_read_bytes
+    )
+    kwargs = {"max_bytes": 2 * max_read_bytes}
     if io is None:
         return bundles.read_extents(*arguments, **kwargs)
     return await io.call(bundles.read_extents, *arguments, **kwargs)

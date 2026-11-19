@@ -9,7 +9,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 
-from swe.app.conversation_storage.bundle import BundleStore
+from swe.app.conversation_storage.bundle import BundleStore, UNBOUNDED
 from swe.app.conversation_storage.migration.direct_import import (
     DirectImporter,
     DirectTarget,
@@ -208,11 +208,16 @@ def _work_base(work_dir, data):
     raise ValueError("no tenant work directory is separate from source roots")
 
 
-def _spool(base, data, memory_bytes, workers):
+def _spool(base, data, memory_bytes=None, workers=None):
+    disk_limit = (
+        UNBOUNDED
+        if data.get("source_binding_storage") == "manifest-v1"
+        else shutil.disk_usage(base).free * 3 // 4
+    )
     return InventorySpool(
         base,
-        max_bytes=shutil.disk_usage(base).free * 3 // 4,
-        record_limit=memory_bytes // workers,
+        max_bytes=disk_limit,
+        record_limit=disk_limit,
         checksum=data.get("source_binding_storage") != "manifest-v1",
         protected=[
             s[k]
@@ -401,12 +406,7 @@ async def _final_source_check(view, inventory, base, resources):
         except TenantInputError as error:
             raise TenantFailure(str(error)) from error
         return
-    with _spool(
-        base,
-        view.data,
-        resources["memory_bytes"],
-        resources["workers"],
-    ) as check_spool:
+    with _spool(base, view.data) as check_spool:
         actual = await _inventory(view, check_spool, resources)
         if not inventories_equal(inventory, actual):
             raise TenantFailure("tenant source changed during operation")
@@ -426,17 +426,16 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
     journal.active_tenant = view.key
     journal.frozen_bindings_data = view.parent.data
     bundles = {
-        s["service_unit_id"]: BundleStore(s["nas_root"])
+        s["service_unit_id"]: (
+            BundleStore(s["nas_root"], unbounded=True)
+            if view.data.get("source_binding_storage") == "manifest-v1"
+            else BundleStore(s["nas_root"])
+        )
         for s in view.data["services"]
     }
     verification_level = resources.get("_verification_level", "fast")
     verification_result = None
-    with _spool(
-        base,
-        view.data,
-        resources["memory_bytes"],
-        resources["workers"],
-    ) as spool:
+    with _spool(base, view.data) as spool:
         _stage("inventory")
         inventory = resources.get("_prefetched")
         if inventory is None:

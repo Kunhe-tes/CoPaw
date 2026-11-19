@@ -34,6 +34,7 @@ MAX_INDEX_BYTES = 4 * 1024 * 1024
 MAX_BLOCKS = 4096
 MAX_BUNDLE_BYTES = 256 * 1024 * 1024
 MAX_READ_BYTES = 8 * 1024 * 1024
+UNBOUNDED = (1 << 63) - 1
 _METADATA_FIELDS = frozenset(
     {
         "operation_key",
@@ -199,8 +200,8 @@ def _valid_name(value, byte_limit):
     )
 
 
-def _encode_index(blocks: list[BundleBlock]):
-    if not blocks or len(blocks) > MAX_BLOCKS:
+def _encode_index(blocks: list[BundleBlock], max_blocks=MAX_BLOCKS):
+    if not blocks or len(blocks) > max_blocks:
         raise ValueError("bundle block count is out of bounds")
     table = {}
     position = 0
@@ -239,8 +240,13 @@ def _copy_block(target, block):
 class BundleStore:
     """The configured root is trusted; every descendant is server generated."""
 
-    def __init__(self, root: str | Path):
+    def __init__(self, root: str | Path, *, unbounded=False):
         self.root = Path(root).absolute()
+        self.unbounded = unbounded
+        self.max_index_bytes = UNBOUNDED if unbounded else MAX_INDEX_BYTES
+        self.max_blocks = UNBOUNDED if unbounded else MAX_BLOCKS
+        self.max_bundle_bytes = UNBOUNDED if unbounded else MAX_BUNDLE_BYTES
+        self.max_read_bytes = UNBOUNDED if unbounded else MAX_READ_BYTES
 
     @staticmethod
     def path_for(
@@ -413,16 +419,16 @@ class BundleStore:
         metadata_value = metadata if metadata is not None else {}
         _validate_metadata(metadata_value)
         metadata_bytes = _json_bytes(metadata_value)
-        table, payload_length = _encode_index(blocks)
+        table, payload_length = _encode_index(blocks, self.max_blocks)
         if (
-            len(metadata_bytes) > MAX_INDEX_BYTES
-            or len(table) > MAX_INDEX_BYTES
+            len(metadata_bytes) > self.max_index_bytes
+            or len(table) > self.max_index_bytes
         ):
             raise ValueError("bundle metadata exceeds index limit")
         byte_length = (
             HEADER.size + len(metadata_bytes) + len(table) + payload_length
         )
-        if byte_length > MAX_BUNDLE_BYTES:
+        if byte_length > self.max_bundle_bytes:
             raise ValueError(
                 "bundle exceeds byte limit; split the publication",
             )
@@ -526,7 +532,12 @@ class BundleStore:
                 != expected_operation_key
             ):
                 raise IntegrityError("bundle publication identity mismatch")
-            yield BundleReader(source, index)
+            yield BundleReader(
+                source,
+                index,
+                max_blocks=self.max_blocks,
+                max_read_bytes=self.max_read_bytes,
+            )
 
     def _inspect_source(
         self,
@@ -547,10 +558,10 @@ class BundleStore:
         if magic != MAGIC or version != VERSION:
             raise IntegrityError("unknown bundle format version")
         if (
-            meta_size > MAX_INDEX_BYTES
-            or table_size > MAX_INDEX_BYTES
+            meta_size > self.max_index_bytes
+            or table_size > self.max_index_bytes
             or size != HEADER.size + meta_size + table_size + payload_size
-            or size > MAX_BUNDLE_BYTES
+            or size > self.max_bundle_bytes
         ):
             raise IntegrityError(
                 "bundle length or index bounds are invalid",
@@ -575,7 +586,7 @@ class BundleStore:
             if (
                 not isinstance(metadata, dict)
                 or not isinstance(table, dict)
-                or not 0 < len(table) <= MAX_BLOCKS
+                or not 0 < len(table) <= self.max_blocks
             ):
                 raise ValueError("invalid index")
             blocks = self._decode_table(table, source.tell(), payload_size)
@@ -589,7 +600,7 @@ class BundleStore:
         extents,
         *,
         expected_length=None,
-        max_bytes=MAX_READ_BYTES,
+        max_bytes=None,
     ):
         """一次安全打开读取给定的有界多块正文，兼容独立索引定位。"""
         with self.open_reader(
@@ -668,7 +679,7 @@ class BundleStore:
         *,
         expected_length: int | None = None,
     ) -> bytes:
-        if type(length) is not int or length > MAX_READ_BYTES:
+        if type(length) is not int or length > self.max_read_bytes:
             raise IntegrityError("extent requires bounded streaming read")
         return b"".join(
             self.iter_extent(
@@ -694,28 +705,38 @@ def _file_state(details):
 class BundleReader:
     """仅在 open_reader 上下文内有效的有界正文读取器。"""
 
-    def __init__(self, source, index):
+    def __init__(
+        self,
+        source,
+        index,
+        *,
+        max_blocks=MAX_BLOCKS,
+        max_read_bytes=MAX_READ_BYTES,
+    ):
         """绑定当前打开文件与已校验索引，不延长文件生命周期。"""
         self.source = source
         self.index = index
+        self.max_blocks = max_blocks
+        self.max_read_bytes = max_read_bytes
         self.index_reservation = (source.tell() - HEADER.size) * 16 + 4096
 
-    def read_extents(self, extents, *, max_bytes=MAX_READ_BYTES):
+    def read_extents(self, extents, *, max_bytes=None):
         """按请求顺序返回正文；在分配前校验所有 extent 与总字节预算。"""
         extents = tuple(extents)
         if (
-            len(extents) > MAX_BLOCKS
-            or type(max_bytes) is not int
-            or max_bytes < 0
+            len(extents) > self.max_blocks
+            or (max_bytes is not None and type(max_bytes) is not int)
+            or (max_bytes is not None and max_bytes < 0)
         ):
             raise IntegrityError("bundle multi-read budget is invalid")
+        max_bytes = self.max_read_bytes if max_bytes is None else max_bytes
         total = 0
         for extent in extents:
             if (
                 type(extent.offset) is not int
                 or type(extent.length) is not int
                 or extent.offset < 0
-                or not 0 <= extent.length <= MAX_READ_BYTES
+                or not 0 <= extent.length <= self.max_read_bytes
                 or not any(
                     extent.kind == block.kind
                     and block.offset <= extent.offset
