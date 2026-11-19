@@ -8,10 +8,7 @@ from datetime import datetime, timezone
 import asyncio
 import json
 import re
-from functools import lru_cache
-from itertools import chain, groupby
-
-from swe.database.prepared import PreparedInsert
+from itertools import groupby
 
 from ..bundle import BundleBlock, BundleIndex, BundleStore
 from ..chat_mutations import load_metadata_json
@@ -100,31 +97,6 @@ COLUMNS = {
         "admitted_at",
         "terminal_at",
     },
-    "messages": {
-        "id",
-        "service_unit_key",
-        "session_id",
-        "origin_chat_id",
-        "archive_chat_id",
-        "layer",
-        "session_order",
-        "archive_order",
-        "turn_id",
-        "source_msg_key",
-        "source_occurrence_no",
-        "role_key",
-        "kind_key",
-        "task_run_key",
-        "publication_id",
-        "byte_offset",
-        "byte_length",
-        "archive_publication_id",
-        "context_epoch",
-        "in_context",
-        "current_visible",
-        "message_timestamp",
-        "deleted_at",
-    },
     "shares": {
         "service_unit_key",
         "token",
@@ -177,7 +149,6 @@ VERIFY_QUERIES = {
     "sessions": ReferenceQuery.OFFLINE_SESSION,
     "chats": ReferenceQuery.OFFLINE_CHAT,
     "turns": ReferenceQuery.OFFLINE_TURN,
-    "messages": ReferenceQuery.OFFLINE_MESSAGE,
     "publications": ReferenceQuery.OFFLINE_PUBLICATION,
 }
 BINARY = {
@@ -228,7 +199,6 @@ IMMUTABLE = {
         "context_epoch",
         "generation",
     },
-    "messages": COLUMNS["messages"],
     "publications": {
         "id",
         "session_id",
@@ -306,20 +276,6 @@ def _table(name):
     if name not in TABLES:
         raise IntegrityError("unknown offline import table")
     return TABLES[name]
-
-
-@lru_cache(maxsize=32)
-def _message_insert(columns):
-    if not columns or set(columns) - COLUMNS["messages"]:
-        raise IntegrityError("unknown offline Message insert field")
-    return PreparedInsert(
-        "INSERT INTO "
-        + _table("messages")
-        + " ("
-        + ",".join(columns)
-        + ") VALUES ",
-        "(" + ",".join(["%s"] * len(columns)) + ")",
-    )
 
 
 def _sql_value(key, value):
@@ -603,6 +559,10 @@ class OfflineImportStore(PublicationStore):
         grouped = {}
         for item in [*plan["rows"], *plan["updates"]]:
             table = item["table"]
+            if table not in VERIFY_QUERIES:
+                raise IntegrityError(
+                    "offline plan references unsupported entity",
+                )
             values = self._resolve(item["values"], publication, index)
             expected = grouped.setdefault(table, {})
             if values["id"] in expected:
@@ -782,14 +742,25 @@ class OfflineImportStore(PublicationStore):
         if (
             not isinstance(plan, dict)
             or set(plan)
-            != {
-                "version",
-                "migration_id",
-                "schema",
-                "rows",
-                "updates",
-                "locks",
-            }
+            not in (
+                {
+                    "version",
+                    "migration_id",
+                    "schema",
+                    "rows",
+                    "updates",
+                    "locks",
+                },
+                {
+                    "version",
+                    "migration_id",
+                    "schema",
+                    "rows",
+                    "updates",
+                    "locks",
+                    "dependencies",
+                },
+            )
             or plan["version"] != 1
             or plan["migration_id"] != self.target.migration_id
             or plan["schema"] != self.target.schema
@@ -806,15 +777,32 @@ class OfflineImportStore(PublicationStore):
             or not isinstance(plan["updates"], list)
             or not isinstance(plan["locks"], dict)
             or set(plan["locks"]) - {"sessions", "chats", "turns"}
+            or not OfflineImportStore._valid_dependencies(
+                plan.get("dependencies", []),
+            )
         ):
             raise IntegrityError(
                 "offline installation collections are invalid",
             )
-        for identities in plan["locks"].values():
-            if not isinstance(identities, list) or any(
-                type(value) is not int or value <= 0 for value in identities
-            ):
-                raise IntegrityError("offline lock identity is invalid")
+        if any(
+            not OfflineImportStore._valid_lock_ids(identities)
+            for identities in plan["locks"].values()
+        ):
+            raise IntegrityError("offline lock identity is invalid")
+
+    @staticmethod
+    def _valid_lock_ids(identities):
+        return isinstance(identities, list) and all(
+            type(value) is int and value > 0 for value in identities
+        )
+
+    @staticmethod
+    def _valid_dependencies(dependencies):
+        return (
+            isinstance(dependencies, list)
+            and all(type(value) is int and value > 0 for value in dependencies)
+            and dependencies == sorted(set(dependencies))
+        )
 
     @staticmethod
     def _validate_typed_record(item):
@@ -830,6 +818,8 @@ class OfflineImportStore(PublicationStore):
             raise IntegrityError(
                 "offline installation uses an unknown typed field",
             )
+        if table == "messages":
+            raise IntegrityError("offline Message rows are not supported")
         if table == "shares":
             raise IntegrityError("offline shares require typed ShareInstall")
         if type(values.get("id")) is not int or values["id"] <= 0:
@@ -952,9 +942,19 @@ class OfflineImportStore(PublicationStore):
     ):
         if plan.messages:
             raise IntegrityError(
-                "offline projection additions require explicit preassigned Message rows",
+                "offline projection additions are unsupported",
             )
         imported = _PLAN.get()
+        if imported.get("dependencies"):
+            retention = RetentionStore(
+                self.db,
+                PublicationRequestFrom(row).scope,
+                scope_kind=row["scope_kind"],
+            )
+            targets = await retention._lock_publications(
+                imported["dependencies"],
+            )
+            await retention._install_locked_dependencies(row, targets)
         for (table, _fields), records in groupby(
             imported["rows"],
             key=lambda item: (item["table"], frozenset(item["values"])),
@@ -975,33 +975,14 @@ class OfflineImportStore(PublicationStore):
 
         await install_share(self.db, request, plan, row, index)
 
-    def _message_parameters(self, records, columns, publication, index):
-        for item in records:
-            values = self._resolve(item["values"], publication, index)
-            self._validate_relation("messages", values, publication)
-            yield tuple(values[key] for key in columns)
-
     async def _install_records(self, table, records, publication, index):
-        if table != "messages":
-            for item in records:
-                await self._apply_record(
-                    item,
-                    publication,
-                    index,
-                    update=False,
-                )
-            return
-        first = next(records)
-        columns = tuple(first["values"])
-        await self.db.insert_prepared(
-            _message_insert(columns),
-            self._message_parameters(
-                chain((first,), records),
-                columns,
+        for item in records:
+            await self._apply_record(
+                item,
                 publication,
                 index,
-            ),
-        )
+                update=False,
+            )
 
     def _resolve(self, values, publication, index):
         result = {}
@@ -1045,12 +1026,12 @@ class OfflineImportStore(PublicationStore):
         ):
             raise IntegrityError("offline record scope mismatch")
         if (
-            table in ("turns", "messages")
+            table == "turns"
             and values.get("service_unit_key")
             != publication["service_unit_key"]
         ):
             raise IntegrityError("offline record service scope mismatch")
-        if table in ("chats", "turns", "messages"):
+        if table in ("chats", "turns"):
             self._validate_record_relations(values, publication)
         if table == "publications":
             if values["id"] != publication["id"]:
@@ -1162,7 +1143,7 @@ class OfflineImportStore(PublicationStore):
             )
 
 
-def plan_block(target, rows, updates=(), locks=None):
+def plan_block(target, rows, updates=(), locks=None, dependencies=()):
     value = {
         "version": 1,
         "migration_id": target.migration_id,
@@ -1170,6 +1151,7 @@ def plan_block(target, rows, updates=(), locks=None):
         "rows": list(rows),
         "updates": list(updates),
         "locks": locks or {},
+        "dependencies": list(dependencies),
     }
     return BundleBlock(
         "import_plan",

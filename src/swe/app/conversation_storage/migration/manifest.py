@@ -22,7 +22,6 @@ KINDS = frozenset(
         "session",
         "chat",
         "turn",
-        "message",
         "publication",
         "retention",
         "share",

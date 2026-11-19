@@ -255,25 +255,33 @@ class ConversationExporter:
                 raise IntegrityError(
                     "export projection dependency order is invalid",
                 )
-            if "message_id" in ref:
-                row = next(
-                    (
-                        item
-                        for item in self.snapshot["messages"]
-                        if item["id"] == ref["message_id"]
+            if {"block_name", "position"} <= set(ref):
+                from ..message_bundle import decode_message_bodies
+
+                extent = self.bundles.inspect(
+                    _text(target["relative_path"]),
+                    expected_length=target["byte_length"],
+                ).blocks.get(ref["block_name"])
+                if extent is None or extent.kind != "message_bodies":
+                    raise IntegrityError(
+                        "export message body block is missing",
+                    )
+                bodies = decode_message_bodies(
+                    self.bundles.read_extent(
+                        _text(target["relative_path"]),
+                        extent.offset,
+                        extent.length,
+                        expected_length=target["byte_length"],
                     ),
-                    None,
                 )
-                if (
-                    row is None
-                    or row["publication_id"] != target_id
-                    or row["byte_offset"] != ref["offset"]
-                    or row["byte_length"] != ref["length"]
+                position = ref["position"]
+                if type(position) is not int or not 0 <= position < len(
+                    bodies,
                 ):
                     raise IntegrityError(
-                        "export projection occurrence locator differs",
+                        "export message body position is invalid",
                     )
-                return self.payload(target_id, ref["offset"], ref["length"])
+                return bodies[position]
             if ref.get("operation_key") != _text(target["operation_key"]):
                 raise IntegrityError(
                     "export projection operation identity differs",
@@ -490,35 +498,55 @@ class ConversationExporter:
             self._archive(destination, chat)
 
     def _archive_messages(self, publication):
+        from ..message_bundle import (
+            decode_archive_manifest,
+            decode_message_bodies,
+            decode_message_directory,
+        )
+
         raw = self.payload(
             publication["id"],
             publication["archive_offset"],
             publication["archive_length"],
         )
-        occurrences = sorted(
-            (
-                row
-                for row in self.snapshot["messages"]
-                if row["archive_publication_id"] == publication["id"]
-            ),
-            key=lambda row: (row["archive_order"], row["id"]),
-        )
-        messages = [
-            self.payload(
-                row["publication_id"],
-                row["byte_offset"],
-                row["byte_length"],
+        if isinstance(raw, list):
+            return raw
+        manifest = decode_archive_manifest(raw)
+        messages = []
+        for chunk in manifest["chunks"]:
+            target = self.publications.get(chunk["publication_id"])
+            if target is None or target["chat_id"] != publication["chat_id"]:
+                raise IntegrityError("archive export chunk ownership differs")
+            path = _text(target["relative_path"])
+            index = self.bundles.inspect(
+                path,
+                expected_length=target["byte_length"],
             )
-            for row in occurrences
-        ]
+            directory_extent = index.blocks[chunk["directory_block"]]
+            directory = decode_message_directory(
+                self.bundles.read_extent(
+                    path,
+                    directory_extent.offset,
+                    directory_extent.length,
+                    expected_length=index.byte_length,
+                ),
+            )
+            body_extent = index.blocks["message_bodies"]
+            bodies = decode_message_bodies(
+                self.bundles.read_extent(
+                    path,
+                    body_extent.offset,
+                    body_extent.length,
+                    expected_length=index.byte_length,
+                ),
+            )
+            if len(directory) != len(bodies):
+                raise IntegrityError(
+                    "archive export directory/body count differs",
+                )
+            messages.extend(bodies)
         if len(messages) != publication["archive_source_count"]:
             raise IntegrityError("archive export occurrence set is incomplete")
-        if isinstance(raw, list) and raw != messages:
-            raise IntegrityError(
-                "archive export boundary body differs from occurrences",
-            )
-        if not isinstance(raw, (list, dict)):
-            raise IntegrityError("archive export boundary is invalid")
         return messages
 
     def _deleted_archive_reclaimed(self, chat):
@@ -537,13 +565,6 @@ class ConversationExporter:
                 row.get(prefix + "_offset") is not None
                 for prefix in ("archive", "checkpoint", "event")
             )
-        )
-        references.update(
-            row[key]
-            for row in self.snapshot["messages"]
-            if row.get("archive_chat_id") == chat["id"]
-            for key in ("publication_id", "archive_publication_id")
-            if row.get(key) is not None
         )
         return any(
             self.publications[identity]["gc_state"]

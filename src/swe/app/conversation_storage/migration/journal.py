@@ -10,7 +10,7 @@ from ..identity import WorkspaceScope
 JOBS = "swe_conversation_migration_jobs"
 ENTRIES = "swe_conversation_migration_entries"
 HYDRATE_PAGE_SIZE = 1000
-TICKET_KINDS = frozenset({"session", "chat", "turn", "message", "publication"})
+TICKET_KINDS = frozenset({"session", "chat", "turn", "publication"})
 ENTITY_TABLES = {
     kind: "swe_conversation_" + kind + "s" for kind in TICKET_KINDS
 }
@@ -228,7 +228,7 @@ class MigrationJournal:
         clause, scope_values = self._tenant_filter("b")
         for kind, table in ENTITY_TABLES.items():
             owned_clause = clause
-            if scope_values and kind in ("turn", "message"):
+            if scope_values and kind == "turn":
                 orphan = await self.db.fetch_one(
                     "SELECT b.id FROM "
                     + table

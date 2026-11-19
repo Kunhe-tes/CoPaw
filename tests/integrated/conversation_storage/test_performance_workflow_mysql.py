@@ -85,8 +85,44 @@ async def _measured_invoke(arguments):
         "exception_type": (
             type(result.exception).__name__ if result.exception else None
         ),
+        "cli_output": result.output,
+        "cli_stderr": result.stderr,
         **metrics,
     }
+
+
+async def _assert_new_metadata_schema(db):
+    tables = {
+        next(iter(row.values())) for row in await db.fetch_all("SHOW TABLES")
+    }
+    expected_tables = {
+        "swe_conversation_sessions",
+        "swe_conversation_chats",
+        "swe_conversation_turns",
+        "swe_conversation_publications",
+        "swe_conversation_retentions",
+    }
+    assert expected_tables <= tables
+    assert "swe_conversation_messages" not in tables
+    ticket_counts = await db.fetch_all(
+        "SELECT entry_kind,COUNT(*) AS n "
+        "FROM swe_conversation_migration_entries "
+        "GROUP BY entry_kind ORDER BY entry_kind",
+    )
+    assert all(row["entry_kind"] != b"message" for row in ticket_counts)
+    return ticket_counts
+
+
+async def _target_row_counts(db):
+    counts = {}
+    for table in (
+        "swe_conversation_sessions",
+        "swe_conversation_chats",
+        "swe_conversation_publications",
+    ):
+        result = await db.fetch_one("SELECT COUNT(*) AS n FROM " + table)
+        counts[table.removeprefix("swe_conversation_")] = result["n"]
+    return counts
 
 
 @pytest.mark.parametrize(
@@ -172,27 +208,9 @@ async def test_representative_prepare_migrate_metrics(
                 *resources,
             ],
         )
-        recorded = await db.fetch_all(
-            "SELECT state,verification_text,failure_text "
-            "FROM swe_conversation_migration_sources WHERE migration_id=%s",
-            (json.loads(manifest.read_text())["migration_id"].encode(),),
-        )
-        evidence = [
-            json.loads(row["verification_text"])
-            for row in recorded
-            if row["verification_text"]
-        ]
-        assert evidence, (
-            f"source verification rows missing; import exit={import_metrics['exit_code']}, "
-            f"fast exit={fast_verify_metrics['exit_code']}, "
-            f"full exit={full_verify_metrics['exit_code']}"
-        )
-        assert all(
-            item["verification_results"]["fast"]["passed"] for item in evidence
-        )
-        assert any(
-            item["verification_results"]["full"]["passed"] for item in evidence
-        )
+        assert fast_verify_metrics["exit_code"] == 0, fast_verify_metrics
+        assert full_verify_metrics["exit_code"] == 0, full_verify_metrics
+        assert full_result.get("passed") is True
     fail_fast_verification = [failure_mode == "fast_verification"]
     if fail_fast_verification[0]:
         from swe.cli import conversation_storage_tenants
@@ -245,10 +263,8 @@ async def test_representative_prepare_migrate_metrics(
         session_b.chmod(0o444)
     result, repeated = await _measured_invoke(arguments)
     assert result["published"] == 3 and result["failed"] == 0
-    count = await db.fetch_one(
-        "SELECT COUNT(*) AS n FROM swe_conversation_messages",
-    )
-    assert count["n"] >= 128
+    ticket_counts = await _assert_new_metadata_schema(db)
+    target_counts = await _target_row_counts(db)
     assert first["db_statement_attempts"] > 0
     assert first["db_transaction_begins"] > 0
     print(
@@ -259,6 +275,17 @@ async def test_representative_prepare_migrate_metrics(
                 "sources": 3,
                 "workspaces": 3,
                 "input_messages": 128,
+                "target_rows": {
+                    **target_counts,
+                    "tickets_by_kind": {
+                        (
+                            row["entry_kind"].decode()
+                            if isinstance(row["entry_kind"], bytes)
+                            else row["entry_kind"]
+                        ): row["n"]
+                        for row in ticket_counts
+                    },
+                },
                 "workers": 3,
                 "io_workers": 2,
                 "memory_budget_mib": 128,

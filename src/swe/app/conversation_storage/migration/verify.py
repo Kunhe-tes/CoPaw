@@ -18,7 +18,7 @@ from ..errors import StorageError
 from mysql.connector.errors import Error as MySQLError
 from ..history import HistoryStore
 from ..archive_reader import ArchiveReader
-from .importer import archive_batches, message_body, task_projections
+from .importer import archive_batches, task_projections
 from .manifest import SourceBoundary
 from .readonly import ReadOnlyDatabase, ReadOnlyRetention, read_only_adapter
 from .verify_parallel import (
@@ -598,6 +598,7 @@ async def _verify_session(
         await _verify_session_messages(
             database,
             bundles,
+            manifest,
             workspace,
             session,
             sid,
@@ -673,6 +674,7 @@ async def _verify_turns(adapter, identity, expected):
 async def _verify_session_messages(
     database,
     bundles,
+    manifest,
     workspace,
     session,
     sid,
@@ -682,10 +684,12 @@ async def _verify_session_messages(
 ):
     identity = session["identity"]
     expected = session["legacy"]["state"]
-    rows = await database.fetch_all(
-        "SELECT * FROM swe_conversation_messages WHERE session_id=%s AND layer<>%s ORDER BY session_order",
-        (sid, "archive"),
+    from ..message_bundle import (
+        decode_message_bodies,
+        decode_message_directory,
     )
+    from ..bundle import BundleStore
+
     from .importer import display_order_messages, extract_messages
 
     messages = extract_messages(
@@ -705,38 +709,54 @@ async def _verify_session_messages(
     ):
         task_projections(messages, expected)
     messages = display_order_messages(messages)
-    if len(rows) != len(messages):
-        raise ValueError("Session Message occurrence count differs")
-    if io is None:
-        bodies = [
-            await _payload(
-                database,
-                bundles,
-                row,
-                "byte_offset",
-                "byte_length",
-                service_unit_id=workspace["scope"][0],
-            )
-            for row in rows
-        ]
-    else:
-        bodies = await _payloads(
-            database,
-            bundles,
-            rows,
-            "byte_offset",
-            "byte_length",
-            service_unit_id=workspace["scope"][0],
-            io=io,
-            io_workers=io_workers,
+    assignments = manifest.data["assignments"].get("publication", {})
+    expected_count = len(messages)
+    seen = 0
+    for position, assignment in sorted(assignments.items()):
+        if not position.startswith(session["position"] + "/messages:"):
+            continue
+        publication = await database.fetch_one(
+            "SELECT * FROM swe_conversation_publications WHERE id=%s AND state='committed' AND gc_state='live'",
+            (assignment["target_id"],),
         )
-    for row, message, body in zip(rows, messages, bodies):
-        if (
-            body != message_body(message)
-            or row["layer"] != message["layer"]
-            or row["source_occurrence_no"] != message["source_occurrence_no"]
-        ):
-            raise ValueError("Message role/body/order/occurrence differs")
+        if publication is None:
+            raise ValueError("Session message bundle publication is missing")
+        path = BundleStore.validate_publication_locator(publication)
+        index = bundles.inspect(
+            path,
+            expected_length=publication["byte_length"],
+        )
+        directory = decode_message_directory(
+            bundles.read_extent(
+                path,
+                index.blocks["message_directory"].offset,
+                index.blocks["message_directory"].length,
+                expected_length=index.byte_length,
+            ),
+        )
+        bodies = decode_message_bodies(
+            bundles.read_extent(
+                path,
+                index.blocks["message_bodies"].offset,
+                index.blocks["message_bodies"].length,
+                expected_length=index.byte_length,
+            ),
+        )
+        if len(directory) != len(bodies):
+            raise ValueError("Session message directory/body count differs")
+        for entry, body in zip(directory, bodies):
+            expected_message = messages[seen]
+            if (
+                body != expected_message["payload"]
+                or entry["layer"] != expected_message["layer"]
+                or entry["source_occurrence"]
+                != expected_message["source_occurrence_no"]
+                or entry["sequence"] != seen + 1
+            ):
+                raise ValueError("Message directory/body/order differs")
+            seen += 1
+    if seen != expected_count:
+        raise ValueError("Session Message occurrence count differs")
 
 
 async def _verify_chat_projection(database, scope, spec):
@@ -815,44 +835,87 @@ async def _verify_archive_rows(
     io=None,
     io_workers=4,
 ):
-    cid = manifest.data["assignments"]["chat"][chat["position"]]["target_id"]
-    rows = await database.fetch_all(
-        "SELECT * FROM swe_conversation_messages WHERE archive_chat_id=%s ORDER BY archive_order",
-        (cid,),
+    from ..message_bundle import (
+        decode_archive_manifest,
+        decode_message_bodies,
+        decode_message_directory,
     )
+    from ..bundle import BundleStore
+
+    cid = manifest.data["assignments"]["chat"][chat["position"]]["target_id"]
     expected = [
         message
         for batch in archive_batches(chat["archive"])
         for message in batch["messages"]
     ]
-    if len(rows) != len(expected):
-        raise ValueError("archive occurrence count differs")
-    if io is None:
-        bodies = [
-            await _payload(
-                database,
-                bundles,
-                row,
-                "byte_offset",
-                "byte_length",
-                service_unit_id=scope.service_unit_id,
-            )
-            for row in rows
-        ]
-    else:
-        bodies = await _payloads(
-            database,
-            bundles,
-            rows,
-            "byte_offset",
-            "byte_length",
-            service_unit_id=scope.service_unit_id,
-            io=io,
-            io_workers=io_workers,
+    assignments = manifest.data["assignments"].get("publication", {})
+    batches = archive_batches(chat["archive"])
+    seen = 0
+    for batch in batches:
+        position = chat["position"] + "/boundary:" + batch["boundary"]["id"]
+        assignment = assignments.get(position)
+        if assignment is None:
+            raise ValueError("archive boundary publication is missing")
+        publication = await database.fetch_one(
+            "SELECT * FROM swe_conversation_publications WHERE id=%s AND state='committed' AND gc_state='live'",
+            (assignment["target_id"],),
         )
-    for body, message in zip(bodies, expected):
-        if body != message:
-            raise ValueError("archive message order/body differs")
+        if publication is None:
+            raise ValueError("archive boundary publication is missing")
+        path = BundleStore.validate_publication_locator(publication)
+        index = bundles.inspect(
+            path,
+            expected_length=publication["byte_length"],
+        )
+        extent = index.blocks["archive_manifest"]
+        archive_manifest = decode_archive_manifest(
+            bundles.read_extent(
+                path,
+                extent.offset,
+                extent.length,
+                expected_length=index.byte_length,
+            ),
+        )
+        for chunk in archive_manifest["chunks"]:
+            chunk_publication = await database.fetch_one(
+                "SELECT * FROM swe_conversation_publications WHERE id=%s AND state='committed' AND gc_state='live'",
+                (chunk["publication_id"],),
+            )
+            if chunk_publication is None:
+                raise ValueError(
+                    "archive message chunk publication is missing",
+                )
+            chunk_path = BundleStore.validate_publication_locator(
+                chunk_publication,
+            )
+            chunk_index = bundles.inspect(
+                chunk_path,
+                expected_length=chunk_publication["byte_length"],
+            )
+            directory_extent = chunk_index.blocks[chunk["directory_block"]]
+            directory = decode_message_directory(
+                bundles.read_extent(
+                    chunk_path,
+                    directory_extent.offset,
+                    directory_extent.length,
+                    expected_length=chunk_index.byte_length,
+                ),
+            )
+            body_extent = chunk_index.blocks["message_bodies"]
+            bodies = decode_message_bodies(
+                bundles.read_extent(
+                    chunk_path,
+                    body_extent.offset,
+                    body_extent.length,
+                    expected_length=chunk_index.byte_length,
+                ),
+            )
+            for entry, body in zip(directory, bodies):
+                if body != expected[seen] or entry["sequence"] != seen + 1:
+                    raise ValueError("archive message order/body differs")
+                seen += 1
+    if seen != len(expected):
+        raise ValueError("archive occurrence count differs")
 
 
 async def _verify_epochs(database, bundles, manifest, chat, scope, *, io=None):

@@ -303,16 +303,6 @@ def task_projections(messages, state):
             }
 
 
-def message_body(item):
-    if "history_projection" not in item:
-        return item["payload"]
-    return {
-        "version": 1,
-        "message": item["payload"],
-        "history_projection": item["history_projection"],
-    }
-
-
 @dataclass(frozen=True)
 class ImportBatch:
     updates: tuple = ()
@@ -325,6 +315,7 @@ class ImportBatch:
     kind: str = "offline_import"
     epoch: int | None = None
     legacy_locks: dict | None = None
+    dependencies: tuple = ()
 
 
 class ConversationImporter:
@@ -349,6 +340,7 @@ class ConversationImporter:
         self.db = database
         self.bundle_stores = bundle_stores(bundles, manifest)
         self.bundles = None
+        self.current_scope = None
         self.manifest = manifest
         self.target = target
         self.batch_size = batch_size
@@ -375,6 +367,7 @@ class ConversationImporter:
         self.session_ids = {}
         self.chat_ids = {}
         self.turn_ids = {}
+        self.session_message_refs = {}
 
     def assigned(self, kind, position):
         return self.manifest.allocate(kind, position)["target_id"]
@@ -408,13 +401,6 @@ class ConversationImporter:
 
     async def _prepare_publications(self, positions, scope):
         """旧 manifest 维持首次使用时分配 publication 的行为。"""
-
-    async def _allocate_messages(self, positions):
-        """旧 manifest 保持逐条语义，SQL 导入器覆盖为有界批量。"""
-        return {
-            position: await self._assigned("message", position)
-            for position in positions
-        }
 
     async def _set_batch_state(self, position, state):
         self.manifest.set_batch_state(position, state)
@@ -527,6 +513,7 @@ class ConversationImporter:
     async def _publish(self, position, scope, rows, blocks, *, spec=None):
         self.bundles = self.bundle_stores[scope.service_unit_id]
         self.store = self.stores[scope.service_unit_id]
+        self.current_scope = scope
         spec = spec or ImportBatch()
         updates, locks, scope_kind = spec.updates, spec.locks, spec.scope_kind
         session_id, chat_id, turn_id = (
@@ -558,7 +545,7 @@ class ConversationImporter:
             epoch=epoch,
         )
         plan = commit_plan or CommitPlan(result_ids=(assignment["target_id"],))
-        body = plan_block(self.target, rows, updates, locks)
+        body = plan_block(self.target, rows, updates, locks, spec.dependencies)
         current = await self._reserve_batch(
             position,
             request,
@@ -605,7 +592,13 @@ class ConversationImporter:
         from .install_records import plan_block
         from .plan_compatibility import retained_plan
 
-        legacy = plan_block(self.target, rows, spec.updates, spec.legacy_locks)
+        legacy = plan_block(
+            self.target,
+            rows,
+            spec.updates,
+            spec.legacy_locks,
+            spec.dependencies,
+        )
         return await self.store._nas_io(
             row["operation_key"].decode(),
             retained_plan,
@@ -695,7 +688,7 @@ class ConversationImporter:
                 + "/"
                 + item["path"]
             )
-            await self._publish(
+            publication = await self._publish(
                 position,
                 WorkspaceScope.from_values(workspace["scope"]),
                 [],
@@ -850,6 +843,12 @@ class ConversationImporter:
             await self._publish(position + "/identities", scope, rows, blocks)
 
     async def _session(self, session, workspace, scope):
+        from ..bundle import BundleBlock
+        from ..message_bundle import (
+            encode_message_bodies,
+            split_message_batches,
+        )
+
         sid = self.session_ids[session["position"]]
         state = session["legacy"]["state"]
         epoch = state.get("context_epoch", 0)
@@ -886,34 +885,71 @@ class ConversationImporter:
         ):
             task_projections(messages, state)
         messages = display_order_messages(messages)
-        for start in range(0, len(messages), self.batch_size):
-            batch = messages[start : start + self.batch_size]
-            positions = [
-                session["position"] + "/message:" + str(index)
-                for index in range(start, start + len(batch))
-            ]
-            assigned = await self._allocate_messages(positions)
+        body_groups = split_message_batches(
+            [item["payload"] for item in messages],
+            max_records=self.batch_size,
+        )
+        start = 0
+        for group in body_groups:
+            batch = messages[start : start + len(group)]
             rows = []
-            blocks = []
+            entries = []
             for index, item in enumerate(batch, start=start):
-                position = session["position"] + "/message:" + str(index)
-                mid = assigned[position]
-                block = "message:" + str(mid)
                 turn = self.turn_ids.get((sid, item["turn_key"]))
                 origin = chats.get(item["chat_key"])
-                values = _message_row(
-                    mid,
-                    sid,
-                    item,
-                    index + 1,
-                    block,
-                    turn,
-                    origin,
-                    service_unit_id=scope.service_unit_id,
+                entries.append(
+                    {
+                        "sequence": index + 1,
+                        "session_order": index + 1,
+                        "raw_id": item["source_msg_key"] or "",
+                        "layer": item["layer"],
+                        "turn_id": turn,
+                        "chat_id": origin,
+                        "visible": True,
+                        "role": item["role"],
+                        "kind": item["payload"].get("type") or "message",
+                        "task": (
+                            item.get("history_projection", {}).get(
+                                "task_run_id",
+                            )
+                            if isinstance(item.get("history_projection"), dict)
+                            else None
+                        ),
+                        "task_index": (
+                            item.get("history_projection", {}).get(
+                                "task_run_index",
+                            )
+                            if isinstance(item.get("history_projection"), dict)
+                            else None
+                        ),
+                        "task_section": (
+                            item.get("history_projection", {}).get(
+                                "task_run_section",
+                            )
+                            if isinstance(item.get("history_projection"), dict)
+                            else None
+                        ),
+                        "source_occurrence": item["source_occurrence_no"],
+                        "timestamp": item["payload"].get("timestamp"),
+                        "epoch": item["context_epoch"],
+                        "in_context": item["in_context"],
+                        "current_visible": True,
+                        "body": {
+                            "publication_id": "self",
+                            "block_name": "message_bodies",
+                            "position": index - start,
+                        },
+                    },
                 )
-                rows.append({"table": "messages", "values": values})
-                blocks.append(_block(block, item["layer"], message_body(item)))
-            await self._publish(
+            blocks = [
+                _block("message_directory", "message_directory", entries),
+                BundleBlock(
+                    "message_bodies",
+                    "message_bodies",
+                    encode_message_bodies(group),
+                ),
+            ]
+            publication = await self._publish(
                 session["position"] + "/messages:" + str(start),
                 scope,
                 rows,
@@ -930,28 +966,28 @@ class ConversationImporter:
                     },
                     locks={
                         "sessions": [sid],
-                        "chats": sorted(
-                            {
-                                item["values"][key]
-                                for item in rows
-                                for key in (
-                                    "origin_chat_id",
-                                    "archive_chat_id",
-                                )
-                                if item["values"].get(key) is not None
-                            },
-                        ),
+                        "chats": sorted(set(chats.values())),
                         "turns": sorted(
-                            {
-                                item["values"]["turn_id"]
-                                for item in rows
-                                if item["values"].get("turn_id") is not None
-                            },
+                            tid for tid in self.turn_ids.values() if tid
                         ),
                     },
                     session_id=sid,
                 ),
             )
+            refs = self.session_message_refs.setdefault(
+                session["position"],
+                {},
+            )
+            for index, item in enumerate(batch, start=start):
+                key = (item["layer"], _json(item["payload"]))
+                refs.setdefault(key, []).append(
+                    {
+                        "publication_id": publication["id"],
+                        "block_name": "message_bodies",
+                        "position": index - start,
+                    },
+                )
+            start += len(group)
         await self._root_and_turns(session, scope, chats, len(messages))
 
     async def _turn_identities(self, session, scope, chats):
@@ -1028,13 +1064,16 @@ class ConversationImporter:
                 ),
             )
 
-    async def _root_and_turns(self, session, scope, chats, history_high):
+    async def _import_turn_recovery_records(
+        self,
+        session,
+        scope,
+        chats,
+        sid,
+        state,
+    ):
         from ..commit_plan import CommitPlan
 
-        sid = self.session_ids[session["position"]]
-        state = deepcopy(session["legacy"]["state"])
-        revision = _session_revision(state)
-        root_position = session["position"] + "/recovery"
         turns = list(state.get("turn_states", {}).items())
         for start in range(0, len(turns), self.batch_size):
             rows = []
@@ -1127,6 +1166,16 @@ class ConversationImporter:
                             commit_plan=CommitPlan(recovery_block="recovery"),
                         ),
                     )
+
+    def _session_recovery_updates(
+        self,
+        session,
+        state,
+        chats,
+        sid,
+        history_high,
+    ):
+        revision = _session_revision(state)
         usage = state.get("context_usage")
         invalid = state.get("context_usage_invalid", False)
         updates = [
@@ -1164,12 +1213,92 @@ class ConversationImporter:
                     "values": {"id": cid, "next_turn_order": high + 1},
                 },
             )
+        return updates
+
+    async def _recovery_projection(self, session, state, scope, sid):
+        from ..session_projection import project_state
+
+        occurrences = self.session_message_refs.get(session["position"], {})
+        cursors = {key: 0 for key in occurrences}
+
+        def resolve_message(layer, body):
+            key = (layer, _json(body))
+            options = occurrences.get(key)
+            if not options:
+                return None
+            cursor = cursors[key]
+            if cursor >= len(options):
+                return None
+            cursors[key] += 1
+            return options[cursor]
+
+        def resolve_turn(key, value):
+            turn_id = self.turn_ids.get((sid, key))
+            if turn_id is None:
+                return None
+            position = session["position"] + "/turn-record:" + str(turn_id)
+            assignment = self.manifest.data["assignments"]["publication"].get(
+                position,
+            )
+            if assignment is None:
+                return None
+            return {
+                "publication_id": assignment["target_id"],
+                "block_name": "recovery",
+            }
+
+        root_position = session["position"] + "/recovery"
+        root_assignment = await self._allocate(
+            "publication",
+            root_position,
+            scope=scope,
+        )
+        projection = project_state(
+            state,
+            operation_key=root_assignment["operation_key"],
+            resolve_message=resolve_message,
+            resolve_turn=resolve_turn,
+        )
+        dependencies = list(projection.dependency_ids)
+        for dependency in dependencies:
+            if dependency >= root_assignment["target_id"]:
+                raise TenantInputError(
+                    "recovery reference publication order is invalid",
+                )
+        return root_position, projection, dependencies
+
+    async def _root_and_turns(self, session, scope, chats, history_high):
+        sid = self.session_ids[session["position"]]
+        state = deepcopy(session["legacy"]["state"])
+        await self._import_turn_recovery_records(
+            session,
+            scope,
+            chats,
+            sid,
+            state,
+        )
+        updates = self._session_recovery_updates(
+            session,
+            state,
+            chats,
+            sid,
+            history_high,
+        )
+        root_position, projection, dependencies = (
+            await self._recovery_projection(
+                session,
+                state,
+                scope,
+                sid,
+            )
+        )
         await self._publish(
             root_position,
             scope,
             [],
             [
-                _block("recovery", "recovery", state),
+                _block("recovery", "recovery", projection.envelope),
+                *projection.blocks,
                 _block(
                     "legacy_root",
                     "legacy_root",
@@ -1180,6 +1309,7 @@ class ConversationImporter:
                 updates=updates,
                 locks={"sessions": [sid], "chats": list(chats.values())},
                 session_id=sid,
+                dependencies=tuple(dependencies),
             ),
         )
 
@@ -1193,6 +1323,13 @@ class ConversationImporter:
         return row["session_id"]
 
     async def _archive(self, chat, scope):
+        from ..bundle import BundleBlock
+        from ..message_bundle import (
+            encode_archive_manifest,
+            encode_message_bodies,
+            split_message_batches,
+        )
+
         if not chat["archive"]["epochs"]:
             return
         cid = self.chat_ids[chat["position"]]
@@ -1201,52 +1338,95 @@ class ConversationImporter:
         batches = archive_batches(chat["archive"])
         for order, batch in enumerate(batches, start=1):
             boundary = batch["boundary"]
-            rows = []
-            blocks = [_block("archive", "archive", batch["messages"])]
             first = archive_order + 1
-            positions = [
-                chat["position"]
-                + "/archive:"
-                + boundary["id"]
-                + "/"
-                + str(index)
-                for index in range(len(batch["messages"]))
+            chunks = []
+            body_groups = split_message_batches(
+                batch["messages"],
+                max_records=self.batch_size,
+            )
+            offset = 0
+            for chunk_index, bodies in enumerate(body_groups):
+                entries = []
+                for index, payload in enumerate(
+                    batch["messages"][offset : offset + len(bodies)],
+                ):
+                    sequence = archive_order + 1
+                    archive_order = sequence
+                    entries.append(
+                        {
+                            "sequence": sequence,
+                            "archive_order": sequence,
+                            "raw_id": payload.get("id"),
+                            "layer": "archive",
+                            "chat_id": cid,
+                            "visible": not chat["archive"]["deleted"],
+                            "role": payload.get("role") or "assistant",
+                            "kind": payload.get("type") or "message",
+                            "source_occurrence": offset + index,
+                            "timestamp": payload.get("timestamp"),
+                            "epoch": batch["epoch"],
+                            "body": {
+                                "publication_id": "self",
+                                "block_name": "message_bodies",
+                                "position": index,
+                            },
+                        },
+                    )
+                position = (
+                    chat["position"]
+                    + "/boundary:"
+                    + boundary["id"]
+                    + "/chunk:"
+                    + str(chunk_index)
+                )
+                result = await self._publish(
+                    position,
+                    scope,
+                    [],
+                    [
+                        _block(
+                            "message_directory",
+                            "message_directory",
+                            entries,
+                        ),
+                        BundleBlock(
+                            "message_bodies",
+                            "message_bodies",
+                            encode_message_bodies(bodies),
+                        ),
+                    ],
+                    spec=ImportBatch(
+                        locks={"sessions": [sid], "chats": [cid]},
+                        session_id=sid,
+                        chat_id=cid,
+                        epoch=batch["epoch"],
+                    ),
+                )
+                chunks.append(
+                    {
+                        "publication_id": result["id"],
+                        "first_sequence": entries[0]["sequence"],
+                        "last_sequence": entries[-1]["sequence"],
+                        "directory_block": "message_directory",
+                    },
+                )
+                offset += len(bodies)
+            rows = []
+            blocks = [
+                BundleBlock(
+                    "archive_manifest",
+                    "archive_manifest",
+                    encode_archive_manifest(
+                        {
+                            "chat_id": chat["spec"]["id"],
+                            "epoch": batch["epoch"],
+                            "first_sequence": first,
+                            "last_sequence": archive_order,
+                            "chunks": chunks,
+                        },
+                    ),
+                ),
             ]
-            assigned = {}
-            for start in range(0, len(positions), self.batch_size):
-                assigned.update(
-                    await self._allocate_messages(
-                        positions[start : start + self.batch_size],
-                    ),
-                )
-            for index, payload in enumerate(batch["messages"]):
-                archive_order += 1
-                mid = assigned[positions[index]]
-                name = "message:" + str(mid)
-                item = _entry(payload, "archive", index, 0)
-                values = _message_row(
-                    mid,
-                    sid,
-                    item,
-                    archive_order,
-                    name,
-                    None,
-                    None,
-                    service_unit_id=scope.service_unit_id,
-                )
-                values.update(
-                    session_order=None,
-                    archive_order=archive_order,
-                    archive_chat_id=cid,
-                    archive_publication_id={"publication": True},
-                    deleted_at=(
-                        self.manifest.data["source_boundary"]["captured_at"]
-                        if chat["archive"]["deleted"]
-                        else None
-                    ),
-                )
-                rows.append({"table": "messages", "values": values})
-                blocks.append(_block(name, "archive", payload))
             pub = await self._allocate(
                 "publication",
                 chat["position"] + "/boundary:" + boundary["id"],
@@ -1270,8 +1450,14 @@ class ConversationImporter:
                 "archive_last_timestamp": _timestamp(
                     boundary["last_timestamp"],
                 ),
-                "archive_offset": {"block": "archive", "part": "offset"},
-                "archive_length": {"block": "archive", "part": "length"},
+                "archive_offset": {
+                    "block": "archive_manifest",
+                    "part": "offset",
+                },
+                "archive_length": {
+                    "block": "archive_manifest",
+                    "part": "length",
+                },
                 "retained_history": 1,
                 "committed_at": boundary["created_at"],
             }
@@ -1286,6 +1472,9 @@ class ConversationImporter:
                     session_id=sid,
                     chat_id=cid,
                     epoch=batch["epoch"],
+                    dependencies=tuple(
+                        item["publication_id"] for item in chunks
+                    ),
                 ),
             )
         epochs = chat["archive"]["epochs"]
@@ -1423,7 +1612,13 @@ class ParallelWorkspaceImporter(ConversationImporter):
             return body
         from .install_records import plan_block
 
-        legacy = plan_block(self.target, rows, spec.updates, spec.legacy_locks)
+        legacy = plan_block(
+            self.target,
+            rows,
+            spec.updates,
+            spec.legacy_locks,
+            spec.dependencies,
+        )
         return await self.context.retained_plan(row, body, legacy)
 
     def __init__(self, context, target, *, batch_size=128):
@@ -1446,6 +1641,7 @@ class ParallelWorkspaceImporter(ConversationImporter):
         self.session_ids = {}
         self.chat_ids = {}
         self.turn_ids = {}
+        self.session_message_refs = {}
 
     async def _allocate(
         self,
@@ -1500,18 +1696,6 @@ class ParallelWorkspaceImporter(ConversationImporter):
             position: (value, scope) for position, value in assignments.items()
         }
 
-    async def _allocate_messages(self, positions):
-        """把消息票据分配交给协调器唯一 SQL owner。"""
-        assignments = await self.context.journal(
-            "allocate_many",
-            "message",
-            positions,
-        )
-        return {
-            position: value["target_id"]
-            for position, value in assignments.items()
-        }
-
     async def _set_batch_state(self, position, state):
         await self.context.journal("set_batch_state", position, state)
 
@@ -1545,7 +1729,13 @@ class ParallelWorkspaceImporter(ConversationImporter):
         plan = spec.commit_plan or CommitPlan(
             result_ids=(assignment["target_id"],),
         )
-        body = plan_block(self.target, rows, spec.updates, spec.locks)
+        body = plan_block(
+            self.target,
+            rows,
+            spec.updates,
+            spec.locks,
+            spec.dependencies,
+        )
         expected = load_metadata_json(body.content)
         expected_blocks = [body, *blocks]
         current = await self.context.store(
@@ -1708,49 +1898,6 @@ def _timestamp(value):
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.isoformat()
-
-
-def _message_row(
-    identity,
-    session,
-    item,
-    order,
-    block,
-    turn,
-    origin,
-    *,
-    service_unit_id,
-):
-    projection = item.get(
-        "history_projection",
-        item["payload"].get("metadata", {}),
-    )
-    task_run_id = (
-        projection.get("task_run_id") if isinstance(projection, dict) else None
-    )
-    return {
-        "id": identity,
-        "service_unit_key": service_unit_id,
-        "session_id": session,
-        "origin_chat_id": origin,
-        "archive_chat_id": None,
-        "layer": item["layer"],
-        "session_order": order,
-        "archive_order": None,
-        "turn_id": turn,
-        "source_msg_key": item["source_msg_key"],
-        "source_occurrence_no": item["source_occurrence_no"],
-        "role_key": item["role"],
-        "kind_key": item["payload"].get("type") or "message",
-        "task_run_key": task_run_id,
-        "publication_id": {"publication": True},
-        "byte_offset": {"block": block, "part": "offset"},
-        "byte_length": {"block": block, "part": "length"},
-        "context_epoch": item["context_epoch"],
-        "in_context": int(item["in_context"]),
-        "current_visible": 1,
-        "message_timestamp": _timestamp(item["payload"].get("timestamp")),
-    }
 
 
 def bundle_stores(bundles, manifest):

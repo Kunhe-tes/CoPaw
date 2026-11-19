@@ -255,10 +255,7 @@ async def _no_data(
         service, tenant = key[:2]
         source = key[2] if len(key) == 3 else None
         for table in BUSINESS_TABLES:
-            if table in (
-                "swe_conversation_turns",
-                "swe_conversation_messages",
-            ):
+            if table == "swe_conversation_turns":
                 orphan = await db.fetch_one(
                     "SELECT b.id FROM "
                     + table
@@ -281,12 +278,7 @@ async def _no_data(
                 )
             values = (service.encode(), tenant.encode())
             if source is not None:
-                prefix = (
-                    "s."
-                    if table
-                    in ("swe_conversation_turns", "swe_conversation_messages")
-                    else ""
-                )
+                prefix = "s." if table == "swe_conversation_turns" else ""
                 query = query.replace(
                     " LIMIT 1",
                     " AND " + prefix + "source_key=%s LIMIT 1",

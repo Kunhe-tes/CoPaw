@@ -296,8 +296,6 @@ def test_task_projection_preserves_raw_payload_and_final_section():
     from agentscope.message import Msg
     from swe.app.conversation_storage.migration.importer import (
         task_projections,
-        message_body,
-        _message_row,
     )
 
     state = {
@@ -315,23 +313,12 @@ def test_task_projection_preserves_raw_payload_and_final_section():
     task_projections(messages, state)
     assert messages[0]["history_projection"]["task_run_section"] == "step"
     assert messages[1]["history_projection"]["task_run_section"] == "final"
-    assert (
-        message_body(messages[1])["message"]
-        == state["agent"]["memory"]["content"][1]
-    )
-    assert (
-        _message_row(
-            1,
-            1,
-            messages[1],
-            1,
-            "message",
-            None,
-            None,
-            service_unit_id="schema-test-service",
-        )["task_run_key"]
-        == "run-1"
-    )
+    assert messages[1]["payload"] == state["agent"]["memory"]["content"][1]
+    assert messages[1]["history_projection"] == {
+        "task_run_id": "run-1",
+        "task_run_index": 0,
+        "task_run_section": "final",
+    }
 
 
 def test_archive_union_retains_old_epoch_only_batches():
