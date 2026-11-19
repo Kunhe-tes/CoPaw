@@ -369,7 +369,10 @@ async def _initialize_agent_observability_storage(app: FastAPI) -> None:
                 readiness["invalid_indexes"],
             )
     except Exception as exc:
-        logger.warning("Agent observability database unavailable: %s", type(exc).__name__)
+        logger.warning(
+            "Agent observability database unavailable: %s",
+            type(exc).__name__,
+        )
         if connection is not None:
             try:
                 await connection.close()
@@ -898,6 +901,12 @@ async def _shutdown_lifespan_resources_impl(
         logger.warning("Error closing AgentTraceSDK global tracer: %s", e)
 
     try:
+        await stop_service_heartbeat()
+    except Exception as e:
+        logger.warning("Error stopping service heartbeat: %s", e)
+    manager_stopped = await _stop_multi_agent_manager(app)
+    pool_stopped = await _stop_tenant_workspace_pool(app)
+    try:
         from ..observability.emitter import shutdown_default_emitter
 
         remaining = shutdown_default_emitter()
@@ -907,14 +916,11 @@ async def _shutdown_lifespan_resources_impl(
                 remaining,
             )
     except Exception as e:
-        logger.warning("Error closing independent agent observability output: %s", e)
+        logger.warning(
+            "Error closing independent agent observability output: %s",
+            e,
+        )
 
-    try:
-        await stop_service_heartbeat()
-    except Exception as e:
-        logger.warning("Error stopping service heartbeat: %s", e)
-    manager_stopped = await _stop_multi_agent_manager(app)
-    pool_stopped = await _stop_tenant_workspace_pool(app)
     if transient_cleanup is not None:
         from ..agents.memory.base_memory_manager import summary_task_stats
 
@@ -961,16 +967,23 @@ async def _shutdown_lifespan_resources_impl(
 
     set_cron_auth_repository(None)
     agent_observability_connection = getattr(
-        app.state, "agent_observability_connection", None,
+        app.state,
+        "agent_observability_connection",
+        None,
     )
     agent_observability_projector = getattr(
-        app.state, "agent_observability_projector", None,
+        app.state,
+        "agent_observability_projector",
+        None,
     )
     if agent_observability_projector is not None:
         try:
             await agent_observability_projector.stop()
         except Exception as e:
-            logger.warning("Error stopping Agent observability projector: %s", e)
+            logger.warning(
+                "Error stopping Agent observability projector: %s",
+                e,
+            )
     if agent_observability_connection is not None:
         try:
             await agent_observability_connection.close()
