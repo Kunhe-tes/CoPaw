@@ -155,7 +155,7 @@ async def test_tracing_overlay_binds_target_scope_and_restores_operator(
     store = history(tmp_path)
     spec = ChatSpec(id="chat", session_id="s", user_id="bob")
     store.chats._hydrate = AsyncMock(return_value=[spec])
-    store._validate_chat_row = AsyncMock()
+    store._validate_snapshot = AsyncMock()
     store._payloads = AsyncMock(return_value=[])
     store._finish = AsyncMock()
     seen = []
@@ -217,7 +217,7 @@ async def test_target_approval_overlay_uses_actual_scope_filter(
     store = history(tmp_path)
     spec = ChatSpec(id="chat", session_id="s", user_id="bob")
     store.chats._hydrate = AsyncMock(return_value=[spec])
-    store._validate_chat_row = AsyncMock()
+    store._validate_snapshot = AsyncMock()
     store._payloads = AsyncMock(return_value=[])
     store._finish = AsyncMock()
     message = ChatMessage(
@@ -258,7 +258,7 @@ async def test_shared_session_reset_during_payload_read(
     epoch = 4
 
     async def session_row(*args):
-        return {"context_epoch": epoch}
+        return {"context_epoch": epoch, "recovery_publication_id": None}
 
     store.db = SimpleNamespace(fetch_one=session_row)
     store._validate_chat_row = AsyncMock()
@@ -292,64 +292,37 @@ async def test_shared_session_reset_during_payload_read(
 
 
 @pytest.mark.parametrize("tracing", [False, True])
-@pytest.mark.parametrize("mutation", ["compact", "recovery_prune"])
-async def test_shared_session_prune_during_payload_read(
+@pytest.mark.parametrize(
+    "change",
+    [{"state_revision": 10}, {"recovery_publication_id": 111}],
+    ids=["revision", "recovery-pointer"],
+)
+async def test_shared_session_publication_changes_during_payload_read(
     tmp_path,
     monkeypatch,
     tracing,
-    mutation,
+    change,
 ):
-    from swe.app.conversation_storage import history as history_module
-    from swe.app.conversation_storage import archive as archive_module
     from swe.app.conversation_storage.history import HistorySnapshot
     from swe.app.conversation_storage.errors import ConflictError
 
     store = history(tmp_path)
-    visible = True
-
-    async def query(database, query, ids, params):
-        assert list(ids) == [12]
-        return [{"id": 12}] if visible else []
-
-    monkeypatch.setattr(history_module, "query_collection", query)
-    store.db = SimpleNamespace(
-        fetch_one=AsyncMock(return_value={"context_epoch": 4}),
-    )
+    session = {
+        "context_epoch": 4,
+        "state_revision": 9,
+        "recovery_publication_id": 110,
+    }
+    store.db = SimpleNamespace(fetch_one=AsyncMock(return_value=session))
     store._validate_chat_row = AsyncMock()
     store.chats._hydrate = AsyncMock(
         return_value=[ChatSpec(id="B", session_id="shared", user_id="bob")],
     )
 
-    async def prune_update(*args):
-        nonlocal visible
-        visible = False
-
-    monkeypatch.setattr(
-        archive_module,
-        "fetch_reference_rows",
-        AsyncMock(
-            return_value={
-                12: {
-                    "service_unit_key": store.scope.sql_values[0],
-                    "session_id": 1,
-                    "layer": "memory",
-                    "context_epoch": 4,
-                },
-            },
-        ),
-    )
-    monkeypatch.setattr(archive_module, "update_collection", prune_update)
-
-    async def read_then_prune(snapshot):
-        await archive_module._prune(
-            store.db,
-            SimpleNamespace(scope=store.scope, session_id=1),
-            (12,),
-            context_epoch=4 if mutation == "compact" else None,
-        )
+    async def read_then_publish(snapshot):
+        session.update(change)
         return []
 
-    store._payloads = read_then_prune
+    store._payloads = read_then_publish
     store._convert = AsyncMock(return_value=[])
     store._finish = AsyncMock()
     monkeypatch.setattr(
@@ -359,10 +332,10 @@ async def test_shared_session_prune_during_payload_read(
     )
     snapshot = HistorySnapshot(
         {"id": 2, "session_id": 1},
-        [{"id": 12, "layer": "memory"}],
         [],
         [],
-        context_epoch=4,
+        [],
+        **session,
     )
     with pytest.raises(ConflictError, match="Session history changed"):
         await store._assemble(snapshot, tracing=tracing)
