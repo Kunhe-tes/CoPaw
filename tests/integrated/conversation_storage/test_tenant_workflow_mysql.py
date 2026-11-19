@@ -488,3 +488,11 @@ async def test_same_tenant_source_retry_preserves_published_sibling(
     await runtime.admit("alice", "bob")
     with pytest.raises(TenantNotPublished):
         await runtime.admit("alice", "unknown")
+    await apply_sql_script(
+        db,
+        SQL_ROOT / "conversation_tenant_publication_finalize.sql",
+    )
+    code, finalized = await _invoke(arguments)
+    assert code == 0
+    assert finalized["state"] == "ready"
+    assert finalized["published"] == 2 and finalized["failed"] == 0

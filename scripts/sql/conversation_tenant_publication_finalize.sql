@@ -2,9 +2,13 @@
 -- every registered tenant is published. Never delete or expire legacy shares.
 -- A fail-fast client is required; DDL implicitly commits.
 SELECT CASE WHEN
-    EXISTS (SELECT 1 FROM swe_conversation_migration_tenants)
+    (EXISTS (SELECT 1 FROM swe_conversation_migration_tenants)
+     OR EXISTS (SELECT 1 FROM swe_conversation_migration_sources))
     AND NOT EXISTS (
         SELECT 1 FROM swe_conversation_migration_tenants WHERE state <> 'published'
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM swe_conversation_migration_sources WHERE state <> 'published'
     )
     AND NOT EXISTS (
         SELECT 1 FROM swe_chat_shares s
