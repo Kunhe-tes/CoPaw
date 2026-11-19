@@ -108,6 +108,24 @@ _APPROVAL_DECISIONS = frozenset(
 )
 _TERMINAL_FACT_SOURCES = frozenset({"business_settlement"})
 
+try:
+    from mysql.connector.errors import (
+        InterfaceError as _InterfaceError,
+        InternalError as _InternalError,
+        OperationalError as _OperationalError,
+        ProgrammingError as _ProgrammingError,
+    )
+
+    # 连接/权限/连接池类错误必须向上抛出，让整批稍后重试。
+    _INFRA_ERRORS: tuple[type[BaseException], ...] = (
+        _InterfaceError,
+        _OperationalError,
+        _InternalError,
+        _ProgrammingError,
+    )
+except ImportError:  # 未安装 MySQL 驱动时只保留 Python 内建分类
+    _INFRA_ERRORS = ()
+
 
 def _timestamp(value: Any) -> datetime:
     if not isinstance(value, str):
@@ -430,6 +448,16 @@ def _validate_lifecycle_values(event: dict[str, Any]) -> None:
     _validate_links(event)
     _timestamp(event.get("occurred_at"))
     _timestamp(event.get("run_started_at"))
+    # 可选时间字段必须在入库前解析，否则坏值会在投影事务中途抛错，
+    # 导致整批回滚并让该行永久卡住。
+    for key in ("started_at", "ended_at", "attempt_started_at"):
+        value = event.get(key)
+        if value is None:
+            continue
+        try:
+            _timestamp(value)
+        except ValueError as exc:
+            raise ValueError(f"invalid_{key}") from exc
     for key in ("attempt_index", "step_index", "request_attempt_index"):
         value = event.get(key)
         if value is not None and (
@@ -620,8 +648,17 @@ class InboxProjector:
         ingest_id = int(row["ingest_id"])
         try:
             event = _validate_payload(row["payload_text"] or "")
-        except ValueError as exc:
-            state, reason, event = 2, str(exc)[:64], None
+        except Exception as exc:  # noqa: BLE001 - 单行坏数据不得中断整批
+            if isinstance(exc, ValueError):
+                reason = str(exc)[:64]
+            else:
+                reason = f"invalid_payload:{type(exc).__name__}"
+                logger.warning(
+                    "Agent observability payload rejected: ingest_id=%s",
+                    ingest_id,
+                    exc_info=True,
+                )
+            state, event = 2, None
             await session.execute(
                 "UPDATE swe_agentobs_inbox SET payload_text = NULL WHERE ingest_id = %s",
                 (ingest_id,),
@@ -629,12 +666,36 @@ class InboxProjector:
         else:
             assert event is not None
             await session.execute("SAVEPOINT agentobs_row")
-            state = await self._store_event(session, event, ingest_id)
-            await session.execute("RELEASE SAVEPOINT agentobs_row")
             reason = None
+            try:
+                state = await self._store_event(session, event, ingest_id)
+            except _INFRA_ERRORS:
+                # 连接/权限类错误交给批次重试，不能当作坏行丢弃。
+                raise
+            except Exception as exc:  # noqa: BLE001 - 行级错误就地隔离
+                await session.execute(
+                    "ROLLBACK TO SAVEPOINT agentobs_row",
+                )
+                await session.execute("RELEASE SAVEPOINT agentobs_row")
+                state = 2
+                reason = f"projection_error:{type(exc).__name__}"
+                logger.warning(
+                    "Agent observability projection failed: ingest_id=%s",
+                    ingest_id,
+                    exc_info=True,
+                )
+            else:
+                if state == 1:
+                    await session.execute("RELEASE SAVEPOINT agentobs_row")
+                else:
+                    # 冲突/未插入时回滚本行已写入的附属行，避免半成品。
+                    await session.execute(
+                        "ROLLBACK TO SAVEPOINT agentobs_row",
+                    )
+                    await session.execute("RELEASE SAVEPOINT agentobs_row")
         if event is not None and state == 3:
             reason = "event_conflict"
-        elif event is not None and state == 2:
+        elif event is not None and state == 2 and reason is None:
             reason = "event_not_inserted"
         await session.execute(
             "UPDATE swe_agentobs_inbox SET processing_state = %s, processed_at = UTC_TIMESTAMP(6), "

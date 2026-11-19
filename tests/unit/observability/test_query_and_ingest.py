@@ -2019,3 +2019,119 @@ def test_attempt_active_time_is_unknown_with_incomplete_or_invalid_interval():
     assert _attempt_interval_union_us([]) is None
     assert _attempt_interval_union_us([complete, incomplete]) is None
     assert _attempt_interval_union_us([complete, reversed_interval]) is None
+
+
+def _run_accepted_payload() -> str:
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("svc", "source", "tenant", "agent"),
+        business_ref={"chat_id": "chat"},
+    )
+    event = {
+        "schema_version": 1,
+        "event_id": str(uuid4()),
+        "event_name": "run.accepted",
+        "occurred_at": context.run_started_at,
+        "producer_id": "host:123:boot",
+        "entity_kind": "run",
+        "entity_id": context.obs_run_id,
+        "phase_key": "accepted",
+        "local_seq": 0,
+        "obs_run_id": context.obs_run_id,
+        "run_started_at": context.run_started_at,
+        "capture_enabled": True,
+        "scope": context.scope.to_dict(),
+        "business_ref": context.business_ref,
+        "started_at": context.run_started_at,
+    }
+    return json.dumps(event)
+
+
+class _RecordingSession:
+    def __init__(self):
+        self.calls: list[tuple[str, tuple | None]] = []
+
+    async def execute(self, sql: str, params=None):
+        self.calls.append((" ".join(sql.split()), params))
+        return 1
+
+    async def fetch_one(self, *_args, **_kwargs):
+        return None
+
+    async def fetch_all(self, *_args, **_kwargs):
+        return []
+
+
+def _inbox_updates(session: _RecordingSession) -> list[tuple]:
+    return [
+        params
+        for sql, params in session.calls
+        if params is not None
+        and sql.startswith("UPDATE swe_agentobs_inbox SET processing_state")
+    ]
+
+
+def test_validation_rejects_invalid_optional_timestamps():
+    """坏的可选时间字段必须在校验期被拒绝，而不是投影中途抛错。"""
+    payload = json.loads(_run_accepted_payload())
+    payload["started_at"] = "not-a-date"
+    with pytest.raises(ValueError, match="invalid_started_at"):
+        _validate_payload(json.dumps(payload))
+
+    payload = json.loads(_run_accepted_payload())
+    payload["ended_at"] = 123
+    with pytest.raises(ValueError, match="invalid_ended_at"):
+        _validate_payload(json.dumps(payload))
+
+    payload = json.loads(_run_accepted_payload())
+    payload["attempt_started_at"] = "2026-13-40T00:00:00Z"
+    with pytest.raises(ValueError, match="invalid_attempt_started_at"):
+        _validate_payload(json.dumps(payload))
+
+
+@pytest.mark.asyncio
+async def test_project_one_isolates_row_error_and_marks_rejected():
+    """单行投影异常只回滚该行并置 rejected，不向批次外抛出。"""
+    projector = InboxProjector(SimpleNamespace(connection=SimpleNamespace()))
+    session = _RecordingSession()
+
+    async def boom(_session, _event, _ingest_id):
+        raise ValueError("bad projection")
+
+    projector._store_event = boom
+
+    await projector._project_one(
+        session,
+        {"ingest_id": 7, "payload_text": _run_accepted_payload()},
+    )
+
+    sqls = [sql for sql, _ in session.calls]
+    assert "SAVEPOINT agentobs_row" in sqls
+    assert "ROLLBACK TO SAVEPOINT agentobs_row" in sqls
+    updates = _inbox_updates(session)
+    assert len(updates) == 1
+    state, reason, _event_id, ingest_id = updates[0]
+    assert state == 2
+    assert reason == "projection_error:ValueError"
+    assert ingest_id == 7
+
+
+@pytest.mark.asyncio
+async def test_project_one_reraises_infrastructure_error():
+    """连接类错误必须向上抛出，交由批次重试。"""
+    errors = pytest.importorskip("mysql.connector.errors")
+    projector = InboxProjector(SimpleNamespace(connection=SimpleNamespace()))
+    session = _RecordingSession()
+
+    async def down(_session, _event, _ingest_id):
+        raise errors.OperationalError("connection lost")
+
+    projector._store_event = down
+
+    with pytest.raises(errors.OperationalError):
+        await projector._project_one(
+            session,
+            {"ingest_id": 8, "payload_text": _run_accepted_payload()},
+        )
+
+    assert _inbox_updates(session) == []
