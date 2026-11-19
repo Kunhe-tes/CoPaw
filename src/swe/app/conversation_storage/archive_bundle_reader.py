@@ -6,6 +6,7 @@ import asyncio
 import json
 
 from .bundle import BundleStore
+from .chat_mutations import load_metadata_json
 from .errors import IntegrityError
 from .message_bundle import (
     decode_archive_manifest,
@@ -208,7 +209,10 @@ def _reader(pins):
 
 def _pinned_boundary(publication, boundary_id, pins):
     pinned = {row["id"]: row for row in pins.publications}
-    return pinned.get(boundary_id, publication)
+    current = pinned.get(boundary_id)
+    if current is None:
+        return publication
+    return {**publication, **current}
 
 
 async def _boundary_index(
@@ -412,7 +416,15 @@ async def _read_bodies(
         bodies = cache.get(key)
         if bodies is None:
             extent = index.blocks.get(locator["block_name"])
-            if extent is None or extent.kind != "message_bodies":
+            if extent is None or extent.kind not in (
+                "message_bodies",
+                "message",
+                "memory",
+                "anchor",
+                "task",
+                "error",
+                "archive",
+            ):
                 raise IntegrityError("archive message body block is missing")
             payload = await read_local(
                 bundles.read_extent,
@@ -421,7 +433,11 @@ async def _read_bodies(
                 extent.length,
                 expected_length=index.byte_length,
             )
-            bodies = decode_message_bodies(payload)
+            bodies = (
+                decode_message_bodies(payload)
+                if extent.kind == "message_bodies"
+                else (load_metadata_json(payload),)
+            )
             cache[key] = bodies
         position = locator["position"]
         if position >= len(bodies):

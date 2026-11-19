@@ -17,6 +17,7 @@ from ..runner.models import (
     ChatHistory,
 )
 from .bundle import _load_json
+from .archive_reader import ArchiveReader
 from .chat_repository import (
     MySQLChatRepository,
     SELECT_CHAT,
@@ -28,13 +29,6 @@ from .errors import ConflictError, IntegrityError
 from .identity import chat_key_bytes, identity_bytes
 from .retention import MAX_PIN_BATCH, RetentionStore
 
-MESSAGE_SELECT = "SELECT m.* FROM swe_conversation_messages m WHERE "
-VISIBLE_ONLINE = (
-    "m.session_id=%s AND m.current_visible=1 AND m.deleted_at IS NULL "
-    "AND (m.layer IN ('memory','task','error') OR (m.layer='anchor' "
-    "AND (m.origin_chat_id=%s OR m.origin_chat_id IS NULL)))"
-)
-
 
 @dataclass
 class HistorySnapshot:
@@ -44,6 +38,8 @@ class HistorySnapshot:
     batches: list
     turn_status: str | None = None
     context_epoch: int | None = None
+    state_revision: int | None = None
+    recovery_publication_id: int | None = None
 
 
 class HistoryStore:
@@ -58,6 +54,7 @@ class HistoryStore:
         self.cursor_secret = cursor_secret
         self.retentions = RetentionStore(database, scope)
         self.chats = MySQLChatRepository(database, scope, bundles)
+        self.reader = ArchiveReader(database, scope, bundles)
 
     def _signature(self, raw):
         namespace = json.dumps(
@@ -213,7 +210,11 @@ class HistoryStore:
             for row in [chat, *rows, *boundaries]
         ):
             raise IntegrityError("history service association mismatch")
-        ids = {row["publication_id"] for row in rows}
+        ids = {
+            row["publication_id"]
+            for row in rows
+            if row.get("publication_id") is not None
+        }
         ids.update(row["id"] for row in boundaries)
         if chat["content_meta_publication_id"] is not None:
             ids.add(chat["content_meta_publication_id"])
@@ -257,62 +258,76 @@ class HistoryStore:
         )
 
     async def _suppress_anchors(self, chat, rows):
-        keys = [
+        anchors = {
             row["source_msg_key"]
             for row in rows
             if row["layer"] == "anchor" and row["source_msg_key"] is not None
-        ]
-        archived = await query_collection(
-            self.db,
-            CollectionQuery.ARCHIVED_KEYS,
-            keys,
-            (self.scope.sql_values[0], chat["id"]),
+        }
+        if not anchors:
+            return rows
+        boundaries = await self.db.fetch_all(
+            "SELECT * FROM swe_conversation_publications WHERE chat_id=%s "
+            "AND state='committed' AND archive_last_order IS NOT NULL",
+            (chat["id"],),
         )
-        suppressed = {row["source_msg_key"] for row in archived}
+        if not boundaries:
+            return rows
+        from .archive_bundle_reader import read_archive_bundle
+
+        archived = set()
+        for boundary in boundaries:
+            read = await read_archive_bundle(
+                self.db,
+                self.scope,
+                self.bundles,
+                boundary,
+                retentions=self.retentions,
+            )
+            try:
+                archived.update(
+                    entry["raw_id"].encode()
+                    for entry in read.entries
+                    if entry["raw_id"].encode() in anchors
+                )
+            finally:
+                await read.pins.finish()
         return [
             row
             for row in rows
             if row["layer"] != "anchor"
-            or row["source_msg_key"] not in suppressed
+            or row["source_msg_key"] not in archived
         ]
 
     async def _snapshot(self, chat_id, *, layers=None):
         async with self.db.transaction():
             chat = await self._chat(chat_id)
             session = await self.db.fetch_one(
-                "SELECT history_high,context_epoch FROM swe_conversation_sessions "
+                "SELECT history_high,context_epoch,state_revision,"
+                "recovery_publication_id FROM swe_conversation_sessions "
                 "WHERE id=%s",
                 (chat["session_id"],),
             )
-            where = VISIBLE_ONLINE
-            params = [chat["session_id"], chat["id"]]
-            where += " AND m.session_order<=%s"
-            params.append(session["history_high"])
-            if layers:
-                where += (
-                    " AND m.layer IN (" + ",".join(["%s"] * len(layers)) + ")"
-                )
-                params.extend(layers)
-            rows = await self.db.fetch_all(
-                MESSAGE_SELECT
-                + where
-                + " ORDER BY m.session_order ASC,m.id ASC",
-                tuple(params),
-            )
-            rows = await self._suppress_anchors(chat, rows)
             boundaries = (
                 await self._boundaries(chat, latest=True)
                 if layers is None
                 else []
             )
-            batches = await self._pins(chat, rows, boundaries)
-            return HistorySnapshot(
-                chat,
-                rows,
-                boundaries,
-                batches,
-                context_epoch=session["context_epoch"],
+            batches = await self._pins(chat, [], boundaries)
+            rows = await self.reader.session_messages(
+                chat["session_id"],
+                high=session["history_high"],
+                layers=layers,
             )
+        rows = await self._suppress_anchors(chat, rows)
+        return HistorySnapshot(
+            chat,
+            rows,
+            boundaries,
+            batches,
+            context_epoch=session["context_epoch"],
+            state_revision=session["state_revision"],
+            recovery_publication_id=session["recovery_publication_id"],
+        )
 
     async def _validate_chat_row(self, chat):
         chat_fields = (
@@ -340,86 +355,49 @@ class HistoryStore:
         ):
             raise ConflictError("Chat history changed while reading")
 
-    async def _validate_snapshot(self, snapshot):
+    async def _validate_snapshot(
+        self,
+        snapshot,
+    ):  # pylint: disable=too-many-boolean-expressions
         await self._validate_chat_row(snapshot.chat)
-        if snapshot.context_epoch is not None:
-            current = await self.db.fetch_one(
-                "SELECT context_epoch FROM swe_conversation_sessions "
-                "WHERE id=%s AND service_unit_key=%s",
-                (snapshot.chat["session_id"], self.scope.sql_values[0]),
+        current = await self.db.fetch_one(
+            "SELECT history_high,context_epoch,state_revision,"
+            "recovery_publication_id FROM swe_conversation_sessions "
+            "WHERE id=%s AND service_unit_key=%s",
+            (snapshot.chat["session_id"], self.scope.sql_values[0]),
+        )
+        if (
+            current is None
+            or (
+                snapshot.context_epoch is not None
+                and current["context_epoch"] != snapshot.context_epoch
             )
-            if (
-                current is None
-                or current["context_epoch"] != snapshot.context_epoch
-            ):
-                raise ConflictError("Session history changed while reading")
-
-        online_ids = {
-            row["id"] for row in snapshot.rows if row["layer"] != "archive"
-        }
-        if online_ids:
-            visible = await query_collection(
-                self.db,
-                CollectionQuery.VISIBLE_OCCURRENCES,
-                online_ids,
-                (self.scope.sql_values[0], snapshot.chat["session_id"]),
+            or (
+                snapshot.state_revision is not None
+                and current["state_revision"] != snapshot.state_revision
             )
-            if {row["id"] for row in visible} != online_ids:
-                raise ConflictError("Session history changed while reading")
+            or (
+                current["recovery_publication_id"]
+                != snapshot.recovery_publication_id
+            )
+        ):
+            raise ConflictError("Session history changed while reading")
 
     async def _payloads(self, snapshot):
-        publications = {
-            row["id"]: (row, batch)
-            for batch in snapshot.batches
-            for row in batch.publications
-        }
         payloads = []
         for row in snapshot.rows:
-            if row["session_id"] != snapshot.chat["session_id"]:
-                raise IntegrityError("history Message Session mismatch")
-            if (
-                row["layer"] == "archive"
-                and row["archive_chat_id"] != snapshot.chat["id"]
-            ):
-                raise IntegrityError("history archive Chat mismatch")
-            publication, batch = publications[row["publication_id"]]
-            if publication["session_id"] != snapshot.chat["session_id"]:
-                raise IntegrityError("history publication Session mismatch")
-            value = await batch.read(
-                self.bundles.read_extent,
-                _text(publication["relative_path"]),
-                row["byte_offset"],
-                row["byte_length"],
-                expected_length=publication["byte_length"],
-            )
-            try:
-                payload = _load_json(value)
-                if not isinstance(payload, dict):
-                    raise ValueError("not an object")
-            except (ValueError, TypeError, UnicodeDecodeError) as error:
-                raise IntegrityError("history payload is invalid") from error
-            raw_message = (
-                payload.get("message")
-                if set(payload) == {"version", "message", "history_projection"}
-                else payload
-            )
-            if not isinstance(raw_message, dict):
-                raise IntegrityError("history source message is invalid")
-            if (
-                raw_message.get("id") is not None
-                and row["source_msg_key"] is not None
-                and identity_bytes(raw_message["id"], 1024)
-                != row["source_msg_key"]
-            ):
-                raise IntegrityError(
-                    "history source message identity mismatch",
-                )
-            if (
-                raw_message.get("role") is not None
-                and identity_bytes(raw_message["role"], 32) != row["role_key"]
-            ):
-                raise IntegrityError("history source message role mismatch")
-            payloads.append(payload)
+            message = row["message"]
+            if row.get("task") is not None:
+                message = {
+                    "version": 1,
+                    "message": message,
+                    "history_projection": {
+                        "task_run_id": row["task"],
+                        "task_run_index": row.get("task_index"),
+                        "task_run_section": row.get("task_section"),
+                    },
+                }
+            payloads.append(message)
         return payloads
 
     @staticmethod
@@ -531,7 +509,7 @@ class HistoryStore:
         before=None,
         limit=50,
         authorize=None,
-    ):
+    ):  # pylint: disable=too-many-statements
         from ..runner import api
 
         if type(limit) is not int or not 1 <= limit <= 50:
@@ -548,21 +526,88 @@ class HistoryStore:
                     raise ValueError(
                         "Invalid conversation archive cursor epoch",
                     )
-            rows = await self.db.fetch_all(
-                MESSAGE_SELECT
-                + "m.archive_chat_id=%s AND m.deleted_at IS NULL "
-                "AND m.archive_order<%s AND m.archive_order<=%s "
-                "ORDER BY m.archive_order DESC LIMIT %s",
-                (chat["id"], bound, high, limit + 1),
+            boundaries = await self.db.fetch_all(
+                "SELECT * FROM swe_conversation_publications WHERE chat_id=%s "
+                "AND state='committed' AND archive_first_order<%s "
+                "AND archive_first_order<=%s ORDER BY archive_last_order DESC",
+                (chat["id"], bound, high),
             )
-            has_more = len(rows) > limit
-            rows = list(reversed(rows[:limit]))
-            boundaries = await self._boundaries(chat, rows)
-            batches = await self._pins(chat, rows, boundaries)
-            snapshot = HistorySnapshot(chat, rows, boundaries, batches)
+        selected_rows, used_boundaries = [], []
+        from .archive_bundle_reader import read_archive_bundle
+
+        has_more = False
+        for boundary in boundaries:
+            first = max(boundary["archive_first_order"], 0)
+            last = min(boundary["archive_last_order"], bound - 1, high)
+            if first > last:
+                continue
+            read = await read_archive_bundle(
+                self.db,
+                self.scope,
+                self.bundles,
+                boundary,
+                first_sequence=first,
+                last_sequence=last,
+                retentions=self.retentions,
+            )
+            try:
+                page = [
+                    {
+                        **entry,
+                        "id": entry["sequence"],
+                        "session_id": chat["session_id"],
+                        "publication_id": boundary["id"],
+                        "service_unit_key": self.scope.sql_values[0],
+                        "archive_chat_id": chat["id"],
+                        "archive_order": entry["sequence"],
+                        "source_msg_key": entry["raw_id"].encode(),
+                        "source_occurrence_no": entry.get(
+                            "source_occurrence_no",
+                            0,
+                        ),
+                        "role_key": (
+                            entry.get("role")
+                            or entry["message"].get("role")
+                            or "assistant"
+                        ).encode(),
+                        "layer": "archive",
+                        "kind_key": (entry.get("kind") or "message").encode(),
+                        "task_run_key": entry.get("task"),
+                        "origin_chat_id": entry.get("origin_chat_id"),
+                        "turn_id": entry.get("turn_id"),
+                        "context_epoch": entry.get("context_epoch", 0),
+                        "message": entry["message"],
+                    }
+                    for entry in read.entries
+                ]
+            finally:
+                await read.pins.finish()
+            if page:
+                used_boundaries.append(boundary)
+                selected_rows = page + selected_rows
+            if len(selected_rows) > limit:
+                has_more = True
+                selected_rows = selected_rows[-limit:]
+                break
+            bound = first
+            if len(selected_rows) == limit:
+                has_more = True
+                break
+        rows = selected_rows
+        visible_boundaries = [
+            boundary
+            for boundary in used_boundaries
+            if any(
+                row.get("archive_order") == boundary["archive_last_order"]
+                for row in rows
+            )
+        ]
+        async with self.db.transaction():
+            batches = await self._pins(chat, [], visible_boundaries)
+        snapshot = HistorySnapshot(chat, rows, visible_boundaries, batches)
         try:
             await self._validate_chat_row(chat)
-            spec = (await self.chats._hydrate([chat], batches))[0]
+            spec = (await self.chats._hydrate([chat]))[0]
             if authorize is not None:
                 authorize(spec)
             messages = await self._convert(
@@ -573,14 +618,7 @@ class HistoryStore:
             await self._validate_chat_row(chat)
             if authorize is not None:
                 authorize(spec)
-            visible = [
-                self._boundary(row)
-                for row in boundaries
-                if any(
-                    m["archive_order"] == row["archive_last_order"]
-                    for m in rows
-                )
-            ]
+            visible = [self._boundary(row) for row in visible_boundaries]
             next_cursor = (
                 self._encode_cursor(
                     chat_id,
@@ -654,12 +692,16 @@ class HistoryStore:
             )
             if turn is not None and turn["chat_id"] != chat["id"]:
                 raise KeyError(msgid)
-            candidates = await self.db.fetch_all(
-                MESSAGE_SELECT
-                + VISIBLE_ONLINE
-                + " AND m.source_msg_key=%s ORDER BY m.session_order,m.id",
-                (chat["session_id"], chat["id"], key),
+            candidates = await self.reader.session_messages(
+                chat["session_id"],
+                high=None,
             )
+            candidates = [
+                item
+                for item in candidates
+                if item["source_msg_key"] == key
+                and item["layer"] in ("memory", "task", "error", "anchor")
+            ]
             if not candidates or _text(candidates[0]["role_key"]) != "user":
                 raise KeyError(msgid)
             anchor = candidates[0]
@@ -672,48 +714,37 @@ class HistoryStore:
                 )
             typed_turn = turn is not None and anchor["turn_id"] == turn["id"]
             high = await self.db.fetch_one(
-                "SELECT history_high,context_epoch FROM swe_conversation_sessions "
+                "SELECT history_high,context_epoch,state_revision,"
+                "recovery_publication_id FROM swe_conversation_sessions "
                 "WHERE id=%s",
                 (chat["session_id"],),
             )
-            next_user = await self.db.fetch_one(
-                "SELECT MIN(m.session_order) AS next_order "
-                "FROM swe_conversation_messages m WHERE "
-                + VISIBLE_ONLINE
-                + " AND m.role_key=%s AND m.session_order>%s",
+            all_rows = await self.reader.session_messages(chat["session_id"])
+            next_user = next(
                 (
-                    chat["session_id"],
-                    chat["id"],
-                    b"user",
-                    anchor["session_order"],
+                    item["session_order"]
+                    for item in all_rows
+                    if item["role_key"] == b"user"
+                    and item["session_order"] > anchor["session_order"]
                 ),
+                None,
             )
             end = (
-                next_user["next_order"]
-                if next_user["next_order"] is not None
+                next_user
+                if next_user is not None
                 else high["history_high"] + 1
             )
             # Recovery projection may repeat the admission question. It is
             # not a new Turn boundary when the persisted Turn owns the slice.
-            message_filter = (
-                " AND m.turn_id=%s"
-                if typed_turn
-                else " AND m.session_order>=%s AND m.session_order<%s"
-            )
-            message_params = (
-                (turn["id"],) if typed_turn else (anchor["session_order"], end)
-            )
-            rows = await self.db.fetch_all(
-                MESSAGE_SELECT
-                + VISIBLE_ONLINE
-                + message_filter
-                + " ORDER BY m.session_order,m.id",
-                (
-                    chat["session_id"],
-                    chat["id"],
-                    *message_params,
-                ),
-            )
+            rows = [
+                item
+                for item in all_rows
+                if (
+                    item.get("turn_id") == turn["id"]
+                    if typed_turn
+                    else anchor["session_order"] <= item["session_order"] < end
+                )
+            ]
             rows = await self._suppress_anchors(chat, rows)
             batches = await self._pins(chat, rows, [])
             return HistorySnapshot(
@@ -723,6 +754,8 @@ class HistoryStore:
                 batches,
                 turn["history_status"] if turn else None,
                 context_epoch=high["context_epoch"],
+                state_revision=high["state_revision"],
+                recovery_publication_id=high["recovery_publication_id"],
             )
 
     async def answer_turn(

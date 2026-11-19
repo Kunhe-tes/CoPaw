@@ -15,7 +15,11 @@ from .chat_mutations import load_metadata_json
 from .errors import ConflictError, IntegrityError
 from .identity import identity_bytes
 from .bundle import BundleBlock
-from .message_bundle import encode_archive_manifest, encode_message_directory
+from .message_bundle import (
+    ARCHIVE_MANIFEST_FORMAT,
+    encode_archive_manifest,
+    encode_message_directory,
+)
 
 
 @dataclass(frozen=True)
@@ -146,6 +150,7 @@ async def prepare_archive_blocks(service, request, plan, blocks):
                 "archive_manifest",
                 encode_archive_manifest(
                     {
+                        "format": ARCHIVE_MANIFEST_FORMAT,
                         "chat_id": chat["external_chat_key"].decode(),
                         "epoch": request.epoch,
                         "first_sequence": first,

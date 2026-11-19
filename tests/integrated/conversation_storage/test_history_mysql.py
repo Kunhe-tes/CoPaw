@@ -175,14 +175,15 @@ async def add_messages(db, store, session, chat, items, *, boundary=False):
         "committed_at": NOW,
         "relative_path": index.relative_path.encode(),
     }
-    if boundary:
+    if is_archive:
+        orders = [order for _, _, order in items]
         manifest_extent = index.blocks["archive_manifest"]
         values.update(
             epoch=chat_row["epoch"],
-            boundary_key=b"boundary",
-            boundary_order=1,
-            archive_first_order=1,
-            archive_last_order=max(order for _, _, order in items),
+            boundary_key=f"boundary-{min(orders)}".encode(),
+            boundary_order=min(orders),
+            archive_first_order=min(orders),
+            archive_last_order=max(orders),
             archive_source_count=len(items),
             archive_display_count=len(items),
             archive_offset=manifest_extent.offset,
@@ -223,11 +224,6 @@ async def add_messages(db, store, session, chat, items, *, boundary=False):
             db,
             store,
             session,
-        )
-    if boundary:
-        await db.execute(
-            "UPDATE swe_conversation_chats SET history_high=%s WHERE id=%s",
-            (max(order for _, _, order in items), chat),
         )
     return publication, index
 

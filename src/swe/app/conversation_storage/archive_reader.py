@@ -5,10 +5,13 @@ from ...agents.memory.conversation_archive import (
     ConversationArchiveStore,
 )
 from .bundle import BundleStore
-from .chat_mutations import load_metadata_json
+from .chat_mutations import load_metadata_json, utc_datetime
 from .checkpoint_reader import CheckpointReads
 from .errors import IntegrityError
 from .identity import chat_key_bytes
+from .message_bundle import decode_message_directory
+import asyncio
+import json
 from .retention import RetentionStore
 
 
@@ -66,6 +69,166 @@ class ArchiveReader(CheckpointReads):
         )
         return load_metadata_json(raw)
 
+    async def session_messages(self, session_id, *, high=None, layers=None):
+        """Resolve the active Session recovery directory into ordered messages."""
+        from types import SimpleNamespace
+        from .projection_publication import _text
+        from .projection_references import ref_key, snapshot_projection
+        from .session_projection import is_projection
+
+        async with self.db.transaction():
+            session = await self.db.fetch_one(
+                "SELECT * FROM swe_conversation_sessions WHERE id=%s "
+                "AND service_unit_key=%s AND tenant_key=%s AND source_key=%s "
+                "AND agent_key=%s",
+                (session_id, *self.scope.sql_values),
+            )
+            if (
+                session is None
+                or session.get("recovery_publication_id") is None
+            ):
+                return []
+            batch = await self.retentions.pin(
+                [session["recovery_publication_id"]],
+                kind="reader",
+            )
+        try:
+            publication = batch.publications[0]
+            if publication["session_id"] != session_id:
+                raise IntegrityError("history recovery Session mismatch")
+            index = await batch.read(
+                self.bundles.inspect,
+                _text(publication["relative_path"]),
+                expected_length=publication["byte_length"],
+            )
+            root = await batch.read(
+                self.bundles.read_extent,
+                index.relative_path,
+                session["recovery_offset"],
+                session["recovery_length"],
+                expected_length=index.byte_length,
+            )
+            envelope = load_metadata_json(root)
+            if not is_projection(envelope):
+                return []
+
+            async def nas_io(_operation_key, function, *args, **kwargs):
+                return await asyncio.to_thread(function, *args, **kwargs)
+
+            service = SimpleNamespace(
+                db=self.db,
+                bundles=self.bundles,
+                _nas_io=nas_io,
+            )
+            source = SimpleNamespace(
+                operation_key=_text(publication["operation_key"]),
+                scope=self.scope,
+                session_id=session_id,
+            )
+            refs = await snapshot_projection(
+                service,
+                source,
+                envelope,
+                index,
+                current_id=publication["id"],
+                retentions=self.retentions,
+            )
+            try:
+                directory = decode_message_directory(
+                    json.dumps(
+                        envelope.get("message_directory", []),
+                        separators=(",", ":"),
+                    ).encode(),
+                )
+                result = []
+                for item in directory:
+                    entry = dict(item)
+                    if layers and entry.get("layer") not in layers:
+                        continue
+                    if not entry.get("visible", True):
+                        continue
+                    order = entry.get("session_order", entry["sequence"])
+                    if high is not None and order > high:
+                        continue
+                    locator = dict(entry["body"])
+                    if locator["publication_id"] == "self":
+                        ref = {
+                            "operation_key": source.operation_key,
+                            "block_name": locator["block_name"],
+                            "position": locator["position"],
+                        }
+                    else:
+                        ref = locator
+                    body = refs.payloads.get(ref_key(ref))
+                    if body is None:
+                        raise IntegrityError(
+                            "history directory body is missing",
+                        )
+                    raw_id = entry["raw_id"]
+                    occurrence = {
+                        **entry,
+                        "id": order,
+                        "service_unit_key": self.scope.sql_values[0],
+                        "session_id": session_id,
+                        "publication_id": ref.get(
+                            "publication_id",
+                            publication["id"],
+                        ),
+                        "relative_path": publication["relative_path"],
+                        "byte_offset": 0,
+                        "byte_length": 0,
+                        "source_msg_key": (
+                            entry.get("source_msg_key", raw_id).encode()
+                            if isinstance(
+                                entry.get("source_msg_key", raw_id),
+                                str,
+                            )
+                            else entry.get("source_msg_key", raw_id)
+                        ),
+                        "source_occurrence_no": entry.get(
+                            "source_occurrence_no",
+                            0,
+                        ),
+                        "role_key": (
+                            entry.get("role")
+                            or body.get("role")
+                            or "assistant"
+                        ).encode(),
+                        "layer": entry.get(
+                            "layer",
+                            entry.get("category", "memory"),
+                        ),
+                        "kind_key": (entry.get("kind") or "message").encode(),
+                        "task_run_key": (
+                            entry["task"].encode()
+                            if isinstance(entry.get("task"), str)
+                            else entry.get("task")
+                        ),
+                        "task_index": entry.get("task_index"),
+                        "task_section": entry.get("task_section"),
+                        "origin_chat_id": entry.get("origin_chat_id"),
+                        "archive_chat_id": entry.get("archive_chat_id"),
+                        "archive_order": entry.get("archive_order"),
+                        "turn_id": entry.get("turn_id"),
+                        "context_epoch": entry.get("context_epoch", 0),
+                        "session_order": order,
+                        "current_visible": entry.get("current_visible", True),
+                        "in_context": entry.get("in_context", False),
+                        "deleted_at": None,
+                        "message_timestamp": (
+                            utc_datetime(entry["timestamp"])
+                            if entry.get("timestamp") is not None
+                            else None
+                        ),
+                        "message": body,
+                    }
+                    result.append(occurrence)
+                return sorted(result, key=lambda value: value["session_order"])
+            finally:
+                await refs.finish(self.retentions)
+        finally:
+            await self.retentions.finish_reader(batch)
+
     async def evidence(
         self,
         chat_id,
@@ -93,44 +256,26 @@ class ArchiveReader(CheckpointReads):
         chat = await self.chat(chat_id)
         if chat["epoch"] != epoch:
             return []
-        recovered, after = [], 0
-        while len(recovered) < min(limit, 10):
-            batch = None
-            async with self.db.transaction():
-                rows = await self.db.fetch_all(
-                    "SELECT m.* FROM swe_conversation_messages m JOIN swe_conversation_publications a ON a.id=m.archive_publication_id WHERE m.archive_chat_id=%s AND m.deleted_at IS NULL AND a.epoch=%s AND a.state='committed' AND m.archive_order>%s ORDER BY m.archive_order LIMIT 64",
-                    (chat["id"], epoch, after),
-                )
-                if not rows:
-                    break
-                batch = await self.retentions.pin(
-                    [row["publication_id"] for row in rows],
-                    kind="reader",
-                )
+        recovered = []
+        boundaries = await self.db.fetch_all(
+            "SELECT * FROM swe_conversation_publications WHERE chat_id=%s "
+            "AND epoch=%s AND state='committed' AND archive_last_order IS NOT NULL "
+            "ORDER BY archive_first_order",
+            (chat["id"], epoch),
+        )
+        from .archive_bundle_reader import read_archive_bundle
+
+        for boundary in boundaries:
+            selected = await read_archive_bundle(
+                self.db,
+                self.scope,
+                self.bundles,
+                boundary,
+                retentions=self.retentions,
+            )
             try:
-                publications = {row["id"]: row for row in batch.publications}
-                for row in rows:
-                    publication = publications[row["publication_id"]]
-                    if (
-                        row["session_id"] != chat["session_id"]
-                        or publication["session_id"] != chat["session_id"]
-                    ):
-                        raise IntegrityError(
-                            "evidence Session association mismatch",
-                        )
-                    raw = await batch.read(
-                        self.bundles.read_extent,
-                        text(publication["relative_path"]),
-                        row["byte_offset"],
-                        row["byte_length"],
-                        expected_length=publication["byte_length"],
-                    )
-                    payload = load_metadata_json(raw)
-                    msg = _decode(Msg, payload)
-                    if msg.id != text(
-                        row["source_msg_key"],
-                    ) or msg.role != text(row["role_key"]):
-                        raise IntegrityError("evidence body identity mismatch")
+                for entry in selected.entries:
+                    msg = _decode(Msg, entry["message"])
                     if selector.matches(
                         msg,
                         requested=normalized.requested,
@@ -141,9 +286,10 @@ class ArchiveReader(CheckpointReads):
                         recovered.append(msg)
                         if len(recovered) >= min(limit, 10):
                             break
-                after = rows[-1]["archive_order"]
             finally:
-                await self.retentions.finish_reader(batch)
+                await selected.pins.finish()
+            if len(recovered) >= min(limit, 10):
+                break
         current = await self.chat(chat_id)
         if (
             current["epoch"] != epoch

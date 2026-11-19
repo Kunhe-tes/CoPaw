@@ -253,6 +253,7 @@ class MySQLArchiveStore:
         await self.publications.write_bundle(
             operation,
             [_block("recovery", "recovery", committed), *blocks],
+            plan=plan,
         )
         publication = await self.publications.commit(operation)
         return ArchiveCommit(committed, publication)
@@ -309,41 +310,25 @@ class MySQLArchiveStore:
             raise ValueError(
                 "compact source batch exceeds bounded record limit",
             )
-        rows = await self.db.fetch_all(
-            "SELECT * FROM swe_conversation_messages WHERE session_id=%s AND layer='memory' AND current_visible=1 AND deleted_at IS NULL ORDER BY session_order LIMIT %s",
-            (session["id"], len(messages)),
+        rows = await self.reader.session_messages(
+            session["id"],
+            layers=("memory",),
         )
+        rows = rows[: len(messages)]
         if len(messages) > len(rows):
             raise ConflictError("compact source prefix is not indexed")
-        selected = rows[: len(messages)]
-        async with self.db.transaction():
-            batch = await self.retentions.pin(
-                [row["publication_id"] for row in selected],
-                kind="reader",
-            )
-        try:
-            publications = {row["id"]: row for row in batch.publications}
-            for row, message in zip(selected, messages):
-                publication = publications[row["publication_id"]]
-                raw = await batch.read(
-                    self.bundles.read_extent,
-                    text(publication["relative_path"]),
-                    row["byte_offset"],
-                    row["byte_length"],
-                    expected_length=publication["byte_length"],
+        for row, message in zip(rows, messages):
+            indexed = row["message"]
+            expected = message.to_dict()
+            if (
+                indexed.get("id") != expected.get("id")
+                or indexed.get("role") != expected.get("role")
+                or indexed.get("content") != expected.get("content")
+            ):
+                raise ConflictError(
+                    "compact requires exact indexed source prefix",
                 )
-                from agentscope.message import Msg
-
-                if (
-                    Msg.from_dict(json.loads(raw)).to_dict()
-                    != message.to_dict()
-                ):
-                    raise ConflictError(
-                        "compact requires exact indexed source prefix",
-                    )
-            return selected
-        finally:
-            await self.retentions.finish_reader(batch)
+        return rows
 
     async def compact(
         self,
@@ -425,7 +410,7 @@ class MySQLArchiveStore:
         )
         boundary = ArchiveInstall(
             boundary_id,
-            "archive",
+            "archive_manifest",
             len(messages),
             sum(
                 len(agentscope_msg_to_message(message)) for message in messages
@@ -457,14 +442,6 @@ class MySQLArchiveStore:
             "compact",
             plan,
             [
-                _block(
-                    "archive",
-                    "archive",
-                    {
-                        "version": 1,
-                        "source_message_ids": [row["id"] for row in sources],
-                    },
-                ),
                 _block("checkpoint", "checkpoint", record.to_dict()),
                 _block("events", "events", [event.to_dict()]),
             ],

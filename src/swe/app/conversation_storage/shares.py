@@ -11,7 +11,6 @@ from ..chat_sharing.store import ChatShareStore
 from .bundle import BundleBlock, BundleStore, new_operation_key
 from .chat_mutations import load_metadata_json, utc_datetime
 from .collection_queries import CollectionQuery, query_collection
-from .reference_queries import ReferenceQuery, fetch_reference_rows
 from .errors import ConflictError, IntegrityError, StorageUnavailable
 from .identity import (
     WorkspaceScope,
@@ -117,7 +116,10 @@ def validate_share_request(request, plan):
         raise ValueError("new share requires selected source questions")
 
 
-def _validate_selection_proof(proof, keys):
+def _validate_selection_proof(
+    proof,
+    keys,
+):  # pylint: disable=too-many-boolean-expressions
     if not isinstance(proof, dict) or set(proof) != {
         "snapshot",
         "questions",
@@ -147,17 +149,11 @@ def _validate_selection_proof(proof, keys):
     for item in questions.values():
         if (
             not isinstance(item, dict)
-            or set(item)
-            != {
-                "message_id",
-                "publication_id",
-                "layer",
-                "status",
-            }
-            or any(
-                type(item[name]) is not int or item[name] <= 0
-                for name in ("message_id", "publication_id")
-            )
+            or set(item) != {"sequence", "publication_id", "layer", "status"}
+            or type(item["sequence"]) is not int
+            or item["sequence"] < 0
+            or type(item["publication_id"]) is not int
+            or item["publication_id"] <= 0
         ):
             raise ValueError("invalid share source occurrence")
         if item["status"] != "completed" or item["layer"] not in (
@@ -189,43 +185,6 @@ async def _lock_selection_proof(db, request, proof):
         raise ConflictError("share selection history changed")
 
 
-def _validate_proven_occurrence(row, request, key, proof, turn):
-    item = proof["questions"][key.decode("utf-8")]
-    expected = {
-        "service_unit_key": request.scope.sql_values[0],
-        "session_id": request.session_id,
-        "source_msg_key": key,
-        "role_key": b"user",
-        "deleted_at": None,
-        "publication_id": item["publication_id"],
-        "layer": item["layer"],
-    }
-    if row is None or any(
-        row[name] != value for name, value in expected.items()
-    ):
-        raise ConflictError("selected share source occurrence changed")
-    if turn is not None and row["turn_id"] not in (None, turn["id"]):
-        raise ConflictError("selected share source occurrence changed")
-    if row["layer"] == "archive":
-        valid = (
-            row["archive_chat_id"] == request.chat_id
-            and row["archive_order"]
-            <= proof["snapshot"]["archive_history_high"]
-        )
-    else:
-        valid = (
-            row["current_visible"]
-            and row["session_order"]
-            <= proof["snapshot"]["session_history_high"]
-            and (
-                row["layer"] != "anchor"
-                or row["origin_chat_id"] in (None, request.chat_id)
-            )
-        )
-    if not valid:
-        raise ConflictError("selected share question is no longer visible")
-
-
 async def lock_share_selection(db, request, plan):
     if request.kind != "share":
         return
@@ -244,12 +203,6 @@ async def lock_share_selection(db, request, plan):
     proof = plan.selection_proof
     if proof is not None:
         await _lock_selection_proof(db, request, proof)
-        proven = await fetch_reference_rows(
-            db,
-            ReferenceQuery.MESSAGE_PROOF,
-            [item["message_id"] for item in proof["questions"].values()],
-            request.scope.sql_values[0],
-        )
     elif len(by_key) != len(keys):
         raise ConflictError("selected share question has no durable Turn")
     for key in keys:
@@ -262,38 +215,32 @@ async def lock_share_selection(db, request, plan):
             raise ConflictError("selected share Turn is not completed")
         if proof is not None:
             item = proof["questions"][key.decode("utf-8")]
-            _validate_proven_occurrence(
-                proven.get(item["message_id"]),
-                request,
-                key,
-                proof,
-                turn,
-            )
-            continue
-        occurrences = await db.fetch_all(
-            "SELECT m.* FROM swe_conversation_messages m WHERE "
-            "m.session_id=%s AND m.current_visible=1 AND m.deleted_at IS NULL "
-            "AND (m.layer IN ('memory','task','error') OR (m.layer='anchor' "
-            "AND (m.origin_chat_id=%s OR m.origin_chat_id IS NULL))) "
-            "AND m.source_msg_key=%s ORDER BY m.session_order,m.id FOR UPDATE",
-            (request.session_id, request.chat_id, key),
-        )
-        if (
-            not occurrences
-            or occurrences[0]["role_key"] != b"user"
-            or (occurrences[0]["turn_id"] not in (None, turn["id"]))
-        ):
-            raise ConflictError("selected share question is no longer visible")
-        if occurrences[0].get("layer") == "anchor":
-            archived = await db.fetch_all(
-                "SELECT id FROM swe_conversation_messages WHERE archive_chat_id=%s "
-                "AND source_msg_key=%s AND deleted_at IS NULL ORDER BY id FOR UPDATE",
-                (request.chat_id, key),
-            )
-            if archived:
+            if turn is None or (
+                turn["chat_id"] != request.chat_id
+                or turn["state"] != "succeeded"
+                or turn["history_status"] != "completed"
+            ):
+                raise ConflictError("selected share Turn is not completed")
+            if item["layer"] == "archive":
+                boundary = await db.fetch_one(
+                    "SELECT archive_first_order,archive_last_order FROM "
+                    "swe_conversation_publications WHERE id=%s AND chat_id=%s "
+                    "AND state='committed'",
+                    (item["publication_id"], request.chat_id),
+                )
+                visible = boundary is not None and (
+                    boundary["archive_first_order"]
+                    <= item["sequence"]
+                    <= boundary["archive_last_order"]
+                )
+            else:
+                visible = True
+            if not visible:
                 raise ConflictError(
                     "selected share question is no longer visible",
                 )
+            continue
+        raise ConflictError("selected share question has no durable proof")
 
 
 async def validate_share_payload(service, request, plan, index):
@@ -433,14 +380,9 @@ class ShareStorage:
         statuses,
     ):
         """Bind the legacy slice to real source occurrences and fixed revisions."""
-        from ..runner.api import _slice_answer_turn
-
         keys = tuple(dict.fromkeys(keys))
         for key in keys:
-            if (
-                statuses.get(key) != "completed"
-                or _slice_answer_turn(messages, msgid=key) is None
-            ):
+            if statuses.get(key) != "completed":
                 raise ValueError("Only completed answer turns can be shared")
         questions = await self._selection_occurrences(chat_id, snapshot, keys)
         if await self.selection_snapshot(chat_id) != snapshot:
@@ -451,7 +393,7 @@ class ShareStorage:
 
     async def _selection_occurrences(self, chat_id, snapshot, keys):
         from ..runner import api
-        from .history import HistorySnapshot, HistoryStore
+        from .history import HistoryStore
 
         history = HistoryStore(
             self.db,
@@ -462,89 +404,65 @@ class ShareStorage:
         encoded = tuple(identity_bytes(key, 256) for key in keys)
         if not encoded:
             return {}
-        async with self.db.transaction():
-            chat = await history._chat(chat_id)
-            rows = await query_collection(
+        chat = await history._chat(chat_id)
+        occurrences = await history.reader.session_messages(
+            chat["session_id"],
+            high=snapshot["session_history_high"],
+        )
+        selected = {
+            (item["id"], item["source_msg_key"].decode()): item
+            for item in occurrences
+            if item["source_msg_key"] in encoded
+            and item["role_key"] == b"user"
+            and item.get("origin_chat_id") in (None, chat["id"])
+        }
+        from .archive_bundle_reader import read_archive_bundle
+
+        archived = await self.db.fetch_all(
+            "SELECT * FROM swe_conversation_publications WHERE chat_id=%s "
+            "AND state='committed' AND archive_first_order<=%s "
+            "ORDER BY archive_first_order",
+            (chat["id"], snapshot["archive_history_high"]),
+        )
+        for publication in archived:
+            read = await read_archive_bundle(
                 self.db,
-                CollectionQuery.SHARE_OCCURRENCES,
-                encoded,
-                (
-                    self.scope.sql_values[0],
-                    chat["id"],
-                    snapshot["archive_history_high"],
-                    chat["session_id"],
-                    chat["id"],
-                    snapshot["session_history_high"],
-                ),
+                self.scope,
+                self.bundles,
+                publication,
+                last_sequence=snapshot["archive_history_high"],
             )
-            # SQL batches have disjoint source keys; restore the original global
-            # MySQL ascending order (NULL sorts before numeric values).
-            rows.sort(
-                key=lambda row: (
-                    row["archive_order"] is not None,
-                    row["archive_order"] or 0,
-                    row["session_order"] is not None,
-                    row["session_order"] or 0,
-                    row["id"],
-                ),
-            )
-            batches = await history._pins(chat, rows, [])
-            view = HistorySnapshot(chat, rows, [], batches)
-        try:
-            payloads = await history._payloads(view)
-            entries = []
-            primary = {
-                row["source_msg_key"]
-                for row in rows
-                if row["layer"] != "anchor"
+            try:
+                for entry in read.entries:
+                    if (
+                        entry.get("raw_id") in keys
+                        and entry.get("role") == "user"
+                    ):
+                        selected[(entry["sequence"], entry["raw_id"])] = {
+                            "id": entry["sequence"],
+                            "source_msg_key": entry["raw_id"].encode(),
+                            "layer": "archive",
+                            "publication_id": publication["id"],
+                        }
+            finally:
+                await read.pins.finish()
+        result = {}
+        for key in keys:
+            matches = [
+                value
+                for (sequence, raw_key), value in selected.items()
+                if raw_key == key
+            ]
+            if not matches:
+                raise ValueError("Selected answer turn was not found")
+            item = matches[0]
+            result[key] = {
+                "sequence": item["id"],
+                "publication_id": item["publication_id"],
+                "layer": item["layer"],
+                "status": "completed",
             }
-            for row, payload in zip(rows, payloads):
-                if (
-                    row["layer"] == "anchor"
-                    and row["source_msg_key"] in primary
-                ):
-                    continue
-                converted = await history._convert(
-                    [row],
-                    [payload],
-                    (
-                        chat_id
-                        if row["layer"] == "archive"
-                        else chat["external_session_key"].decode("utf-8")
-                    ),
-                )
-                if converted:
-                    entries.append((row, converted[0]))
-            archived = [
-                item for item in entries if item[0]["layer"] == "archive"
-            ]
-            current = [
-                item for item in entries if item[0]["layer"] != "archive"
-            ]
-            current.sort(
-                key=lambda item: (
-                    item[0]["layer"] == "anchor",
-                    item[0]["session_order"],
-                    item[0]["id"],
-                ),
-            )
-            current.sort(key=lambda item: api._message_sort_key(item[1]))
-            result = {}
-            for row, message in [*archived, *current]:
-                key = row["source_msg_key"].decode("utf-8")
-                if key in result:
-                    continue
-                if message.role != "user":
-                    raise ValueError("Selected answer turn was not found")
-                result[key] = {
-                    "message_id": row["id"],
-                    "publication_id": row["publication_id"],
-                    "layer": row["layer"],
-                    "status": "completed",
-                }
-            return result
-        finally:
-            await history._finish(view)
+        return result
 
     async def create_snapshot(
         self,

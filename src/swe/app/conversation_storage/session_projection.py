@@ -137,7 +137,13 @@ def hydrate_state(value, resolve):
         not fields <= set(value)
         or set(value)
         - fields
-        - {"identity", "installations", "dependency_ids", "prune_ids"}
+        - {
+            "identity",
+            "installations",
+            "dependency_ids",
+            "prune_ids",
+            "message_directory",
+        }
         or value["version"] != VERSION
         or not isinstance(value["state"], dict)
     ):
