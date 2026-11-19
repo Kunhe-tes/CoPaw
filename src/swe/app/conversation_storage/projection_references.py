@@ -275,19 +275,19 @@ async def refresh_projection_cache(service, row, envelope, snapshot):
     from .projection_publication import canonical
 
     values = defaultdict(list)
-    for series in envelope["lists"]:
-        layer = (
-            "memory"
-            if len(series["path"]) > 1
-            else "task" if series["path"][0] == "task_messages" else "error"
-        )
-        for entry in series["entries"]:
-            ref = entry["ref"]
-            payload = snapshot.payloads[ref_key(ref)]
-            resolved = {
-                "publication_id": ref.get("publication_id", row["id"]),
-                "block_name": ref["block_name"],
-                "position": ref.get("position", 0),
+    for entry in envelope.get("message_directory", []):
+        layer = entry["layer"]
+        if layer not in ("memory", "task", "error"):
+            continue
+        locator = entry["body"]
+        ref = locator
+        if locator["publication_id"] == "self":
+            ref = {
+                "operation_key": _text(row["operation_key"]),
+                "block_name": locator["block_name"],
+                "position": locator["position"],
             }
-            values[(layer, canonical(payload))].append(resolved)
+            locator = {**locator, "publication_id": row["id"]}
+        payload = snapshot.payloads[ref_key(ref)]
+        values[(layer, canonical(payload))].append(locator)
     remember(cache_key(row, row["base_state_revision"] + 1), values)

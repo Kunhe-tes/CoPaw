@@ -41,50 +41,11 @@ class HistoryDatabase(RetentionDatabase):
                 for i in range(1, count + 1)
             },
         )
-        self.messages = {
-            i: {
-                "service_unit_key": b"schema-test-service",
-                "id": i,
-                "publication_id": i,
-                "session_id": 1,
-                "byte_offset": 0,
-                "byte_length": 10,
-                "deleted_at": None,
-                "layer": "task",
-                "source_msg_key": str(i).encode(),
-                "role_key": b"assistant",
-                "origin_chat_id": None,
-                "turn_id": None,
-                "source_occurrence_no": 0,
-                "kind_key": b"message",
-                "task_run_key": None,
-                "context_epoch": 0,
-                "message_timestamp": None,
-                "session_order": i,
-                "current_visible": 1,
-                "in_context": 1,
-            }
-            for i in self.objects
-        }
-
-    async def fetch_all(self, query, params):
-        if "swe_conversation_messages" in query:
-            if "service_unit_key=%s AND id IN (" in query:
-                self.queries.append(query)
-                columns = query[7:].split(" FROM ")[0].split(",")
-                return [
-                    {key: self.messages[identity][key] for key in columns}
-                    for identity in params[1:]
-                    if identity in self.messages
-                    and self.messages[identity]["service_unit_key"]
-                    == params[0]
-                ]
-            return list(self.messages.values())
-        return await super().fetch_all(query, params)
+        self.session = None
 
     async def fetch_one(self, query, params=None):
-        if "swe_conversation_messages" in query:
-            return self.messages.get(params[0])
+        if "FROM swe_conversation_sessions" in query:
+            return self.session
         return await super().fetch_one(query, params)
 
 
@@ -98,10 +59,6 @@ def history(count):
         "future": {"keep": True},
     }
 
-    def read(path, *_args, **_kwargs):
-        return json.dumps(state["task_messages"][int(path) - 1]).encode()
-
-    service = SimpleNamespace(db=db, bundles=SimpleNamespace(read_extent=read))
     row = {
         "service_unit_key": b"schema-test-service",
         "tenant_key": b"t",
@@ -115,11 +72,48 @@ def history(count):
         operation_key="current",
         resolve_message=lambda layer, body: {
             "publication_id": int(body["id"]),
-            "message_id": int(body["id"]),
-            "offset": 0,
-            "length": 10,
+            "block_name": "message",
+            "position": 0,
         },
     ).envelope
+    envelope["message_directory"] = [
+        {"layer": "task", "body": item["ref"]}
+        for item in envelope["lists"][0]["entries"]
+    ]
+    root_id = count + 1
+    db.objects[root_id] = {
+        **db.objects[1],
+        "id": root_id,
+        "operation_key": b"current",
+        "relative_path": str(root_id).encode(),
+    }
+    db.session = {
+        "recovery_publication_id": root_id,
+        "recovery_offset": 0,
+        "recovery_length": 10,
+    }
+
+    def read(path, *_args, **_kwargs):
+        document = (
+            envelope
+            if int(path) == root_id
+            else state["task_messages"][int(path) - 1]
+        )
+        return json.dumps(document).encode()
+
+    def inspect(path, *, expected_length):
+        return SimpleNamespace(
+            relative_path=path,
+            byte_length=expected_length,
+            blocks={
+                "message": SimpleNamespace(offset=0, length=10, kind="task"),
+            },
+        )
+
+    service = SimpleNamespace(
+        db=db,
+        bundles=SimpleNamespace(read_extent=read, inspect=inspect),
+    )
     request = SimpleNamespace(
         scope=WorkspaceScope(
             "t",
@@ -235,10 +229,11 @@ async def test_external_cancel_drains_io_before_releasing_all_batches(path):
     entered, release = threading.Event(), threading.Event()
     original = service.bundles.read_extent
 
-    def blocked(*args, **kwargs):
-        entered.set()
-        assert release.wait(10)
-        return original(*args, **kwargs)
+    def blocked(path, *args, **kwargs):
+        if int(path) <= 4097:
+            entered.set()
+            assert release.wait(10)
+        return original(path, *args, **kwargs)
 
     service.bundles.read_extent = blocked
     task = asyncio.create_task(
@@ -259,8 +254,8 @@ async def test_external_cancel_drains_io_before_releasing_all_batches(path):
         task.cancel()
         await asyncio.sleep(0)
         assert not task.done()
-        assert (
-            len([pin for pin in db.pins if pin["state"] == "active"]) == 4097
+        assert len([pin for pin in db.pins if pin["state"] == "active"]) == (
+            4098 if path == "publication" else 4097
         )
     finally:
         release.set()

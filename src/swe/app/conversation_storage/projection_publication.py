@@ -331,6 +331,10 @@ async def prepare_recovery_blocks(
     previous_by_ref = {
         canonical(entry["body"]): entry for entry in previous_entries
     }
+    anchors_by_id = defaultdict(deque)
+    for entry in previous_entries:
+        if entry.get("layer") == "anchor":
+            anchors_by_id[entry["raw_id"]].append(entry)
     retained_refs = set()
     directory = []
     seen_refs = set()
@@ -424,6 +428,26 @@ async def prepare_recovery_blocks(
                     "body": entry["body"],
                     "in_context": entry["in_context"],
                 }
+            anchors = anchors_by_id.get(entry["raw_id"])
+            if (
+                anchors
+                and layer == "memory"
+                and entry.get("origin_chat_id") is None
+            ):
+                anchor = anchors.popleft()
+                entry.update(
+                    {
+                        key: anchor[key]
+                        for key in (
+                            "turn_id",
+                            "origin_chat_id",
+                            "chat_id",
+                            "source_msg_key",
+                            "source_occurrence_no",
+                        )
+                        if anchor.get(key) is not None
+                    },
+                )
             retained_refs.add(canonical(entry["body"]))
             if plan.reset is not None:
                 entry.update(
@@ -454,7 +478,7 @@ async def prepare_recovery_blocks(
             "position": 0,
         }
         locator_key = canonical(locator)
-        if locator_key in seen_refs:
+        if locator_key in retained_refs:
             continue
         body = load_metadata_json(supplied[install.block_name].content)
         directory.append(
@@ -480,7 +504,7 @@ async def prepare_recovery_blocks(
                 "chat_id": install.origin_chat_id,
             },
         )
-        seen_refs.add(locator_key)
+        retained_refs.add(locator_key)
         sequence += 1
     directory.sort(
         key=lambda entry: entry.get("session_order", entry["sequence"]),
