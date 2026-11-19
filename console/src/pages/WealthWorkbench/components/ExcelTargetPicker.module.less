@@ -151,9 +151,9 @@ details.feedback {
   flex: 0 1 320px;
 }
 
-.peopleToolbar select {
+.branchSelect {
   flex: 0 1 180px;
-  cursor: pointer;
+  min-width: 0;
 }
 
 .peopleGrid {
@@ -206,4 +206,25 @@ details.feedback {
 
 .roster .missingOrg {
   color: #8b5e00;
+}
+
+.personInfo {
+  flex: 1;
+}
+
+.personHeading {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.personHeading strong {
+  flex: 0 1 auto;
+}
+
+.personId {
+  flex: none;
+  color: var(--text);
+  font-size: 11px;
 }

@@ -14,10 +14,7 @@ import styles from "../index.module.less";
 import { useIframeStore } from "../../../stores/iframeStore";
 import { Icon } from "../components/Icon";
 import { TargetPicker } from "../components/TargetPicker";
-import {
-  ExcelRosterSummary,
-  ExcelTargetPicker,
-} from "../components/ExcelTargetPicker";
+import { ExcelTargetPicker } from "../components/ExcelTargetPicker";
 import excelStyles from "../components/ExcelTargetPicker.module.less";
 import { canUseExcelDistribution } from "../distribution/excelAccess";
 import { TimeField } from "../components/TimeField";
@@ -112,15 +109,22 @@ const WEEKDAYS: { value: string; label: string }[] = [
  * 溢出判定用隐藏孪生节点测量真实高度——line-clamp 下 scrollHeight
  * 也会被截断，不能直接用来判断是否溢出。
  */
-function TargetNamesSummary({ sapIds }: { sapIds: string[] }) {
+function TargetNamesSummary({
+  sapIds,
+  people,
+}: {
+  sapIds: string[];
+  people?: DistributeTarget[];
+}) {
   const targets = useWealthStore((s) => s.targets);
+  const namesById = new Map(
+    (people ?? targets).map((person) => [person.sapId, person.name]),
+  );
   const [expanded, setExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
   const ref = useRef<HTMLParagraphElement>(null);
   const measureRef = useRef<HTMLParagraphElement>(null);
-  const names = sapIds
-    .map((id) => targets.find((t) => t.sapId === id)?.name ?? id)
-    .join("、");
+  const names = sapIds.map((id) => namesById.get(id) ?? id).join("、");
 
   useEffect(() => {
     const el = ref.current;
@@ -735,15 +739,6 @@ interface TargetMethodState {
   visitedInstitution: boolean;
   excelTargets: DistributeTarget[];
   excelPending: boolean;
-  originalSapIds: string[];
-}
-
-function formatTargetChanges(original: string[], current: string[]) {
-  const oldIds = new Set(original);
-  const newIds = new Set(current);
-  const added = current.filter((id) => !oldIds.has(id)).length;
-  const removed = original.filter((id) => !newIds.has(id)).length;
-  return `新增 ${added} 人 · 移除 ${removed} 人 · 最终 ${current.length} 人`;
 }
 
 export default function Create() {
@@ -801,7 +796,6 @@ export default function Create() {
     excelTargets:
       excelAllowed && editingId ? useWealthStore.getState().targets : [],
     excelPending: false,
-    originalSapIds: editingId ? manualSapIds : [],
   });
   const [selection, setSelection] = useState(initialSelection);
   if (selection.key !== formKey) setSelection(initialSelection());
@@ -905,18 +899,11 @@ export default function Create() {
               <strong>{draft.items.length} 个</strong>
             </div>
           </div>
-          {useExcel ? (
-            <>
-              <strong>分发方式 · 上传 Excel 名单</strong>
-              {editingId && (
-                <p>
-                  {formatTargetChanges(selection.originalSapIds, targetSapIds)}
-                </p>
-              )}
-              <ExcelRosterSummary people={excelTargets} />
-            </>
-          ) : (
-            needsTargets && <TargetNamesSummary sapIds={targetSapIds} />
+          {needsTargets && (
+            <TargetNamesSummary
+              sapIds={targetSapIds}
+              people={useExcel ? excelTargets : undefined}
+            />
           )}
           {draft.items.map((x, i) => (
             <div className={styles.recommendation} key={x.id}>

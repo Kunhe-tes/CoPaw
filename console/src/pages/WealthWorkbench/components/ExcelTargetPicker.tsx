@@ -5,6 +5,7 @@ import {
   UploadOutlined,
 } from "@ant-design/icons";
 import cx from "classnames";
+import { Select } from "antd";
 import { BBK_ID_TO_NAME_MAP } from "../../../constants/bbk";
 import { importExcelPeople, MAX_EXCEL_FILE_MB } from "../distribution/api";
 import type { DistributeTarget } from "../types";
@@ -344,7 +345,7 @@ export function ExcelRosterSummary({
               className={cardStyles.search}
               type="search"
               aria-label="搜索已选人员"
-              placeholder="搜索姓名 / SAP 用户 ID / 分行 / 机构名称或编码"
+              placeholder="搜索姓名 / 用户ID / 机构号"
               value={keyword}
               onChange={(event) => {
                 setKeyword(event.currentTarget.value);
@@ -352,22 +353,22 @@ export function ExcelRosterSummary({
               }}
             />
             {(branches.size > 1 || branchFilter !== "*") && (
-              <select
-                className={cardStyles.search}
+              <Select
+                className={styles.branchSelect}
                 aria-label="筛选分行"
                 value={branchFilter}
-                onChange={(event) => {
-                  setSelectedBranch(event.currentTarget.value);
+                onChange={(value) => {
+                  setSelectedBranch(value);
                   setPage(0);
                 }}
-              >
-                <option value="*">全部分行</option>
-                {[...branches].map(([id, group]) => (
-                  <option key={id} value={id}>
-                    {group.name}（{group.count} 人）
-                  </option>
-                ))}
-              </select>
+                options={[
+                  { value: "*", label: "全部分行" },
+                  ...[...branches].map(([id, group]) => ({
+                    value: id,
+                    label: `${group.name}（${group.count} 人）`,
+                  })),
+                ]}
+              />
             )}
           </div>
           {visible.length ? (
@@ -386,7 +387,6 @@ export function ExcelRosterSummary({
                   const branchName = branches.get(person.bbkId ?? "")?.name;
                   const org = person.orgName.trim() || person.bbkOrgId;
                   const metadata = [
-                    person.sapId,
                     branchName,
                     org === branchName ? undefined : org,
                   ]
@@ -401,10 +401,15 @@ export function ExcelRosterSummary({
                         {person.name.slice(0, 1)}
                       </span>
                       <span
-                        className={cardStyles.personInfo}
-                        title={`${person.name} · ${metadata}`}
+                        className={cx(cardStyles.personInfo, styles.personInfo)}
+                        title={`${person.name} · ${person.sapId} · ${metadata}`}
                       >
-                        <strong>{person.name}</strong>
+                        <span className={styles.personHeading}>
+                          <strong>{person.name}</strong>
+                          <span className={styles.personId}>
+                            {person.sapId}
+                          </span>
+                        </span>
                         <small
                           className={missingOrg ? styles.missingOrg : undefined}
                         >
