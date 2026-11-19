@@ -107,6 +107,7 @@ async def seed_new_data(db, root, scope=None, *, initialize_schema=True):
     )
     question = {
         "id": "new-question",
+        "name": "user",
         "role": "user",
         "content": "new question",
     }
@@ -132,12 +133,25 @@ async def seed_new_data(db, root, scope=None, *, initialize_schema=True):
         operation_key=new_operation_key(),
     )
     await repo.release_current_expert_binding(chat)
-    share = await ShareStorage(db, bundles, scope=scope).create_snapshot(
+    shares = ShareStorage(db, bundles, scope=scope)
+    snapshot = await shares.selection_snapshot(chat)
+    from swe.app.runner.utils import agentscope_msg_to_message
+    from agentscope.message import Msg
+
+    proof = await shares.prove_selection(
+        chat,
+        snapshot,
+        ("new-question",),
+        agentscope_msg_to_message(Msg.from_dict(question)),
+        {"new-question": "completed"},
+    )
+    share = await shares.create_snapshot(
         chat_id=chat,
         creator_id="alice",
         tenant_id=scope.tenant_id,
         payload={"chat_name": "new-share", "messages": [question]},
         selected_question_keys=("new-question",),
+        selection_proof=proof,
     )
     await ShareStorage(
         db,
@@ -1000,36 +1014,24 @@ async def test_backup_missing_body_retains_real_sql_pins(
     )
 
 
-async def add_collectable_message(
-    db,
-    bundles,
-    session_id,
-    chat_id,
-    mode,
-    order,
-):
+async def add_collectable_bundle(db, bundles, session_id, chat_id, mode):
     from datetime import datetime
     from swe.app.conversation_storage.bundle import BundleBlock
     from tests.integrated.conversation_storage.test_schema import (
         insert_publication,
-        insert_row,
     )
     from swe.app.conversation_storage.identity import WorkspaceScope
 
     operation = new_operation_key()
-    message = {
-        "id": "collected-" + mode,
-        "role": "assistant",
-        "content": "obsolete " + mode,
-    }
-    blocks = [BundleBlock("message", "message", json.dumps(message).encode())]
-    if mode == "archive":
-        blocks.append(
-            BundleBlock("archive", "archive", json.dumps([message]).encode()),
-        )
     index = bundles.publish(
         operation,
-        blocks,
+        [
+            BundleBlock(
+                "message_bodies",
+                "message_bodies",
+                b'[{"id":"obsolete"}]',
+            ),
+        ],
         scope=WorkspaceScope(
             "tenant",
             "source",
@@ -1038,7 +1040,6 @@ async def add_collectable_message(
         ),
         metadata={"operation_key": operation},
     )
-    extent = index.blocks["message"]
     fields = {
         "session_id": session_id,
         "chat_id": chat_id,
@@ -1048,9 +1049,10 @@ async def add_collectable_message(
         "durable_at": datetime(2026, 10, 30),
     }
     if mode == "archive":
+        extent = index.blocks["message_bodies"]
         fields.update(
-            archive_offset=index.blocks["archive"].offset,
-            archive_length=index.blocks["archive"].length,
+            archive_offset=extent.offset,
+            archive_length=extent.length,
             archive_source_count=1,
             archive_display_count=1,
             boundary_key=str(uuid4()).encode(),
@@ -1058,34 +1060,7 @@ async def add_collectable_message(
             epoch=1,
         )
     publication = await insert_publication(db, operation.encode(), **fields)
-    message_id = await insert_row(
-        db,
-        "swe_conversation_messages",
-        {
-            "session_id": session_id,
-            "layer": "archive" if mode == "archive" else "memory",
-            "session_order": None if mode == "archive" else order,
-            "archive_chat_id": chat_id if mode == "archive" else None,
-            "archive_order": 1 if mode == "archive" else None,
-            "archive_publication_id": (
-                publication if mode == "archive" else None
-            ),
-            "source_occurrence_no": 0,
-            "source_msg_key": message["id"].encode(),
-            "role_key": b"assistant",
-            "kind_key": b"message",
-            "publication_id": publication,
-            "byte_offset": extent.offset,
-            "byte_length": extent.length,
-            "context_epoch": 0,
-            "in_context": 0,
-            "current_visible": 0 if mode == "hidden" else 1,
-            "deleted_at": (
-                datetime(2026, 10, 30) if mode == "deleted" else None
-            ),
-        },
-    )
-    return publication, message_id, index.relative_path
+    return publication, index.relative_path
 
 
 async def test_gc_tombstones_backup_restore_preserve_effective_data_without_missing_bodies(
@@ -1115,21 +1090,17 @@ async def test_gc_tombstones_backup_restore_preserve_effective_data_without_miss
         (deleted_chat.encode(),),
     )
     garbage = [
-        await add_collectable_message(
+        await add_collectable_bundle(
             db,
             bundles,
             row["session_id"],
             row["id"],
             mode,
-            order,
         )
-        for order, mode in enumerate(
-            ("hidden", "deleted", "archive"),
-            start=100,
-        )
+        for mode in ("hidden", "deleted", "archive")
     ]
     await repo.delete_chats([deleted_chat])
-    garbage.append((row["content_meta_publication_id"], None, None))
+    garbage.append((row["content_meta_publication_id"], None))
     collector = GarbageCollector(db, scope, bundles, physical_enabled=True)
     protected = await db.fetch_one(
         "SELECT recovery_publication_id FROM swe_conversation_sessions WHERE id=%s",
@@ -1137,7 +1108,7 @@ async def test_gc_tombstones_backup_restore_preserve_effective_data_without_miss
     )
     with pytest.raises(ConflictError, match="protected"):
         await collector.mark(protected["recovery_publication_id"])
-    for publication, _, relative_path in garbage:
+    for publication, relative_path in garbage:
         await collector.mark(publication)
         await collector.reclaim(publication)
         if relative_path:
@@ -1156,7 +1127,7 @@ async def test_gc_tombstones_backup_restore_preserve_effective_data_without_miss
                 evidence=RestoreEvidence("stopped", "isolated"),
             )
         )["passed"]
-        for publication, message_id, relative_path in garbage:
+        for publication, _ in garbage:
             restored = await clone.fetch_one(
                 "SELECT * FROM swe_conversation_publications WHERE id=%s",
                 (publication,),
@@ -1165,14 +1136,6 @@ async def test_gc_tombstones_backup_restore_preserve_effective_data_without_miss
             assert not (
                 restored_bundles.root / restored["relative_path"].decode()
             ).exists()
-            if message_id:
-                assert await clone.fetch_one(
-                    "SELECT * FROM swe_conversation_messages WHERE id=%s",
-                    (message_id,),
-                ) == await db.fetch_one(
-                    "SELECT * FROM swe_conversation_messages WHERE id=%s",
-                    (message_id,),
-                )
         restored_repo = MySQLChatRepository(clone, scope, restored_bundles)
         assert await restored_repo.get_chat(deleted_chat) is None
         assert (await restored_repo.get_chat(live_chat)).id == live_chat

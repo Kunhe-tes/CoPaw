@@ -154,50 +154,11 @@ async def protect(db, gc, publication, session, chat, kind):
                 "byte_length": 1,
             },
         )
-    elif kind in ("message", "archive", "boundary"):
-        values = {
-            "session_id": session,
-            "layer": (
-                "archive" if kind in ("archive", "boundary") else "memory"
-            ),
-            "session_order": 1 if kind == "message" else None,
-            "archive_chat_id": chat if kind != "message" else None,
-            "archive_order": 1 if kind != "message" else None,
-            "source_occurrence_no": 0,
-            "role_key": b"user",
-            "kind_key": b"message",
-            "publication_id": publication,
-            "byte_offset": 1,
-            "byte_length": 1,
-            "context_epoch": 0,
-            "in_context": 0,
-            "current_visible": 1,
-        }
-        if kind == "boundary":
-            operation = new_operation_key()
-            body = await insert_publication(
-                db,
-                operation.encode(),
-                state="committed",
-                relative_path=gc.bundles.path_for(
-                    operation,
-                    gc.scope,
-                ).encode(),
-                session_id=session,
-                chat_id=chat,
-            )
-            values["publication_id"] = body
-        if kind != "message":
-            values["archive_publication_id"] = publication
-        await insert_row(db, "swe_conversation_messages", values)
 
 
 @pytest.mark.parametrize(
     "kind",
     [
-        "message",
-        "archive",
-        "boundary",
         "root",
         "admission",
         "terminal",

@@ -180,7 +180,6 @@ async def test_all_scopes_restore_together_with_shared_orphan(
             "chats",
             "turns",
             "publications",
-            "messages",
             "shares",
         ):
             assert (
