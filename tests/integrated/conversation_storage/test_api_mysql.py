@@ -41,6 +41,11 @@ from tests.integrated.conversation_storage.conftest import (
     apply_sql_script,
 )
 from tests.integrated.conversation_storage.test_history_mysql import (
+    _ARCHIVE_BODIES,
+    _SESSION_BODIES,
+    _SESSION_MESSAGES,
+    _update_archive_directory,
+    _update_session_directory,
     add_messages,
     source,
 )
@@ -55,6 +60,9 @@ from tests.integrated.conversation_storage.test_schema import (
 @pytest.fixture
 async def api_stack(conversation_test_database, tmp_path, monkeypatch):
     db = conversation_test_database
+    _SESSION_MESSAGES[id(db)] = {}
+    _SESSION_BODIES[id(db)] = {}
+    _ARCHIVE_BODIES[id(db)] = {}
     await ChatShareStore(db).ensure_schema()
     await apply_sql_script(
         db,
@@ -529,9 +537,19 @@ async def test_http_cold_turn_preserves_current_view_boundary(api_stack):
             "history_status": "completed",
         },
     )
-    await stack.db.execute(
-        "UPDATE swe_conversation_messages SET turn_id=%s,current_visible=0,in_context=0 WHERE session_id=%s",
-        (turn, session),
+    await _update_session_directory(
+        stack.db,
+        stack.storage.history,
+        session,
+        lambda entries: [
+            entry.update(
+                turn_id=turn,
+                visible=False,
+                current_visible=False,
+                in_context=False,
+            )
+            for entry in entries
+        ],
     )
     await add_messages(
         stack.db,
@@ -549,9 +567,14 @@ async def test_http_cold_turn_preserves_current_view_boundary(api_stack):
     assert hidden.status_code == 404
     archived = await stack.client.get("/chats/chat-a/history")
     assert message_ids(archived.json()) == ["cold-q", "cold-a"]
-    await stack.db.execute(
-        "UPDATE swe_conversation_messages SET current_visible=1 WHERE turn_id=%s AND layer='memory'",
-        (turn,),
+    await _update_session_directory(
+        stack.db,
+        stack.storage.history,
+        session,
+        lambda entries: [
+            entry.update(visible=True, current_visible=True)
+            for entry in entries
+        ],
     )
     visible = await stack.client.get("/chats/answer-turn", params=params)
     assert visible.status_code == 200
@@ -956,10 +979,30 @@ async def test_http_share_options_selected_turns_permanent_token_and_missing(
                 "history_status": "completed",
             },
         )
-        await stack.db.execute(
-            "UPDATE swe_conversation_messages SET turn_id=%s WHERE source_msg_key IN (%s,%s)",
-            (turn, b"old-q", b"old-a"),
-        )
+        if cold:
+            publication = await stack.db.fetch_one(
+                "SELECT id FROM swe_conversation_publications WHERE chat_id=%s AND boundary_key IS NOT NULL",
+                (a,),
+            )
+            await _update_archive_directory(
+                stack.db,
+                stack.storage.history,
+                publication["id"],
+                lambda entries: [
+                    entry.update(turn_id=turn) for entry in entries
+                ],
+            )
+        else:
+            await _update_session_directory(
+                stack.db,
+                stack.storage.history,
+                session,
+                lambda entries: [
+                    entry.update(turn_id=turn)
+                    for entry in entries
+                    if entry["raw_id"] in ("old-q", "old-a")
+                ],
+            )
     options = await stack.client.get("/chats/chat-a/share-options")
     assert options.status_code == 200
     assert message_ids(options.json()) == ["old-q", "old-a", "new-q", "new-a"]
@@ -976,7 +1019,7 @@ async def test_http_share_options_selected_turns_permanent_token_and_missing(
         "/chats/chat-a/share",
         json={"turn_ids": ["old-q"]},
     )
-    assert created.status_code == 200
+    assert created.status_code == 200, created.text
     token = created.json()["token"]
     await stack.storage.chats.delete_chats(["chat-a"])
     snapshot = await stack.client.get(f"/chat-shares/{token}")
@@ -1268,14 +1311,28 @@ async def test_http_share_uses_chat_channel_identity_not_console_or_meta(
             "alice",
             state={"turn_states": {"q": {"status": status}}},
         )
+    snapshot = await stack.storage.shares.selection_snapshot("cron-chat")
+    chat_spec = await stack.manager.get_chat("cron-chat")
+    _, selected_messages, statuses = await sharing._share_context(
+        chat_spec,
+        stack.workspace,
+        ("q",),
+    )
+    await stack.storage.shares.prove_selection(
+        "cron-chat",
+        snapshot,
+        ("q",),
+        selected_messages,
+        statuses,
+    )
     options = await stack.client.get("/chats/cron-chat/share-options")
-    assert options.status_code == 200
+    assert options.status_code == 200, options.text
     assert options.json()["turn_statuses"] == {"q": "completed"}
     created = await stack.client.post(
         "/chats/cron-chat/share",
         json={"turn_ids": ["q"]},
     )
-    assert created.status_code == 200
+    assert created.status_code == 200, created.text
     snapshot = await stack.client.get(
         f"/chat-shares/{created.json()['token']}",
     )
@@ -1852,7 +1909,7 @@ async def test_http_duplicate_archive_question_uses_first_legacy_slice_and_sourc
         "/chats/chat-a/share",
         json={"turn_ids": ["q"]},
     )
-    assert created.status_code == 200
+    assert created.status_code == 200, created.text
     snapshot = await stack.client.get(
         f"/chat-shares/{created.json()['token']}",
     )
@@ -1864,11 +1921,8 @@ async def test_http_duplicate_archive_question_uses_first_legacy_slice_and_sourc
     )
     metadata = json.loads(publication["result_metadata_text"])
     proof = metadata["share"]["selection_proof"]
-    row = await stack.db.fetch_one(
-        "SELECT * FROM swe_conversation_messages WHERE id=%s",
-        (proof["questions"]["q"]["message_id"],),
-    )
-    assert row["layer"] == "archive" and row["archive_order"] == 1
+    assert proof["questions"]["q"]["layer"] == "archive"
+    assert proof["questions"]["q"]["sequence"] == 1
     assert (
         publication["base_state_revision"]
         == proof["snapshot"]["state_revision"]

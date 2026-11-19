@@ -215,12 +215,6 @@ async def lock_share_selection(db, request, plan):
             raise ConflictError("selected share Turn is not completed")
         if proof is not None:
             item = proof["questions"][key.decode("utf-8")]
-            if turn is None or (
-                turn["chat_id"] != request.chat_id
-                or turn["state"] != "succeeded"
-                or turn["history_status"] != "completed"
-            ):
-                raise ConflictError("selected share Turn is not completed")
             if item["layer"] == "archive":
                 boundary = await db.fetch_one(
                     "SELECT archive_first_order,archive_last_order FROM "

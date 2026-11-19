@@ -611,7 +611,7 @@ class HistoryStore:
         snapshot = HistorySnapshot(chat, rows, visible_boundaries, batches)
         try:
             await self._validate_chat_row(chat)
-            spec = (await self.chats._hydrate([chat]))[0]
+            spec = (await self.chats._hydrate([chat], batches))[0]
             if authorize is not None:
                 authorize(spec)
             messages = await self._convert(
