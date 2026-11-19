@@ -4,7 +4,15 @@
 from __future__ import annotations
 
 import json
+import asyncio
+import io
+import os
 from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime
 
 import pytest
 
@@ -1516,6 +1524,244 @@ async def test_worker_binds_launch_identity(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("business_status", "span_status"),
+    [
+        ("completed", "succeeded"),
+        ("partial", "partial"),
+        ("failed", "failed"),
+        ("cancelled", "cancelled"),
+    ],
+)
+async def test_worker_emits_subagent_span_from_scope_checked_carrier(
+    monkeypatch,
+    tmp_path,
+    business_status,
+    span_status,
+):
+    from swe.app.subagents import worker as worker_module
+    from swe.observability.config import EmitterConfig
+    from swe.observability.context import bind_context, current_context
+    from swe.observability.emitter import JsonlEmitter
+    from swe.observability.instrumentation import Observability
+    from swe.observability.context import bind_context
+    from swe.observability.models import ObservabilityContext, Scope
+    import io
+
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    observed = {}
+
+    class CapturingRuntime:
+        def __init__(self, store):
+            self.store = store
+
+        async def run(self, **kwargs):
+            assert (
+                "agent_observability_context" not in kwargs["request_context"]
+            )
+            observed["parent_span_id"] = current_context().parent_obs_span_id
+            return _result(kwargs["run"].run_id, status=business_status)
+
+    launch_path, run_id, run_store_dir = await _write_launch_spec(tmp_path)
+    carrier_context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope(
+            service_unit_id="swe",
+            source_id="source-1",
+            tenant_id="tenant-1",
+            agent_id="agent-1",
+        ),
+        business_ref={
+            "session_id": "session-1",
+            "chat_id": "chat-1",
+            "root_question_msgid": "question-1",
+        },
+    ).with_updates(
+        parent_obs_span_id="550e8400-e29b-41d4-a716-446655440000",
+    )
+    raw = json.loads(launch_path.read_text(encoding="utf-8"))
+    request_context = {
+        "session_id": "session-1",
+        "chat_id": "chat-1",
+        "msgid": "question-1",
+        "user_id": "user-1",
+        "source_id": "source-1",
+        "tenant_id": "tenant-1",
+        "agent_id": "agent-1",
+    }
+    parent_observer = Observability(emitter=emitter)
+    with bind_context(carrier_context):
+        parent_span = parent_observer.span(
+            "SubAgent",
+            "agent.execute",
+            subagent={
+                "mode": "background",
+                "execution_agent_key": "plan-researcher",
+            },
+        )
+    assert parent_span is not None
+    request_context["agent_observability_context"] = parent_span.to_carrier()
+    raw["request_context"] = request_context
+    launch_path.write_text(json.dumps(raw), encoding="utf-8")
+    monkeypatch.setattr(worker_module, "SubAgentRuntime", CapturingRuntime)
+    monkeypatch.setattr(
+        worker_module,
+        "_OBSERVABILITY",
+        worker_module.Observability(emitter=emitter),
+    )
+
+    exit_code = await worker_module.run_worker(launch_path)
+    emitter.close()
+    record = await PerRunSubAgentRunStore(run_store_dir).get(run_id)
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+
+    assert exit_code == 0
+    assert record is not None
+    assert record.result is not None
+    assert record.result.status == business_status
+    assert observed["parent_span_id"] == parent_span.span_id
+    assert emitter.dropped_count == 0
+    from swe.observability.projector import _validate_payload
+
+    for event in events:
+        _validate_payload(json.dumps(event))
+    assert [event["event_name"] for event in events] == [
+        "span.started",
+        "span.ended",
+    ]
+    started, ended = events
+    assert (
+        started["obs_run_id"]
+        == ended["obs_run_id"]
+        == carrier_context.obs_run_id
+    )
+    assert (
+        started["parent_obs_span_id"]
+        == ended["parent_obs_span_id"]
+        == "550e8400-e29b-41d4-a716-446655440000"
+    )
+    assert started["subagent"] == {
+        "mode": "background",
+        "execution_agent_key": "plan-researcher",
+    }
+    assert ended["subagent"] == {
+        **started["subagent"],
+        "business_subagent_key": run_id,
+        "result_status": business_status,
+    }
+    assert ended["status"] == span_status
+    assert (
+        started["scope"] == ended["scope"] == carrier_context.scope.to_dict()
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_background_subagents_keep_task_local_span_identity(
+    monkeypatch,
+):
+    from swe.app.subagents import worker as worker_module
+    from swe.observability.config import EmitterConfig
+    from swe.observability.context import bind_context, current_context
+    from swe.observability.emitter import JsonlEmitter
+    from swe.observability.instrumentation import Observability
+    from swe.observability.models import ObservabilityContext, Scope
+
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    observer = Observability(emitter=emitter)
+    monkeypatch.setattr(worker_module, "_OBSERVABILITY", observer)
+    root = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("swe", "source-a", "tenant-a", "parent-agent"),
+    ).new_attempt()
+    carriers = {}
+    parent_span_ids = {}
+    with bind_context(root):
+        for run_id, name in (
+            ("run-a", "researcher-a"),
+            ("run-b", "researcher-b"),
+        ):
+            span = observer.span(
+                "SubAgent",
+                "agent.execute",
+                subagent={"mode": "background", "execution_agent_key": name},
+            )
+            assert span is not None
+            carriers[run_id] = span.to_carrier()
+            parent_span_ids[run_id] = span.span_id
+    barrier = asyncio.Event()
+    arrived = 0
+    observed = {}
+
+    class ConcurrentRuntime:
+        def __init__(self, run_id):
+            self.run_id = run_id
+
+        async def run(self, **_kwargs):
+            nonlocal arrived
+            observed[self.run_id] = current_context().parent_obs_span_id
+            arrived += 1
+            if arrived == 2:
+                barrier.set()
+            await asyncio.wait_for(barrier.wait(), timeout=5)
+            return _result(self.run_id)
+
+    await asyncio.gather(
+        *(
+            worker_module._run_background_runtime(
+                ConcurrentRuntime(run_id),
+                {},
+                ObservabilityContext.from_carrier(carrier["context"]),
+                carrier,
+                run_id,
+                f"researcher-{run_id[-1]}",
+            )
+            for run_id, carrier in carriers.items()
+        ),
+    )
+    assert emitter.close(timeout=1) == 0
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    started = {
+        event["obs_span_id"]: event
+        for event in events
+        if event["event_name"] == "span.started"
+    }
+    ended = {
+        event["subagent"]["business_subagent_key"]: event
+        for event in events
+        if event["event_name"] == "span.ended"
+    }
+    assert observed == parent_span_ids
+    assert set(started) == set(parent_span_ids.values())
+    assert set(ended) == {"run-a", "run-b"}
+    assert {
+        run_id: event["obs_span_id"] for run_id, event in ended.items()
+    } == {
+        run_id: carrier["obs_span_id"] for run_id, carrier in carriers.items()
+    }
+    assert all(
+        event["obs_run_id"] == root.obs_run_id for event in ended.values()
+    )
+    intervals = {
+        run_id: (
+            datetime.fromisoformat(started[span_id]["started_at"]),
+            datetime.fromisoformat(ended[run_id]["ended_at"]),
+        )
+        for run_id, span_id in parent_span_ids.items()
+    }
+    assert max(start for start, _ in intervals.values()) < min(
+        end for _, end in intervals.values()
+    )
+
+
+def test_worker_maps_blocked_result_to_rejected_span():
+    from swe.app.subagents.worker import _SUBAGENT_SPAN_STATUSES
+
+    assert _SUBAGENT_SPAN_STATUSES["blocked"] == "rejected"
+
+
+@pytest.mark.asyncio
 async def test_worker_exception_writes_failed(monkeypatch, tmp_path):
     from swe.app.subagents import worker as worker_module
 
@@ -1540,3 +1786,109 @@ async def test_worker_exception_writes_failed(monkeypatch, tmp_path):
     assert record.errors
     assert record.errors[-1].code == "worker_runtime_error"
     assert record.errors[-1].message == "SubAgent execution failed."
+
+
+@pytest.mark.asyncio
+async def test_worker_sigterm_does_not_fabricate_carried_span_terminal(
+    tmp_path,
+):
+    from swe.observability.config import EmitterConfig
+    from swe.observability.context import bind_context
+    from swe.observability.emitter import JsonlEmitter
+    from swe.observability.instrumentation import Observability
+    from swe.observability.models import ObservabilityContext, Scope
+
+    launch_path, run_id, run_store_dir = await _write_launch_spec(tmp_path)
+    events_path = tmp_path / "worker-events.jsonl"
+    marker_path = tmp_path / "worker-runtime-started"
+    root = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("swe", "source-1", "tenant-1", "parent-agent"),
+    )
+    parent_emitter = JsonlEmitter(
+        EmitterConfig(),
+        stream=events_path.open("w"),
+    )
+    observer = Observability(emitter=parent_emitter)
+    with bind_context(root):
+        span = observer.span(
+            "SubAgent",
+            "agent.execute",
+            subagent={
+                "business_subagent_key": run_id,
+                "mode": "background",
+                "execution_agent_key": "plan-researcher",
+            },
+        )
+    assert span is not None
+    launch = json.loads(launch_path.read_text(encoding="utf-8"))
+    launch["request_context"][
+        "agent_observability_context"
+    ] = span.to_carrier()
+    launch_path.write_text(json.dumps(launch), encoding="utf-8")
+    assert parent_emitter.close(timeout=1) == 0
+
+    child_script = """
+import asyncio
+from pathlib import Path
+import sys
+from swe.app.subagents import worker
+from swe.observability.config import EmitterConfig
+from swe.observability.emitter import JsonlEmitter
+from swe.observability.instrumentation import Observability
+
+marker = Path(sys.argv[2])
+class WaitingRuntime:
+    def __init__(self, store):
+        self.store = store
+    async def run(self, **kwargs):
+        marker.write_text("running", encoding="utf-8")
+        await asyncio.Event().wait()
+
+worker.SubAgentRuntime = WaitingRuntime
+event_stream = open(sys.argv[3], "a", encoding="utf-8", buffering=1)
+worker._OBSERVABILITY = Observability(
+    emitter=JsonlEmitter(EmitterConfig(), stream=event_stream),
+)
+raise SystemExit(asyncio.run(worker.run_worker(Path(sys.argv[1]))))
+"""
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            child_script,
+            str(launch_path),
+            str(marker_path),
+            str(events_path),
+        ],
+        cwd=Path(__file__).resolve().parents[3],
+        env={**os.environ, "PYTHONPATH": str(Path.cwd() / "src")},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 10
+    while not marker_path.exists() and process.poll() is None:
+        if time.monotonic() >= deadline:
+            process.kill()
+            process.wait(timeout=5)
+            pytest.fail("worker subprocess did not enter runtime")
+        await asyncio.sleep(0.01)
+    assert marker_path.exists()
+    process.send_signal(signal.SIGTERM)
+    return_code = process.wait(timeout=5)
+
+    events = [
+        json.loads(line)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert return_code == -signal.SIGTERM
+    assert [event["event_name"] for event in events] == ["span.started"]
+    assert events[0]["subagent"]["business_subagent_key"] == run_id
+    from swe.observability.projector import _validate_payload
+
+    assert _validate_payload(json.dumps(events[0]))["event_name"] == (
+        "span.started"
+    )
+    record = await PerRunSubAgentRunStore(run_store_dir).get(run_id)
+    assert record is not None
+    assert record.status == "running"

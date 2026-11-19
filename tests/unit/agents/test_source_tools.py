@@ -16,6 +16,91 @@ from swe.agents.source_tools import (
 )
 
 
+@pytest.mark.asyncio
+async def test_source_tool_emits_selected_catalog_version_on_tool_span(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    import io
+    import json
+    import hashlib
+    from dataclasses import replace
+
+    from swe.observability.config import EmitterConfig
+    from swe.observability.context import bind_context
+    from swe.observability.emitter import JsonlEmitter
+    from swe.observability.instrumentation import (
+        Observability,
+        bind_tool_span,
+    )
+    from swe.observability.models import ObservabilityContext, Scope
+    from swe.observability.projector import _validate_payload
+
+    script = "private script marker"
+    digest = hashlib.sha256(script.encode("utf-8")).hexdigest()
+    version = replace(
+        _version(script),
+        version=7,
+        content_digest=digest,
+    )
+    monkeypatch.setattr(
+        "swe.agents.source_tools._run_source_tool",
+        lambda *_args: _resolved({"private": "result"}),
+    )
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    observer = Observability(emitter)
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+    ).new_attempt()
+
+    with bind_context(context):
+        span = observer.span(
+            "Tool",
+            "execute",
+            tool={
+                "tool_key": version.name,
+                "tool_call_id": "call-source-asset",
+                "tool_execution_id": "00000000-0000-4000-8000-000000000007",
+                "executor_kind": "agent_tool",
+            },
+        )
+        with bind_tool_span(span):
+            await build_source_tool_function(
+                version,
+                SourceToolRuntime(
+                    tenant_id="tenant-a",
+                    source_id="source-a",
+                    workspace_dir=tmp_path,
+                    agent_id="agent-a",
+                ),
+            )(private_argument="private argument")
+        span.end(status="succeeded")
+    emitter.close()
+
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    asset = next(
+        event for event in events if event["event_name"] == "asset.used"
+    )
+    assert asset["parent_obs_span_id"] == span.span_id
+    assert asset["asset"] == {
+        "asset_type": "tool",
+        "asset_id": "source_echo",
+        "asset_source": "source_catalog_snapshot",
+        "asset_version": "7",
+        "asset_digest": f"sha256:{digest}",
+    }
+    assert _validate_payload(json.dumps(asset))["event_name"] == "asset.used"
+    assert "private script marker" not in json.dumps(asset)
+    assert "private argument" not in json.dumps(asset)
+    assert "private result" not in json.dumps(asset)
+
+
+async def _resolved(value):
+    return value
+
+
 def _version(
     script: str,
     *,

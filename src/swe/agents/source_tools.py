@@ -107,6 +107,21 @@ def build_source_tool_function(
     """Create the AgentScope-compatible async adapter for one catalog snapshot."""
 
     async def _source_tool(**arguments: Any) -> ToolResponse:
+        digest = version.content_digest
+        if not digest.startswith("sha256:"):
+            digest = f"sha256:{digest}"
+        try:
+            from ..observability.instrumentation import emit_tool_asset_used
+
+            emit_tool_asset_used(
+                asset_type="tool",
+                asset_id=version.name,
+                source="source_catalog_snapshot",
+                version=str(version.version),
+                digest=digest,
+            )
+        except Exception:  # noqa: BLE001
+            pass
         try:
             result = await _run_source_tool(version, runtime, arguments)
         except SourceToolConfigurationError as exc:

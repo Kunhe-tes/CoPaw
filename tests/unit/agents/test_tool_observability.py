@@ -33,7 +33,7 @@ class _ToolExecutor:
 
 class _ObservedToolAgent(ToolGuardMixin, _ToolExecutor):
     def _resolve_mcp_server(self, _tool_name):
-        return None
+        return getattr(self, "mcp_server", None)
 
     def _tool_has_specific_timeout(self, _tool_name):
         return True
@@ -41,6 +41,18 @@ class _ObservedToolAgent(ToolGuardMixin, _ToolExecutor):
 
 def _events(stream: io.StringIO) -> list[dict]:
     return [json.loads(line) for line in stream.getvalue().splitlines()]
+
+
+def _assert_tool_asset(events: list[dict], *, span_id: str, tool_name: str):
+    assets = [event for event in events if event["event_name"] == "asset.used"]
+    assert len(assets) == 1
+    assert assets[0]["parent_obs_span_id"] == span_id
+    assert assets[0]["asset"] == {
+        "asset_type": "tool",
+        "asset_id": tool_name,
+        "asset_version": "unknown",
+        "asset_source": "runtime_registered",
+    }
 
 
 @pytest.mark.asyncio
@@ -92,17 +104,91 @@ async def test_tool_execution_preserves_business_result_and_projects_outcome(
 
     assert result is outcome
     assert agent.calls == [tool_call]
-    assert [event["event_name"] for event in events] == [
+    span_events = [
+        event for event in events if event["event_name"].startswith("span.")
+    ]
+    assert [event["event_name"] for event in span_events] == [
         "span.started",
         "span.ended",
     ]
-    assert events[0]["tool"]["tool_key"] == "read_file"
-    assert events[0]["tool"]["tool_call_id"] == "call-1"
-    assert events[0]["step_index"] == 4
-    assert events[1]["status"] == span_status
-    assert events[1]["technical_status"] == technical_status
-    assert events[1]["has_error"] is has_error
-    assert events[1].get("error_type") == outcome.get("error_type")
+    assert span_events[0]["tool"]["tool_key"] == "read_file"
+    assert span_events[0]["tool"]["tool_call_id"] == "call-1"
+    assert span_events[0]["step_index"] == 4
+    assert span_events[1]["status"] == span_status
+    assert span_events[1]["technical_status"] == technical_status
+    assert span_events[1]["has_error"] is has_error
+    assert span_events[1].get("error_type") == outcome.get("error_type")
+    _assert_tool_asset(
+        events,
+        span_id=span_events[0]["obs_span_id"],
+        tool_name="read_file",
+    )
+    assert "private tool input" not in json.dumps(events)
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_assets_capture_snapshot_identity_without_configuration(
+    monkeypatch,
+):
+    from swe.observability import instrumentation
+
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(instrumentation, "default_emitter", lambda: emitter)
+    agent = _ObservedToolAgent({"content": "private tool output"})
+    agent.mcp_server = "runtime-mcp-name"
+    agent._request_context = {
+        "subagent_mcp_server_keys": {"runtime-mcp-name": "search_provider"},
+        "mcp_config": {"headers": {"Authorization": "secret-value"}},
+    }
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+    ).new_attempt()
+
+    with bind_context(context):
+        await agent._run_tool_call_with_hard_timeout_impl(
+            {
+                "id": "call-mcp",
+                "name": "search",
+                "input": {"query": "private tool input"},
+            },
+            "search",
+            {"query": "private tool input"},
+        )
+    emitter.close()
+    events = _events(stream)
+    span_id = next(
+        event["obs_span_id"]
+        for event in events
+        if event["event_name"] == "span.started"
+    )
+    assets = [event for event in events if event["event_name"] == "asset.used"]
+
+    assert [event["asset"] for event in assets] == [
+        {
+            "asset_type": "tool",
+            "asset_id": "search",
+            "asset_version": "unknown",
+            "asset_source": "runtime_registered",
+        },
+        {
+            "asset_type": "mcp_server",
+            "asset_id": "search_provider",
+            "asset_version": "unknown",
+            "asset_source": "runtime_snapshot",
+        },
+    ]
+    assert all(event["parent_obs_span_id"] == span_id for event in assets)
+    event_text = json.dumps(events)
+    for private_value in (
+        "private tool input",
+        "private tool output",
+        "Authorization",
+        "secret-value",
+        "mcp_config",
+    ):
+        assert private_value not in event_text
 
 
 @pytest.mark.asyncio
@@ -140,14 +226,22 @@ async def test_tool_execution_records_exception_and_preserves_propagation(
     emitter.close()
     events = _events(stream)
 
-    assert [event["event_name"] for event in events] == [
+    span_events = [
+        event for event in events if event["event_name"].startswith("span.")
+    ]
+    assert [event["event_name"] for event in span_events] == [
         "span.started",
         "span.ended",
     ]
-    assert events[1]["status"] == expected_status
-    assert events[1].get("technical_status") == technical_status
+    assert span_events[1]["status"] == expected_status
+    assert span_events[1].get("technical_status") == technical_status
     if technical_status is not None:
-        assert events[1]["error_type"] == type(error).__name__
+        assert span_events[1]["error_type"] == type(error).__name__
+    _assert_tool_asset(
+        events,
+        span_id=span_events[0]["obs_span_id"],
+        tool_name="read_file",
+    )
     assert "private tool error" not in stream.getvalue()
 
 
@@ -277,13 +371,21 @@ async def test_tool_hard_timeout_records_controlled_failure(monkeypatch):
 
     assert result is None
     assert len(agent.calls) == 1
-    assert [event["event_name"] for event in events] == [
+    span_events = [
+        event for event in events if event["event_name"].startswith("span.")
+    ]
+    assert [event["event_name"] for event in span_events] == [
         "span.started",
         "span.ended",
     ]
-    assert events[-1]["status"] == "failed"
-    assert events[-1]["technical_status"] == "ERROR"
-    assert events[-1]["error_type"] == "tool_timeout"
+    assert span_events[-1]["status"] == "failed"
+    assert span_events[-1]["technical_status"] == "ERROR"
+    assert span_events[-1]["error_type"] == "tool_timeout"
+    _assert_tool_asset(
+        events,
+        span_id=span_events[0]["obs_span_id"],
+        tool_name="local_tool",
+    )
 
 
 @pytest.mark.asyncio
@@ -372,3 +474,55 @@ async def test_guard_short_circuit_emits_guard_span_without_tool_execution(
 
     for event in events:
         _validate_payload(json.dumps(event))
+
+
+@pytest.mark.asyncio
+async def test_tool_span_is_bound_only_during_tool_execution(monkeypatch):
+    from swe.observability import instrumentation
+
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(instrumentation, "default_emitter", lambda: emitter)
+
+    async def record_evidence(tool_call):
+        assert instrumentation.emit_tool_output_evidence(
+            chat_id="chat-1",
+            message_id="tool-message-1",
+            occurrence_id=0,
+        )
+        return tool_call
+
+    agent = _ObservedToolAgent(record_evidence)
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+    ).new_attempt()
+
+    with bind_context(context):
+        result = await agent._run_tool_call_with_hard_timeout_impl(
+            {"id": "call-evidence", "name": "read_file", "input": {}},
+            "read_file",
+            {},
+        )
+        assert not instrumentation.emit_tool_output_evidence(
+            chat_id="chat-1",
+            message_id="outside-tool-call",
+        )
+    emitter.close()
+    events = _events(stream)
+    tool_span = next(
+        event for event in events if event["event_name"] == "span.started"
+    )
+    evidence = next(
+        event
+        for event in events
+        if event.get("event_type") == "evidence.linked"
+    )
+
+    assert result["id"] == "call-evidence"
+    assert evidence["obs_span_id"] == tool_span["obs_span_id"]
+    assert evidence["chat_id"] == "chat-1"
+    assert evidence["message_id"] == "tool-message-1"
+    assert evidence["occurrence_id"] == 0
+    assert evidence["content_type"] == "tool_output"
+    assert evidence["saved_state"] == "available"

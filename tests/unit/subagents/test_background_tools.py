@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -481,6 +482,230 @@ async def test_start_subagent_serializes_real_run_record(tmp_path):
     assert "run_id" not in json.dumps(payload)
     assert "definition_match" not in payload
     assert "worker" not in payload
+
+
+@pytest.mark.asyncio
+async def test_start_subagent_carries_current_observability_context(
+    monkeypatch,
+    tmp_path,
+):
+    from swe.observability.context import bind_context
+    from swe.observability.instrumentation import Observability
+    from swe.observability.models import ObservabilityContext, Scope
+    from swe.app.subagents.models import WorkerProcessInfo
+
+    package = _enable_agent_definition(tmp_path)
+    record = await PerRunSubAgentRunStore(tmp_path / "runs").create(
+        DelegationSpec(name="plan-researcher", objective="Inspect"),
+        package.definition,
+        PermissionPolicy.readonly(),
+        nickname="研究员",
+    )
+    observed = {}
+    events = []
+
+    class CapturingEmitter:
+        def emit(self, event):
+            events.append(event.to_dict())
+            return True
+
+    class CapturingSupervisor:
+        async def start(self, **kwargs):
+            observed.update(kwargs)
+            return record.model_copy(
+                update={
+                    "status": "running",
+                    "worker": WorkerProcessInfo(pid=4321),
+                },
+            )
+
+    context = (
+        ObservabilityContext.new_run(
+            capture_enabled=True,
+            scope=Scope("swe", "source-1", "tenant-1", "agent-1"),
+            business_ref={
+                "session_id": "session-1",
+                "chat_id": "chat-1",
+                "root_question_msgid": "question-1",
+            },
+        )
+        .new_attempt()
+        .with_updates(parent_obs_span_id="parent-span-1")
+    )
+    tools = create_background_subagent_tools(
+        supervisor=CapturingSupervisor(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+            "source_id": "source-1",
+            "session_id": "session-1",
+            "chat_id": "chat-1",
+            "msgid": "question-1",
+            "_subagent_definition_store_dir": str(tmp_path / "definitions"),
+        },
+        expert_discovery_enabled=True,
+    )
+    monkeypatch.setattr(
+        "swe.agents.tools.subagent_background._OBSERVABILITY",
+        Observability(emitter=CapturingEmitter()),
+    )
+
+    with bind_context(context):
+        await tools["start_subagent"](
+            expert_name="plan-researcher",
+            objective="Inspect",
+        )
+
+    carrier = observed["request_context"]["agent_observability_context"]
+    assert carrier["context"]["obs_run_id"] == context.obs_run_id
+    assert carrier["context"]["obs_attempt_id"] == context.obs_attempt_id
+    assert carrier["parent_obs_span_id"] == "parent-span-1"
+    assert carrier["context"]["scope"] == context.scope.to_dict()
+    assert carrier["context"]["business_ref"] == context.business_ref
+    assert carrier["attributes"]["subagent"] == {
+        "mode": "background",
+        "execution_agent_key": "plan-researcher",
+    }
+    assert [event["event_name"] for event in events] == ["span.started"]
+
+
+@pytest.mark.asyncio
+async def test_start_subagent_settles_span_when_supervisor_fails_before_worker(
+    monkeypatch,
+    tmp_path,
+):
+    from swe.observability.context import bind_context
+    from swe.observability.instrumentation import Observability
+    from swe.observability.models import ObservabilityContext, Scope
+
+    package = _enable_agent_definition(tmp_path)
+    store = PerRunSubAgentRunStore(tmp_path / "runs")
+    record = await store.create(
+        DelegationSpec(name="plan-researcher", objective="Inspect"),
+        package.definition,
+        PermissionPolicy.readonly(),
+    )
+    record = await store.fail(
+        record.run_id,
+        "SubAgent execution failed.",
+        error_code="worker_snapshot_failed",
+    )
+    events = []
+
+    class CapturingEmitter:
+        def emit(self, event):
+            events.append(event.to_dict())
+            return True
+
+    class FailedSupervisor:
+        async def start(self, **_kwargs):
+            return record
+
+    tools = create_background_subagent_tools(
+        supervisor=FailedSupervisor(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+            "source_id": "source-1",
+            "session_id": "session-1",
+            "chat_id": "chat-1",
+            "msgid": "question-1",
+            "_subagent_definition_store_dir": str(tmp_path / "definitions"),
+        },
+        expert_discovery_enabled=True,
+    )
+    monkeypatch.setattr(
+        "swe.agents.tools.subagent_background._OBSERVABILITY",
+        Observability(emitter=CapturingEmitter()),
+    )
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("swe", "source-1", "tenant-1", "agent-1"),
+        business_ref={
+            "session_id": "session-1",
+            "chat_id": "chat-1",
+            "root_question_msgid": "question-1",
+        },
+    )
+
+    with bind_context(context):
+        await tools["start_subagent"](
+            expert_name="plan-researcher",
+            objective="Inspect",
+        )
+
+    assert [event["event_name"] for event in events] == [
+        "span.started",
+        "span.ended",
+    ]
+    assert events[0]["obs_span_id"] == events[1]["obs_span_id"]
+    assert events[1]["status"] == "failed"
+    assert events[1]["subagent"]["business_subagent_key"] == record.run_id
+    assert events[1]["subagent"]["result_status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_supervisor_handoff_remains_partial_without_guessing(
+    monkeypatch,
+    tmp_path,
+):
+    from swe.observability.context import bind_context
+    from swe.observability.instrumentation import Observability
+    from swe.observability.models import ObservabilityContext, Scope
+
+    _enable_agent_definition(tmp_path)
+    events = []
+
+    class CapturingEmitter:
+        def emit(self, event):
+            events.append(event.to_dict())
+            return True
+
+    class CancelledSupervisor:
+        async def start(self, **_kwargs):
+            raise asyncio.CancelledError
+
+    tools = create_background_subagent_tools(
+        supervisor=CancelledSupervisor(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+            "source_id": "source-1",
+            "session_id": "session-1",
+            "chat_id": "chat-1",
+            "msgid": "question-1",
+            "_subagent_definition_store_dir": str(tmp_path / "definitions"),
+        },
+        expert_discovery_enabled=True,
+    )
+    monkeypatch.setattr(
+        "swe.agents.tools.subagent_background._OBSERVABILITY",
+        Observability(emitter=CapturingEmitter()),
+    )
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("swe", "source-1", "tenant-1", "agent-1"),
+        business_ref={
+            "session_id": "session-1",
+            "chat_id": "chat-1",
+            "root_question_msgid": "question-1",
+        },
+    )
+
+    with bind_context(context):
+        with pytest.raises(asyncio.CancelledError):
+            await tools["start_subagent"](
+                expert_name="plan-researcher",
+                objective="Inspect",
+            )
+
+    assert [event["event_name"] for event in events] == ["span.started"]
 
 
 @pytest.mark.asyncio

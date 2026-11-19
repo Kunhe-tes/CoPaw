@@ -90,6 +90,36 @@ async def _insert_admitted_turn(
     )
 
 
+async def _seed_population_subagents(run_store_dir):
+    from swe.app.subagents import (
+        DelegationSpec,
+        PerRunSubAgentRunStore,
+        PermissionPolicy,
+        SubAgentDefinition,
+    )
+
+    store = PerRunSubAgentRunStore(run_store_dir)
+    definition = SubAgentDefinition(
+        name="population-researcher",
+        description="Population integration test",
+        instruction="Inspect a test population.",
+    )
+    records = []
+    for chat_id in ("chat-real", "", "hidden-chat"):
+        record = await store.create(
+            DelegationSpec(
+                parent_chat_id=chat_id,
+                parent_thread_id="session-real",
+                name=definition.name,
+                objective="Inspect population coverage.",
+            ),
+            definition,
+            PermissionPolicy.readonly(),
+        )
+        records.append(record)
+    await store.mark_running(records[1].run_id, worker_pid=123)
+
+
 @pytest.mark.asyncio
 async def test_business_population_reads_admitted_turn_from_mysql(
     conversation_test_database,
@@ -123,6 +153,7 @@ async def test_business_population_reads_admitted_turn_from_mysql(
         question_key=b"question-real",
         admitted_at=admitted_at,
     )
+    await _seed_population_subagents(tmp_path / "subagents")
     await _insert_admitted_turn(
         database,
         source_key=b"foreign-source",
@@ -175,7 +206,9 @@ async def test_business_population_reads_admitted_turn_from_mysql(
     assert body["business"]["by_turn_status"]["completed"] == 1
     assert body["business"]["not_collected_count"] == 1
     assert body["runs"]["settled_count"] == 0
-    assert body["subagents"]["count"] == 0
+    assert body["subagents"]["count"] == 2
+    assert body["subagents"]["by_status"] == {"pending": 1, "running": 1}
+    assert body["subagents"]["unresolved_count"] == 1
     assert body["population_source"]["business"] == (
         "current_workspace_admitted_turns"
     )

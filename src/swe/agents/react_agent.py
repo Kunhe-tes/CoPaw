@@ -2485,6 +2485,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         await self._retrieve_from_knowledge(msg)
 
         last_reply: Msg | None = None
+        self._observability_step_index = 0
         previous_reply_task = self._reply_task
         self._reply_task = asyncio.current_task()
         self._required_structured_model = None
@@ -2526,6 +2527,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         finally:
             self._stop_watchdog()
             self._reply_task = previous_reply_task
+            self._observability_step_index = None
 
     async def _research_messages(self) -> tuple[Msg, ...]:
         """Snapshot research memory for a bounded terminal handoff."""
@@ -2631,6 +2633,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         ):
             try:
                 self._start_watchdog()
+                self._observability_step_index = 0
                 with self.agent_phase(AgentPhase.REASONING, reason="reply"):
                     return await super().reply(
                         msg=msg,
@@ -2638,6 +2641,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                     )
             finally:
                 self._stop_watchdog()
+                self._observability_step_index = None
 
     async def interrupt(self, msg: Msg | list[Msg] | None = None) -> None:
         """Interrupt the current reply process and wait for cleanup.

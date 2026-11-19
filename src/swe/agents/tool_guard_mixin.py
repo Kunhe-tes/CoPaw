@@ -422,7 +422,10 @@ class ToolGuardMixin:
         tool_name: str,
         tool_input: dict[str, Any],
     ) -> dict | None:
-        from ..observability.instrumentation import Observability
+        from ..observability.instrumentation import (
+            Observability,
+            bind_tool_span,
+        )
         from ..observability.context import current_context
 
         context = current_context()
@@ -450,20 +453,48 @@ class ToolGuardMixin:
                 and 1 <= timeout_budget_ms <= 0xFFFFFFFF
             ):
                 tool_metadata["timeout_budget_ms"] = int(timeout_budget_ms)
+            step_index = getattr(self, "_observability_step_index", None)
+            span_attributes: dict[str, Any] = {"tool": tool_metadata}
+            if type(step_index) is int and step_index > 0:
+                span_attributes["step_index"] = step_index
             span = Observability().span(
                 "Tool",
                 "execute",
                 name="registered.tool",
-                tool=tool_metadata,
+                **span_attributes,
             )
+            if span is not None:
+                span.asset_used(
+                    "tool",
+                    tool_name,
+                    source="runtime_registered",
+                    version="unknown",
+                )
+                mcp_server = self._resolve_mcp_server(tool_name)
+                if mcp_server:
+                    request_context = (
+                        getattr(self, "_request_context", {}) or {}
+                    )
+                    mcp_asset_id = _subagent_mcp_server_key(
+                        mcp_server,
+                        request_context,
+                    )
+                    if mcp_asset_id:
+                        span.asset_used(
+                            "mcp_server",
+                            mcp_asset_id,
+                            source="runtime_snapshot",
+                            version="unknown",
+                        )
         except Exception:
             span = None
         try:
-            result = await self._run_tool_call_with_hard_timeout_raw(
-                tool_call,
-                tool_name,
-                tool_input,
-            )
+            with bind_tool_span(span):
+                result = await self._run_tool_call_with_hard_timeout_raw(
+                    tool_call,
+                    tool_name,
+                    tool_input,
+                )
         except asyncio.CancelledError:
             if span is not None:
                 span.end(status="cancelled")
@@ -2526,7 +2557,7 @@ class ToolGuardMixin:
         record_approval_requested(
             current_context(),
             pending_request.request_id,
-            started_at=pending_request.created_at,
+            started_at=getattr(pending_request, "created_at", None),
         )
         await self._notify_approval_pending(pending_request)
 
@@ -2594,9 +2625,14 @@ class ToolGuardMixin:
         from ..app.runner.expert_main_runtime import consume_expert_reasoning
 
         consume_expert_reasoning(self._request_context)
-        return await super()._reasoning(  # type: ignore[misc]
-            tool_choice=tool_choice,
-        )
+        from ..observability.instrumentation import bind_agent_step_index
+
+        step_index = (getattr(self, "_observability_step_index", 0) or 0) + 1
+        self._observability_step_index = step_index
+        with bind_agent_step_index(step_index):
+            return await super()._reasoning(  # type: ignore[misc]
+                tool_choice=tool_choice,
+            )
 
     def _consume_plan_interaction_turn_boundary(self) -> bool:
         """Consume the plan-card turn boundary marker once."""

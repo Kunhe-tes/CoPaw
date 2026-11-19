@@ -909,6 +909,18 @@ class SkillInvocationDetector:
             tool_name,
             load_hooks=load_hooks,
         )
+        from ..observability.instrumentation import Observability
+
+        Observability().asset_used(
+            "skill",
+            skill_name,
+            source=(
+                "runtime_snapshot"
+                if skill_name in self._skill_signatures
+                else "runtime_identity"
+            ),
+            digest=self._skill_signatures.get(skill_name),
+        )
         self._context_manager.record_tool_call(tool_name, mcp_server)
         return skill_name, weights or {skill_name: confidence}
 
