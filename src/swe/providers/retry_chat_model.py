@@ -660,7 +660,7 @@ class RetryChatModel(ChatModelBase):
         async for chunk in self._consume_stream_with_slot(stream, limiter):
             yield chunk, _has_usable_model_output(chunk)
 
-    def _consume_empty_output_retry(
+    async def _consume_empty_output_retry(
         self,
         remaining: int,
         *,
@@ -678,6 +678,13 @@ class RetryChatModel(ChatModelBase):
             message,
             attempt,
             self.model_name,
+        )
+        # 空输出重试不等待，delay 固定为 0；与非流式路径保持一致
+        await self._notify_retry(
+            attempt,
+            attempt + 1,
+            EmptyModelOutputError(message),
+            0,
         )
         return remaining - 1
 
@@ -715,7 +722,7 @@ class RetryChatModel(ChatModelBase):
                 if has_usable_output:
                     return  # stream completed without error
                 empty_output_retries_remaining = (
-                    self._consume_empty_output_retry(
+                    await self._consume_empty_output_retry(
                         empty_output_retries_remaining,
                         attempt=call_attempt,
                         stream=True,
@@ -768,7 +775,7 @@ class RetryChatModel(ChatModelBase):
                             yield chunk
                         if has_usable_output:
                             return  # stream completed without error
-                        empty_output_retries_remaining = self._consume_empty_output_retry(
+                        empty_output_retries_remaining = await self._consume_empty_output_retry(
                             empty_output_retries_remaining,
                             attempt=call_attempt,
                             stream=True,
@@ -780,7 +787,7 @@ class RetryChatModel(ChatModelBase):
                         yield result
                         return
 
-                    empty_output_retries_remaining = self._consume_empty_output_retry(
+                    empty_output_retries_remaining = await self._consume_empty_output_retry(
                         empty_output_retries_remaining,
                         attempt=call_attempt,
                         stream=True,
