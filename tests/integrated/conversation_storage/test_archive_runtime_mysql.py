@@ -150,7 +150,7 @@ async def test_runtime_compact_reuses_original_body_extent_and_dependency_pins(
     )
     assert (
         await db.fetch_one(
-            "SELECT COUNT(*) AS n FROM swe_conversation_messages WHERE layer='archive'",
+            "SELECT COUNT(*) AS n FROM swe_conversation_publications WHERE state='committed' AND archive_first_order IS NOT NULL",
         )
     )["n"] == 1
 
@@ -212,7 +212,7 @@ async def test_source_visibility_race_rolls_back_root_archive_and_dependency(
     tmp_path,
     monkeypatch,
 ):
-    from swe.app.conversation_storage.errors import IntegrityError
+    from swe.app.conversation_storage.errors import ConflictError
     from swe.app.conversation_storage import publications
 
     db = conversation_test_database
@@ -230,13 +230,13 @@ async def test_source_visibility_race_rolls_back_root_archive_and_dependency(
         value = await snapshot(service, request, plan)
         if value.rows:
             await db.execute(
-                "UPDATE swe_conversation_messages SET current_visible=0 WHERE id=%s",
-                (next(iter(value.rows)),),
+                "UPDATE swe_conversation_sessions SET state_revision=state_revision+1 WHERE id=%s",
+                (session,),
             )
         return value
 
     monkeypatch.setattr(publications, "snapshot_sources", hide_after_snapshot)
-    with pytest.raises(IntegrityError, match="changed"):
+    with pytest.raises(ConflictError, match="changed"):
         await store.compact(
             "first",
             [message],
@@ -248,10 +248,10 @@ async def test_source_visibility_race_rolls_back_root_archive_and_dependency(
             "SELECT state_revision FROM swe_conversation_sessions WHERE id=%s",
             (session,),
         )
-    )["state_revision"] == 1
+    )["state_revision"] == 2
     assert (
         await db.fetch_one(
-            "SELECT COUNT(*) AS n FROM swe_conversation_messages WHERE layer='archive'",
+            "SELECT COUNT(*) AS n FROM swe_conversation_publications WHERE state='committed' AND archive_first_order IS NOT NULL",
         )
     )["n"] == 0
     assert (
@@ -366,7 +366,7 @@ async def test_runtime_active_owner_generation_fences_late_compact(
         )
     assert (
         await db.fetch_one(
-            "SELECT COUNT(*) AS n FROM swe_conversation_messages WHERE layer='archive'",
+            "SELECT COUNT(*) AS n FROM swe_conversation_publications WHERE state='committed' AND archive_first_order IS NOT NULL",
         )
     )["n"] == 0
     assert (

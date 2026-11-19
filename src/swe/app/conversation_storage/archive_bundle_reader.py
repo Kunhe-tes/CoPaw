@@ -284,6 +284,14 @@ async def _manifest_and_chunks(
         raise IntegrityError(
             "archive manifest locator differs from publication",
         )
+    if prepared_index is None and (
+        manifest["first_sequence"],
+        manifest["last_sequence"],
+    ) != (
+        publication["archive_first_order"],
+        publication["archive_last_order"],
+    ):
+        raise IntegrityError("archive manifest range differs from publication")
     return manifest, chunks
 
 

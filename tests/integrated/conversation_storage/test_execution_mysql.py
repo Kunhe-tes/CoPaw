@@ -296,9 +296,10 @@ async def test_admission_root_message_and_terminal_release_are_atomic(
     await service.renew(admitted.authority)
     assert (
         await db.fetch_one(
-            "SELECT COUNT(*) AS n FROM swe_conversation_messages",
+            "SELECT history_high FROM swe_conversation_sessions WHERE id=%s",
+            (session_id,),
         )
-    )["n"] == 1
+    )["history_high"] == 1
     done = await service.finish(
         admitted.authority,
         "completed",

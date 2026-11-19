@@ -139,22 +139,29 @@ async def _existing(service, row):
             retentions=retentions,
         )
         try:
-            for series in envelope["lists"]:
-                path = tuple(series["path"])
-                layer = next(
-                    (
-                        known_layer
-                        for known_path, known_layer, _ in LISTS
-                        if known_path == path
-                    ),
-                    None,
-                )
+            for entry in envelope.get("message_directory", []):
+                layer = entry["layer"]
                 if layer not in ("memory", "task", "error"):
                     continue
-                for entry in series["entries"]:
-                    ref = entry["ref"]
-                    body = snapshot.payloads[ref_key(ref)]
-                    result[(layer, canonical(body))].append(ref)
+                locator = entry["body"]
+                if locator["publication_id"] == "self":
+                    ref = {
+                        "operation_key": source.operation_key,
+                        "block_name": locator["block_name"],
+                        "position": locator["position"],
+                    }
+                else:
+                    ref = locator
+                body = snapshot.payloads[ref_key(ref)]
+                result[(layer, canonical(body))].append(
+                    {
+                        **locator,
+                        "publication_id": ref.get(
+                            "publication_id",
+                            publication["id"],
+                        ),
+                    },
+                )
         finally:
             await snapshot.finish(retentions)
         remember(cache_key(row), result)
@@ -243,7 +250,7 @@ async def prepare_recovery_blocks(
     )
     supplied = {item.name: item for item in blocks}
     context = await service.db.fetch_one(
-        "SELECT context_epoch FROM swe_conversation_sessions WHERE id=%s AND service_unit_key=%s",
+        "SELECT context_epoch,history_high FROM swe_conversation_sessions WHERE id=%s AND service_unit_key=%s",
         (row["session_id"], row["service_unit_key"]),
     )
     epoch = context["context_epoch"]
@@ -267,6 +274,7 @@ async def prepare_recovery_blocks(
         values = available.get((layer, canonical(body)))
         ref = values.popleft() if values else None
         if ref is not None:
+            ref = {**ref, "position": ref.get("position", 0)}
             resolved_bodies[canonical(ref)] = body
         return ref
 
@@ -291,12 +299,12 @@ async def prepare_recovery_blocks(
                 context_epoch=epoch,
                 in_context=layer == "memory",
                 message_timestamp=_stamp(body.get("timestamp")),
-            ).to_dict(),
+            ),
         )
     envelope = {
         **projection.envelope,
         "identity": identity(row),
-        "installations": installations,
+        "installations": [item.to_dict() for item in installations],
         "dependency_ids": list(projection.dependency_ids),
     }
     # Keep occurrence metadata in the recovery root so current history can be
@@ -312,7 +320,9 @@ async def prepare_recovery_blocks(
                 },
             )
         ] = body
-    installs_by_name = {item.block_name: item for item in plan.messages}
+    installs_by_name = {
+        item.block_name: item for item in (*installations, *plan.messages)
+    }
     previous_entries = (
         []
         if plan.reset is not None
@@ -324,16 +334,8 @@ async def prepare_recovery_blocks(
     retained_refs = set()
     directory = []
     seen_refs = set()
-    sequence = (
-        max(
-            (
-                entry.get("session_order", entry["sequence"])
-                for entry in previous_entries
-            ),
-            default=0,
-        )
-        + 1
-    )
+    sequence = context.get("history_high", 0) + 1
+    projected_layers = set()
     for series in envelope["lists"]:
         layer = next(
             (
@@ -343,6 +345,7 @@ async def prepare_recovery_blocks(
             ),
             "memory",
         )
+        projected_layers.add(layer)
         for item in series["entries"]:
             ref = dict(item["ref"])
             ref.setdefault("position", 0)
@@ -350,11 +353,14 @@ async def prepare_recovery_blocks(
             if locator_key in seen_refs:
                 continue
             seen_refs.add(locator_key)
-            retained_refs.add(locator_key)
             body = resolved_bodies.get(locator_key)
             if body is None:
                 raise IntegrityError("recovery body reference lacks directory")
-            install = installs_by_name.get(ref.get("block_name"))
+            install = (
+                installs_by_name.get(ref["block_name"])
+                if "publication_id" not in ref
+                else None
+            )
             previous = previous_by_ref.get(
                 canonical(
                     {
@@ -412,6 +418,19 @@ async def prepare_recovery_blocks(
                 )
             elif body.get("timestamp") is not None:
                 entry["timestamp"] = _stamp(body["timestamp"])
+            if previous is not None and install is None:
+                entry = {
+                    **previous,
+                    "body": entry["body"],
+                    "in_context": entry["in_context"],
+                }
+            retained_refs.add(canonical(entry["body"]))
+            if plan.reset is not None:
+                entry.update(
+                    visible=False,
+                    current_visible=False,
+                    in_context=False,
+                )
             directory.append(entry)
             if previous is None:
                 sequence += 1
@@ -420,6 +439,7 @@ async def prepare_recovery_blocks(
         if (
             locator_key in retained_refs
             or previous["sequence"] in plan.prune_ids
+            or previous["layer"] in projected_layers
         ):
             continue
         directory.append(previous)

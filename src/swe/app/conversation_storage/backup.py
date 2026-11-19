@@ -514,6 +514,19 @@ def _read_payload(snapshot, bundles, publication_id, offset, length):
     )
 
 
+def _backup_dependencies(snapshot, publication_id):
+    key = f"dep:{publication_id}".encode("ascii")
+    return {
+        row["publication_id"]
+        for row in snapshot.get("retentions", ())
+        if (
+            row.get("retention_key") == key
+            and row.get("kind") == "dependency"
+            and row["state"] == "active"
+        )
+    }
+
+
 def _recovery_payload(
     snapshot,
     bundles,
@@ -554,15 +567,7 @@ def _recovery_payload(
         extent.offset,
         extent.length,
     )
-    dependencies = {
-        row["publication_id"]
-        for row in snapshot["retentions"]
-        if (
-            row.get("retention_key") == f"dep:{publication_id}".encode("ascii")
-            and row.get("kind") == "dependency"
-            and row["state"] == "active"
-        )
-    }
+    dependencies = _backup_dependencies(snapshot, publication_id)
     indexes = {publication_id: index}
     decoded = {}
 
@@ -626,12 +631,54 @@ def _recovery_payload(
     return hydrate_state(value, resolve)
 
 
+def _validate_archive_dependencies(snapshot, bundles, indexes, publications):
+    from .archive_bundle_reader import archive_manifest_dependencies
+
+    for identity in indexes:
+        row = publications[identity]
+        if row.get("archive_offset") is None:
+            continue
+        manifest = _read_payload(
+            snapshot,
+            bundles,
+            identity,
+            row["archive_offset"],
+            row["archive_length"],
+        )
+        if (
+            manifest.get("first_sequence"),
+            manifest.get("last_sequence"),
+            manifest.get("epoch"),
+        ) != (
+            row["archive_first_order"],
+            row["archive_last_order"],
+            row["epoch"],
+        ):
+            raise IntegrityError("backup archive manifest range differs")
+        dependencies = _backup_dependencies(snapshot, identity)
+        for target in archive_manifest_dependencies(
+            manifest,
+            boundary_publication_id=identity,
+        ):
+            if target not in dependencies or target not in indexes:
+                raise IntegrityError("backup archive chunk is missing")
+            chunk = publications[target]
+            if (chunk["session_id"], chunk["chat_id"]) != (
+                row["session_id"],
+                row["chat_id"],
+            ):
+                raise IntegrityError(
+                    "backup archive chunk association differs",
+                )
+
+
 def _validate_bodies(snapshot, bundles, indexes):
     from .shares import ShareStorage
     from ..chat_sharing.store import ChatShareStore
     from ..chat_sharing.models import ChatShareSnapshot
 
     publications = {row["id"]: row for row in snapshot["publications"]}
+    _validate_archive_dependencies(snapshot, bundles, indexes, publications)
     for row in snapshot["shares"]:
         publication = publications[row["publication_id"]]
         if publication["kind"] not in ("share", "share_import"):

@@ -92,7 +92,10 @@ async def test_reference_queries_are_bounded_and_ignore_return_order(count):
             "id": i,
             "service_unit_key": SERVICE,
             "session_id": 1,
-            "publication_id": 1,
+            "scope_kind": "workspace",
+            "tenant_key": b"t",
+            "source_key": b"s",
+            "agent_key": b"a",
         }
         for i in range(1, count + 1)
     }
@@ -254,7 +257,10 @@ async def test_query_failure_and_cancel_propagate_without_partial_result(
                 "id": i,
                 "service_unit_key": SERVICE,
                 "session_id": 1,
-                "publication_id": 1,
+                "scope_kind": "workspace",
+                "tenant_key": b"t",
+                "source_key": b"s",
+                "agent_key": b"a",
             }
             for i in range(1, 258)
         },

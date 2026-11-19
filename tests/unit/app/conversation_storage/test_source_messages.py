@@ -5,54 +5,7 @@ import pytest
 
 from swe.app.conversation_storage.identity import WorkspaceScope
 
-from swe.app.conversation_storage.message_installs import (
-    MessageInstall,
-    _message_values,
-)
-from swe.app.conversation_storage.bundle import BundleIndex
-
-
-def test_archive_source_locator_retains_original_publication_and_extent():
-    message = MessageInstall(
-        "source:11",
-        "archive",
-        "user",
-        source_msg_key="q",
-        archive_chat_id=2,
-        source_message_id=11,
-    )
-    sources = {
-        11: {
-            "service_unit_key": b"schema-test-service",
-            "publication_id": 4,
-            "byte_offset": 50,
-            "byte_length": 27,
-        },
-    }
-    values = _message_values(
-        message,
-        SimpleNamespace(
-            scope=WorkspaceScope(
-                "t",
-                "s",
-                "a",
-                service_unit_id="schema-test-service",
-            ),
-            session_id=1,
-            chat_id=2,
-            turn_id=None,
-        ),
-        {"id": 8},
-        BundleIndex("new", 100, {}, {}),
-        9,
-        sources=sources,
-    )
-    assert (
-        values["publication_id"],
-        values["byte_offset"],
-        values["byte_length"],
-    ) == (4, 50, 27)
-    assert values["archive_publication_id"] == 8
+from swe.app.conversation_storage.message_installs import MessageInstall
 
 
 def test_online_messages_cannot_reuse_another_occurrence_extent():
@@ -132,26 +85,27 @@ def test_source_occurrence_identity_cannot_be_forged():
         )
 
 
-async def test_locator_change_after_pin_rejects_commit():
-    from swe.app.conversation_storage.source_messages import (
-        SourceMessages,
-        SOURCE_FIELDS,
-    )
-    from swe.app.conversation_storage.errors import IntegrityError
-    from tests.unit.app.conversation_storage.test_reference_queries import (
-        ReferenceDatabase,
-        SERVICE,
-    )
+async def test_session_revision_change_rejects_archive_commit():
+    from unittest.mock import AsyncMock
 
-    row = {
-        **dict.fromkeys(SOURCE_FIELDS, 1),
-        "service_unit_key": SERVICE,
-        "in_context": 1,
-    }
-    sources = SourceMessages(rows={1: row})
-    db = ReferenceDatabase(messages={1: {**row, "byte_offset": 99}})
+    from swe.app.conversation_storage.errors import IntegrityError
+    from swe.app.conversation_storage.source_messages import SourceMessages
+
+    sources = SourceMessages(session_revision=1)
+    db = SimpleNamespace(
+        fetch_one=AsyncMock(return_value={"state_revision": 2}),
+    )
+    scope = WorkspaceScope(
+        "t",
+        "s",
+        "a",
+        service_unit_id="schema-test-service",
+    )
     with pytest.raises(IntegrityError, match="changed"):
-        await sources.revalidate(db)
+        await sources.revalidate(
+            db,
+            SimpleNamespace(scope=scope, session_id=1),
+        )
 
 
 async def test_source_publications_lock_older_then_current_in_integer_order():

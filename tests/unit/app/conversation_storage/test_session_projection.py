@@ -20,6 +20,34 @@ def message(key, content):
     }
 
 
+def test_history_and_context_reuse_bodies_by_occurrence():
+    raw = message("same-id", "same-body")
+    state = {
+        "agent": {
+            "memory": {
+                "content": [[raw, []], [raw, ["marked"]]],
+                "messages": [raw, raw],
+            },
+        },
+    }
+    projection = project_state(state, operation_key="a" * 64)
+    assert len(projection.blocks) == 2
+    context, history = projection.envelope["lists"]
+    assert [item["ref"] for item in context["entries"]] == [
+        item["ref"] for item in history["entries"]
+    ]
+    bodies = {
+        block.name: json.loads(block.content) for block in projection.blocks
+    }
+    assert (
+        hydrate_state(
+            projection.envelope,
+            lambda ref: bodies[ref["block_name"]],
+        )
+        == state
+    )
+
+
 def test_projection_reuses_exact_occurrences_and_keeps_duplicate_source_ids():
     first, second = message("q", "one"), message("q", "two")
     state = {

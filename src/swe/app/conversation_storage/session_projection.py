@@ -65,6 +65,7 @@ def project_state(
         "turns": [],
     }
     blocks, messages, dependencies = [], [], set()
+    known_messages = {}
     for path, layer, paired in LISTS:
         parent = _parent(projected, path)
         if parent is None or path[-1] not in parent:
@@ -75,6 +76,7 @@ def project_state(
                 "known recovery history list has invalid shape",
             )
         entries = []
+        occurrences = {}
         for item in values:
             body, marks = (item, None)
             if paired and isinstance(item, (list, tuple)) and len(item) == 2:
@@ -83,7 +85,12 @@ def project_state(
                 raise IntegrityError(
                     "recovery message must be a complete object",
                 )
-            ref = resolve_message(layer, body) if resolve_message else None
+            key = layer, _bytes(body)
+            occurrence = occurrences.get(key, 0)
+            occurrences[key] = occurrence + 1
+            ref = known_messages.get((key, occurrence))
+            if ref is None and resolve_message is not None:
+                ref = resolve_message(layer, body)
             if ref is None:
                 name = "delta:" + str(len(blocks))
                 ref = {"operation_key": operation_key, "block_name": name}
@@ -93,6 +100,7 @@ def project_state(
                 ref = deepcopy(ref)
                 if "publication_id" in ref:
                     dependencies.add(ref["publication_id"])
+            known_messages[key, occurrence] = ref
             entries.append(
                 {
                     "ref": ref,
