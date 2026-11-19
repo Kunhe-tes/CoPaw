@@ -127,6 +127,8 @@ async def test_session_message_batch_offsets_are_numeric(tmp_path):
             scope=scope,
         )
         rows[start + 1] = {
+            **scope.fields,
+            "session_id": 1,
             "relative_path": index.relative_path,
             "byte_length": index.byte_length,
         }
@@ -156,7 +158,7 @@ async def test_session_message_batch_offsets_are_numeric(tmp_path):
         Database(),
         bundles,
         manifest,
-        {"chats": []},
+        {"chats": [], "scope": list(scope.values)},
         session,
         1,
     )

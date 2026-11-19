@@ -709,6 +709,7 @@ async def _verify_session_messages(
         task_projections(messages, expected)
     messages = display_order_messages(messages)
     assignments = manifest.data["assignments"].get("publication", {})
+    scope = WorkspaceScope.from_values(workspace["scope"])
     prefix = session["position"] + "/messages:"
     batches = [
         (int(position[len(prefix) :]), assignment)
@@ -726,6 +727,13 @@ async def _verify_session_messages(
         )
         if publication is None:
             raise ValueError("Session message bundle publication is missing")
+        if (
+            WorkspaceScope.from_row(publication) != scope
+            or publication["session_id"] != sid
+        ):
+            raise ValueError(
+                "Session message bundle publication scope differs",
+            )
         path = BundleStore.validate_publication_locator(publication)
         index = bundles.inspect(
             path,
@@ -873,8 +881,13 @@ async def _verify_archive_rows(
             "SELECT * FROM swe_conversation_publications WHERE id=%s AND state='committed' AND gc_state='live'",
             (assignment["target_id"],),
         )
-        if publication is None:
-            raise ValueError("archive boundary publication is missing")
+        if (
+            publication is None
+            or WorkspaceScope.from_row(publication) != scope
+            or publication["chat_id"] != cid
+            or publication["epoch"] != batch["epoch"]
+        ):
+            raise ValueError("archive boundary publication scope differs")
         path = BundleStore.validate_publication_locator(publication)
         index = bundles.inspect(
             path,
@@ -894,9 +907,15 @@ async def _verify_archive_rows(
                 "SELECT * FROM swe_conversation_publications WHERE id=%s AND state='committed' AND gc_state='live'",
                 (chunk["publication_id"],),
             )
-            if chunk_publication is None:
+            if (
+                chunk_publication is None
+                or WorkspaceScope.from_row(chunk_publication) != scope
+                or chunk_publication["chat_id"] != cid
+                or chunk_publication["session_id"] != publication["session_id"]
+                or chunk_publication["epoch"] != batch["epoch"]
+            ):
                 raise ValueError(
-                    "archive message chunk publication is missing",
+                    "archive message chunk publication scope differs",
                 )
             chunk_path = BundleStore.validate_publication_locator(
                 chunk_publication,
@@ -923,6 +942,12 @@ async def _verify_archive_rows(
                     expected_length=chunk_index.byte_length,
                 ),
             )
+            if len(directory) != len(bodies) or seen + len(bodies) > len(
+                expected,
+            ):
+                raise ValueError(
+                    "archive message directory/body count differs",
+                )
             for entry, body in zip(directory, bodies):
                 if body != expected[seen] or entry["sequence"] != seen + 1:
                     raise ValueError("archive message order/body differs")

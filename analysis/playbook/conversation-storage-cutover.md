@@ -6,6 +6,20 @@
 
 DBA 使用当前分支的 SQL 脚本准备空目标库，服务和 CLI 使用同一版本。先用 `prepare` 登记 workspace 与 source，然后对同一 manifest 执行 `migrate --apply`。导入器读取旧 `chats.json`、`sessions` 和 `dialog`。中断后用原 manifest 续跑，已发布 source 会跳过。历史分享处于迁移排除范围。
 
+### 隔离环境实测
+
+MySQL 8.0.46、测试机本地 bundle 目录、3 个 source、3 个 workspace。样本包含 257 条旧归档消息及一个 128 条消息的 Session。导入保留 1 个归档边界，形成 3 个归档数据块，完整审计按页逐条比对原文。
+
+| 命令阶段 | 耗时（秒） | SQL 语句尝试数 | 已提交事务 |
+|---|---:|---:|---:|
+| `prepare` | 2.35 | 11 | 0 |
+| `import --apply` | 111.42 | 1,180 | 164 |
+| `verify --full-audit` | 201.81 | 2,009 | 162 |
+| `migrate --apply` 发布已导入的 source | 50.95 | 368 | 79 |
+| 同一 manifest 重跑 | 2.42 | 13 | 1 |
+
+业务元数据包含 3 个 Session、3 个 Chat 和 15 条 Publication。迁移控制表包含 15 条批次票据、15 条发布票据及 7 条保护票据，消息票据为 0。另一个实库用例在两个 source 发布后执行 DBA finalize，再使用同一 manifest 重跑，CLI 返回退出码 0 和 `ready`。
+
 ## 历史流程与故障记录
 
 下文保留旧版 staging 安装、回退和故障排查记录。旧版的表数、分享导入及安装命令适用于对应历史版本。

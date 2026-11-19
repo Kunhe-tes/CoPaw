@@ -394,7 +394,7 @@ async def test_runtime_tickets_do_not_prevent_zero_data_tenant_review():
         for query in queries
     )
     assert any(
-        "swe_conversation_messages b JOIN swe_conversation_sessions" in query
+        "FROM swe_conversation_publications WHERE service_unit_key=%s" in query
         for query in queries
     )
 

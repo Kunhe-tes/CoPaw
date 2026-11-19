@@ -106,34 +106,45 @@ async def test_offline_epoch_rejects_foreign_service_before_nas():
     bundles.inspect.assert_not_called()
 
 
-async def test_offline_archive_rows_receive_explicit_service(monkeypatch):
+async def test_offline_archive_rejects_foreign_service_before_nas(monkeypatch):
     from types import SimpleNamespace
-    from unittest.mock import AsyncMock
+    from unittest.mock import AsyncMock, Mock
     from swe.app.conversation_storage.identity import WorkspaceScope
     from swe.app.conversation_storage.migration import verify
 
-    row = {"publication_id": 1}
-    message = {"id": "archived"}
-    payload = AsyncMock(return_value=message)
-    monkeypatch.setattr(verify, "_payload", payload)
+    scope = WorkspaceScope("t", "s", "a", service_unit_id="A")
+    foreign = {
+        **scope.fields,
+        "service_unit_key": b"B",
+        "chat_id": 2,
+        "epoch": 1,
+    }
     monkeypatch.setattr(
         verify,
         "archive_batches",
-        lambda _: [{"messages": [message]}],
+        lambda _: [
+            {"boundary": {"id": "archive"}, "epoch": 1, "messages": []},
+        ],
     )
-    database = SimpleNamespace(fetch_all=AsyncMock(return_value=[row]))
+    database = SimpleNamespace(fetch_one=AsyncMock(return_value=foreign))
+    bundles = SimpleNamespace(inspect=Mock())
     manifest = SimpleNamespace(
-        data={"assignments": {"chat": {"chat": {"target_id": 2}}}},
+        data={
+            "assignments": {
+                "chat": {"chat": {"target_id": 2}},
+                "publication": {"chat/boundary:archive": {"target_id": 1}},
+            },
+        },
     )
-    scope = WorkspaceScope("t", "s", "a", service_unit_id="A")
-    await verify._verify_archive_rows(
-        database,
-        None,
-        manifest,
-        {"position": "chat", "archive": {}},
-        scope,
-    )
-    assert payload.await_args.kwargs == {"service_unit_id": "A"}
+    with pytest.raises(ValueError, match="publication scope"):
+        await verify._verify_archive_rows(
+            database,
+            bundles,
+            manifest,
+            {"position": "chat", "archive": {}},
+            scope,
+        )
+    bundles.inspect.assert_not_called()
 
 
 from swe.app.conversation_storage.migration.manifest import (
@@ -386,12 +397,10 @@ async def test_runtime_chat_verification_matches_seven_value_session_identity(
     api._build_chat_history.assert_awaited_once()
 
 
-async def test_imported_turn_and_message_rows_carry_immutable_service():
+async def test_imported_turn_rows_carry_immutable_service():
     from unittest.mock import AsyncMock
     from swe.app.conversation_storage.migration.importer import (
         ConversationImporter,
-        _message_row,
-        _entry,
     )
     from swe.app.conversation_storage.migration.install_records import (
         COLUMNS,
@@ -423,27 +432,11 @@ async def test_imported_turn_and_message_rows_carry_immutable_service():
     await importer._turn_identities(session, scope, {"chat": 3})
     turn = importer._publish.call_args.args[2][0]["values"]
     assert turn["service_unit_key"] == "service"
-    item = _entry({"role": "user", "content": "body"}, "memory", 0, 0)
-    message = _message_row(
-        4,
-        1,
-        item,
-        1,
-        "body",
-        2,
-        3,
-        service_unit_id="service",
-    )
-    assert message["service_unit_key"] == "service"
-    for table in ("turns", "messages"):
-        assert "service_unit_key" in COLUMNS[table]
-        assert "service_unit_key" in IMMUTABLE[table]
+    assert "service_unit_key" in COLUMNS["turns"]
+    assert "service_unit_key" in IMMUTABLE["turns"]
 
 
-@pytest.mark.parametrize("table", ["turns", "messages"])
-def test_import_record_rejects_foreign_service_even_with_same_parent_ids(
-    table,
-):
+def test_import_record_rejects_foreign_service_even_with_same_parent_ids():
     from swe.app.conversation_storage.migration.install_records import (
         OfflineImportStore,
         _LOCKED,
@@ -464,53 +457,8 @@ def test_import_record_rejects_foreign_service_even_with_same_parent_ids(
     try:
         with pytest.raises(IntegrityError, match="service|scope"):
             importer._validate_relation(
-                table,
+                "turns",
                 {"id": 2, "session_id": 1, "service_unit_key": b"foreign"},
-                publication,
-            )
-    finally:
-        _LOCKED.reset(token)
-
-
-def test_import_message_rejects_foreign_service_turn_reference():
-    from swe.app.conversation_storage.migration.install_records import (
-        OfflineImportStore,
-        _LOCKED,
-    )
-    from swe.app.conversation_storage.errors import IntegrityError
-
-    scope = {
-        "service_unit_key": b"service",
-        "tenant_key": b"tenant",
-        "source_key": b"source",
-        "agent_key": b"agent",
-    }
-    publication = {"id": 9, **scope}
-    importer = OfflineImportStore.__new__(OfflineImportStore)
-    token = _LOCKED.set(
-        {
-            "sessions": {1: {"id": 1, **scope}},
-            "chats": {},
-            "turns": {
-                2: {
-                    "id": 2,
-                    "session_id": 1,
-                    "chat_id": 3,
-                    "service_unit_key": b"foreign",
-                },
-            },
-        },
-    )
-    try:
-        with pytest.raises(IntegrityError, match="Turn relation"):
-            importer._validate_relation(
-                "messages",
-                {
-                    "id": 4,
-                    "session_id": 1,
-                    "turn_id": 2,
-                    "service_unit_key": b"service",
-                },
                 publication,
             )
     finally:

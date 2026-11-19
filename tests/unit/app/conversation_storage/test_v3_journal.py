@@ -436,7 +436,7 @@ async def test_first_job_refuses_unknown_business_rows():
     from swe.app.conversation_storage.migration.journal import MigrationJournal
 
     db = Database()
-    db.rows["swe_conversation_messages"] = {"id": 9}
+    db.rows["swe_conversation_sessions"] = {"id": 9}
     with pytest.raises(ValueError, match="empty|unknown"):
         await MigrationJournal(db, manifest()).prepare()
     assert not db.entries
