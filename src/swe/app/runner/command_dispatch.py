@@ -158,6 +158,7 @@ async def _run_daemon_command(
         agent_id=agent_id,
         tenant_id=tenant_id,
         session_id=context.session_id,
+        user_id=context.user_id,
     )
     msg = await handler.handle_daemon_command(query, daemon_ctx)
     yield msg, True
