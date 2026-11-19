@@ -20,6 +20,10 @@ _Avoid_: model retry, HTTP request, conversation turn, new Run
 The non-terminal state of an Observability Run while its user question awaits an approval decision, even when the business Answer Turn carrying the approval prompt has completed. Approval continuation belongs to a new Observability Attempt in the same Run.
 _Avoid_: successful Run, completed task, model retry
 
+**Observability Trace View (可观测执行链路视图)**:
+The presentation of an Observability Attempt's actual operations and their timing within its Run. It is navigated through the Run and Attempt identities; approval continuation remains a separate Attempt, and associated background work can outlive its initiating execution.
+_Avoid_: legacy SDK Trace, new execution identity, conversation lifetime
+
 **Observability Metadata Event (可观测元数据事件)**:
 A fact about an Observability Run or one of its operations, containing identity, relationships, lifecycle, measurements, or evidence references. Conversation text, model messages, tool arguments and results, and free-form exception text are not Observability Metadata.
 _Avoid_: raw prompt event, body preview, SDK span export

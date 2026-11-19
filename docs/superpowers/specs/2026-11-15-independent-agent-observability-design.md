@@ -5,6 +5,8 @@
 决策：[ADR 0047](../../adr/0047-independent-agent-observability-uses-metadata-logs.md)、[ADR 0048](../../adr/0048-independent-observability-metadata-uses-mysql.md)。
 背景：[能力蓝图](../../../Agent_可观测增强设计_Span与五大能力.md)、[逐轮决策](../../../.scratch/agent-observability/map.md)。本文为收敛后的实施设计入口；过程草案只用于核查证据。
 
+视图对照修订（2026-11-15）：已核查 [Trace 视图方案](../../Agent_Observability_Trace_视图设计方案.md)。交互按该方案适配，领域/采集边界以本文与 ADR 为准；[差异清单](../../../.scratch/agent-observability/trace-view-review.md)记录存储、埋点与查询调整。原 worktree 已合入当前分支，交付物位于当前仓库同名路径。本轮只做分析与设计，不实施功能。
+
 ## 1. 已确认范围
 
 本方案与 swe.tracing、AgentTraceSDK 及其埋点、配置、身份、输出、表、查询均无运行依赖；不升级、替换、迁移或兼容读取旧可观测。新增业务边界观测可位于同一业务代码，但不改旧埋点逻辑、异常/重试/流式行为。
@@ -72,12 +74,12 @@ UTF-8 单行 JSON；schema_version=1，命名空间 agentobs。完整单行最�
 | 生命周期键 | entity_kind、entity_id、phase_key、local_seq；序号只在拥有者局部有效，不是跨 Pod 全局时钟 |
 | scope | service_unit_id、source_id、tenant_id、agent_id；缺业务作用域显式不支持，不填假身份 |
 | 业务引用 | chat_id、root_question_msgid、run_started_at、capture_enabled（每个Run生命周期事件都带）、当前问题/turn、approval_request_id、subagent_run_id（适用时） |
-| 操作 | span_type、operation、kind、受控 name、start/end、status、reason_code、attempt ordinal |
+| 操作 | span_type、operation、kind、受控 name、step_index、start/end、业务 status、technical_status、has_error、reason_code、attempt ordinal |
 | 度量 | duration_us、首有效chunk/首可见文本延迟、已知tokens、loop/tool计数；未知 null |
 | 关系/资产 | 安全 Events、Links、cause/recovery、可信模型/Tool/Agent/Skill/Prompt ID与版本/签名 |
 | 质量 | start/end证据、metadata_truncated、context_missing、usage_known 等独立信息 |
 
-事件名：run.accepted/run.state/run.ended、attempt.started/attempt.ended、span.started/span.ended、approval.requested/approval.resolved、subagent.started/subagent.ended、asset.used、observer.health。observer.health为全局诊断元数据，允许无Run/scope，使用进程启动observer实体UUID与health序号；仅admin能读取全局诊断，manager不得查跨Source健康事件。其它生命周期事件必须完整Run/scope，不能借可空列绕过校验。结束事件携带操作起始时间、终态、完整有界汇总，即使 start 丢失也可展示 partial。每个事件固定生命周期槽：(entity_kind,entity_id,phase_key,local_seq)，重传槽与event_id保持；不同event_id重复同槽不重复计数，同槽冲突标记而非最后到达获胜。
+事件名：run.accepted/run.state/run.ended、attempt.started/attempt.ended、span.started/span.ended/span.event、approval.requested/approval.resolved、subagent.started/subagent.ended、asset.used、observer.health。observer.health为全局诊断元数据，允许无Run/scope，使用进程启动observer实体UUID与health序号；仅admin能读取全局诊断，manager不得查跨Source健康事件。其它生命周期事件必须完整Run/scope，不能借可空列绕过校验。结束事件携带操作起始时间、终态、完整有界汇总，即使 start 丢失也可展示 partial。每个事件固定生命周期槽：(entity_kind,entity_id,phase_key,local_seq)，重传槽与event_id保持；不同event_id重复同槽不重复计数，同槽冲突标记而非最后到达获胜。
 
 元数据禁止正文：问题/回答、messages/prompt、工具参数/结果/说明/schema、检索Query/片段、URL query、文件文本、原始异常消息/堆栈、人工自由文本理由、密钥。错误只记受限 error.type/phase/code 与 cause/recovery ID。名称来自注册/配置且限长，不接受用户输入或任意 repr。当必须正文解释时查 NAS；NAS 没保存就不可用。
 
@@ -151,11 +153,92 @@ Run elapsed含审批等待，active time为Attempt活动区间并集；操作dur
 
 游标携带版本/过滤指纹/授权scope/稳定最后键，用MAC防改，scope每次重验；不复用业务会话cursor的秘密。列表默认24h、50条，最多200条；单次范围最多31天但可明确选择任意历史窗口，不清理数据。Span分页默认200、最多1000，旧页已加载节点不宣称整树完整，缺父提供安全祖先摘要或标orphan。服务查询默认5秒超时，超限返回可重试/缩小范围，不影响Agent。
 
-Console使用独立“Agent可观测”入口：上方筛选/数据质量，执行列表，详情共享Tree+Waterfall行模型，Inspector含Overview、Evidence、Assets、Errors、Performance、Events/Links/Raw。总览嵌在同页面，不铺大量孤立页面。尝试/审批/后台状态各自可见。手动刷新及运行/等待时5秒轮询，页面隐藏暂停、终态停止自动轮询，可手动查晚到日志。
+Console使用独立“Agent可观测”入口：上方筛选/数据质量，执行列表，详情共享Tree+Waterfall行模型，Inspector含Overview、Evidence、Assets、Errors、Performance、Events/Links/Raw。总览嵌在同页面，不铺大量孤立页面。尝试/审批/后台状态各自可见。手动刷新及运行/等待或已知后台仍运行时5秒轮询，页面隐藏暂停、所有已知执行终态后停止自动轮询，可手动查晚到日志。
 
 外观以console/DESIGN.md为唯一规范，不照搬第三方主题。真实Chromium108与当前浏览器验证独立滚动、长列表、键盘选择、1280/1440宽度和hideMenu=true；窄屏Inspector改抽屉。不得无回退使用subgrid/Popover；滚动条需webkit样式，保持原有壳层语义。
 
-## 10. 实施顺序与验收
+## 10. Trace 视图适配：存储、埋点与读模型
+
+### 10.1 Run、Attempt 与视图中的 Trace
+
+沿用已确认领域：一次问题一个 Run，连续执行一个 Attempt，模型重试不创建新 Attempt。列表每行一个 Run，详情内以 Attempt 导航执行树；视图稿中的 Trace 仅作为所选 Attempt 的执行链路视图称谓，不增加 trace_id、Trace 表或 OTel/旧 SDK 运行依赖。Run/Attempt/Span 的深链接使用已有新 ID。审批等待在 Attempt 之间独立显示；SubAgent 基础节点保留启动 Attempt 关联，可晚于该 Attempt/Run 结束。可同时显示根终态与后台运行态。
+
+页面路径采用 `/agent-observability/runs`、`/agent-observability/runs/{run_id}?attempt={attempt_id}&span={span_id}`，不依赖旧 Monitor 页。项目筛选映射服务端授权 Source，不新增 project 身份。默认 Run 总览，展开所选 Attempt 的真实 Span；Run/Attempt 导航条是 UI 结构，不伪造持久化 Span。父子需同 Run，跨 Attempt 的恢复关系使用 Link；未确认父关系不能按时间、名称或 step 猜。
+
+### 10.2 五表增量与投影字段
+
+保留五表，新列/索引均已进入 [DDL 草案](../../../.scratch/agent-observability/schema-draft.sql)，尚未执行：
+
+- runs：增加 `span_count`、`error_span_count`，以及 Source+Session、Source+Agent+时间、Source+duration+Run 索引。精确 Session 查找保留原值字节比较；不做前缀检索。
+- spans：增加受控 `name`（128字符）、可空 `step_index`、`technical_status`、`has_error`；增加 Run+Attempt+时间和 Run+Attempt+has_error+时间索引。
+- events：增加 Run+Span+时间+事件ID索引，Inspector 不扫描整条 Run 的 metadata。关系/资产/正文证据仍为白名单元数据，不新增关系表、正文表或任意属性索引。
+
+`status`仍是业务结果；`technical_status=UNSET|OK|ERROR|null`是本方案自己的技术枚举，常见名称不意味着 OTel 依赖。`has_error=1`需明确技术错误证据（独立 ERROR、受控 error.type 或异常事件），0仅在有明确无技术错误结算时设置，未知为null。失败业务结果、拒绝或取消不自动等于技术错误；已恢复错误仍可定位，不把父节点标成ERROR。has_error按已确认错误证据合并，后到成功事实不擦除已恢复错误；相互矛盾的结算按既有conflict规则处理。
+
+Run的span_count/error_span_count统计已规范投影的唯一Span及has_error=1的Span，包括明确的后台节点；非完整时为已观测下界，不是全部业务操作数。`metadata.summary_quality`按指标返回`source=observed_spans|owner_summary`、`coverage=observed|complete_for_owner|unknown`、`as_of`、Usage已知覆盖与截断。只有有计数事实才显示0；无事实为null。执行所有者提供的完整摘要与已收到Span数并列，不能混合成虚假的全量统计；晚到Span可更新计数，不重开根Run。Attempt摘要由run_id+attempt_id受限聚合或其可信摘要得到，不另增表。
+
+所有查询仍从已授权Run验证完整scope，模型/工具跨Run筛选用授权Run集合关联spans，不以全局model/tool索引代替鉴权。name/step/关系/模型身份的不同已知值按冲突处理；缺值可由后到相同实体事实补齐。事件中的受控step/model/tool/evidence字段按组存入Span的metadata，不能复制完整事件历史让派生metadata超过24KiB；增长的Events/Links只保留有界摘要并从events分页。
+
+请求模型与响应模型是不同字段；二者不同不构成冲突。model_key从请求模型回退值提升为已知响应模型时允许更新，并保留model_key_source=request_fallback|response；只有同一实际请求的同一身份字段出现互斥已知值才标conflict。一个逻辑模型容器跨请求尝试时不把多个实际模型硬合成一个身份，实际模型按请求Span展示。
+
+### 10.3 埋点字段与事实边界
+
+结束事件仍须自包含开始时间、操作身份、父关系、技术/业务结果及本操作有界摘要，开始丢失也能显示partial。同Span重复包装只生成一个事实槽；保持旧埋点及业务调用次序不变。以下是字段设计，不代表项目现在已经产出这些字段：
+
+| 白名单组 | 采集内容与缺失语义 |
+|---|---|
+| 通用 | name来自注册/固定operation，不含命令/SQL/参数；step_index为所属Agent执行片段内的循环序号，可空；并行不靠序号伪造全序 |
+| LLM | provider_key、request_model_key、response_model_key、finish_reason枚举、流式标志、逻辑调用ID、本层request_retry_index；model_key优先实际响应模型，否则请求模型并标来源 |
+| 模型重试 | 逻辑模型调用与本项目真实可见的请求尝试用独立Span/受控operation区分，重试仍同Attempt；llm_calls只统计逻辑调用，request attempts另列，Token只取唯一真实请求Usage一次，不再叠加容器摘要；不可见Provider内部HTTP重试不填伪值 |
+| Tool | tool_key、tool_call_id、独立tool_execution_id、executor_kind、timeout_budget_ms、retry_index、已知exit_code；一次真实执行一个execution ID，审批replay可同call ID但不同execution ID，不记录输入输出正文 |
+| SubAgent | 业务task/run key、启动父Span、启动Attempt、sync/async、执行Agent身份及终态；同一业务子操作的started/ended复用观测Span ID；worker内部细粒度树不自动升为P0承诺 |
+| Context/Approval/Checkpoint | 实际压缩前后tokens/策略枚举、approval_request_id/决议枚举/等待区间、checkpoint_id/动作枚举；仅真实存在时产出，缺测为null，不为满足图标创建假Span |
+| Resource | 独立采集的service_name/service_version、deployment_environment、producer_id；受控配置值且限长，不透传环境变量集、任意Header或OTel Resource |
+| 安全错误/因果 | error.type、error_phase、reason_code、cause/recovery ID和relation_type；不采集异常消息、堆栈或用户自由文本 |
+| 正文证据 | evidence_ref含当前Chat/Turn/消息身份、layer、真实occurrence定位或可唯一解析的publication/block业务引用、tool_call_id（适用时）、evidence_role、capture_scope；只存身份，不存文本/文件路径 |
+
+新增通用事件名`span.event`：用于单个retry_scheduled、recovered、evidence.linked、link.added等受控事实；使用`entity_kind=span`、entity_id=obs_span_id、phase_key=event、local_seq由该Span唯一拥有者推进。专门的审批/SubAgent事件仍用其原事件名和独立槽，不通过第二个span.event重复累计同一事实。Events/Links/资产不全部塞入span.ended数组；单事件数组仍最多32项，可分页独立事实，结束摘要给出已发事实数及截断标记。独立事实丢失时不由摘要伪造内容。
+
+Span实体生命周期和span.event序号由一个拥有者产生；worker需要独立事件序列时分配其自己的Span，通过Link关联，不让两个进程抢同一槽。跨进程传递Span身份和不可变父关系；owner摘要不具备全链路送达证明。v1尚未实施，本次补充直接更新v1草案；后续已发布协议变更才按版本兼容规则升级。
+
+SubAgent启动/结束允许显式所有权交接：启动方独占started槽，启动快照传递同一Span和不可变元数据，worker独占ended槽；两者不得同时生成同一phase/seq的事实。该例外不允许各进程分别从0生成同一Span的span.event序列；worker自己的增量事实用独立实体/Span再关联。worker结束的自包含摘要继续携带原始安全name/parent/started_at；启动方不得再生成互相竞争的结束裁决。启动失败且尚未交给worker的情况由启动方结算，不能双重拥有。
+
+投影映射固定：business_ref.session_id→runs.session_key，model.response_model_key（已知）否则request_model_key→spans.model_key，tool.tool_key→spans.tool_key，subagent.business_subagent_key→spans.business_subagent_key；scope.agent_id始终是根Run授权身份，worker执行身份单独保留。顶层name/step_index/technical_status/has_error与DDL同名映射；其余允许组存入metadata，evidence_refs不在派生行无限累积。span.event不增加span_count或llm/tool调用数，不凭单个非区间事实创建带假开始时刻的Span；生命周期未到时事件保留并标unresolved。
+
+事件先于Span到达时，后续Span生命周期投影需重新关联该Span已有安全事件，补齐错误/证据/关系摘要；不能只处理本批新事件而永久遗漏先到事实。投影结果由规范事实集合决定，与入库顺序无关；摘要仍受字节预算约束。
+
+IO Tab映射为NAS正文证据，区分`input|output|tool_call|tool_result`与`capture_scope=saved_conversation_fragment`，从不声称完整原始模型请求。消息ID或tool_call_id不保证唯一；定位冲突返回unresolved，不能按最近消息猜。正文尚未持久化时pending，未保存not_saved，已压缩compacted；无权/不存在对外统一不可用。真实保存后可追加evidence.linked，不能让观测等待NAS提交或改变已有持久化语义。Raw仅显示校验后的安全元数据，不附正文、原inbox或异常堆栈。不存在的Prompt/Stacktrace不从普通业务日志旁路补齐。
+
+### 10.4 列表、树和Inspector读契约
+
+| 入口 | 补充契约 |
+|---|---|
+| GET /runs | time、source、agent、业务status、min_duration_us、精确run_id/attempt_id/session_id；ID查询先授权并保留scope；精确Run/Attempt深链接不因默认24h而被隐藏 |
+| 排序/计数 | 默认(started_at,run_id)倒序；可选(duration_us,run_id)倒序，只查已结束且duration已知；运行中耗时单列elapsed不参与终态排序；默认has_more，无无界总COUNT |
+| GET /runs/{id} | Run/Attempt摘要、root_span_id若真实存在、首技术错误定位、known_span_count、quality和服务器observed_at；超多Attempt也分页，不无限嵌套 |
+| GET /runs/{id}/spans | attempt_id过滤，按(started_at,span_id)稳定分页；支持error_only、受控name/operation/tool/model精确或字面子串q；不查正文/任意attributes，不开放SQL/正则 |
+| GET /runs/{id}/spans/{span_id} | 单节点受控详情、分页祖先摘要/必要路径、关系和指标；返回attempt_id以定位正确Attempt，不受已加载首屏限制 |
+| GET /runs/{id}/events | 可选span_id/attempt_id，按(occurred_at,event_id)分页；生命周期事件和span.event/专用事实统一列表，seq只保证拥有者顺序，跨进程同刻不声称因果先后 |
+
+列表搜索框显式选择Run ID、Attempt ID或Session ID，完整匹配，不把三个命名空间混猜；Span ID由已知Run的深链接/节点入口定位。视图原稿的Trace ID输入在本方案改为Attempt ID，不接受旧SDK Trace ID。Inspector的Events/Links/Assets/Evidence各自继续分页，可用受控view参数过滤已校验事件种类/关系投影；父事件数组与独立事实按事实ID或固定关系键去重，不因多个Tab重复展示而重复累计。未知资产/证据数量不声明完整，预算耗尽显式提示继续或缩小范围。
+
+列表主扫描和排序索引与组合过滤不可能全部同时最优；每请求默认最多扫描50000个候选行、5秒，超出返回range_too_large，不返回有偏的“完整结果”。候选预算在应用分批读取实际主索引候选时累计，不能仅凭LIMIT保证扫描有界；实际DB执行仍有超时约束。聚合沿用50000已结束样本上限。管理员显式跨Source按授权范围分页归并，游标携带每个范围的继续位置及排序/filter指纹，限制Source个数为32，超过提示缩小范围；不能直接无范围全表排序。duration排序的候选时间过滤仍要验EXPLAIN/容量，不预先承诺响应时间。
+
+Span默认200/最多1000，事件默认100/最多500；单次响应JSON建议最大1MiB，按实际字节提前分页且has_more，不能一次塞入1000×24KiB详情。行列表只给身份/父关系/受控name/类型/时刻/状态/小指标，大属性和正文按需读。深链接、首/上下个错误以及搜索由服务端在选定Attempt全集内定位后返回节点及祖先；错误按(started_at,span_id)确定顺序，首错误不等于根因。祖先每页最多64个并返回继续键；用visited检测循环，超过预算显示质量提示，不悄悄截断当Root。
+
+“Parent missing”只在同一授权Run/Attempt内定点查询仍不存在父时显示；父只是没加载标parent_not_loaded，过滤没命中保留ancestor_context。匹配/错误计数标明覆盖、是否已扫描完；首200条不是全树。2,000节点用多页窄行集合加共享虚拟行模型；20/200/2000三档验收必须覆盖末页错误、末页搜索、跨页祖先。只对加载完整且时长已知的集合计算慢节点前10%，未齐时仅允许明确阈值筛选。
+
+轮询返回projected_at/observed_at，不以最晚时间保证此前事件全到达。新节点可能插入已读游标之前；每次刷新需重建当前查询分页遍历，合并时按ID去重，后端不许只用started_at大于上次游标做增量。P0不承诺跨多次HTTP的原子快照，API标read_consistency=eventual；有投影变更提示时重读已加载页，未完整刷新要明确。根已结束但已知后台仍运行时仍允许有界轮询；所有已知执行终止后停止，手动刷新查询未知晚到事实。
+
+### 10.5 时间、摘要与视图范围约束
+
+持久化UTC DATETIME(6)，API给UTC带微秒字符串及相对所选视窗的offset_us；不向JavaScript传纳秒epoch Number。单调duration_us与墙钟起止不一致时分别保留并标clock_skew，end早于start等异常不改写成正常耗时。统一窗口取已知起止边界并包含后台晚结束；进行中延长至服务端observed_at，未知/缺结束用unknown/partial样式，不能仅因无end永远宣称仍在业务执行。浏览器可外推显示估计elapsed但不作为业务裁决。
+
+首有效chunk/首可见文本沿用第8节的真实定义；Provider未证明为首token时UI不将time_to_first_chunk标成精确TTFT。请求模型与实际模型分别展示。Input/Output Usage及合计仅在相应覆盖已知时给值，未知为—；不把父/子模型容器重复相加。成本仍是P1：没有执行时价格版本、币种与实际用量口径，本期隐藏成本列或显示unavailable，不按现价估算。
+
+视图的Tool命令预览、完整Prompt、原始异常堆栈、下载原文件、全部OTel attributes不是本期承诺。Loop/Context/Checkpoint支持安全类型化呈现，但只对项目真实边界埋点。Transcript、关键路径、原生OTel接入/导出、价格成本、反馈评测和新全文搜索不由本次视图对照自动进入P0。Chromium108与hideMenu兼容要求保持不变。
+
+## 11. 实施顺序与验收
 
 1. 独立协议/全局配置/上下文/输出：关闭零正文工作量、队满不阻塞、取消不变、JSON白名单/UTF-8限额；旧可观测无导入依赖。
 2. MySQL DDL/readiness/inbox投影：样例导入、重复/不同ID同槽/冲突、乱序、并发、晚提交小ID、事务回滚；先实际数据库验DDL/索引。

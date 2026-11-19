@@ -17,9 +17,9 @@ Priority: P0
 - [x] 真实工具执行使用独立tool_execution_id，关联业务tool_call_id和受控tool_key；同call重放可有不同execution_id，不能把包装层重复观察计为多次执行。
 - [x] 记录实际可知的executor_kind、timeout budget、retry index和exit code，从日志→投影→API→Tool Inspector及Run实际调用计数完成闭环。
 - [x] guard/审批/策略短路单独记录真实事实；未执行不增加工具执行次数，结构化失败不只依赖Python异常。
-- [ ] 业务status、technical_status、has_error和受控error.type/phase/code独立；失败、取消、拒绝不自动等同技术ERROR，子失败不自动把根或父操作标ERROR。
-- [ ] 安全name来自注册值而非命令/SQL/用户参数；工具schema、参数、结果和异常原文不进日志或安全Raw；为后续NAS证据保留精确业务关联。
-- [ ] 重复或乱序结束不叠加计数；缺开始可用自包含结束摘要但标partial，父身份/业务身份冲突不静默覆盖。
+- [x] 业务status、technical_status、has_error和受控error.type/phase/code独立；失败、取消、拒绝不自动等同技术ERROR，子失败不自动把根或父操作标ERROR。
+- [x] 安全name来自注册值而非命令/SQL/用户参数；工具schema、参数、结果和异常原文不进日志或安全Raw；为后续NAS证据保留精确业务关联。
+- [x] 重复或乱序结束不叠加计数；缺开始可用自包含结束摘要但标partial，父身份/业务身份冲突不静默覆盖。
 - [x] 测试实际成功/结构化失败/异常/取消/超时明确裁决、guard拒绝及并行工具；验证原工具调用次数、返回与取消语义不变。
 - [ ] 完成真实工具的端到端演示及Chromium108、当前浏览器受影响Inspector验收。
 
@@ -37,3 +37,17 @@ Priority: P0
 2026-11-17：连接用户提供的 MySQL，在隔离库 `swe_agentobs_codex_20261117_test` 重跑观测 pipeline 与 Runner lifecycle 集成，14 passed。验证覆盖 Guard 身份从 inbox→MySQL→manager 授权 Run Detail 的闭环；未写业务库。真实 Chromium 108/360 验收仍未完成。
 
 2026-11-17：`tests/unit/agents/test_tool_observability.py` 增加真实 hard-timeout 路径与两项并行工具重叠验证，断言 timeout 取消底层执行、以受控 `tool_timeout` 标记技术错误；并行工具各自保留 tool_call/execution ID，原结果及一次调用语义不变。成功、结构化失败、异常、取消、guard 拒绝、timeout、并行场景共 8 passed。Chromium 108.0.5359.95/360 Inspector 实机验收仍未完成。
+
+Chromium 108.0.5359.29 页面检查同样被 dev server 的认证/配置/模板 API 500 阻断，Inspector 未渲染；不能作为浏览器验收。108.0.5359.95、360 内核和 hideMenu 嵌入模式仍待服务可用后检查。
+
+2026-11-18：工具输出现在在执行 Span task-local 绑定下，于 `ArchiveBinding.append` 确认 MySQL/NAS 发布成功后写 `evidence.linked`，只记录 Chat 与持久化 Msg ID；重复 ID 由 `HistoryStore.message_occurrence` 返回 unresolved。相关定向测试 61 passed，目标 pre-commit hooks 通过。新增真实 MySQL/NAS 发布→精确正文读取集成用例因当前未配置 `SWE_TEST_DB_*` 被 skip；真实 Inspector 及 Chromium 108/360 验收仍未完成。
+
+2026-11-18：新增隔离 MySQL Span 终态乱序/幂等合同：先投影 failed `span.ended`，重放同 event ID，再投递同生命周期槽的冲突 succeeded 终态，随后投影成功 Run 终态和迟到 `span.started`；预期冲突隔离、唯一 Span 保留原错误、根 Run 成功及 ended_at 不因后到子事实回退。用例 `test_mysql_span_end_replay_and_late_start_preserve_one_terminal_fact` 已通过目标 pre-commit，但因未配置 `SWE_AGENTOBS_TEST_DB_*` 被 skip，故“重复或乱序结束”验收项仍未勾选，待实际隔离 MySQL 执行。
+
+同日复验：观测 core/query 单测 66 passed；上述 MySQL 合同 1 skipped。独立复核修正 `has_error` 数据库整数断言后确认无其他阻塞问题；目标 pre-commit 全部通过。复核建议 Run 终态先于迟到子 Span，本用例已纳入该顺序并断言 Run 的 status/ended_at 不变。重复/乱序终态的真实 MySQL 证据仍缺失。
+
+2026-11-18：用新建随机 `_test` schema 重跑 `test_mysql_span_end_replay_and_late_start_preserve_one_terminal_fact`，与资产 33 项分页、approval continuation、active-duration 合同同组执行，共 4 passed。重复 ended/conflicting terminal/late start 的隔离 MySQL 证据已补齐；schema 在测试后删除并确认本轮 agent-observability 隔离 schema 余数为 0。Inspector 与 Chromium108/360 验收仍未完成。
+
+2026-11-18：新增独立真实 ToolGuard producer→Inbox→Projector→manager Run Detail MySQL 合同，覆盖结构化 `permission_denied` 与 `RuntimeError`。前者投影为 Tool `failed/OK/has_error=false`，根 Run 可保持 `succeeded`；后者投影为 Tool `failed/ERROR/has_error=true/error_type=RuntimeError` 并由合同结算根 Run `failed`。验证原工具各调用一次、跨 Source 404、参数和异常正文不进入 JSONL/API。随机 `_test` schema 两参数均通过（23.90s），删除后核验余数为 0；ToolGuard 单测 10 passed，目标 pre-commit 全绿。Tool Inspector 和 Chromium108/360 验收仍未完成。
+
+同日继续：终态 MySQL 合同扩展覆盖同一 Span 上 conflicting parent 身份被隔离、重复 ended 不增加事件、late start 不覆盖失败终态，以及仅有 `quality.start_observed=false` 的自包含 ended Span 投影为 partial。该合同在随机隔离 `_test` schema 通过；期间发现 projector 原先仅凭 started_at 字段将明确标记未观察到 start 的 Span 错记为 observed，现改为尊重显式质量标记，调整后 MySQL 合同再次通过并确认隔离库已删除。相关 Observability core/ingest 单测 71 passed，目标 pre-commit 全绿。端到端 UI/浏览器验收仍未完成。

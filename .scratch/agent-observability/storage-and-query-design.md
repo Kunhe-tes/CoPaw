@@ -3,6 +3,8 @@
 Status: open
 
 最终评审入口：[独立可观测实施设计](../../docs/superpowers/specs/2026-11-15-independent-agent-observability-design.md)。本文为过程草案，字段/阈值以最终设计及DDL为准。
+
+2026-11-15视图对照补充：[Trace视图评审](trace-view-review.md)已修订五表DDL，补充Run的Session/Agent/耗时索引、Span安全名称/step/技术错误列及Attempt/错误索引、按Span事件索引。身份/分页/查询预算和类型化埋点以最终设计第10节为准；无独立Trace表，不接旧SDK，不实施功能或执行建表。
 Type: grilling
 日期：2026-11-15
 前提：[主设计](spec.md)、[ADR 0047](../../docs/adr/0047-independent-agent-observability-uses-metadata-logs.md)。已确认独立MySQL表/索引与连接配置；不增加ES/OpenSearch。本期不做元数据清理，不读写旧可观测表。

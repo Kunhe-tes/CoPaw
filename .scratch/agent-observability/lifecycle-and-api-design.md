@@ -3,6 +3,8 @@
 Status: open
 
 最终评审入口：[独立可观测实施设计](../../docs/superpowers/specs/2026-11-15-independent-agent-observability-design.md)。本文为过程草案，字段/阈值以最终设计及DDL为准。
+
+2026-11-15视图对照补充：页面以Run列表、Attempt导航及Span深链接呈现，不增加Trace身份。最终设计第10节补充`GET /runs/{id}/events`、服务端全Attempt错误/搜索定位、分页祖先、未加载/缺父区分、晚到数据刷新、后台仍运行时轮询及NAS evidence_ref契约，见[评审清单](trace-view-review.md)。本轮仅设计。
 Type: grilling
 日期：2026-11-15
 前提：[主设计](spec.md)、[存储设计](storage-and-query-design.md)、[决策树](map.md)。本文件只设计，不修改业务状态机或任何旧可观测逻辑。

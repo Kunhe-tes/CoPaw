@@ -42,6 +42,8 @@ CREATE TABLE swe_agentobs_runs (
     agent_loops BIGINT UNSIGNED NULL,
     input_tokens BIGINT UNSIGNED NULL,
     output_tokens BIGINT UNSIGNED NULL,
+    span_count BIGINT UNSIGNED NULL,
+    error_span_count BIGINT UNSIGNED NULL,
     metadata_text MEDIUMTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
     projected_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     PRIMARY KEY (run_id),
@@ -49,6 +51,9 @@ CREATE TABLE swe_agentobs_runs (
     KEY ix_agentobs_runs_scope_time (service_unit_key, source_key, tenant_key, agent_key, started_at, run_id),
     KEY ix_agentobs_runs_question (service_unit_key, source_key, tenant_key, agent_key, chat_key, root_question_key),
     KEY ix_agentobs_runs_status (service_unit_key, source_key, status, started_at, run_id),
+    KEY ix_agentobs_runs_session (service_unit_key, source_key, session_key, started_at, run_id),
+    KEY ix_agentobs_runs_agent_time (service_unit_key, source_key, agent_key, started_at, run_id),
+    KEY ix_agentobs_runs_duration (service_unit_key, source_key, duration_us, run_id),
     KEY ix_agentobs_runs_predecessor (predecessor_run_id),
     CONSTRAINT ck_agentobs_run_capture CHECK (capture_enabled IN (0,1)),
     CONSTRAINT ck_agentobs_run_metadata CHECK (OCTET_LENGTH(metadata_text) <= 24576)
@@ -77,6 +82,7 @@ CREATE TABLE swe_agentobs_events (
     UNIQUE KEY uq_agentobs_event_slot (entity_kind, entity_id, phase_key, local_seq),
     KEY ix_agentobs_events_run (run_id, occurred_at, event_id),
     KEY ix_agentobs_events_entity (entity_kind, entity_id, occurred_at, event_id),
+    KEY ix_agentobs_events_span (run_id, span_id, occurred_at, event_id),
     KEY ix_agentobs_events_scope_time (service_unit_key, source_key, occurred_at, event_id),
     CONSTRAINT ck_agentobs_event_metadata CHECK (OCTET_LENGTH(metadata_text) <= 24576)
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;
@@ -107,6 +113,8 @@ CREATE TABLE swe_agentobs_spans (
     span_type VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     operation VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     kind VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    name VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    step_index INT UNSIGNED NULL,
     model_key VARBINARY(256) NULL,
     provider_key VARBINARY(256) NULL,
     request_model_key VARBINARY(256) NULL,
@@ -118,6 +126,8 @@ CREATE TABLE swe_agentobs_spans (
     started_at DATETIME(6) NOT NULL,
     ended_at DATETIME(6) NULL,
     status VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    technical_status VARCHAR(8) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    has_error TINYINT UNSIGNED NULL COMMENT '1 known technical error,0 explicitly known no technical error,NULL unknown',
     error_type VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NULL,
     quality VARCHAR(24) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'unknown',
     duration_us BIGINT UNSIGNED NULL,
@@ -130,8 +140,12 @@ CREATE TABLE swe_agentobs_spans (
     KEY ix_agentobs_spans_run_time (run_id, started_at, span_id),
     KEY ix_agentobs_spans_parent (run_id, parent_span_id, started_at, span_id),
     KEY ix_agentobs_spans_type (run_id, span_type, started_at, span_id),
+    KEY ix_agentobs_spans_attempt (run_id, attempt_id, started_at, span_id),
+    KEY ix_agentobs_spans_error (run_id, attempt_id, has_error, started_at, span_id),
     KEY ix_agentobs_spans_model (model_key, started_at, run_id),
     KEY ix_agentobs_spans_tool (tool_key, started_at, run_id),
+    CONSTRAINT ck_agentobs_span_technical CHECK (technical_status IS NULL OR technical_status IN ('UNSET','OK','ERROR')),
+    CONSTRAINT ck_agentobs_span_error CHECK (has_error IS NULL OR has_error IN (0,1)),
     CONSTRAINT ck_agentobs_span_streaming CHECK (streaming IS NULL OR streaming IN (0,1)),
     CONSTRAINT ck_agentobs_span_metadata CHECK (OCTET_LENGTH(metadata_text) <= 24576)
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;
