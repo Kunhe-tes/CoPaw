@@ -139,16 +139,29 @@ async def _target_row_counts(db):
     return counts
 
 
-def _add_archive_sample(workspace):
-    session = next((workspace / "sessions").glob("*.json"))
-    state = json.loads(session.read_text())
-    state["agent"]["memory"]["content"] = [
-        [Msg("assistant", "large body " + str(i), "assistant").to_dict(), []]
-        for i in range(257)
-    ]
-    session.chmod(0o644)
-    session.write_text(json.dumps(state))
-    session.chmod(0o444)
+async def _add_archive_sample(workspace):
+    from swe.agents.memory.conversation_archive import ConversationArchiveStore
+
+    registry = json.loads((workspace / "chats.json").read_text())
+    chat_id = registry["chats"][0]["id"]
+    workspace.chmod(0o755)
+    archive = ConversationArchiveStore(workspace / "dialog")
+    await archive.commit(
+        chat_id,
+        [
+            Msg("assistant", "large body " + str(i), "assistant")
+            for i in range(257)
+        ],
+    )
+    dialog = workspace / "dialog"
+    for path in sorted(
+        dialog.rglob("*"),
+        key=lambda item: len(item.parts),
+        reverse=True,
+    ):
+        path.chmod(0o555 if path.is_dir() else 0o444)
+    dialog.chmod(0o555)
+    workspace.chmod(0o555)
 
 
 @pytest.mark.parametrize(
@@ -190,7 +203,7 @@ async def test_representative_prepare_migrate_metrics(
     session_a.chmod(0o644)
     session_a.write_text(json.dumps(state))
     session_a.chmod(0o444)
-    _add_archive_sample(workspaces["alice"])
+    await _add_archive_sample(workspaces["alice"])
     result, prepare_metrics = await _measured_invoke(
         [
             "prepare",
@@ -245,7 +258,8 @@ async def test_representative_prepare_migrate_metrics(
             full_verify_metrics["failure_report"],
             full_verify_metrics["cli_stderr"],
         )
-        assert full_result.get("passed") is True
+        assert full_result["failed"] == 0
+        assert full_result["verification_level"] == "full"
     fail_fast_verification = [failure_mode == "fast_verification"]
     if fail_fast_verification[0]:
         from swe.cli import conversation_storage_tenants
@@ -309,7 +323,7 @@ async def test_representative_prepare_migrate_metrics(
         "WHERE entry_kind=%s AND source_key LIKE %s",
         (b"publication", b"%/chunk:%"),
     )
-    assert archive_counts["messages"] == 0
+    assert archive_counts["messages"] == 257
     assert archive_counts["boundaries"] == 1
     assert archive_chunks["n"] >= 3
     assert first["db_statement_attempts"] > 0
@@ -323,7 +337,7 @@ async def test_representative_prepare_migrate_metrics(
                 "workspaces": 3,
                 "input_messages": 128,
                 "archive_boundaries": archive_counts["boundaries"],
-                "archive_messages": archive_counts["messages"],
+                "archive_messages": int(archive_counts["messages"]),
                 "archive_chunks": archive_chunks["n"],
                 "target_rows": {
                     **target_counts,

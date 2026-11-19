@@ -8,9 +8,11 @@ semantic comparison and rollback export rather than display-only conversion.
 
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 import shutil
 import tempfile
+from uuid import NAMESPACE_URL, uuid5
 
 from agentscope.message import Msg
 
@@ -222,6 +224,14 @@ def _v2_epochs(chat_dir, chat_id):
 def _v1_epoch(store, chat_dir, chat_id):
     current = store._read_current_epoch(chat_dir)
     record = store._read_checkpoint_locked(chat_id, current)
+    if not (chat_dir / "checkpoint.json").exists():
+        record = replace(
+            record,
+            checkpoint_id=str(
+                uuid5(NAMESPACE_URL, f"legacy-checkpoint:{chat_id}:{current}"),
+            ),
+            updated_at="1970-01-01T00:00:00+00:00",
+        )
     events = _strict_events(chat_dir / "events.jsonl")
     manifest = (
         _json(chat_dir / "manifest.json")

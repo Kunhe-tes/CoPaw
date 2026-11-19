@@ -933,7 +933,9 @@ class ConversationImporter:
                         ),
                         "source_occurrence": item["source_occurrence_no"],
                         "source_occurrence_no": item["source_occurrence_no"],
-                        "timestamp": item["payload"].get("timestamp"),
+                        "timestamp": _timestamp(
+                            item["payload"].get("timestamp"),
+                        ),
                         "epoch": item["context_epoch"],
                         "context_epoch": item["context_epoch"],
                         "in_context": item["in_context"],
@@ -1363,7 +1365,7 @@ class ConversationImporter:
                             "role": payload.get("role") or "assistant",
                             "kind": payload.get("type") or "message",
                             "source_occurrence": offset + index,
-                            "timestamp": payload.get("timestamp"),
+                            "timestamp": _timestamp(payload.get("timestamp")),
                             "epoch": batch["epoch"],
                             "body": {
                                 "publication_id": "self",

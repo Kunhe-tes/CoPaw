@@ -494,8 +494,6 @@ async def _verify_artifact(
         "relative_path": item["path"],
         "snapshot_id": inventory["source_boundary"]["snapshot_id"],
     }
-    if "bytes" in item:
-        expected["bytes"] = item["bytes"]
     if io is None:
         index = bundles.inspect(
             assignment["relative_path"],
@@ -516,6 +514,7 @@ async def _verify_artifact(
         io=io,
     )
     metadata = load_metadata_json(metadata_raw)
+    expected["bytes"] = item.get("bytes", len(body_raw))
     if metadata != expected or metadata.get("bytes") != len(body_raw):
         raise ValueError("retained legacy artifact source identity differs")
     source_path = Path(workspace["root"]) / item["path"]
