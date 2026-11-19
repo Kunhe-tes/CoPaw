@@ -315,6 +315,10 @@ def _create_start_subagent_tool(
                     "reason": "invalid_request",
                 },
             )
+        # 必须在 try 之前初始化，否则异常分支会引用未绑定变量。
+        observability_span = None
+        observability_span_transferred = False
+        supervisor_start_in_progress = False
         try:
             definition, definition_match, failure = (
                 _resolve_subagent_start_definition(
@@ -336,9 +340,6 @@ def _create_start_subagent_tool(
             start_context = dict(context.request_context)
             start_context.pop("_expert_dependency_view_root", None)
             observability_context = current_context()
-            observability_span = None
-            observability_span_transferred = False
-            supervisor_start_in_progress = False
             subagent_attributes = {
                 "mode": "background",
                 "execution_agent_key": definition.name,

@@ -1654,3 +1654,37 @@ class _AsyncRaise:
 
     async def __call__(self, *args, **kwargs):
         raise self.error
+
+
+@pytest.mark.asyncio
+async def test_start_subagent_returns_invalid_request_when_resolution_raises(
+    tmp_path,
+    monkeypatch,
+):
+    """定义解析抛异常时返回失败结果，而不是抛出 UnboundLocalError。"""
+
+    def boom(**_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        "swe.agents.tools.subagent_background._resolve_subagent_start_definition",
+        boom,
+    )
+    tools = create_background_subagent_tools(
+        supervisor=SimpleNamespace(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+            "_subagent_definition_store_dir": str(tmp_path / "definitions"),
+        },
+    )
+
+    response = await tools["start_subagent"](
+        expert_name="plan-researcher",
+        objective="Inspect",
+    )
+    payload = json.loads(response.content[0]["text"])
+
+    assert payload == {"status": "failed", "reason": "invalid_request"}
