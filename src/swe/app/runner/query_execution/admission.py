@@ -196,6 +196,7 @@ async def _approval_continuation(
         service,
         session_id=session_id,
         request_id=request_id,
+        user_id=user_id,
     )
     if pending is None and request_id:
         completed = await service.get_request(request_id)

@@ -498,8 +498,20 @@ async def submit_external_approval_decision(
     source_id: str | None = None,
     user_name: str | None = None,
     bbk_id: str | None = None,
+    caller_user_id: str | None = None,
 ) -> ExternalApprovalSubmission:
-    """Submit an external approval decision through the console runner."""
+    """Submit an external approval decision through the console runner.
+
+    ``caller_user_id`` 是服务端解析出的调用方身份；与审批归属不一致时
+    直接拒绝，避免同 scope 内跨用户批准。
+    """
+    owner_user_id = getattr(pending, "user_id", None)
+    if (
+        caller_user_id is not None
+        and owner_user_id
+        and owner_user_id != caller_user_id
+    ):
+        raise PermissionError("approval belongs to another user")
     if pending.status != "pending":
         return ExternalApprovalSubmission(
             request_id=pending.request_id,

@@ -186,6 +186,48 @@ def restore_approval_context(
         return None
 
 
+def approval_identity_matches(owner: Any, request: Any, pending: Any) -> bool:
+    """校验审批记录与当前请求的业务身份是否一致。
+
+    与 ``restore_approval_context`` 不同，这里只比较业务身份字段：
+    观测载体缺失或损坏不应阻止业务审批，但用户/会话/来源身份不符必须阻止。
+    """
+    if request is None:
+        return True
+    request_user = getattr(request, "user_id", None)
+    if request_user is not None and pending.user_id != request_user:
+        return False
+    request_session = getattr(request, "session_id", None)
+    if request_session and pending.session_id != request_session:
+        return False
+    extra = getattr(pending, "extra", None)
+    if not isinstance(extra, dict):
+        return True
+    meta = getattr(request, "channel_meta", None) or {}
+    source_id = (
+        get_current_source_id()
+        or getattr(request, "source_id", None)
+        or meta.get("source_id")
+    )
+    if (
+        extra.get("source_id")
+        and source_id
+        and extra["source_id"] != source_id
+    ):
+        return False
+    tenant_id = get_current_effective_tenant_id()
+    if (
+        extra.get("tenant_id")
+        and tenant_id
+        and extra["tenant_id"] != tenant_id
+    ):
+        return False
+    agent_id = getattr(owner, "agent_id", None)
+    if extra.get("agent_id") and agent_id and extra["agent_id"] != agent_id:
+        return False
+    return True
+
+
 def record_approval_requested(
     context: ObservabilityContext | None,
     approval_request_id: str,

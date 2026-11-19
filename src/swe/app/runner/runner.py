@@ -788,17 +788,20 @@ async def _select_pending_approval(
     *,
     session_id: str,
     request_id: str | None,
+    user_id: str | None = None,
 ):
+    """选择待审批记录；传入 user_id 时只返回该用户自己的请求。"""
     if request_id:
-        pending = await svc.get_request(request_id)
+        pending = await svc.get_request(request_id, user_id=user_id)
         if (
             pending is not None
             and pending.session_id == session_id
             and pending.status == "pending"
+            and (user_id is None or pending.user_id == user_id)
         ):
             return pending
         return None
-    return await svc.get_pending_by_session(session_id)
+    return await svc.get_pending_by_session(session_id, user_id=user_id)
 
 
 def _load_tenant_hook_config(tenant_id: str | None) -> HookConfig:
@@ -3370,14 +3373,22 @@ class AgentRunner(Runner):
         request_id = _approval_request_id(normalized) or _denial_request_id(
             normalized,
         )
+        # 身份缺失（request 为空或未携带 user_id）时不做用户过滤，
+        # 保持内部调用与旧通道的兼容；一旦携带身份则必须精确匹配。
+        raw_user_id = getattr(request, "user_id", None)
+        user_id = None if raw_user_id is None else str(raw_user_id)
         pending = await _select_pending_approval(
             svc,
             session_id=session_id,
             request_id=request_id,
+            user_id=user_id,
         )
         if pending is None:
             if request_id:
-                completed = await svc.get_request(request_id)
+                completed = await svc.get_request(
+                    request_id,
+                    user_id=user_id,
+                )
                 if (
                     completed is not None
                     and completed.session_id == session_id
@@ -3398,6 +3409,7 @@ class AgentRunner(Runner):
                     await svc.resolve_request_once(
                         request_id,
                         ApprovalDecision(completed.status),
+                        user_id=user_id,
                     )
                     return (
                         self._already_resolved_approval(completed),
@@ -3407,6 +3419,14 @@ class AgentRunner(Runner):
             return None, False, None
 
         from swe.observability import runner_lifecycle
+
+        # 身份不符必须中止决议；观测载体不匹配只影响上报，不阻止业务。
+        if not runner_lifecycle.approval_identity_matches(
+            self,
+            request,
+            pending,
+        ):
+            return None, False, None
 
         restored_context = runner_lifecycle.restore_approval_context(
             self,
@@ -3451,6 +3471,7 @@ class AgentRunner(Runner):
                 pending.request_id,
                 ApprovalDecision.TIMEOUT,
                 on_transition=transition_callback("timed_out", "timed_out"),
+                user_id=user_id,
             )
             if not changed:
                 report_resolution(
@@ -3493,6 +3514,7 @@ class AgentRunner(Runner):
                 pending.request_id,
                 ApprovalDecision.APPROVED,
                 on_transition=transition_callback("approved", None),
+                user_id=user_id,
             )
             if not changed:
                 report_resolution(
@@ -3519,6 +3541,7 @@ class AgentRunner(Runner):
             pending.request_id,
             denial_decision,
             on_transition=transition_callback("denied", "rejected"),
+            user_id=user_id,
         )
         if not changed:
             report_resolution(

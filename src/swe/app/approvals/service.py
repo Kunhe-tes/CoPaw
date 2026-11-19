@@ -239,9 +239,15 @@ class ApprovalService:
         self,
         request_id: str,
         decision: ApprovalDecision,
+        *,
+        user_id: str | None = None,
     ) -> PendingApproval | None:
         """Resolve one pending approval request."""
-        record, _ = await self.resolve_request_once(request_id, decision)
+        record, _ = await self.resolve_request_once(
+            request_id,
+            decision,
+            user_id=user_id,
+        )
         return record
 
     async def resolve_request_once(
@@ -250,8 +256,12 @@ class ApprovalService:
         decision: ApprovalDecision,
         *,
         on_transition: Callable[[PendingApproval], None] | None = None,
+        user_id: str | None = None,
     ) -> tuple[PendingApproval | None, bool]:
-        """Return the record and whether this call changed its state."""
+        """Return the record and whether this call changed its state.
+
+        ``user_id`` 非空时额外校验审批归属，防止同 scope 内跨用户决议。
+        """
         replay: PendingApproval | None = None
         async with self._lock:
             scope_id = self._get_current_scope_id()
@@ -302,8 +312,12 @@ class ApprovalService:
                         self._debug_record_summary(completed),
                     )
                     return None, False
+                if self._user_mismatch(completed, user_id):
+                    return None, False
                 replay = completed
             else:
+                if self._user_mismatch(pending, user_id):
+                    return None, False
                 pending = self._pending.pop(request_id)
                 if pending is None:
                     replay = self._completed.get(request_id)
@@ -369,8 +383,34 @@ class ApprovalService:
             )
         return pending, True
 
-    async def get_request(self, request_id: str) -> PendingApproval | None:
-        """按当前 scope 获取 pending 或已完成的审批请求。"""
+    def _user_mismatch(self, record: Any, user_id: str | None) -> bool:
+        """判断记录归属是否与调用方用户冲突。
+
+        ``user_id`` 为 None 表示内部/系统调用，不做用户过滤。
+        """
+        if user_id is None or record is None:
+            return False
+        if record.user_id == user_id:
+            return False
+        logger.warning(
+            "Approval user mismatch: request_id=%s caller_user_id=%s "
+            "record=%s",
+            record.request_id,
+            user_id,
+            self._debug_record_summary(record),
+        )
+        return True
+
+    async def get_request(
+        self,
+        request_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> PendingApproval | None:
+        """按当前 scope 获取 pending 或已完成的审批请求。
+
+        ``user_id`` 非空时额外校验请求归属，避免同 scope 内跨用户读取。
+        """
         async with self._lock:
             scope_id = self._get_current_scope_id()
             pending = self._pending.get(request_id)
@@ -404,6 +444,8 @@ class ApprovalService:
                     self._debug_record_summary(record),
                 )
                 return None
+            if self._user_mismatch(record, user_id):
+                return None
             return record
 
     async def get_requests(
@@ -427,6 +469,8 @@ class ApprovalService:
     async def get_request_status(
         self,
         request_id: str,
+        *,
+        user_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Return the current status visible in the active runtime scope."""
         async with self._lock:
@@ -454,6 +498,8 @@ class ApprovalService:
                     self._debug_record_summary(record),
                 )
                 return None
+            if self._user_mismatch(record, user_id):
+                return None
 
             external_submission = self._external_submission_summary(record)
             status = record.status
@@ -472,11 +518,14 @@ class ApprovalService:
     async def get_pending_by_session(
         self,
         session_id: str,
+        *,
+        user_id: str | None = None,
     ) -> PendingApproval | None:
         """Return the next pending approval for *session_id* (FIFO).
 
         Pending approvals are consumed in creation order, so repeated
-        ``/approve`` inputs walk the queue from oldest to newest.
+        ``/approve`` inputs walk the queue from oldest to newest.  When
+        ``user_id`` is provided, approvals owned by other users are skipped.
         """
         async with self._lock:
             for pending in self._pending.values():
@@ -484,6 +533,7 @@ class ApprovalService:
                     pending.session_id == session_id
                     and pending.status == "pending"
                     and self._matches_scope(pending)
+                    and (user_id is None or pending.user_id == user_id)
                 ):
                     return pending
         return None

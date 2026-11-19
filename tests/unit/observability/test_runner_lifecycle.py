@@ -308,7 +308,7 @@ async def test_approval_command_resumes_same_run_with_predecessor_attempt(
     )
 
     class ApprovalService:
-        async def get_request(self, _request_id):
+        async def get_request(self, _request_id, **_kwargs):
             return pending
 
     monkeypatch.setattr(
@@ -360,7 +360,7 @@ async def test_consecutive_approvals_keep_root_run_and_attempt_chain(
     class ApprovalService:
         pending = None
 
-        async def get_request(self, _request_id):
+        async def get_request(self, _request_id, **_kwargs):
             return self.pending
 
     service = ApprovalService()
@@ -510,7 +510,7 @@ async def test_approval_with_missing_observability_carrier_is_unresolved(
     )
 
     class ApprovalService:
-        async def get_request(self, _request_id):
+        async def get_request(self, _request_id, **_kwargs):
             return pending
 
     monkeypatch.setattr(
@@ -704,3 +704,77 @@ def test_stopped_approval_wait_settles_run_as_cancelled(monkeypatch):
     )
     assert emitter.events[-1]["event_name"] == "run.ended"
     assert emitter.events[-1]["status"] == "cancelled"
+
+
+def test_approval_identity_matches_user_and_session(monkeypatch):
+    """用户或会话不一致必须判定为身份冲突。"""
+    monkeypatch.setattr(
+        runner_lifecycle,
+        "get_current_source_id",
+        lambda: "source-a",
+    )
+    monkeypatch.setattr(
+        runner_lifecycle,
+        "get_current_effective_tenant_id",
+        lambda: "tenant-a",
+    )
+    owner = SimpleNamespace(agent_id="agent-a")
+    pending = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        extra={"source_id": "source-a", "tenant_id": "tenant-a"},
+    )
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        source_id="source-a",
+        channel_meta={},
+    )
+    assert runner_lifecycle.approval_identity_matches(owner, request, pending)
+    assert not runner_lifecycle.approval_identity_matches(
+        owner,
+        SimpleNamespace(
+            session_id="session-1",
+            user_id="user-2",
+            source_id="source-a",
+            channel_meta={},
+        ),
+        pending,
+    )
+    assert not runner_lifecycle.approval_identity_matches(
+        owner,
+        SimpleNamespace(
+            session_id="session-2",
+            user_id="user-1",
+            source_id="source-a",
+            channel_meta={},
+        ),
+        pending,
+    )
+
+
+def test_approval_identity_ignores_missing_observability_carrier(monkeypatch):
+    """观测载体缺失不应阻止业务审批。"""
+    monkeypatch.setattr(
+        runner_lifecycle,
+        "get_current_source_id",
+        lambda: "source-a",
+    )
+    monkeypatch.setattr(
+        runner_lifecycle,
+        "get_current_effective_tenant_id",
+        lambda: "tenant-a",
+    )
+    owner = SimpleNamespace(agent_id="agent-a")
+    pending = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        extra={},
+    )
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        source_id="source-a",
+        channel_meta={},
+    )
+    assert runner_lifecycle.approval_identity_matches(owner, request, pending)

@@ -297,12 +297,14 @@ async def test_runner_does_not_observe_losing_approval_decision(
             decision,
             *,
             on_transition=None,
+            user_id=None,
         ):
             await resolve(request_id, winner)
             return await resolve(
                 request_id,
                 decision,
                 on_transition=on_transition,
+                user_id=user_id,
             )
 
         monkeypatch.setattr(
@@ -1181,3 +1183,93 @@ async def test_runner_external_approval_does_not_duplicate_zhaohu_result(
     assert consumed is True
     assert approved_tool_call is None
     assert zhaohu.result_calls == []
+
+
+@pytest.mark.asyncio
+async def test_pending_approval_rejects_other_user(monkeypatch):
+    """同 scope 内其他用户不能消费不属于自己的待审批请求。"""
+    service = ApprovalService()
+    monkeypatch.setattr("swe.app.approvals.service._approval_service", service)
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+        )
+        result = await AgentRunner()._resolve_pending_approval(
+            "session-1",
+            f"/approve {pending.request_id}",
+            request=SimpleNamespace(
+                session_id="session-1",
+                user_id="user-2",
+            ),
+        )
+    assert result == (None, False, None)
+    assert pending.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_get_pending_by_session_filters_by_user():
+    """FIFO 选择只能命中调用方自己的请求。"""
+    service = ApprovalService()
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        first = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+        )
+        second = await service.create_pending(
+            session_id="session-1",
+            user_id="user-2",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+        )
+        assert (
+            await service.get_pending_by_session(
+                "session-1",
+                user_id="user-2",
+            )
+            is second
+        )
+        assert (
+            await service.get_pending_by_session(
+                "session-1",
+                user_id="user-3",
+            )
+            is None
+        )
+    assert first.status == "pending" and second.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_resolve_request_once_rejects_other_user():
+    """决议接口在锁内再校验一次归属，防止先读后改窗口。"""
+    service = ApprovalService()
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+        )
+        rejected = await service.resolve_request_once(
+            pending.request_id,
+            ApprovalDecision.APPROVED,
+            user_id="user-2",
+        )
+        assert rejected == (None, False)
+        assert pending.status == "pending"
+        resolved, changed = await service.resolve_request_once(
+            pending.request_id,
+            ApprovalDecision.APPROVED,
+            user_id="user-1",
+        )
+    assert changed is True
+    assert resolved is pending
+    assert pending.status == "approved"
