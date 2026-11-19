@@ -8,28 +8,6 @@ from .errors import IntegrityError, StorageUnavailable
 MAX_REFERENCE_IDS = 256
 MAX_QUERY_BYTES = 64 * 1024
 
-MESSAGE_LOCATOR_FIELDS = (
-    "id",
-    "service_unit_key",
-    "session_id",
-    "origin_chat_id",
-    "turn_id",
-    "source_msg_key",
-    "source_occurrence_no",
-    "role_key",
-    "kind_key",
-    "task_run_key",
-    "publication_id",
-    "byte_offset",
-    "byte_length",
-    "context_epoch",
-    "message_timestamp",
-    "session_order",
-    "layer",
-    "current_visible",
-    "in_context",
-    "deleted_at",
-)
 TURN_REFERENCE_FIELDS = (
     "id",
     "service_unit_key",
@@ -128,35 +106,6 @@ class ReferenceQuery(Enum):
         ),
         "",
     )
-    OFFLINE_MESSAGE = (
-        "messages",
-        (
-            "archive_chat_id",
-            "archive_order",
-            "archive_publication_id",
-            "byte_length",
-            "byte_offset",
-            "context_epoch",
-            "current_visible",
-            "deleted_at",
-            "id",
-            "in_context",
-            "kind_key",
-            "layer",
-            "message_timestamp",
-            "origin_chat_id",
-            "publication_id",
-            "role_key",
-            "service_unit_key",
-            "session_id",
-            "session_order",
-            "source_msg_key",
-            "source_occurrence_no",
-            "task_run_key",
-            "turn_id",
-        ),
-        "",
-    )
     OFFLINE_PUBLICATION = (
         "publications",
         (
@@ -193,25 +142,8 @@ class ReferenceQuery(Enum):
         "",
     )
 
-    MESSAGE_PRUNE = (
-        "messages",
-        ("id", "service_unit_key", "session_id", "layer", "context_epoch"),
-        " FOR UPDATE",
-    )
-    MESSAGE_PROOF = (
-        "messages",
-        (*MESSAGE_LOCATOR_FIELDS, "archive_chat_id", "archive_order"),
-        " FOR UPDATE",
-    )
     PUBLICATION_LOCK = ("publications", PUBLICATION_LOCK_FIELDS, " FOR UPDATE")
     CHAT_CHECK = ("chats", CHAT_CHECK_FIELDS, "")
-    MESSAGE_LOCATOR = ("messages", MESSAGE_LOCATOR_FIELDS, "")
-    MESSAGE_CURRENT = ("messages", MESSAGE_LOCATOR_FIELDS, " FOR SHARE")
-    MESSAGE_OWNERSHIP = (
-        "messages",
-        ("id", "service_unit_key", "session_id", "publication_id"),
-        "",
-    )
     TURN_REFERENCE = ("turns", TURN_REFERENCE_FIELDS, "")
     PUBLICATION_OWNERSHIP = (
         "publications",

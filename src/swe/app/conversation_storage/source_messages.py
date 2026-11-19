@@ -3,41 +3,11 @@
 
 from dataclasses import dataclass, field
 
-from .chat_mutations import load_metadata_json, utc_datetime
+from .chat_mutations import utc_datetime
 from .errors import IntegrityError
 from .identity import identity_bytes
 from .retention import RetentionStore
 from .reference_queries import ReferenceQuery, fetch_reference_rows
-
-SOURCE_FIELDS = (
-    "service_unit_key",
-    "id",
-    "session_id",
-    "origin_chat_id",
-    "turn_id",
-    "source_msg_key",
-    "source_occurrence_no",
-    "role_key",
-    "kind_key",
-    "task_run_key",
-    "publication_id",
-    "byte_offset",
-    "byte_length",
-    "context_epoch",
-    "message_timestamp",
-    "session_order",
-    "layer",
-    "current_visible",
-    "deleted_at",
-)
-
-
-def _text(value):
-    return (
-        bytes(value).decode()
-        if isinstance(value, (bytes, bytearray))
-        else value
-    )
 
 
 @dataclass
@@ -47,6 +17,8 @@ class SourceMessages:
     batch: object = None
     dependency_publications: dict = field(default_factory=dict)
     projection_references: object = None
+    session_revision: int | None = None
+    archive_pins: object = None
 
     @property
     def publication_ids(self):
@@ -56,29 +28,31 @@ class SourceMessages:
         )
 
     async def finish(self, service, scope):
-        if self.batch is not None:
-            await RetentionStore(service.db, scope).finish_reader(self.batch)
-            self.batch = None
+        try:
+            if self.archive_pins is not None:
+                await self.archive_pins.finish()
+                self.archive_pins = None
+        finally:
+            if self.batch is not None:
+                await RetentionStore(service.db, scope).finish_reader(
+                    self.batch,
+                )
+                self.batch = None
 
-    async def revalidate(self, db):
+    async def revalidate(self, db, request):
         if self.projection_references is not None:
             await self.projection_references.revalidate(db)
-        rows = (
-            await fetch_reference_rows(
-                db,
-                ReferenceQuery.MESSAGE_CURRENT,
-                self.rows,
-                next(iter(self.rows.values()))["service_unit_key"],
+        if self.session_revision is not None:
+            session = await db.fetch_one(
+                "SELECT state_revision FROM swe_conversation_sessions "
+                "WHERE id=%s AND service_unit_key=%s",
+                (request.session_id, request.scope.sql_values[0]),
             )
-            if self.rows
-            else {}
-        )
-        for identity, expected in sorted(self.rows.items()):
-            row = rows.get(identity)
-            if row is None or any(
-                row[key] != expected[key] for key in SOURCE_FIELDS
+            if (
+                session is None
+                or session["state_revision"] != self.session_revision
             ):
-                raise IntegrityError("archive source occurrence changed")
+                raise IntegrityError("archive source snapshot changed")
 
     def include_projection(self, references):
         self.dependency_publications.update(references.publications)
@@ -102,7 +76,7 @@ class SourceMessages:
         *,
         locked_publications=None,
     ):
-        await self.revalidate(service.db)
+        await self.revalidate(service.db, request)
         if self.publication_ids:
             store = RetentionStore(service.db, request.scope)
             if locked_publications is None:
@@ -207,7 +181,7 @@ def _validate_row(row, message, request):
         if message.message_timestamp is not None
         else None
     )
-    if any(row[key] != value for key, value in expected.items()):
+    if any(row.get(key) != value for key, value in expected.items()):
         raise IntegrityError(
             "archive source typed identity differs from occurrence",
         )
@@ -223,46 +197,36 @@ async def snapshot_sources(service, request, plan):
     ids = [item.source_message_id for item in messages]
     if len(ids) != len(set(ids)):
         raise IntegrityError("archive source occurrences cannot repeat")
+    if ids != sorted(ids):
+        raise IntegrityError("archive sources must retain Session order")
+    if request.base_state_revision is None:
+        raise IntegrityError("archive sources require a Session revision")
+    from .archive_reader import ArchiveReader
+
     retentions = RetentionStore(service.db, request.scope)
     try:
-        async with service.db.transaction():
-            rows = await fetch_reference_rows(
-                service.db,
-                ReferenceQuery.MESSAGE_LOCATOR,
-                ids,
-                request.scope.sql_values[0],
-            )
-            for message in messages:
-                row = rows.get(message.source_message_id)
-                _validate_row(row, message, request)
-                snapshot.rows[row["id"]] = row
-            orders = [
-                snapshot.rows[identity]["session_order"] for identity in ids
-            ]
-            if orders != sorted(orders):
-                raise IntegrityError(
-                    "archive sources must retain Session order",
-                )
-            snapshot.batch = await retentions.pin(
-                snapshot.publication_ids,
-                kind="reader",
-            )
-        publications = {row["id"]: row for row in snapshot.batch.publications}
+        reader = ArchiveReader(service.db, request.scope, service.bundles)
+        occurrences = await reader.session_messages(
+            request.session_id,
+            high=ids[-1],
+        )
+        rows = {row["id"]: row for row in occurrences}
         for message in messages:
-            row = snapshot.rows[message.source_message_id]
-            publication = publications[row["publication_id"]]
-            if publication["session_id"] != request.session_id:
-                raise IntegrityError(
-                    "archive source publication Session mismatch",
-                )
-            raw = await snapshot.batch.read(
-                service.bundles.read_extent,
-                _text(publication["relative_path"]),
-                row["byte_offset"],
-                row["byte_length"],
-                expected_length=publication["byte_length"],
-            )
-            snapshot.payloads[message.block_name] = load_metadata_json(raw)
+            identity = message.source_message_id
+            row = rows.get(identity)
+            _validate_row(row, message, request)
+            snapshot.rows[identity] = row
+            snapshot.payloads[message.block_name] = row["message"]
+        snapshot.batch = await retentions.pin(
+            snapshot.publication_ids,
+            kind="reader",
+        )
+        if any(
+            row["session_id"] != request.session_id
+            for row in snapshot.batch.publications
+        ):
+            raise IntegrityError("archive source publication Session mismatch")
+        snapshot.session_revision = request.base_state_revision
         return snapshot
     except BaseException:
         await snapshot.finish(service, request.scope)

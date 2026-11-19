@@ -5,26 +5,12 @@ from dataclasses import dataclass, field
 import json
 
 from .errors import IntegrityError
-from .identity import WorkspaceScope
+from .message_bundle import decode_message_bodies
 from .retention import ReaderPins, RetentionStore
 from .session_projection import hydrate_state, is_projection
 from .projection_cache import active, cache_key, cached, remember
 from .reference_queries import ReferenceQuery, fetch_reference_rows
 
-PROJECTION_FIELDS = (
-    "service_unit_key",
-    "session_id",
-    "publication_id",
-    "byte_offset",
-    "byte_length",
-    "layer",
-    "source_msg_key",
-    "role_key",
-    "context_epoch",
-    "current_visible",
-    "in_context",
-    "deleted_at",
-)
 TURN_FIELDS = (
     "service_unit_key",
     "session_id",
@@ -45,7 +31,17 @@ def references(envelope):
         for series in envelope["lists"]
         for entry in series["entries"]
     ]
-    return refs + [item["ref"] for item in envelope["turns"]]
+    refs.extend(item["ref"] for item in envelope["turns"])
+    for item in envelope.get("message_directory", ()):
+        locator = item["body"]
+        if locator["publication_id"] == "self":
+            locator = {
+                "operation_key": envelope["identity"]["operation_key"],
+                "block_name": locator["block_name"],
+                "position": locator["position"],
+            }
+        refs.append(locator)
+    return list({ref_key(ref): ref for ref in refs}.values())
 
 
 def _text(value):
@@ -58,7 +54,6 @@ def _text(value):
 
 @dataclass
 class ProjectionReferences:
-    rows: dict = field(default_factory=dict)
     payloads: dict = field(default_factory=dict)
     publications: dict = field(default_factory=dict)
     batch: object = None
@@ -74,24 +69,6 @@ class ProjectionReferences:
             self.batch = None
 
     async def revalidate(self, db):
-        rows = (
-            await fetch_reference_rows(
-                db,
-                ReferenceQuery.MESSAGE_CURRENT,
-                self.rows,
-                next(iter(self.rows.values()))["service_unit_key"],
-            )
-            if self.rows
-            else {}
-        )
-        for identity, expected in sorted(self.rows.items()):
-            row = rows.get(identity)
-            if row is None or any(
-                row[key] != expected[key] for key in PROJECTION_FIELDS
-            ):
-                raise IntegrityError(
-                    "recovery projection occurrence locator changed",
-                )
         turns = (
             await fetch_reference_rows(
                 db,
@@ -110,55 +87,25 @@ class ProjectionReferences:
                 raise IntegrityError("cold Turn projection authority changed")
 
 
-def _same_locator(row, request, ref):
-    return (
-        row is not None
-        and row["service_unit_key"] == request.scope.sql_values[0]
-        and row["session_id"] == request.session_id
-        and row["deleted_at"] is None
-        and (row["publication_id"], row["byte_offset"], row["byte_length"])
-        == (ref["publication_id"], ref["offset"], ref["length"])
-    )
-
-
 async def _snapshot_rows(service, request, refs, snapshot):
-    rows = await fetch_reference_rows(
-        service.db,
-        ReferenceQuery.MESSAGE_LOCATOR,
-        [ref["message_id"] for ref in refs if "message_id" in ref],
-        request.scope.sql_values[0],
-    )
     turns = await fetch_reference_rows(
         service.db,
         ReferenceQuery.TURN_REFERENCE,
-        [
-            ref["turn_id"]
-            for ref in refs
-            if "message_id" not in ref and "turn_id" in ref
-        ],
+        [ref["turn_id"] for ref in refs if "turn_id" in ref],
         request.scope.sql_values[0],
     )
     for ref in refs:
-        if "message_id" not in ref:
-            if "turn_id" in ref:
-                turn = turns.get(ref["turn_id"])
-                if (
-                    turn is None
-                    or turn["service_unit_key"] != request.scope.sql_values[0]
-                    or turn["session_id"] != request.session_id
-                    or turn["terminal_publication_id"] != ref["publication_id"]
-                ):
-                    raise IntegrityError(
-                        "cold Turn reference association differs",
-                    )
-                snapshot.turns[turn["id"]] = turn
+        if "turn_id" not in ref:
             continue
-        row = rows.get(ref["message_id"])
-        if not _same_locator(row, request, ref):
-            raise IntegrityError(
-                "recovery projection reference does not match Session locator",
-            )
-        snapshot.rows[row["id"]] = row
+        turn = turns.get(ref["turn_id"])
+        if (
+            turn is None
+            or turn["service_unit_key"] != request.scope.sql_values[0]
+            or turn["session_id"] != request.session_id
+            or turn["terminal_publication_id"] != ref["publication_id"]
+        ):
+            raise IntegrityError("cold Turn reference association differs")
+        snapshot.turns[turn["id"]] = turn
 
 
 def _cached_bodies(request, envelope):
@@ -212,71 +159,58 @@ async def snapshot_projection(
                 snapshot.publications = {
                     row["id"]: row for row in snapshot.batch.publications
                 }
+        decoded = {}
+        indexes = {current_id: index}
         for ref in refs:
             if ref_key(ref) in cached_bodies:
                 snapshot.payloads[ref_key(ref)] = cached_bodies[ref_key(ref)]
                 continue
-            if "publication_id" not in ref:
-                extent = index.blocks.get(ref["block_name"])
-                raw = await service._nas_io(
-                    request.operation_key,
-                    service.bundles.read_extent,
-                    index.relative_path,
-                    extent.offset,
-                    extent.length,
-                    expected_length=index.byte_length,
-                )
-            else:
-                publication = snapshot.publications[ref["publication_id"]]
+            target = ref.get("publication_id", current_id)
+            if target != current_id:
+                publication = snapshot.publications[target]
                 if publication["session_id"] != request.session_id:
                     raise IntegrityError(
                         "recovery projection dependency Session differs",
                     )
-                if "message_id" in ref:
-                    offset, length = ref["offset"], ref["length"]
-                else:
-                    prior = await snapshot.batch.read(
+                if target not in indexes:
+                    indexes[target] = await snapshot.batch.read(
                         service.bundles.inspect,
                         _text(publication["relative_path"]),
                         expected_length=publication["byte_length"],
                     )
-                    block = prior.blocks.get(ref["block_name"])
-                    if block is None or block.kind != "turn":
-                        raise IntegrityError(
-                            "cold Turn must reference an independent Turn body",
-                        )
-                    offset, length = block.offset, block.length
-                raw = await snapshot.batch.read(
+            target_index = indexes[target]
+            name = ref["block_name"]
+            extent = target_index.blocks.get(name)
+            if extent is None or ("turn_id" in ref and extent.kind != "turn"):
+                raise IntegrityError("recovery reference block is invalid")
+            if (target, name) not in decoded:
+                args = (
                     service.bundles.read_extent,
-                    _text(publication["relative_path"]),
-                    offset,
-                    length,
-                    expected_length=publication["byte_length"],
+                    target_index.relative_path,
+                    extent.offset,
+                    extent.length,
                 )
-            snapshot.payloads[ref_key(ref)] = json.loads(raw)
-            if "message_id" in ref:
-                value = snapshot.payloads[ref_key(ref)]
-                row = snapshot.rows[ref["message_id"]]
-                if (
-                    not isinstance(value, dict)
-                    or value.get("id") != _text(row["source_msg_key"])
-                    or (value.get("role") or "assistant")
-                    != _text(row["role_key"])
-                ):
-                    raise IntegrityError(
-                        "recovery projection body identity mismatch",
+                if target == current_id:
+                    raw = await service._nas_io(
+                        request.operation_key,
+                        *args,
+                        expected_length=target_index.byte_length,
                     )
-            elif "turn_id" in ref:
-                turn = snapshot.turns[ref["turn_id"]]
-                if (
-                    ref["block_name"]
-                    != "turn:" + _text(turn["question_msg_key"])
-                    or snapshot.payloads[ref_key(ref)].get("status")
-                    != turn["history_status"]
-                ):
-                    raise IntegrityError(
-                        "cold Turn independent body identity differs",
+                else:
+                    raw = await snapshot.batch.read(
+                        *args,
+                        expected_length=target_index.byte_length,
                     )
+                decoded[target, name] = (
+                    decode_message_bodies(raw)
+                    if extent.kind == "message_bodies"
+                    else json.loads(raw)
+                )
+            snapshot.payloads[ref_key(ref)] = _resolve_payload(
+                decoded[target, name],
+                ref,
+                snapshot.turns,
+            )
         hydrate_state(envelope, lambda ref: snapshot.payloads[ref_key(ref)])
         return snapshot
     except BaseException:
@@ -284,12 +218,29 @@ async def snapshot_projection(
         raise
 
 
+def _resolve_payload(payload, ref, turns):
+    position = ref.get("position", 0)
+    if isinstance(payload, (tuple, list)):
+        if type(position) is not int or not 0 <= position < len(payload):
+            raise IntegrityError("recovery message position is invalid")
+        payload = payload[position]
+    elif position != 0:
+        raise IntegrityError("recovery message position is invalid")
+    if "turn_id" in ref:
+        turn = turns[ref["turn_id"]]
+        if (
+            ref["block_name"] != "turn:" + _text(turn["question_msg_key"])
+            or payload.get("status") != turn["history_status"]
+        ):
+            raise IntegrityError("cold Turn independent body identity differs")
+    return payload
+
+
 async def hydrate_projection(adapter, envelope, session, publication, batch):
     if not is_projection(envelope):
         return envelope
     from types import SimpleNamespace
 
-    refs = references(envelope)
     source = SimpleNamespace(
         operation_key=_text(publication["operation_key"]),
         scope=adapter.scope,
@@ -324,7 +275,6 @@ async def refresh_projection_cache(service, row, envelope, snapshot):
     from .projection_publication import canonical
 
     values = defaultdict(list)
-    index = None
     for series in envelope["lists"]:
         layer = (
             "memory"
@@ -334,36 +284,10 @@ async def refresh_projection_cache(service, row, envelope, snapshot):
         for entry in series["entries"]:
             ref = entry["ref"]
             payload = snapshot.payloads[ref_key(ref)]
-            if "message_id" in ref:
-                resolved = ref
-            else:
-                if index is None:
-                    index = await service._nas_io(
-                        _text(row["operation_key"]),
-                        service.bundles.inspect,
-                        _text(row["relative_path"]),
-                        expected_length=row["byte_length"],
-                    )
-                extent = index.blocks[ref["block_name"]]
-                message = await service.db.fetch_one(
-                    "SELECT * FROM swe_conversation_messages WHERE publication_id=%s AND byte_offset=%s AND byte_length=%s AND session_id=%s AND service_unit_key=%s ORDER BY id LIMIT 1",
-                    (
-                        row["id"],
-                        extent.offset,
-                        extent.length,
-                        row["session_id"],
-                        row["service_unit_key"],
-                    ),
-                )
-                if message is None:
-                    raise IntegrityError(
-                        "committed projection delta occurrence is missing",
-                    )
-                resolved = {
-                    "publication_id": row["id"],
-                    "message_id": message["id"],
-                    "offset": extent.offset,
-                    "length": extent.length,
-                }
+            resolved = {
+                "publication_id": ref.get("publication_id", row["id"]),
+                "block_name": ref["block_name"],
+                "position": ref.get("position", 0),
+            }
             values[(layer, canonical(payload))].append(resolved)
     remember(cache_key(row, row["base_state_revision"] + 1), values)

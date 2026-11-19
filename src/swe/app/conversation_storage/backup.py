@@ -26,7 +26,6 @@ TABLES = {
         "chats",
         "turns",
         "publications",
-        "messages",
         "retentions",
     )
 }
@@ -38,7 +37,6 @@ REFERENCE_FIELDS = {
         "active_checkpoint_publication_id",
     ),
     "turns": ("admission_publication_id", "terminal_publication_id"),
-    "messages": ("publication_id", "archive_publication_id"),
     "shares": ("publication_id",),
 }
 
@@ -114,25 +112,11 @@ def decode_metadata(value):
     return _decode(load_metadata_json(value))
 
 
-def _effective_message(row, chats):
-    if row.get("deleted_at") is not None:
-        return False
-    if row["layer"] != "archive":
-        return row["current_visible"] == 1
-    chat = chats.get(row["archive_chat_id"])
-    if chat is None:
-        raise IntegrityError("backup archive Message owner Chat is missing")
-    return chat["deleted_at"] is None
-
-
 def _effective_reference_ids(snapshot):
     references = set()
-    chats = {row["id"]: row for row in snapshot["chats"]}
     for table, fields in REFERENCE_FIELDS.items():
         for row in snapshot[table]:
             if table == "chats" and row["deleted_at"] is not None:
-                continue
-            if table == "messages" and not _effective_message(row, chats):
                 continue
             references.update(
                 row[key] for key in fields if row.get(key) is not None
@@ -274,7 +258,6 @@ def _validate_associations(snapshot):
     for table, rows in (
         ("chats", chats.values()),
         ("turns", turns.values()),
-        ("messages", snapshot["messages"]),
     ):
         for row in rows:
             parent = sessions.get(row["session_id"])
@@ -314,13 +297,6 @@ def _validate_associations(snapshot):
             raise IntegrityError("backup Turn association mismatch")
     publications = {row["id"]: row for row in snapshot["publications"]}
     _validate_publication_associations(publications, sessions, chats, turns)
-    _validate_message_associations(
-        snapshot,
-        sessions,
-        chats,
-        turns,
-        publications,
-    )
     for table, fields in REFERENCE_FIELDS.items():
         if table == "shares":
             continue
@@ -363,43 +339,6 @@ def _validate_associations(snapshot):
                     raise IntegrityError(
                         "backup locator publication Session differs",
                     )
-
-
-def _validate_message_associations(
-    snapshot,
-    sessions,
-    chats,
-    turns,
-    publications,
-):
-    for message in snapshot["messages"]:
-        if message["session_id"] not in sessions:
-            raise IntegrityError("backup Message Session is missing")
-        for key in ("origin_chat_id", "archive_chat_id"):
-            identity = message[key]
-            if identity is not None and (
-                identity not in chats
-                or any(
-                    chats[identity][key]
-                    != sessions[message["session_id"]][key]
-                    for key in SCOPE_COLUMNS
-                )
-            ):
-                raise IntegrityError(
-                    "backup Message Chat association mismatch",
-                )
-        if message["turn_id"] is not None and (
-            message["turn_id"] not in turns
-            or turns[message["turn_id"]]["session_id"] != message["session_id"]
-        ):
-            raise IntegrityError("backup Message Turn association mismatch")
-        if (
-            publications[message["publication_id"]]["session_id"]
-            != message["session_id"]
-        ):
-            raise IntegrityError(
-                "backup Message payload publication Session differs",
-            )
 
 
 def _validate_publication_associations(publications, sessions, chats, turns):
@@ -510,7 +449,6 @@ def _validate_extents(snapshot, indexes):
                 "content_meta_length",
             ),
         ),
-        "messages": (("publication_id", "byte_offset", "byte_length"),),
         "shares": (("publication_id", "byte_offset", "byte_length"),),
     }
     for table, fields in specs.items():
@@ -528,14 +466,6 @@ def _validate_extents(snapshot, indexes):
                             "sessions": {"recovery"},
                             "chats": {"content_meta"},
                             "shares": {"share"},
-                            "messages": {
-                                "message",
-                                "memory",
-                                "task",
-                                "error",
-                                "anchor",
-                                "archive",
-                            },
                         }[table],
                     )
     for row in snapshot["publications"]:
@@ -547,7 +477,12 @@ def _validate_extents(snapshot, indexes):
                     indexes[row["id"]],
                     row[prefix + "_offset"],
                     row[prefix + "_length"],
-                    kinds={"events" if prefix == "event" else prefix},
+                    kinds={
+                        {
+                            "archive": "archive_manifest",
+                            "event": "events",
+                        }.get(prefix, prefix),
+                    },
                 )
 
 
@@ -587,7 +522,8 @@ def _recovery_payload(
     offset=None,
     length=None,
 ):
-    from .session_projection import hydrate_state
+    from .projection_references import references
+    from .session_projection import hydrate_state, is_projection
 
     publications = {row["id"]: row for row in snapshot["publications"]}
     current = publications[publication_id]
@@ -618,6 +554,17 @@ def _recovery_payload(
         extent.offset,
         extent.length,
     )
+    dependencies = {
+        row["publication_id"]
+        for row in snapshot["retentions"]
+        if (
+            row.get("retention_key") == f"dep:{publication_id}".encode("ascii")
+            and row.get("kind") == "dependency"
+            and row["state"] == "active"
+        )
+    }
+    indexes = {publication_id: index}
+    decoded = {}
 
     def resolve(ref):
         target_id = ref.get("publication_id", publication_id)
@@ -625,47 +572,57 @@ def _recovery_payload(
         if (
             target is None
             or target["session_id"] != current["session_id"]
-            or (target_id != publication_id and target_id >= publication_id)
+            or (
+                target_id != publication_id
+                and (
+                    target_id >= publication_id
+                    or target_id not in dependencies
+                )
+            )
         ):
             raise IntegrityError(
                 "backup projection dependency association differs",
             )
-        if "message_id" in ref:
-            row = next(
-                (
-                    row
-                    for row in snapshot["messages"]
-                    if row["id"] == ref["message_id"]
-                ),
-                None,
+        if (
+            "operation_key" in ref
+            and ref["operation_key"] != target["operation_key"].decode()
+        ):
+            raise IntegrityError("backup projection operation differs")
+        if target_id not in indexes:
+            indexes[target_id] = bundles.inspect(
+                bundles.validate_publication_locator(target),
+                expected_length=target["byte_length"],
             )
-            if row is None or (
-                row["publication_id"],
-                row["byte_offset"],
-                row["byte_length"],
-            ) != (target_id, ref["offset"], ref["length"]):
-                raise IntegrityError("backup projection occurrence differs")
-            return _read_payload(
+        name = ref["block_name"]
+        target_extent = indexes[target_id].blocks.get(name)
+        if target_extent is None:
+            raise IntegrityError("backup projection block is missing")
+        key = (target_id, name)
+        if key not in decoded:
+            decoded[key] = _read_payload(
                 snapshot,
                 bundles,
                 target_id,
-                ref["offset"],
-                ref["length"],
+                target_extent.offset,
+                target_extent.length,
             )
-        if ref["operation_key"] != target["operation_key"].decode():
-            raise IntegrityError("backup projection operation differs")
-        target_index = bundles.inspect(
-            bundles.validate_publication_locator(target),
-        )
-        target_extent = target_index.blocks[ref["block_name"]]
-        return _read_payload(
-            snapshot,
-            bundles,
-            target_id,
-            target_extent.offset,
-            target_extent.length,
-        )
+        payload = decoded[key]
+        if target_extent.kind == "message_bodies":
+            position = ref["position"]
+            if (
+                not isinstance(payload, list)
+                or type(position) is not int
+                or not 0 <= position < len(payload)
+            ):
+                raise IntegrityError("backup message body position is invalid")
+            return payload[position]
+        if ref.get("position", 0) != 0:
+            raise IntegrityError("backup message body position is invalid")
+        return payload
 
+    if is_projection(value):
+        for ref in references(value):
+            resolve(ref)
     return hydrate_state(value, resolve)
 
 
@@ -832,13 +789,14 @@ class ConversationBackup:
                     + " ORDER BY id",
                     params,
                 )
-            for name in ("turns", "messages"):
-                snapshot[name] = await self.db.fetch_all(
-                    "SELECT r.* FROM "
-                    + TABLES[name]
-                    + " r JOIN swe_conversation_sessions s ON s.id=r.session_id WHERE r.service_unit_key=s.service_unit_key AND s.service_unit_key=%s AND s.tenant_key=%s AND s.source_key=%s AND s.agent_key=%s ORDER BY r.id",
-                    values,
-                )
+            snapshot["turns"] = await self.db.fetch_all(
+                "SELECT r.* FROM swe_conversation_turns r "
+                "JOIN swe_conversation_sessions s ON s.id=r.session_id "
+                "WHERE r.service_unit_key=s.service_unit_key AND "
+                "s.service_unit_key=%s AND s.tenant_key=%s AND "
+                "s.source_key=%s AND s.agent_key=%s ORDER BY r.id",
+                values,
+            )
             snapshot["shares"] = await self.db.fetch_all(
                 "SELECT r.* FROM swe_chat_shares r JOIN swe_conversation_publications p ON p.id=r.publication_id WHERE r.service_unit_key=p.service_unit_key AND ((p.service_unit_key=%s AND p.tenant_key=%s AND p.source_key=%s AND p.agent_key=%s AND p.scope_kind=%s) OR (p.service_unit_key=%s AND p.tenant_key=%s AND p.source_key=%s AND p.agent_key=%s AND p.scope_kind=%s)) ORDER BY r.token",
                 (*values, "workspace", *values[:2], b"", b"", "legacy_share"),

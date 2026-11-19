@@ -24,6 +24,7 @@ from .reference_queries import ReferenceQuery, fetch_reference_rows
 from .message_installs import install_messages, install_turn
 from .archive import install_archive
 from .archive_payloads import (
+    prepare_archive_blocks,
     validate_archive_plan,
     validate_archive_payloads,
     validate_request_plan,
@@ -330,11 +331,6 @@ class PublicationStore(PublicationAssociations):
         await self._validate_plan_reference_ownership(request, plan)
 
     async def _validate_plan_reference_ownership(self, request, plan):
-        messages = {
-            item.source_message_id
-            for item in plan.messages
-            if item.source_message_id is not None
-        } | set(plan.prune_ids)
         publications = set()
         if plan.share is not None and plan.share.selection_proof is not None:
             proof = plan.share.selection_proof
@@ -344,25 +340,7 @@ class PublicationStore(PublicationAssociations):
             ) != (request.session_id, request.chat_id):
                 raise IntegrityError("share proof association mismatch")
             for item in proof["questions"].values():
-                messages.add(item["message_id"])
                 publications.add(item["publication_id"])
-        rows = await fetch_reference_rows(
-            self.db,
-            ReferenceQuery.MESSAGE_OWNERSHIP,
-            messages,
-            request.scope.sql_values[0],
-        )
-        for identity in sorted(messages):
-            row = rows.get(identity)
-            if (
-                row is None
-                or row["service_unit_key"] != request.scope.sql_values[0]
-                or row["session_id"] != request.session_id
-            ):
-                raise IntegrityError(
-                    "Message reference service or Session mismatch",
-                )
-            publications.add(row["publication_id"])
         rows = await fetch_reference_rows(
             self.db,
             ReferenceQuery.PUBLICATION_OWNERSHIP,
@@ -396,7 +374,8 @@ class PublicationStore(PublicationAssociations):
         self._validate_service(request)
         validate_share_request(request, plan.share)
         validate_request_plan(request, plan)
-        plan_text = plan.serialize()
+        plan.serialize()
+        plan_text = plan.for_reservation().serialize()
         try:
             async with self.db.transaction():
                 await self._assert_writes_allowed(request)
@@ -417,6 +396,8 @@ class PublicationStore(PublicationAssociations):
         self,
         operation_key: str,
         blocks: list[BundleBlock],
+        *,
+        plan: CommitPlan | None = None,
     ):
         try:
             row = await self.get(operation_key)
@@ -427,13 +408,22 @@ class PublicationStore(PublicationAssociations):
                 "publication must be prepared before writing NAS",
             )
         request = _request(row)
-        plan = await self._validate_prepared_references(row)
+        reserved = await self._validate_prepared_references(row)
+        plan = reserved if plan is None else plan
+        if plan.for_reservation() != reserved:
+            raise ConflictError("publication commit plan changed")
+        payload = plan.install_payload()
+        if reserved.install_digest is not None and payload is None:
+            raise IntegrityError("publication requires its installation block")
         blocks = await prepare_recovery_blocks(
             self,
             row,
             plan,
             blocks,
         )
+        blocks = await prepare_archive_blocks(self, request, plan, blocks)
+        if payload is not None:
+            blocks = [*blocks, BundleBlock("install", "install", payload)]
         index = await self._nas_io(
             operation_key,
             self.bundles.publish,
@@ -445,6 +435,23 @@ class PublicationStore(PublicationAssociations):
         )
         await self._mark_durable(operation_key, index)
         return index
+
+    async def recovery_install_plan(self, row, index, plan=None):
+        plan = plan or CommitPlan.parse(row["result_metadata_text"])
+        if plan.install_digest is None:
+            return plan
+        extent = index.blocks.get("install")
+        if extent is None or extent.kind != "install":
+            raise IntegrityError("publication installation block is missing")
+        payload = await self._nas_io(
+            _text(row["operation_key"]),
+            self.bundles.read_extent,
+            index.relative_path,
+            extent.offset,
+            extent.length,
+            expected_length=index.byte_length,
+        )
+        return plan.with_install_payload(payload)
 
     async def confirm_bundle(self, operation_key: str):
         """Confirm the original file, never regenerate model/tool output."""
@@ -804,7 +811,6 @@ class PublicationStore(PublicationAssociations):
                 plan.checkpoint,
                 plan.events,
                 plan.reset,
-                plan.prune_ids,
             ),
         ):
             if associations is None:
@@ -819,7 +825,6 @@ class PublicationStore(PublicationAssociations):
                 checkpoint=plan.checkpoint,
                 events=plan.events,
                 reset=plan.reset,
-                prune_ids=plan.prune_ids,
             )
 
     @staticmethod
@@ -903,6 +908,7 @@ class PublicationStore(PublicationAssociations):
             )
             if index.metadata.get("operation_key") != operation_key:
                 raise IntegrityError("bundle operation identity mismatch")
+            plan = await self.recovery_install_plan(initial, index, plan)
             plan, projection = await effective_recovery_plan(
                 self,
                 request,
@@ -926,6 +932,7 @@ class PublicationStore(PublicationAssociations):
                 request,
                 plan,
                 index,
+                initial,
                 sources=sources,
             )
             existing = await self._commit_install(

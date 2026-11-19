@@ -12,15 +12,26 @@ from ...agents.memory.chat_checkpoint import (
     validate_checkpoint_record,
 )
 from .chat_mutations import load_metadata_json
-from .errors import IntegrityError
+from .errors import ConflictError, IntegrityError
 from .identity import identity_bytes
+from .bundle import BundleBlock
+from .message_bundle import encode_archive_manifest, encode_message_directory
 
 
 @dataclass(frozen=True)
 class ArchivePayloads:
     checkpoint: CheckpointRecord | None = None
+    manifest: dict | None = None
 
     def validate_chat(self, chat):
+        if self.manifest is not None and (
+            identity_bytes(self.manifest["chat_id"], 256)
+            != chat["external_chat_key"]
+            or self.manifest["first_sequence"] != chat["history_high"] + 1
+        ):
+            raise IntegrityError(
+                "archive manifest differs from the locked Chat",
+            )
         if (
             self.checkpoint is not None
             and identity_bytes(self.checkpoint.chat_id, 256)
@@ -30,6 +41,8 @@ class ArchivePayloads:
 
 
 def validate_archive_plan(plan):
+    if plan.install_digest is not None:
+        return
     archived = [item for item in plan.messages if item.layer == "archive"]
     if archived and plan.archive is None:
         raise ValueError("archive occurrences require a committed boundary")
@@ -50,6 +63,108 @@ def validate_request_plan(request, plan):
     validate_archive_plan(plan)
     if request.kind == "compact" and plan.recovery_block is None:
         raise ValueError("compact requires a complete recovery root")
+
+
+async def prepare_archive_blocks(service, request, plan, blocks):
+    if plan.archive is None:
+        return blocks
+    from .source_messages import snapshot_sources
+
+    chat = await service.db.fetch_one(
+        "SELECT external_chat_key,history_high FROM swe_conversation_chats "
+        "WHERE id=%s AND service_unit_key=%s AND history_revision=%s",
+        (
+            request.chat_id,
+            request.scope.sql_values[0],
+            request.base_history_revision,
+        ),
+    )
+    if chat is None:
+        raise ConflictError("archive Chat revision changed")
+    sources = await snapshot_sources(service, request, plan)
+    try:
+        archived = [item for item in plan.messages if item.layer == "archive"]
+        first = chat["history_high"] + 1
+        entries = []
+        for sequence, item in enumerate(archived, first):
+            source = sources.rows.get(item.source_message_id)
+            locator = (
+                {
+                    "publication_id": source["publication_id"],
+                    "block_name": source["body"]["block_name"],
+                    "position": source["body"]["position"],
+                }
+                if source is not None
+                else {
+                    "publication_id": "self",
+                    "block_name": item.block_name,
+                    "position": 0,
+                }
+            )
+            entries.append(
+                {
+                    "sequence": sequence,
+                    "archive_order": sequence,
+                    "raw_id": item.source_msg_key or "",
+                    "layer": "archive",
+                    "visible": True,
+                    "turn_id": item.turn_id,
+                    "archive_chat_id": request.chat_id,
+                    "origin_chat_id": item.origin_chat_id,
+                    "role": item.role,
+                    "kind": item.kind,
+                    "task": item.task_run_key,
+                    "source_occurrence_no": item.source_occurrence_no,
+                    "context_epoch": item.context_epoch,
+                    "timestamp": item.message_timestamp,
+                    "body": locator,
+                },
+            )
+        archive_blocks = []
+        chunks = []
+        for start in range(0, len(entries), 1000):
+            part = entries[start : start + 1000]
+            name = f"archive-directory:{start}"
+            archive_blocks.append(
+                BundleBlock(
+                    name,
+                    "message_directory",
+                    encode_message_directory(part),
+                ),
+            )
+            chunks.append(
+                {
+                    "publication_id": "self",
+                    "directory_block": name,
+                    "first_sequence": part[0]["sequence"],
+                    "last_sequence": part[-1]["sequence"],
+                },
+            )
+        archive_blocks.append(
+            BundleBlock(
+                plan.archive.block_name,
+                "archive_manifest",
+                encode_archive_manifest(
+                    {
+                        "chat_id": chat["external_chat_key"].decode(),
+                        "epoch": request.epoch,
+                        "first_sequence": first,
+                        "last_sequence": first + len(entries) - 1,
+                        "chunks": chunks,
+                    },
+                ),
+            ),
+        )
+        return [
+            *(
+                block
+                for block in blocks
+                if block.name != plan.archive.block_name
+            ),
+            *archive_blocks,
+        ]
+    finally:
+        await sources.finish(service, request.scope)
 
 
 def _stamp(value):
@@ -92,29 +207,39 @@ def _events(value, request, plan):
         raise ValueError("event body epoch or facts are invalid")
 
 
-def _archive(value, plan, payloads):
+def _archive(entries, plan, sources):
     from ..runner.utils import agentscope_msg_to_message
 
     archived = [item for item in plan.messages if item.layer == "archive"]
-    originals = [payloads[item.block_name] for item in archived]
-    source_ids = [item.source_message_id for item in archived]
-    expected = (
-        {"version": 1, "source_message_ids": source_ids}
-        if all(identity is not None for identity in source_ids)
-        else originals
-    )
-    if value != expected:
-        raise ValueError("archive batch differs from its ordered occurrences")
+    if len(entries) != len(archived):
+        raise ValueError("archive directory count differs from occurrences")
+    originals = [entry["message"] for entry in entries]
     count = 0
-    for item, raw in zip(archived, originals):
+    for item, entry, raw in zip(archived, entries, originals):
         if not isinstance(raw, dict) or (
-            raw.get("id") != item.source_msg_key
-            or raw.get("role") != item.role
-            or _stamp(raw.get("timestamp")) != _stamp(item.message_timestamp)
-        ):
+            raw.get("id"),
+            raw.get("role"),
+            _stamp(raw.get("timestamp")),
+        ) != (item.source_msg_key, item.role, _stamp(item.message_timestamp)):
             raise ValueError(
                 "archive occurrence body identity differs from metadata",
             )
+        if (
+            entry["raw_id"],
+            entry["turn_id"],
+            entry["origin_chat_id"],
+            entry["archive_chat_id"],
+        ) != (
+            item.source_msg_key,
+            item.turn_id,
+            item.origin_chat_id,
+            item.archive_chat_id,
+        ):
+            raise ValueError("archive directory associations differ")
+        if item.source_message_id is not None and (
+            sources.payloads[item.block_name] != raw
+        ):
+            raise ValueError("archive referenced body differs from Session")
         count += len(agentscope_msg_to_message(Msg.from_dict(raw)))
     boundary = plan.archive
     if (
@@ -132,24 +257,18 @@ async def validate_archive_payloads(
     request,
     plan,
     index,
+    publication=None,
     *,
     sources=None,
 ):
     specs = {}
     for item, kind in (
-        (plan.archive, "archive"),
         (plan.checkpoint, "checkpoint"),
         (plan.events, "events"),
     ):
         if item is not None:
             specs[item.block_name] = kind
-    if plan.archive is not None:
-        specs.update(
-            (item.block_name, "archive")
-            for item in plan.messages
-            if item.layer == "archive" and item.source_message_id is None
-        )
-    payloads = dict(sources.payloads) if sources is not None else {}
+    payloads = {}
     try:
         for name, kind in specs.items():
             extent = index.blocks.get(name)
@@ -173,9 +292,24 @@ async def validate_archive_payloads(
             )
         if plan.events is not None:
             _events(payloads[plan.events.block_name], request, plan.events)
+        manifest = None
         if plan.archive is not None:
-            _archive(payloads[plan.archive.block_name], plan, payloads)
-        return ArchivePayloads(checkpoint)
+            from .archive_bundle_reader import read_archive_bundle
+
+            archive = await read_archive_bundle(
+                service.db,
+                request.scope,
+                service.bundles,
+                publication,
+                prepared_index=index,
+            )
+            sources.archive_pins = archive.pins
+            _archive(archive.entries, plan, sources)
+            manifest = archive.manifest
+            sources.dependency_publications.update(
+                (row["id"], row) for row in archive.pins.publications
+            )
+        return ArchivePayloads(checkpoint, manifest)
     except (ValueError, TypeError, KeyError, AttributeError) as error:
         raise IntegrityError(
             "archive/checkpoint/event body validation failed: " + str(error),

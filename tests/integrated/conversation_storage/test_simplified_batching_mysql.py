@@ -7,7 +7,6 @@ import pytest
 
 from swe.app.conversation_storage.bundle import BlockExtent, BundleIndex
 from swe.app.conversation_storage.message_installs import (
-    MESSAGE_INSERT,
     MessageInstall,
     install_messages,
 )
@@ -58,11 +57,9 @@ async def test_pin_batch_failure_rolls_back_every_member(
     )
 
 
-@pytest.mark.parametrize("failure_at", [1, 2, 3])
-async def test_message_batch_failure_rolls_back_rows_and_high_watermarks(
+async def test_message_batch_failure_rolls_back_high_watermarks(
     conversation_test_database,
     monkeypatch,
-    failure_at,
 ):
     db = conversation_test_database
     session = await insert_session(db, history_high=9)
@@ -81,7 +78,14 @@ async def test_message_batch_failure_rolls_back_rows_and_high_watermarks(
         {},
         {str(i): BlockExtent("message", 50 + i, 1) for i in range(201)},
     )
-    calls = fail_chunk(monkeypatch, MESSAGE_INSERT, failure_at)
+    execute = db.execute
+
+    async def fail_chat_update(query, params=None):
+        if query.startswith("UPDATE swe_conversation_chats"):
+            raise RuntimeError("injected Chat watermark failure")
+        return await execute(query, params)
+
+    monkeypatch.setattr(db, "execute", fail_chat_update)
     with pytest.raises(RuntimeError, match="injected"):
         async with db.transaction():
             await install_messages(
@@ -92,8 +96,6 @@ async def test_message_batch_failure_rolls_back_rows_and_high_watermarks(
                 index,
                 ({"history_high": 9}, {"history_high": 0}, None),
             )
-    assert len(calls) == failure_at
-    assert await db.fetch_all("SELECT id FROM swe_conversation_messages") == []
     current = await db.fetch_one(
         "SELECT history_high FROM swe_conversation_sessions WHERE id=%s",
         (session,),

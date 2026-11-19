@@ -64,9 +64,11 @@ async def test_runtime_compact_reuses_original_body_extent_and_dependency_pins(
             authority=None,
         )
         state = result.recovery_state
-    originals = await db.fetch_all(
-        "SELECT * FROM swe_conversation_messages ORDER BY session_order",
+    originals = await store.reader.session_messages(
+        session,
+        layers=("memory",),
     )
+    assert [row["message"]["id"] for row in originals] == ["q", "q"]
     result = await store.compact(
         "first",
         [first],
@@ -81,19 +83,25 @@ async def test_runtime_compact_reuses_original_body_extent_and_dependency_pins(
         },
         authority=None,
     )
-    archived = await db.fetch_one(
-        "SELECT * FROM swe_conversation_messages WHERE layer='archive'",
+    from swe.app.conversation_storage.archive_bundle_reader import (
+        read_archive_bundle,
     )
-    assert (
-        archived["publication_id"],
-        archived["byte_offset"],
-        archived["byte_length"],
-    ) == (
-        originals[0]["publication_id"],
-        originals[0]["byte_offset"],
-        originals[0]["byte_length"],
+
+    archived = await read_archive_bundle(
+        db,
+        store.scope,
+        store.bundles,
+        result.publication,
     )
-    assert archived["archive_publication_id"] == result.publication["id"]
+    try:
+        assert [row["body"] for row in archived.entries] == [
+            {
+                **originals[0]["body"],
+                "publication_id": originals[0]["publication_id"],
+            },
+        ]
+    finally:
+        await archived.pins.finish()
     pins = await db.fetch_all(
         "SELECT publication_id FROM swe_conversation_retentions WHERE kind='dependency' AND state='active'",
     )

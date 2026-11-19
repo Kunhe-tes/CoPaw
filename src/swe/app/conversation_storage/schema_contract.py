@@ -130,31 +130,6 @@ COLUMNS = {
         "aborted_at": ("datetime(6)", "YES"),
         "reclaimed_at": ("datetime(6)", "YES"),
     },
-    "swe_conversation_messages": {
-        "id": ("bigint unsigned", "NO"),
-        "service_unit_key": ("varbinary(256)", "NO"),
-        "session_id": ("bigint unsigned", "NO"),
-        "origin_chat_id": ("bigint unsigned", "YES"),
-        "archive_chat_id": ("bigint unsigned", "YES"),
-        "layer": ("varchar(16)", "NO"),
-        "session_order": ("bigint unsigned", "YES"),
-        "archive_order": ("bigint unsigned", "YES"),
-        "turn_id": ("bigint unsigned", "YES"),
-        "source_msg_key": ("varbinary(1024)", "YES"),
-        "source_occurrence_no": ("bigint unsigned", "NO"),
-        "role_key": ("varbinary(32)", "NO"),
-        "kind_key": ("varbinary(64)", "NO"),
-        "task_run_key": ("varbinary(256)", "YES"),
-        "publication_id": ("bigint unsigned", "NO"),
-        "byte_offset": ("bigint unsigned", "NO"),
-        "byte_length": ("bigint unsigned", "NO"),
-        "archive_publication_id": ("bigint unsigned", "YES"),
-        "context_epoch": ("bigint unsigned", "NO"),
-        "in_context": ("tinyint unsigned", "NO"),
-        "current_visible": ("tinyint unsigned", "NO"),
-        "message_timestamp": ("datetime(6)", "YES"),
-        "deleted_at": ("datetime(6)", "YES"),
-    },
     "swe_conversation_retentions": {
         "id": ("bigint unsigned", "NO"),
         "service_unit_key": ("varbinary(256)", "NO"),
@@ -293,51 +268,13 @@ INDEXES = {
             1,
             ("chat_id", "epoch", "event_last", "id"),
         ),
+        "ix_conv_publication_archive": (
+            1,
+            ("chat_id", "archive_last_order", "id"),
+        ),
         "ix_conv_publication_chat": (1, ("chat_id", "id")),
         "ix_conv_publication_session": (1, ("session_id", "id")),
         "ix_conv_publication_turn": (1, ("turn_id", "id")),
-    },
-    "swe_conversation_messages": {
-        "PRIMARY": (0, ("id",)),
-        "uq_conv_message_session_order": (0, ("session_id", "session_order")),
-        "uq_conv_message_archive_order": (
-            0,
-            ("archive_chat_id", "archive_order"),
-        ),
-        "ix_conv_message_current": (
-            1,
-            (
-                "session_id",
-                "current_visible",
-                "layer",
-                "deleted_at",
-                "session_order",
-            ),
-        ),
-        "ix_conv_message_anchor": (
-            1,
-            ("session_id", "origin_chat_id", "layer", "session_order"),
-        ),
-        "ix_conv_message_origin_chat": (1, ("origin_chat_id", "id")),
-        "ix_conv_message_turn": (1, ("turn_id", "session_order", "id")),
-        "ix_conv_message_source": (
-            1,
-            ("session_id", "source_msg_key", "layer"),
-        ),
-        "ix_conv_message_context": (
-            1,
-            ("session_id", "context_epoch", "in_context", "session_order"),
-        ),
-        "ix_conv_message_archive_page": (
-            1,
-            ("archive_chat_id", "deleted_at", "archive_order"),
-        ),
-        "ix_conv_message_archive_source": (
-            1,
-            ("archive_chat_id", "source_msg_key", "deleted_at"),
-        ),
-        "ix_conv_message_publication": (1, ("publication_id",)),
-        "ix_conv_message_archive_ref": (1, ("archive_publication_id",)),
     },
     "swe_conversation_retentions": {
         "PRIMARY": (0, ("id",)),
@@ -399,7 +336,6 @@ DEFAULTS = {
         "retained_history": "0",
         "gc_state": "live",
     },
-    "swe_conversation_messages": {"current_visible": "1"},
     "swe_conversation_retentions": {"scope_kind": "workspace"},
 }
 
@@ -408,7 +344,6 @@ EXTRAS = {
     "swe_conversation_chats": {"id": "auto_increment"},
     "swe_conversation_turns": {"id": "auto_increment"},
     "swe_conversation_publications": {"id": "auto_increment"},
-    "swe_conversation_messages": {"id": "auto_increment"},
     "swe_conversation_retentions": {"id": "auto_increment"},
 }
 

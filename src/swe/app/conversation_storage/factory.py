@@ -23,7 +23,6 @@ TABLES = tuple(
         "chats",
         "turns",
         "publications",
-        "messages",
         "retentions",
     )
 )

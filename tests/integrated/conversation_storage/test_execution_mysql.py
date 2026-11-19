@@ -82,6 +82,67 @@ async def admit(service, question="question", chat="one", recovery=None):
     return result
 
 
+async def test_admission_recovers_after_durable_bundle_before_commit(
+    conversation_test_database,
+    tmp_path,
+    monkeypatch,
+):
+    db = conversation_test_database
+    session_id = await seed(db)
+    service = store(db, tmp_path, "original-owner")
+    operation = new_operation_key()
+    reservation = await service.reserve_admission(
+        identity(),
+        "one",
+        "interrupted",
+        operation_key=operation,
+        runtime_turn_key="turn-before-commit",
+    )
+
+    async def interrupt(_operation):
+        raise UnknownCommit(operation)
+
+    with monkeypatch.context() as patches:
+        patches.setattr(service.publications, "commit", interrupt)
+        with pytest.raises(UnknownCommit):
+            await service.publish_admission(
+                reservation,
+                {"id": "interrupted", "role": "user", "content": "question"},
+                {"revision": 1},
+            )
+    prepared = await service.publications.get(operation)
+    assert prepared["state"] == "prepared" and prepared["durable_at"]
+    assert "messages" not in json.loads(prepared["result_metadata_text"])
+    before = await db.fetch_one(
+        "SELECT recovery_publication_id FROM swe_conversation_sessions WHERE id=%s",
+        (session_id,),
+    )
+    assert before["recovery_publication_id"] is None
+
+    restarted = store(db, tmp_path, "restarted-owner")
+    recovered = await restarted.publications.commit(operation)
+    assert (
+        recovered["id"] == prepared["id"] and recovered["state"] == "committed"
+    )
+    assert (await restarted.publications.commit(operation))["id"] == recovered[
+        "id"
+    ]
+    reader = HistoryStore(
+        db,
+        identity().scope,
+        restarted.publications.bundles,
+        cursor_secret=b"test-cursor-secret",
+    )
+    from swe.app.conversation_storage.archive_reader import ArchiveReader
+
+    directory = await ArchiveReader(
+        db,
+        reader.scope,
+        reader.bundles,
+    ).session_messages(session_id)
+    assert [row["message"]["id"] for row in directory] == ["interrupted"]
+
+
 @pytest.mark.parametrize(
     "following_chat",
     [None, "one", "two"],

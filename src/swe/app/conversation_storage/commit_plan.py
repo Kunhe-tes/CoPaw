@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Body-free, versioned installation plans persisted before immutable NAS IO."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from hashlib import sha256
 import json
 
 from .archive import (
@@ -35,8 +36,54 @@ class CommitPlan:
     reset: ContextReset | None = None
     prune_ids: tuple[int, ...] = ()
     share: ShareInstall | None = None
+    install_digest: str | None = None
     # Derived from the durable recovery body during commit, never persisted.
     context_usage_projection: tuple[str | None, bool] | None = None
+
+    def install_payload(self):
+        if not (self.messages or self.prune_ids):
+            return None
+        return json.dumps(
+            {
+                "messages": [item.to_dict() for item in self.messages],
+                "prune_ids": self.prune_ids,
+            },
+            separators=(",", ":"),
+        ).encode()
+
+    def for_reservation(self):
+        payload = self.install_payload()
+        if payload is None:
+            return self
+        return replace(
+            self,
+            messages=(),
+            prune_ids=(),
+            install_digest=sha256(payload).hexdigest(),
+        )
+
+    def with_install_payload(self, payload):
+        if sha256(payload).hexdigest() != self.install_digest:
+            raise IntegrityError("publication installation block differs")
+        try:
+            value = load_metadata_json(payload)
+            if set(value) != {"messages", "prune_ids"}:
+                raise ValueError("unknown installation fields")
+            result = replace(
+                self,
+                messages=tuple(
+                    MessageInstall.from_dict(item)
+                    for item in value["messages"]
+                ),
+                prune_ids=tuple(value["prune_ids"]),
+                install_digest=None,
+            )
+            result.serialize()
+            return result
+        except (TypeError, ValueError, KeyError, AttributeError) as error:
+            raise IntegrityError(
+                "invalid publication installation block",
+            ) from error
 
     def serialize(self):
         self._validate_share_plan()
@@ -51,6 +98,16 @@ class CommitPlan:
             "recovery_block": self.recovery_block,
             "result_ids": self.result_ids,
         }
+        if self.install_digest is not None:
+            if (
+                self.install_payload() is not None
+                or len(self.install_digest) != 64
+                or any(
+                    ch not in "0123456789abcdef" for ch in self.install_digest
+                )
+            ):
+                raise ValueError("invalid publication installation digest")
+            value["install_digest"] = self.install_digest
         if self.share is not None:
             value["share"] = self.share.to_dict()
         self._serialize_chat_metadata(value)
@@ -67,7 +124,10 @@ class CommitPlan:
                 raise ValueError(
                     "Turn admission or terminal requires a complete recovery root",
                 )
-            if self.turn_install.phase == "admission":
+            if (
+                self.turn_install.phase == "admission"
+                and self.install_digest is None
+            ):
                 anchors = [
                     message
                     for message in self.messages
@@ -126,6 +186,7 @@ class CommitPlan:
                 self.events,
                 self.reset,
                 self.prune_ids,
+                self.install_digest,
             ),
         ):
             raise ValueError("share installation must be an independent plan")
@@ -173,6 +234,7 @@ class CommitPlan:
                         "reset",
                         "prune_ids",
                         "share",
+                        "install_digest",
                     }
                 )
                 or value.pop("version") != 1

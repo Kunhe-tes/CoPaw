@@ -94,7 +94,7 @@ async def insert_publication(db, operation=b"operation", **changes):
     return await insert_row(db, "swe_conversation_publications", values)
 
 
-async def test_mysql_capabilities_and_exact_six_table_schema(
+async def test_mysql_capabilities_and_exact_five_table_schema(
     conversation_test_database,
     record_property,
 ):
@@ -225,7 +225,7 @@ async def test_full_session_identity_is_binary_unique_and_empty_is_valid(
     assert "Data too long" in str(error.value)
 
 
-async def test_session_accepts_multiple_chats_and_nullable_message_order_keys(
+async def test_session_accepts_multiple_chats_and_independent_archive_order(
     conversation_test_database,
 ):
     db = conversation_test_database
@@ -238,47 +238,15 @@ async def test_session_accepts_multiple_chats_and_nullable_message_order_keys(
         registry_order=2,
     )
     assert first_chat != second_chat
-    publication_id = await insert_publication(db)
-    values = {
-        "session_id": session_id,
-        "layer": "memory",
-        "source_msg_key": b"duplicate-id",
-        "source_occurrence_no": 0,
-        "role_key": b"user",
-        "kind_key": b"message",
-        "publication_id": publication_id,
-        "byte_offset": 10,
-        "byte_length": 2,
-        "context_epoch": 0,
-        "in_context": 1,
-    }
-    await insert_row(db, "swe_conversation_messages", values)
-    await insert_row(
-        db,
-        "swe_conversation_messages",
-        {**values, "source_occurrence_no": 1},
-    )
-    await insert_row(
-        db,
-        "swe_conversation_messages",
-        {**values, "session_order": 1},
-    )
+    values = {"session_id": session_id, "boundary_order": 1}
+    await insert_publication(db, b"first", chat_id=first_chat, **values)
+    await insert_publication(db, b"second", chat_id=second_chat, **values)
     with pytest.raises(IntegrityError):
-        await insert_row(
+        await insert_publication(
             db,
-            "swe_conversation_messages",
-            {**values, "session_order": 1},
-        )
-    for chat in (first_chat, second_chat):
-        await insert_row(
-            db,
-            "swe_conversation_messages",
-            {
-                **values,
-                "archive_chat_id": chat,
-                "archive_order": 1,
-                "layer": "archive",
-            },
+            b"third",
+            chat_id=first_chat,
+            **values,
         )
 
 
