@@ -480,7 +480,7 @@ def _raise_if_user_info_expired(state: CronAuthState) -> None:
     if not state.user_info:
         return
     expires_at = ensure_utc(state.user_info_expires_at)
-    print("user_info expires_at", expires_at)
+    logger.debug("user_info expires_at %s", expires_at)
     now = utc_now()
     if expires_at is not None and expires_at <= now:
         raise ValueError("cron auth user_info is expired")
