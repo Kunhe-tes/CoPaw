@@ -19,7 +19,7 @@ from ..publications import PublicationRequest, _request
 from ..projection_references import (
     ProjectionReferences,
     _snapshot_rows,
-    _text,
+    _resolve_payload,
     references,
     ref_key,
 )
@@ -330,7 +330,6 @@ class OfflineVerifyStages:
                     {
                         "name": name,
                         "envelope": envelope,
-                        "rows": deepcopy(snapshot.rows),
                         "turns": deepcopy(snapshot.turns),
                         "publications": deepcopy(snapshot.publications),
                     },
@@ -405,46 +404,32 @@ class OfflineVerifyStages:
                         publication,
                     )
                     size = publication["byte_length"]
-                    if "message_id" in ref:
-                        offset, length = ref["offset"], ref["length"]
-                    else:
-                        prior = bundles.inspect(path, expected_length=size)
-                        extent = prior.blocks.get(ref["block_name"])
-                        if extent is None or extent.kind != "turn":
-                            raise IntegrityError(
-                                "cold Turn requires an independent Turn body",
-                            )
-                        offset, length = extent.offset, extent.length
-                value = json.loads(
-                    bundles.read_extent(
-                        path,
-                        offset,
-                        length,
-                        expected_length=size,
-                    ),
+                    prior = bundles.inspect(path, expected_length=size)
+                    extent = prior.blocks.get(ref["block_name"])
+                    if extent is None or (
+                        "turn_id" in ref and extent.kind != "turn"
+                    ):
+                        raise IntegrityError(
+                            "recovery reference block is invalid",
+                        )
+                    offset, length = extent.offset, extent.length
+                raw = bundles.read_extent(
+                    path,
+                    offset,
+                    length,
+                    expected_length=size,
                 )
-                payloads[ref_key(ref)] = value
-                if "message_id" in ref:
-                    row = snapshot["rows"][ref["message_id"]]
-                    if (
-                        not isinstance(value, dict)
-                        or value.get("id") != _text(row["source_msg_key"])
-                        or (value.get("role") or "assistant")
-                        != _text(row["role_key"])
-                    ):
-                        raise IntegrityError(
-                            "recovery projection body identity mismatch",
-                        )
-                elif "turn_id" in ref:
-                    turn = snapshot["turns"][ref["turn_id"]]
-                    if (
-                        ref["block_name"]
-                        != "turn:" + _text(turn["question_msg_key"])
-                        or value.get("status") != turn["history_status"]
-                    ):
-                        raise IntegrityError(
-                            "cold Turn independent body identity differs",
-                        )
+                if extent.kind == "message_bodies":
+                    from ..message_bundle import decode_message_bodies
+
+                    value = decode_message_bodies(raw)
+                else:
+                    value = json.loads(raw)
+                payloads[ref_key(ref)] = _resolve_payload(
+                    value,
+                    ref,
+                    snapshot["turns"],
+                )
 
             actual = hydrate_state(
                 snapshot["envelope"],
