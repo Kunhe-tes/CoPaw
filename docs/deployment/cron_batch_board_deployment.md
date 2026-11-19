@@ -94,7 +94,7 @@ Content-Type: application/json
 
 `GET {{scheduler_base}}/scheduler/cron/managed-dispatch/batches/{{batch_id}}/failures`
 
-按需重复添加 `types=model_rate_limit` 等 Params。counts 为整个批次当前失败分类；items 为前200个匹配成员，matched_count/has_more 表示尚余匹配成员。分类多选只影响候选，不缩减分类总数；历史未保存原因显示其他错误，不补造原始原因。
+按需重复添加 `types=model_rate_limit` 等 Params。counts 为整个批次当前失败分类，matched_count 为匹配总数。items 每次最多返回 200 个成员，offset 默认为 0。has_more 为 true 时以相同筛选传入 `offset=200`、`offset=400` 等继续查看。分类多选只影响匹配成员，不缩减分类总数；历史未保存原因显示其他错误，不补造原始原因。
 
 每项带 member_id、execution_id、member_version、execution_version、definition_version、business_attempt。definition_version 是当前定义，execution_definition_version 是失败执行的旧版本。transport_only 表示只重投原请求。
 
@@ -135,6 +135,6 @@ Content-Type: application/json
 
 ## 页面与联调验收
 
-管理员打开新旧两个菜单，确认旧页仍只发旧请求，新页只发 managed-dispatch 请求；新页没有旧重试兜底。验证来源/用户切换、成员及事件筛选分页、200候选限制、停止确认、重复点击、错误提示和重试后的逐项结果。共享容量可展开曲线和调整详情，原 CSS/组件样式延续，不使用旧数字 Intent ID 承载新 UUID。
+管理员打开新旧两个菜单，确认旧页仍只发旧请求，新页只发 managed-dispatch 请求；新页没有旧重试兜底。验证来源/用户切换、成员及事件筛选分页、失败预览能翻到第 201 条及之后、重试只提交当前组且最多 200 个候选。继续验证停止确认、重复点击、错误提示和重试后的逐项结果。共享容量可展开曲线和调整详情，原 CSS/组件样式延续，不使用旧数字 Intent ID 承载新 UUID。
 
 本地自动化及浏览器证据另见进度记录。浏览器边界 Mock 不代表真实网关、平台、SWE 多实例或 Agent/Workflow 已联调；上线前仍须用真实认证、稳定平台触发及业务执行完成以上正负场景。

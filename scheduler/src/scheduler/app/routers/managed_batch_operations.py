@@ -53,12 +53,13 @@ def batch_error(exc):
 async def failures(
     batch_id: str,
     types: list[str] = Query(default=[]),
+    offset: int = Query(default=0, ge=0),
     caller: CallerIdentity = Depends(caller_identity),
     service=Depends(batch_service),
 ):
-    """仅可信 manager/admin 查询本来源；统计整批，预览最多 200 个匹配的当前尝试。"""
+    """仅可信 manager/admin 查询本来源；统计整批，按偏移量预览匹配成员。"""
     try:
-        return await service.preview(caller, batch_id, types)
+        return await service.preview(caller, batch_id, types, offset=offset)
     except Exception as exc:
         raise batch_error(exc) from exc
 

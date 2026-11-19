@@ -211,7 +211,7 @@ export function ManagedBroadcastModal({
               size="small"
               rowKey={(row) => `${row.tenant_id}:${row.agent_id}:${row.job_id}`}
               dataSource={task.results ?? []}
-              pagination={{ pageSize: 10, showSizeChanger: true }}
+              pagination={{ defaultPageSize: 10, showSizeChanger: true }}
               scroll={{ x: 750 }}
               columns={[
                 { title: "用户", dataIndex: "tenant_id" },

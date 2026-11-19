@@ -17,6 +17,10 @@ import {
 } from "../../../api/modules/managedBatchBoard";
 import { useBoardResource } from "./useBoardResource";
 
+const RETRY_GROUP_SIZE = 200;
+// 页大小要整除重试组大小，避免同一页跨组。
+const PAGE_SIZES = [5, 10, 20, 50, 100];
+
 function readPending(key: string): ManagedRetryBody | null {
   try {
     return JSON.parse(sessionStorage.getItem(key) || "null");
@@ -50,6 +54,9 @@ export default function FailurePanel({
     batchId,
   ])}`;
   const [types, setTypes] = useState<string[]>([]);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(PAGE_SIZES[0]);
+  const [lastMatchedCount, setLastMatchedCount] = useState(0);
   const [refresh, setRefresh] = useState(0);
   const [stopped, setStopped] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -66,15 +73,30 @@ export default function FailurePanel({
       alive.current = false;
     };
   }, []);
+  const firstRow = (page - 1) * pageSize;
+  const offset = Math.floor(firstRow / RETRY_GROUP_SIZE) * RETRY_GROUP_SIZE;
   const load = useCallback(
     (signal: AbortSignal) => {
       void refresh;
-      return managedBatchBoard.failures(source, batchId, types, signal);
+      return managedBatchBoard.failures(source, batchId, types, signal, offset);
     },
-    [source, batchId, types, refresh],
+    [source, batchId, types, refresh, offset],
   );
   const preview = useBoardResource(load);
-  const danger = preview.value?.items.some((item) =>
+  const group = preview.value?.items;
+  const matchedCount = preview.value?.matched_count ?? lastMatchedCount;
+  useEffect(() => {
+    if (!preview.value) return;
+    const count = preview.value.matched_count;
+    setLastMatchedCount(count);
+    setPage((current) =>
+      Math.min(current, Math.max(1, Math.ceil(count / pageSize))),
+    );
+  }, [preview.value, pageSize]);
+
+  const startInGroup = firstRow - offset;
+  const pageItems = group?.slice(startInGroup, startInGroup + pageSize);
+  const danger = group?.some((item) =>
     [
       "other",
       "outcome_unknown",
@@ -87,13 +109,16 @@ export default function FailurePanel({
     (!pending &&
       (preview.loading ||
         !types.length ||
-        !preview.value?.items.length ||
+        !group?.length ||
         (danger && !stopped)));
+  const retryLabel = pending
+    ? "核对并重提原请求"
+    : `重试本组的 ${group?.length || 0} 个失败成员`;
   const retry = async () => {
     if (blocked || locked.current) return;
     const command = pending || {
       request_id: crypto.randomUUID(),
-      candidates: retryCandidates(preview.value!.items),
+      candidates: retryCandidates(group!),
       confirm_stopped: stopped,
     };
     locked.current = true;
@@ -105,6 +130,7 @@ export default function FailurePanel({
       savePending(storageKey, null);
       if (!alive.current) return;
       setPending(null);
+      setStopped(false);
       setNotice({
         type: "success",
         text: `已受理 ${result.queued} 个，跳过 ${result.skipped} 个${
@@ -156,22 +182,44 @@ export default function FailurePanel({
           }))}
           onChange={(value) => {
             setTypes(value);
+            setPage(1);
+            setLastMatchedCount(0);
             setStopped(false);
           }}
         />
         {preview.error && <Alert type="error" message={preview.error} />}
-        {preview.value?.has_more && (
+        {matchedCount > RETRY_GROUP_SIZE && !!group?.length && (
           <Alert
-            type="warning"
-            message="本次预览前 200 个匹配成员，提交后可继续处理剩余成员。"
+            type="info"
+            message={`共 ${matchedCount} 个匹配成员。当前重试范围为第 ${
+              offset + 1
+            }–${offset + group.length} 条，每次最多 ${RETRY_GROUP_SIZE} 个。`}
           />
         )}
         <Spin spinning={preview.loading}>
           <Table
             size="small"
             rowKey="member_id"
-            dataSource={preview.value?.items || []}
-            pagination={{ pageSize: 5 }}
+            dataSource={pageItems}
+            pagination={{
+              current: page,
+              pageSize,
+              total: matchedCount,
+              pageSizeOptions: PAGE_SIZES,
+              showSizeChanger: true,
+              showTotal: (total) => `共 ${total} 条`,
+              disabled: submitting,
+              onChange: (nextPage, nextSize) => {
+                const nextFirstRow = (nextPage - 1) * nextSize;
+                if (
+                  nextFirstRow < offset ||
+                  nextFirstRow >= offset + RETRY_GROUP_SIZE
+                )
+                  setStopped(false);
+                setPage(nextPage);
+                setPageSize(nextSize);
+              },
+            }}
             scroll={{ x: 1120 }}
             columns={[
               {
@@ -267,22 +315,19 @@ export default function FailurePanel({
         <Space>
           <Button
             type="primary"
-            aria-label={
-              pending
-                ? "核对并重提原请求"
-                : `重试预览的 ${preview.value?.items.length || 0} 个失败成员`
-            }
+            aria-label={retryLabel}
             disabled={Boolean(blocked)}
             loading={submitting}
             onClick={() => void retry()}
           >
-            {pending
-              ? "核对并重提原请求"
-              : `重试预览的 ${preview.value?.items.length || 0} 个失败成员`}
+            {retryLabel}
           </Button>
           <Button
             disabled={submitting || !!pending}
-            onClick={() => setRefresh((value) => value + 1)}
+            onClick={() => {
+              setStopped(false);
+              setRefresh((value) => value + 1);
+            }}
           >
             刷新预览
           </Button>

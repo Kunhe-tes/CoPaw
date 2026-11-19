@@ -101,9 +101,85 @@ it("响应丢失时保留并重提原始请求，不按新预览换请求ID", as
   expect(sessionStorage.getItem(key)).toBeNull();
 });
 
+it("切换页大小并翻过 200 条后，只重试当前组的候选", async () => {
+  let items = Array.from({ length: 201 }, (_, index) => ({
+    ...candidate,
+    member_id: `member-${index + 1}`,
+    execution_id: `exec-${index + 1}`,
+    failure_type: "configuration",
+  }));
+  api.failures.mockImplementation(
+    (_source, _batch, _types, _signal, offset = 0) =>
+      Promise.resolve({
+        counts: [
+          {
+            failure_type: "configuration",
+            label: "配置错误",
+            count: items.length,
+          },
+        ],
+        items: items.slice(offset, offset + 200),
+        matched_count: items.length,
+        has_more: offset + 200 < items.length,
+        offset,
+      }),
+  );
+  api.retry.mockImplementation(async () => {
+    items = items.slice(0, -1);
+    return { queued: 1, skipped: 0 };
+  });
+  render(
+    <FailurePanel
+      source="bank"
+      actor="manager"
+      batchId="batch"
+      onQueued={() => {}}
+    />,
+  );
+  await screen.findByText("exec-5");
+  expect(screen.queryByText("exec-6")).toBeNull();
+  fireEvent.mouseDown(
+    screen.getByRole("combobox", { name: "选择重试失败类型" }),
+  );
+  fireEvent.click(await screen.findByText("配置错误 (201)"));
+  await waitFor(() =>
+    expect(api.failures).toHaveBeenLastCalledWith(
+      "bank",
+      "batch",
+      ["configuration"],
+      expect.any(AbortSignal),
+      0,
+    ),
+  );
+  const sizeControl = screen.getAllByRole("combobox")[1];
+  fireEvent.mouseDown(sizeControl);
+  fireEvent.click(await screen.findByTitle(/^100\s*\/\s*page$/));
+  expect(await screen.findByText("exec-100")).toBeInTheDocument();
+  fireEvent.click(screen.getByTitle("3"));
+  expect(await screen.findByText("exec-201")).toBeInTheDocument();
+  expect(screen.queryByText("exec-1")).toBeNull();
+  fireEvent.click(
+    screen.getByRole("button", { name: "重试本组的 1 个失败成员" }),
+  );
+  await waitFor(() =>
+    expect(api.retry).toHaveBeenCalledWith(
+      "bank",
+      "batch",
+      expect.objectContaining({
+        candidates: [
+          { ...candidate, member_id: "member-201", execution_id: "exec-201" },
+        ],
+      }),
+    ),
+  );
+  expect(await screen.findByText("exec-101")).toBeInTheDocument();
+  expect(screen.queryByText("exec-201")).toBeNull();
+});
+
 it("失败预览展示原始错误说明，而不只是公开错误码", async () => {
   api.failures.mockResolvedValue({
     counts: [{ failure_type: "configuration", label: "配置错误", count: 1 }],
+    matched_count: 1,
     items: [
       {
         ...candidate,

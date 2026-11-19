@@ -436,7 +436,7 @@ export function ManagedChildrenModal({
                 `${item.tenant_id}:${item.agent_id}:${item.job_id}`
               }
               dataSource={result.results}
-              pagination={{ pageSize: 10 }}
+              pagination={{ defaultPageSize: 10 }}
               columns={[
                 { title: "用户", dataIndex: "tenant_id" },
                 { title: "任务", dataIndex: "job_id" },
