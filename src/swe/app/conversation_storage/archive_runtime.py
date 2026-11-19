@@ -284,6 +284,7 @@ class MySQLArchiveStore:
                     "memory",
                     message.role,
                     source_msg_key=message.id,
+                    origin_chat_id=chat["id"],
                     turn_id=authority.turn_id if authority else None,
                     context_epoch=session["context_epoch"],
                     in_context=True,
