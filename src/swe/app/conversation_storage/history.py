@@ -59,6 +59,76 @@ class HistoryStore:
         self.retentions = RetentionStore(database, scope)
         self.chats = MySQLChatRepository(database, scope, bundles)
 
+    async def business_turn_population(
+        self,
+        *,
+        start_at,
+        end_at,
+        limit: int = 50_000,
+    ) -> list[dict]:
+        """Read bounded, admitted Turn identities in the current workspace."""
+        service, tenant, source, agent = self.scope.sql_values
+        start_value = start_at.astimezone(timezone.utc).replace(tzinfo=None)
+        end_value = end_at.astimezone(timezone.utc).replace(tzinfo=None)
+        return await self.db.fetch_all(
+            "SELECT c.external_chat_key AS chat_id,"
+            "s.external_session_key AS session_id,"
+            "t.question_msg_key AS question_id,t.state,t.history_status,"
+            "t.admitted_at,t.terminal_at "
+            "FROM swe_conversation_turns t "
+            "JOIN swe_conversation_chats c ON c.id=t.chat_id "
+            "AND c.service_unit_key=t.service_unit_key "
+            "JOIN swe_conversation_sessions s ON s.id=t.session_id "
+            "AND s.service_unit_key=t.service_unit_key "
+            "WHERE t.service_unit_key=%s AND t.admission_publication_id IS NOT NULL "
+            "AND t.admitted_at >= %s AND t.admitted_at < %s "
+            "AND c.deleted_at IS NULL "
+            "AND c.service_unit_key=%s AND c.tenant_key=%s "
+            "AND c.source_key=%s AND c.agent_key=%s "
+            "AND s.service_unit_key=%s AND s.tenant_key=%s "
+            "AND s.source_key=%s AND s.agent_key=%s "
+            "ORDER BY t.admitted_at ASC,t.id ASC LIMIT %s",
+            (
+                service,
+                start_value,
+                end_value,
+                service,
+                tenant,
+                source,
+                agent,
+                service,
+                tenant,
+                source,
+                agent,
+                limit + 1,
+            ),
+        )
+
+    async def business_visible_chat_sessions(
+        self,
+        *,
+        limit: int = 50_000,
+    ) -> list[dict]:
+        """Read bounded, currently visible Chat/Session identities."""
+        service, tenant, source, agent = self.scope.sql_values
+        return await self.db.fetch_all(
+            "SELECT c.external_chat_key AS chat_id,"
+            "s.external_session_key AS session_id "
+            "FROM swe_conversation_chats c "
+            "JOIN swe_conversation_sessions s ON s.id=c.session_id "
+            "AND s.service_unit_key=c.service_unit_key "
+            "AND s.tenant_key=c.tenant_key AND s.source_key=c.source_key "
+            "AND s.agent_key=c.agent_key AND s.user_key=c.user_key "
+            "AND s.channel_key=c.channel_key "
+            "WHERE c.deleted_at IS NULL "
+            "AND c.service_unit_key=%s AND c.tenant_key=%s "
+            "AND c.source_key=%s AND c.agent_key=%s "
+            "AND s.service_unit_key=%s AND s.tenant_key=%s "
+            "AND s.source_key=%s AND s.agent_key=%s "
+            "ORDER BY c.id ASC,s.id ASC LIMIT %s",
+            (*self.scope.sql_values, *self.scope.sql_values, limit + 1),
+        )
+
     def _signature(self, raw):
         namespace = json.dumps(
             self.scope.sql_values,
@@ -516,6 +586,100 @@ class HistoryStore:
             await self._snapshot(chat_id),
             authorize=authorize,
         )
+
+    async def message_occurrence(
+        self,
+        chat_id,
+        message_id,
+        *,
+        occurrence_no=None,
+        authorize=None,
+        max_bytes=None,
+    ):
+        """Read one exact saved occurrence without walking chat history."""
+        chat = await self._chat(chat_id)
+        params = [chat["session_id"], chat["id"]]
+        occurrence_filter = ""
+        if occurrence_no is not None:
+            if type(occurrence_no) is not int or occurrence_no < 0:
+                raise ValueError("invalid message occurrence")
+            occurrence_filter = " AND m.source_occurrence_no=%s"
+        params.append(identity_bytes(message_id, 1024))
+        if occurrence_no is not None:
+            params.append(occurrence_no)
+        rows = await self.db.fetch_all(
+            "SELECT m.* FROM swe_conversation_messages m WHERE "
+            "((m.session_id=%s AND m.layer IN ('memory','task','error') "
+            "AND m.current_visible=1 AND m.deleted_at IS NULL) OR "
+            "(m.archive_chat_id=%s AND m.layer='archive' "
+            "AND m.deleted_at IS NULL)) AND m.source_msg_key=%s"
+            + occurrence_filter
+            + " ORDER BY m.id LIMIT 2",
+            tuple(params),
+        )
+        if not rows:
+            return {"status": "unavailable", "message": None}
+        if len(rows) != 1:
+            return {"status": "unresolved", "message": None}
+
+        row = rows[0]
+        batches = await self._pins(chat, [row], [])
+        snapshot = HistorySnapshot(chat, [row], [], batches)
+        try:
+            await self._validate_snapshot(snapshot)
+            await self._validate_message_occurrence(chat, row)
+            spec = (await self.chats._hydrate([chat], batches))[0]
+            if authorize is not None:
+                authorize(spec)
+            if type(max_bytes) is int and 0 < max_bytes < row["byte_length"]:
+                await self._validate_snapshot(snapshot)
+                await self._validate_message_occurrence(chat, row)
+                if authorize is not None:
+                    authorize(spec)
+                return {"status": "truncated", "message": None}
+            payload = (await self._payloads(snapshot))[0]
+            await self._validate_snapshot(snapshot)
+            await self._validate_message_occurrence(chat, row)
+            if authorize is not None:
+                authorize(spec)
+            if set(payload) == {"version", "message", "history_projection"}:
+                payload = payload["message"]
+            from ..runner import api
+
+            messages = await self._convert(
+                [row],
+                [payload],
+                spec.session_id,
+            )
+            messages = api._redact_hidden_context_messages(messages)
+            if not messages:
+                return {"status": "unavailable", "message": None}
+            return {
+                "status": "available",
+                "message": messages[0].model_dump(mode="json"),
+            }
+        finally:
+            await self._finish(snapshot)
+
+    async def _validate_message_occurrence(self, chat, row):
+        layer_filter = (
+            "layer='archive' AND archive_chat_id=%s"
+            if row["layer"] == "archive"
+            else "layer IN ('memory','task','error') AND current_visible=1 "
+            "AND session_id=%s"
+        )
+        params = [row["id"], self.scope.sql_values[0], chat["session_id"]]
+        if row["layer"] == "archive":
+            params[2] = chat["id"]
+        current = await self.db.fetch_one(
+            "SELECT id FROM swe_conversation_messages WHERE id=%s "
+            "AND service_unit_key=%s AND "
+            + layer_filter
+            + " AND deleted_at IS NULL",
+            tuple(params),
+        )
+        if current is None:
+            raise ConflictError("Message occurrence is no longer visible")
 
     async def tracing_view(self, chat_id, *, authorize=None):
         return await self._assemble(

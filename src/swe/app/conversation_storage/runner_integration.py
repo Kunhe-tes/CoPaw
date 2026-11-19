@@ -43,6 +43,9 @@ class IndexedQuery:
         self.observability_context = None
         self.observability_attempt = None
         self.observability_attempt_ref = {"value": None}
+        self.approval_resolution_seen = False
+        self.approval_resolution_decision = None
+        self.approval_resolution_changed = False
         self.semantic_publisher = None
         self.question_key = None
         self.chat = None
@@ -141,23 +144,6 @@ class IndexedQuery:
                     ),
                 )
                 raise
-            from ...observability.runner_lifecycle import (
-                admit_query_run,
-                start_query_attempt,
-            )
-
-            self.observability_context = admit_query_run(
-                self.owner,
-                self.request,
-                messages,
-                chat_id=self.chat.id,
-            )
-            self.observability_attempt = start_query_attempt(
-                self.observability_context,
-            )
-            self.observability_attempt_ref["value"] = (
-                self.observability_attempt
-            )
             async with self.session.bind_authority(self.authority):
                 yield self
         except asyncio.CancelledError:
@@ -179,6 +165,32 @@ class IndexedQuery:
         )
         if self.pending_request is not None:
             self.execution.pending_request = self.pending_request
+
+    def observe_approval_resolution(self, context, decision, changed):
+        self.approval_resolution_seen = True
+        self.approval_resolution_decision = decision
+        self.approval_resolution_changed = changed
+        if context is not None:
+            self.observability_context = context
+
+    def start_observability(self, messages):
+        if self.observability_context is not None:
+            return
+        from ...observability.runner_lifecycle import (
+            admit_query_run,
+            start_query_attempt,
+        )
+
+        self.observability_context = admit_query_run(
+            self.owner,
+            self.request,
+            messages,
+            chat_id=self.chat.id,
+        )
+        self.observability_attempt = start_query_attempt(
+            self.observability_context,
+        )
+        self.observability_attempt_ref["value"] = self.observability_attempt
 
     async def _renew(self, parent):
         loop = asyncio.get_running_loop()
@@ -311,14 +323,18 @@ class IndexedQuery:
 
         runtime_agent = getattr(self.runtime, "agent", None)
         pending = getattr(runtime_agent, "_tool_guard_pending_info", None)
-        finish_query_run(
-            self.observability_context,
-            self.observability_attempt_ref["value"],
-            status,
-            waiting_for_approval=bool(
-                isinstance(pending, dict) and pending.get("request_id"),
-            ),
-        )
+        if not self.approval_resolution_seen or (
+            self.approval_resolution_changed
+            and self.approval_resolution_decision == "approved"
+        ):
+            finish_query_run(
+                self.observability_context,
+                self.observability_attempt_ref["value"],
+                status,
+                waiting_for_approval=bool(
+                    isinstance(pending, dict) and pending.get("request_id"),
+                ),
+            )
 
     async def _confirm_pending_terminal(self, operation_key):
         """Observe completed reconciliation without touching a closed snapshot."""
@@ -625,12 +641,47 @@ async def _observe(query):
         chat_id=query.chat.id,
         user_id=query.request.user_id,
     )
+    await _repair_observed_approval_audit(query, history.messages)
     for index, message in enumerate(history.messages):
         if message.role == "user":
             continue
         yield Msg.from_dict(message.model_dump(mode="json")), (
             index == len(history.messages) - 1
         )
+
+
+async def _repair_observed_approval_audit(query, messages):
+    from ..approvals import get_approval_service
+    from ..runner.runner import (
+        _external_approval_message_key,
+    )
+    from ...security.tool_guard.approval import ApprovalDecision
+
+    try:
+        for message in messages:
+            if message.role != "user":
+                continue
+            original = message.model_dump(mode="json")
+            if original.get("id") != query.question_key:
+                continue
+            key = _external_approval_message_key(original)
+            if key is None:
+                return
+            service = get_approval_service()
+            completed = await service.get_request(key[1])
+            if (
+                completed is not None
+                and completed.session_id == query.request.session_id
+                and completed.user_id == query.request.user_id
+                and completed.status in {"approved", "denied", "timeout"}
+            ):
+                await service.resolve_request_once(
+                    key[1],
+                    ApprovalDecision(completed.status),
+                )
+            return
+    except Exception:
+        logger.warning("Observed approval audit repair failed", exc_info=True)
 
 
 async def _preflight(owner, request, query, execution):
@@ -651,7 +702,34 @@ async def _stream_admitted(
     execution,
     indexed,
 ):
-    preflight = await _preflight(owner, request, query, execution)
+    from ...observability.runner_lifecycle import (
+        observe_approval_resolution,
+        start_query_attempt,
+    )
+
+    try:
+        with observe_approval_resolution(indexed.observe_approval_resolution):
+            preflight = await _preflight(owner, request, query, execution)
+    except (Exception, asyncio.CancelledError):
+        if not indexed.approval_resolution_seen:
+            indexed.start_observability(messages)
+        raise
+    if (
+        not indexed.approval_resolution_seen
+        and not preflight.approval_consumed
+    ):
+        indexed.start_observability(messages)
+    elif (
+        indexed.approval_resolution_changed
+        and indexed.approval_resolution_decision == "approved"
+        and indexed.observability_context is not None
+    ):
+        indexed.observability_attempt = start_query_attempt(
+            indexed.observability_context,
+        )
+        indexed.observability_attempt_ref["value"] = (
+            indexed.observability_attempt
+        )
     if preflight.response is not None:
         if preflight.cleanup_denied_memory:
             await owner._cleanup_denied_session_memory(
@@ -663,25 +741,87 @@ async def _stream_admitted(
         await indexed.finish("failed")
         yield preflight.response, True
         return
-    async for frame in owner._stream_query_after_preflight(
-        messages,
-        request=request,
-        query=query,
-        session_id=request.session_id,
-        preflight=preflight,
-        session_execution=execution,
-        observability_context=indexed.observability_context,
-        observability_attempt_ref=indexed.observability_attempt_ref,
+    from ...observability.runner_lifecycle import bind_query_context
+
+    with bind_query_context(
+        indexed.observability_attempt or indexed.observability_context,
     ):
-        yield frame
+        async for frame in owner._stream_query_after_preflight(
+            messages,
+            request=request,
+            query=query,
+            session_id=request.session_id,
+            preflight=preflight,
+            session_execution=execution,
+            observability_context=indexed.observability_context,
+            observability_attempt_ref=indexed.observability_attempt_ref,
+        ):
+            yield frame
 
 
-async def _stream_command(owner, storage, messages, request, query, execution):
+async def _stream_command(
+    owner,
+    storage,
+    messages,
+    request,
+    query,
+    execution,
+    indexed=None,
+):
     from ..runner.command_dispatch import run_command_path
 
-    preflight = await _preflight(owner, request, query, execution)
+    if indexed is None:
+        preflight = await _preflight(owner, request, query, execution)
+    else:
+        from ...observability.runner_lifecycle import (
+            observe_approval_resolution,
+        )
+
+        with observe_approval_resolution(indexed.observe_approval_resolution):
+            preflight = await _preflight(owner, request, query, execution)
     if preflight.response is not None:
+        if indexed is not None:
+            await indexed.finish("failed")
         yield preflight.response, True
+        return
+    if preflight.approval_consumed:
+        if indexed is None:
+            return
+        from ...observability.runner_lifecycle import (
+            bind_query_context,
+            start_query_attempt,
+        )
+
+        if (
+            indexed.approval_resolution_changed
+            and indexed.approval_resolution_decision == "approved"
+            and indexed.observability_context is not None
+        ):
+            indexed.observability_attempt = start_query_attempt(
+                indexed.observability_context,
+            )
+            indexed.observability_attempt_ref["value"] = (
+                indexed.observability_attempt
+            )
+
+        async def resume_approved_tool():
+            async for frame in owner._stream_query_after_preflight(
+                messages,
+                request=request,
+                query=query,
+                session_id=request.session_id,
+                preflight=preflight,
+                session_execution=execution,
+                observability_context=indexed.observability_context,
+                observability_attempt_ref=indexed.observability_attempt_ref,
+            ):
+                yield frame
+
+        with bind_query_context(
+            indexed.observability_attempt or indexed.observability_context,
+        ):
+            async for frame in resume_approved_tool():
+                yield frame
         return
     pending = None
     async for message, last in run_command_path(
@@ -701,6 +841,8 @@ async def _stream_command(owner, storage, messages, request, query, execution):
 
 async def stream_indexed_query(owner, storage, messages, *, request, query):
     """Reuse the Runner flow under SQL admission and request-owned state."""
+    from ...observability.runner_lifecycle import bind_query_context
+    from ..runner.daemon_commands import parse_daemon_query
     from ..runner.command_dispatch import _is_command
 
     adapter = storage.session_for(request.channel or "console")
@@ -708,7 +850,11 @@ async def stream_indexed_query(owner, storage, messages, *, request, query):
         request.session_id,
         user_id=request.user_id,
     ) as execution:
-        if query and _is_command(query):
+        parsed_command = parse_daemon_query(query or "")
+        approval_command = (
+            parsed_command is not None and parsed_command[0] == "approve"
+        )
+        if query and _is_command(query) and not approval_command:
             async for frame in _stream_command(
                 owner,
                 storage,
@@ -725,21 +871,36 @@ async def stream_indexed_query(owner, storage, messages, *, request, query):
                 async for frame in _observe(indexed):
                     yield frame
                 return
-            from ...observability.runner_lifecycle import bind_query_context
-
-            with bind_query_context(
-                indexed.observability_attempt or indexed.observability_context,
-            ):
-                source = _stream_admitted(
-                    owner,
-                    messages,
-                    request,
-                    query,
-                    execution,
-                    indexed,
-                )
-                try:
-                    async for frame in indexed.stream(source):
-                        yield frame
-                finally:
-                    await source.aclose()
+            if approval_command:
+                with bind_query_context(
+                    indexed.observability_attempt
+                    or indexed.observability_context,
+                ):
+                    source = _stream_command(
+                        owner,
+                        storage,
+                        messages,
+                        request,
+                        query,
+                        execution,
+                        indexed,
+                    )
+                    try:
+                        async for frame in indexed.stream(source):
+                            yield frame
+                    finally:
+                        await source.aclose()
+                return
+            source = _stream_admitted(
+                owner,
+                messages,
+                request,
+                query,
+                execution,
+                indexed,
+            )
+            try:
+                async for frame in indexed.stream(source):
+                    yield frame
+            finally:
+                await source.aclose()

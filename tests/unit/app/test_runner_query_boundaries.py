@@ -321,6 +321,8 @@ async def test_query_attempt_and_turn_lifecycle_facades_delegate(
             "session_id": "session-1",
             "preflight": _QueryPreflight(),
             "session_execution": None,
+            "observability_context": None,
+            "observability_attempt_ref": None,
         },
     ]
     assert turn_calls == [

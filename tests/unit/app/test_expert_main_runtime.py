@@ -886,9 +886,12 @@ async def test_expert_main_denied_approval_releases_original_snapshot(
         request_id="approval",
         created_at=time.time(),
         tool_name="read_file",
+        status="denied",
         extra={"execution_identity": {"kind": "expert_main"}},
     )
-    service = SimpleNamespace(resolve_request=AsyncMock(return_value=pending))
+    service = SimpleNamespace(
+        resolve_request_once=AsyncMock(return_value=(pending, True)),
+    )
     monkeypatch.setattr(approvals, "get_approval_service", lambda: service)
     monkeypatch.setattr(
         module,

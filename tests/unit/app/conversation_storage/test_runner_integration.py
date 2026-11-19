@@ -245,6 +245,288 @@ async def test_preflight_failure_commits_failed_turn(monkeypatch):
     assert storage.executions.finish.await_args.args[1] == "failed"
 
 
+async def test_indexed_preflight_resolution_does_not_create_replacement_run(
+    monkeypatch,
+):
+    from swe.app.conversation_storage import runner_integration as integration
+    from swe.observability import runner_lifecycle
+
+    context = object()
+    observed = {}
+    indexed = SimpleNamespace(
+        approval_resolution_seen=False,
+        approval_resolution_changed=False,
+        approval_resolution_decision=None,
+        observability_context=None,
+        observability_attempt=None,
+        observability_attempt_ref={"value": None},
+        chat=SimpleNamespace(id="new-chat"),
+        finish=AsyncMock(),
+    )
+
+    def capture(resolved_context, decision, changed):
+        observed.update(
+            context=resolved_context,
+            decision=decision,
+            changed=changed,
+        )
+        indexed.approval_resolution_seen = True
+        indexed.approval_resolution_changed = changed
+        indexed.approval_resolution_decision = decision
+        indexed.observability_context = resolved_context
+
+    async def preflight(*_args):
+        runner_lifecycle.report_approval_resolution(context, "denied", True)
+        return SimpleNamespace(
+            response=Msg("assistant", "denied", "assistant"),
+            cleanup_denied_memory=False,
+        )
+
+    monkeypatch.setattr(integration, "_preflight", preflight)
+    monkeypatch.setattr(
+        runner_lifecycle,
+        "admit_query_run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "approval resolution created a replacement Run",
+        ),
+    )
+    indexed.observe_approval_resolution = capture
+    frames = [
+        frame
+        async for frame in integration._stream_admitted(
+            SimpleNamespace(),
+            [Msg("user", "question", "user")],
+            SimpleNamespace(session_id="session", user_id="user"),
+            "/deny",
+            object(),
+            indexed,
+        )
+    ]
+    assert len(frames) == 1 and frames[0][0].get_text_content() == "denied"
+    assert observed == {
+        "context": context,
+        "decision": "denied",
+        "changed": True,
+    }
+    assert indexed.approval_resolution_seen is True
+    assert indexed.observability_context is context
+    indexed.finish.assert_awaited_once_with("failed")
+
+
+async def test_ordinary_preflight_error_still_starts_observability(
+    monkeypatch,
+):
+    from swe.app.conversation_storage import runner_integration as integration
+
+    started = []
+
+    def start_observability(messages):
+        started.append(messages)
+
+    indexed = SimpleNamespace(
+        observe_approval_resolution=lambda *_args: None,
+        approval_resolution_seen=False,
+        approval_resolution_changed=False,
+        approval_resolution_decision=None,
+        observability_context=None,
+        observability_attempt=None,
+        observability_attempt_ref={"value": None},
+        start_observability=start_observability,
+    )
+
+    async def fail_preflight(*_args):
+        raise ValueError("preflight failed")
+
+    monkeypatch.setattr(integration, "_preflight", fail_preflight)
+    messages = [Msg("user", "question", "user")]
+    with pytest.raises(ValueError, match="preflight failed"):
+        _ = [
+            frame
+            async for frame in integration._stream_admitted(
+                SimpleNamespace(),
+                messages,
+                SimpleNamespace(session_id="session", user_id="user"),
+                "question",
+                object(),
+                indexed,
+            )
+        ]
+    assert started == [messages]
+
+
+async def test_consumed_approval_without_observer_does_not_create_run(
+    monkeypatch,
+):
+    from swe.app.conversation_storage import runner_integration as integration
+
+    indexed = SimpleNamespace(
+        observe_approval_resolution=lambda *_args: None,
+        approval_resolution_seen=False,
+        approval_resolution_changed=False,
+        approval_resolution_decision=None,
+        observability_context=None,
+        start_observability=lambda *_args: pytest.fail(
+            "created a replacement Run",
+        ),
+        finish=AsyncMock(),
+    )
+
+    async def preflight(*_args):
+        return SimpleNamespace(
+            approval_consumed=True,
+            response=Msg("assistant", "denied", "assistant"),
+            cleanup_denied_memory=False,
+        )
+
+    monkeypatch.setattr(integration, "_preflight", preflight)
+    frames = [
+        frame
+        async for frame in integration._stream_admitted(
+            SimpleNamespace(),
+            [Msg("user", "deny", "user")],
+            SimpleNamespace(session_id="session", user_id="user"),
+            "deny",
+            object(),
+            indexed,
+        )
+    ]
+    assert len(frames) == 1
+    indexed.finish.assert_awaited_once_with("failed")
+
+
+async def test_preflight_audit_failure_keeps_approval_run_unresolved(
+    monkeypatch,
+):
+    from swe.app.conversation_storage import runner_integration as integration
+    from swe.observability import runner_lifecycle
+
+    context = object()
+    indexed = SimpleNamespace(
+        approval_resolution_seen=False,
+        approval_resolution_decision=None,
+        approval_resolution_changed=False,
+        observability_context=None,
+        start_observability=lambda *_args: pytest.fail(
+            "a resolved approval was replaced with a new Run",
+        ),
+    )
+
+    def capture(resolved_context, decision, changed):
+        indexed.approval_resolution_seen = True
+        indexed.approval_resolution_decision = decision
+        indexed.approval_resolution_changed = changed
+        indexed.observability_context = resolved_context
+
+    indexed.observe_approval_resolution = capture
+
+    async def preflight(*_args):
+        runner_lifecycle.report_approval_resolution(context, "denied", True)
+        raise OSError("approval audit persistence failed")
+
+    monkeypatch.setattr(integration, "_preflight", preflight)
+    with pytest.raises(OSError, match="approval audit persistence failed"):
+        _ = [
+            frame
+            async for frame in integration._stream_admitted(
+                SimpleNamespace(),
+                [Msg("user", "/deny", "user")],
+                SimpleNamespace(session_id="session", user_id="user"),
+                "/deny",
+                object(),
+                indexed,
+            )
+        ]
+    assert indexed.observability_context is context
+    assert indexed.approval_resolution_changed is True
+
+
+async def test_approval_command_resumes_approved_tool_inside_indexed_turn(
+    monkeypatch,
+):
+    from swe.app.conversation_storage import runner_integration as integration
+    from swe.observability import runner_lifecycle
+
+    execution = object()
+    request = SimpleNamespace(session_id="session", user_id="user")
+    message = Msg("user", "/daemon approve", "user")
+    context = object()
+    attempt = object()
+    preflight_result = SimpleNamespace(
+        response=None,
+        approval_consumed=True,
+        approved_tool_call={"id": "tool-call"},
+    )
+    preflight_args = {}
+    owner = SimpleNamespace(
+        _prepare_query_preflight=AsyncMock(return_value=preflight_result),
+        _stream_query_after_preflight=AsyncMock(),
+    )
+
+    async def resume(*_args, **kwargs):
+        preflight_args.update(kwargs)
+        yield Msg("assistant", "tool resumed", "assistant"), True
+
+    owner._stream_query_after_preflight = resume
+    storage = SimpleNamespace()
+    indexed_events = []
+
+    class Indexed:
+        observability_context = object()
+        observability_attempt = object()
+        observability_attempt_ref = {"value": None}
+        approval_resolution_changed = True
+        approval_resolution_decision = "approved"
+
+        def observe_approval_resolution(self, *_args):
+            return None
+
+        async def stream(self, source):
+            async for frame in source:
+                indexed_events.append(frame)
+                yield frame
+
+        async def finish(self, status):
+            indexed_events.append(("finish", status))
+
+    async def preflight(*args):
+        return preflight_result
+
+    monkeypatch.setattr(integration, "_preflight", preflight)
+    monkeypatch.setattr(
+        runner_lifecycle,
+        "start_query_attempt",
+        lambda value: (
+            attempt
+            if value is context
+            else pytest.fail(
+                "approval recovery started an Attempt under the wrong Run",
+            )
+        ),
+    )
+    indexed = Indexed()
+    indexed.observability_context = context
+    frames = [
+        frame
+        async for frame in integration._stream_command(
+            owner,
+            storage,
+            [message],
+            request,
+            "/daemon approve",
+            execution,
+            indexed,
+        )
+    ]
+    assert (
+        len(frames) == 1 and frames[0][0].get_text_content() == "tool resumed"
+    )
+    assert indexed_events == []
+    assert indexed.observability_attempt is attempt
+    assert indexed.observability_attempt_ref["value"] is attempt
+    assert preflight_args["observability_context"] is context
+    assert preflight_args["observability_attempt_ref"]["value"] is attempt
+
+
 async def test_existing_question_is_observed_without_running_again():
     from swe.app.conversation_storage.runner_integration import IndexedQuery
 
@@ -260,6 +542,66 @@ async def test_existing_question_is_observed_without_running_again():
     assert not events
     storage.executions.start.assert_not_awaited()
     storage.executions.publish_admission.assert_not_awaited()
+
+
+@pytest.mark.parametrize("matches", [True, False])
+async def test_observed_approval_repairs_only_matching_completed_request(
+    monkeypatch,
+    matches,
+):
+    from swe.app.approvals.service import ApprovalService
+    from swe.app.conversation_storage.runner_integration import _observe
+    from swe.config.context import tenant_context
+    from swe.security.tool_guard.approval import ApprovalDecision
+
+    service = ApprovalService()
+    monkeypatch.setattr("swe.app.approvals.service._approval_service", service)
+    resolve_once = service.resolve_request_once
+    service.resolve_request_once = AsyncMock(wraps=resolve_once)
+    with tenant_context(tenant_id="tenant", source_id="source"):
+        pending = await service.create_pending(
+            session_id="session",
+            user_id="alice",
+            channel="console",
+            tool_name="tool",
+            result=SimpleNamespace(findings=[], findings_count=0),
+        )
+        await service.resolve_request(
+            pending.request_id,
+            ApprovalDecision.DENIED,
+        )
+        service.resolve_request_once.reset_mock()
+        question = Msg("user", f"/deny {pending.request_id}", "user")
+        question.id = "question"
+        answer = Msg("assistant", "original answer", "assistant")
+        messages = [
+            SimpleNamespace(
+                role=message.role,
+                model_dump=lambda mode, message=message: message.to_dict(),
+            )
+            for message in (question, answer)
+        ]
+        query = SimpleNamespace(
+            observation=SimpleNamespace(turn={"state": "failed"}),
+            question_key="question",
+            chat=SimpleNamespace(id="chat"),
+            request=SimpleNamespace(
+                session_id="session" if matches else "other",
+                user_id="alice",
+            ),
+            storage=SimpleNamespace(
+                history=SimpleNamespace(
+                    answer_turn=AsyncMock(
+                        return_value=SimpleNamespace(messages=messages),
+                    ),
+                ),
+            ),
+        )
+        frames = [frame async for frame in _observe(query)]
+    assert frames[0][0].get_text_content() == "original answer"
+    assert len(frames) == 1
+    assert service.resolve_request_once.await_count == int(matches)
+    assert pending.status == "denied"
 
 
 async def test_settling_execution_rejects_new_cleanup_publication():

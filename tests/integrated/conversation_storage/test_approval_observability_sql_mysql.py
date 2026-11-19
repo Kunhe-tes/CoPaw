@@ -351,6 +351,63 @@ async def test_same_message_replay_repairs_approval_audit(
 
 
 @pytest.mark.asyncio
+async def test_sql_waiting_approval_cancel_settles_original_run(
+    conversation_test_database,
+    tmp_path,
+    monkeypatch,
+):
+    database = conversation_test_database
+    (
+        _storage,
+        output,
+        emitter,
+        root_context,
+        waiting_attempt,
+        _service,
+        pending,
+        _tenant,
+    ) = await _create_waiting_approval(database, tmp_path, monkeypatch)
+
+    owner = SimpleNamespace(_agent_observability_contexts={})
+    identity = object()
+    runner_lifecycle.defer_query_run_settlement(
+        owner,
+        identity,
+        root_context,
+        waiting_attempt,
+        waiting_for_approval=True,
+    )
+    runner_lifecycle.update_deferred_query_run_approval(
+        owner,
+        identity,
+        waiting_for_approval=False,
+        clear_attempt=True,
+    )
+    runner_lifecycle.finish_deferred_query_run(owner, identity, "cancelled")
+    assert emitter.close(timeout=1) == 0
+    records = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert sum(event["event_name"] == "run.ended" for event in records) == 1
+    assert not any(
+        event["event_name"] == "approval.resolved" for event in records
+    )
+    detail, events = await _project_and_fetch_detail(
+        database,
+        records,
+        root_context.obs_run_id,
+    )
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["run"]["status"] == "cancelled"
+    assert [item["status"] for item in detail.json()["attempts"]] == [
+        "waiting_approval",
+    ]
+    assert not any(
+        item["event_name"] == "approval.resolved"
+        for item in events.json()["items"]
+    )
+    assert pending.status == "pending"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     (
         "query",
@@ -709,6 +766,10 @@ def _external_sql_approval_workspace(runner, storage, pending):
             return "idle"
 
     class Coordinator:
+        def __init__(self):
+            self.producer_started = False
+            self.cancelled_unstarted = False
+
         async def start_or_attach(self, chat_id, payload, producer, **kwargs):
             self.payload = payload
             self.identity = SimpleNamespace(
@@ -724,6 +785,18 @@ def _external_sql_approval_workspace(runner, storage, pending):
             self.producer_task = asyncio.create_task(run_producer())
             await asyncio.sleep(0)
             return SimpleNamespace(identity=self.identity, is_new_run=True)
+
+        async def mark_producer_started(self, identity):
+            if identity != self.identity or self.cancelled_unstarted:
+                return False
+            self.producer_started = True
+            return True
+
+        async def cancel_unstarted(self, identity):
+            if identity == self.identity and not self.producer_started:
+                self.cancelled_unstarted = True
+                return True
+            return False
 
     coordinator = Coordinator()
     workspace = SimpleNamespace(

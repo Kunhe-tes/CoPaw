@@ -83,6 +83,225 @@ async def test_memory_payload_preserves_duplicate_source_and_fragments(
     assert messages[0].id == messages[2].id
 
 
+async def test_business_turn_population_is_workspace_scoped_and_bounded(
+    tmp_path,
+):
+    from datetime import datetime, timezone
+
+    store = history(tmp_path)
+    database = SimpleNamespace(fetch_all=AsyncMock(return_value=[]))
+    store.db = database
+    start = datetime(2026, 11, 17, tzinfo=timezone.utc)
+    end = datetime(2026, 11, 18, tzinfo=timezone.utc)
+
+    result = await store.business_turn_population(
+        start_at=start,
+        end_at=end,
+        limit=100,
+    )
+
+    assert result == []
+    query, params = database.fetch_all.await_args.args
+    assert "t.admission_publication_id IS NOT NULL" in query
+    assert "c.deleted_at IS NULL" in query
+    assert query.count("tenant_key=%s") == 2
+    assert query.count("source_key=%s") == 2
+    assert params[:3] == store.scope.sql_values[:1] + (
+        start.replace(tzinfo=None),
+        end.replace(tzinfo=None),
+    )
+    assert params[-5:] == (*store.scope.sql_values, 101)
+
+
+@pytest.mark.asyncio
+async def test_business_visible_chat_sessions_use_current_scope_and_deletes(
+    tmp_path,
+):
+    store = history(tmp_path)
+    database = SimpleNamespace(fetch_all=AsyncMock(return_value=[]))
+    store.db = database
+
+    assert await store.business_visible_chat_sessions(limit=100) == []
+
+    query, params = database.fetch_all.await_args.args
+    assert "JOIN swe_conversation_sessions s ON s.id=c.session_id" in query
+    assert "c.deleted_at IS NULL" in query
+    assert query.count("tenant_key=%s") == 2
+    assert query.count("source_key=%s") == 2
+    assert params == (*store.scope.sql_values, *store.scope.sql_values, 101)
+
+
+async def test_message_occurrence_reads_one_exact_saved_row(tmp_path):
+    store = history(tmp_path)
+    chat = {"id": 7, "session_id": 11}
+    row = {
+        "id": 42,
+        "service_unit_key": b"schema-test-service",
+        "session_id": 11,
+        "layer": "memory",
+        "current_visible": 1,
+        "deleted_at": None,
+        "publication_id": 99,
+        "source_msg_key": b"message-1",
+        "source_occurrence_no": 3,
+    }
+    store._chat = AsyncMock(return_value=chat)
+    store.db = SimpleNamespace(
+        fetch_all=AsyncMock(return_value=[row]),
+        fetch_one=AsyncMock(return_value={"id": 42}),
+    )
+    store._pins = AsyncMock(return_value=[])
+    store._validate_snapshot = AsyncMock()
+    store._validate_message_occurrence = AsyncMock()
+    store.chats._hydrate = AsyncMock(
+        return_value=[ChatSpec(id="chat", session_id="s", user_id="alice")],
+    )
+    store._payloads = AsyncMock(
+        return_value=[{"id": "message-1", "role": "user"}],
+    )
+    from swe.app.runner.models import ChatMessage
+
+    store._convert = AsyncMock(
+        return_value=[
+            ChatMessage(
+                id="message-1",
+                role="user",
+                content=[{"type": "text", "text": "secret"}],
+                metadata={
+                    "console_hidden_context_v1": {
+                        "visible_text": "safe",
+                        "suffix": "secret",
+                    },
+                },
+            ),
+        ],
+    )
+    store._finish = AsyncMock()
+
+    result = await store.message_occurrence(
+        "chat",
+        "message-1",
+        occurrence_no=3,
+    )
+
+    assert result["status"] == "available"
+    assert result["message"]["id"] == "message-1"
+    assert result["message"]["content"][0]["text"] == "safe"
+    assert "console_hidden_context_v1" not in result["message"]["metadata"]
+    assert store.db.fetch_all.await_args.args[1][-1] == 3
+    assert store._validate_message_occurrence.await_count == 2
+
+
+async def test_message_occurrence_rejects_oversize_extent_before_read(
+    tmp_path,
+):
+    store = history(tmp_path)
+    row = {
+        "id": 42,
+        "byte_length": 1024,
+        "service_unit_key": b"schema-test-service",
+    }
+    store._chat = AsyncMock(return_value={"id": 7, "session_id": 11})
+    store.db = SimpleNamespace(fetch_all=AsyncMock(return_value=[row]))
+    store._pins = AsyncMock(return_value=[])
+    store._validate_snapshot = AsyncMock()
+    store._validate_message_occurrence = AsyncMock()
+    store.chats._hydrate = AsyncMock(
+        return_value=[ChatSpec(id="chat", session_id="s", user_id="alice")],
+    )
+    store._payloads = AsyncMock()
+    store._finish = AsyncMock()
+    authorized = []
+
+    def authorize(chat):
+        authorized.append(chat)
+
+    result = await store.message_occurrence(
+        "chat",
+        "message-1",
+        max_bytes=32,
+        authorize=authorize,
+    )
+
+    assert result == {"status": "truncated", "message": None}
+    assert len(authorized) == 2
+    assert store._validate_snapshot.await_count == 2
+    assert store._validate_message_occurrence.await_count == 2
+    store._payloads.assert_not_awaited()
+    store._finish.assert_awaited_once()
+
+
+async def test_oversize_occurrence_rechecks_visibility_after_chat_hydration(
+    tmp_path,
+):
+    store = history(tmp_path)
+    row = {"id": 42, "byte_length": 1024}
+    store._chat = AsyncMock(return_value={"id": 7, "session_id": 11})
+    store.db = SimpleNamespace(fetch_all=AsyncMock(return_value=[row]))
+    store._pins = AsyncMock(return_value=[])
+    store._validate_snapshot = AsyncMock()
+    store._validate_message_occurrence = AsyncMock(
+        side_effect=[None, RuntimeError("occurrence deleted")],
+    )
+    store.chats._hydrate = AsyncMock(
+        return_value=[ChatSpec(id="chat", session_id="s", user_id="alice")],
+    )
+    store._payloads = AsyncMock()
+    store._finish = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="occurrence deleted"):
+        await store.message_occurrence("chat", "message-1", max_bytes=32)
+
+    store._payloads.assert_not_awaited()
+    store._finish.assert_awaited_once()
+
+
+async def test_message_occurrence_authorizes_before_reporting_truncation(
+    tmp_path,
+):
+    store = history(tmp_path)
+    row = {"id": 42, "byte_length": 1024}
+    store._chat = AsyncMock(return_value={"id": 7, "session_id": 11})
+    store.db = SimpleNamespace(fetch_all=AsyncMock(return_value=[row]))
+    store._pins = AsyncMock(return_value=[])
+    store._validate_snapshot = AsyncMock()
+    store._validate_message_occurrence = AsyncMock()
+    store.chats._hydrate = AsyncMock(
+        return_value=[ChatSpec(id="chat", session_id="s", user_id="alice")],
+    )
+    store._payloads = AsyncMock()
+    store._finish = AsyncMock()
+
+    def deny(_chat):
+        raise KeyError("not authorized")
+
+    with pytest.raises(KeyError):
+        await store.message_occurrence(
+            "chat",
+            "message-1",
+            max_bytes=32,
+            authorize=deny,
+        )
+    store._payloads.assert_not_awaited()
+    store._finish.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected"),
+    [([], "unavailable"), ([{"id": 1}, {"id": 2}], "unresolved")],
+)
+async def test_message_occurrence_does_not_guess_missing_or_duplicate_ids(
+    tmp_path,
+    rows,
+    expected,
+):
+    store = history(tmp_path)
+    store._chat = AsyncMock(return_value={"id": 7, "session_id": 11})
+    store.db = SimpleNamespace(fetch_all=AsyncMock(return_value=rows))
+    result = await store.message_occurrence("chat", "duplicate")
+    assert result == {"status": expected, "message": None}
+
+
 async def test_current_route_uses_injected_history_without_file_session(
     tmp_path,
 ):

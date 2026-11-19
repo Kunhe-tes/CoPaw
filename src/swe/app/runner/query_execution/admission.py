@@ -197,6 +197,15 @@ async def _approval_continuation(
         session_id=session_id,
         request_id=request_id,
     )
+    if pending is None and request_id:
+        completed = await service.get_request(request_id)
+        if (
+            completed is not None
+            and completed.session_id == session_id
+            and completed.user_id == user_id
+            and completed.status in {"approved", "denied", "timeout"}
+        ):
+            return None, "unresolved"
     if (
         pending is None
         or pending.status != "pending"

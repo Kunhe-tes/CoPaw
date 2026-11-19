@@ -34,6 +34,21 @@ class _Db:
         self.executed.append((query, params))
         return 1
 
+    async def fetch_one(self, query, params=None):
+        request_id, event_type = params
+        return next(
+            (
+                {"event_id": index}
+                for index, (statement, values) in enumerate(self.executed)
+                if statement.lstrip().startswith(
+                    "INSERT INTO swe_tool_approval_events",
+                )
+                and values[0] == request_id
+                and values[1] == event_type
+            ),
+            None,
+        )
+
 
 class _Result:
     findings: list[Any] = []
@@ -237,6 +252,54 @@ async def test_approval_service_writes_create_resolve_and_consume_audit():
     ]
     assert audit_store.events[1]["status"] == "approved"
     assert audit_store.upserts[-1]["consumed"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("decision", "replay_decision"),
+    [
+        (ApprovalDecision.APPROVED, ApprovalDecision.DENIED),
+        (ApprovalDecision.DENIED, ApprovalDecision.APPROVED),
+        (ApprovalDecision.TIMEOUT, ApprovalDecision.APPROVED),
+    ],
+)
+async def test_repeated_resolution_persists_only_first_decision(
+    decision,
+    replay_decision,
+):
+    db = _Db()
+    service = ApprovalService()
+    service.set_store(ApprovalAuditStore(db))
+    pending = await _pending(service)
+
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        first = await service.resolve_request(pending.request_id, decision)
+        replay = await service.resolve_request(
+            pending.request_id,
+            replay_decision,
+        )
+
+    event_writes = [
+        params
+        for query, params in db.executed
+        if query.lstrip().startswith("INSERT INTO swe_tool_approval_events")
+    ]
+    request_writes = [
+        params
+        for query, params in db.executed
+        if query.lstrip().startswith("INSERT INTO swe_tool_approval_requests")
+    ]
+    resolved_events = [
+        params for params in event_writes if params[1] == "resolved"
+    ]
+
+    assert first is pending
+    assert replay is pending
+    assert pending.status == decision.value
+    assert pending.future.result() is decision
+    assert len(request_writes) == 3
+    assert len(resolved_events) == 1
+    assert resolved_events[0][2] == decision.value
 
 
 @pytest.mark.asyncio

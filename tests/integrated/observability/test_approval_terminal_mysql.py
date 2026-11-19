@@ -14,7 +14,7 @@ import pytest
 
 from swe.app.approvals.service import ApprovalService
 from swe.app.runner.runner import AgentRunner
-from swe.config.context import tenant_context
+from swe.config.context import get_current_effective_tenant_id, tenant_context
 from swe.database import DatabaseConnection
 from swe.observability import Observability, Scope, bind_context
 from swe.observability.emitter import JsonlEmitter
@@ -50,6 +50,12 @@ async def _resolve_approval_with_runner(
             await runner._resolve_pending_approval(
                 pending.session_id,
                 f"/deny {pending.request_id}",
+                request=SimpleNamespace(
+                    session_id=pending.session_id,
+                    user_id=pending.user_id,
+                    source_id="agentobs-integration",
+                    channel_meta={},
+                ),
             )
         )
         resolved = await approval_service.get_request(pending.request_id)
@@ -118,11 +124,17 @@ async def test_mysql_denied_or_timed_out_approval_ends_waiting_run(
         emitter = JsonlEmitter(stream=sink)
         observer = Observability(emitter)
         monkeypatch.setattr(runner_lifecycle, "_OBSERVABILITY", observer)
+        with tenant_context(
+            tenant_id="default",
+            source_id="agentobs-integration",
+        ):
+            tenant_id = get_current_effective_tenant_id()
         context = observer.admit_run(
-            scope=Scope("swe", "agentobs-integration", "user-a", "default"),
+            scope=Scope("swe", "agentobs-integration", tenant_id, "default"),
             business_ref={
                 "chat_id": "approval-terminal-chat",
                 "root_question_msgid": "approval-terminal-question",
+                "session_id": "approval-terminal-session",
             },
             enabled=True,
         )
@@ -138,6 +150,14 @@ async def test_mysql_denied_or_timed_out_approval_ends_waiting_run(
                 channel="console",
                 tool_name="execute_shell_command",
                 result=SimpleNamespace(findings=[], findings_count=0),
+                extra={
+                    "source_id": "agentobs-integration",
+                    "tenant_id": tenant_id,
+                    "agent_id": "default",
+                    "chat_id": "approval-terminal-chat",
+                    "msgid": "approval-terminal-question",
+                    "agent_observability_context": attempt.to_carrier(),
+                },
             )
         approval_id = pending.request_id
         monkeypatch.setattr(

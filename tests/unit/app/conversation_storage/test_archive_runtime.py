@@ -4,6 +4,7 @@
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
+import json
 
 import pytest
 from agentscope.message import Msg
@@ -59,6 +60,245 @@ async def test_manager_evidence_uses_injected_store():
         epoch=1,
         refs=["message:q"],
     )
+
+
+@pytest.mark.parametrize("compacted", [False, True])
+async def test_tool_output_evidence_transitions_after_message_publication(
+    compacted,
+    monkeypatch,
+):
+    import io
+
+    from swe.app.conversation_storage.archive_binding import ArchiveBinding
+    from swe.observability import instrumentation
+    from swe.observability.config import EmitterConfig
+    from swe.observability.context import bind_context
+    from swe.observability.emitter import JsonlEmitter
+    from swe.observability.models import ObservabilityContext, Scope
+
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(instrumentation, "default_emitter", lambda: emitter)
+    store = SimpleNamespace(
+        append_message=AsyncMock(
+            return_value=SimpleNamespace(recovery_state={"revision": 1}),
+        ),
+    )
+    execution = SimpleNamespace(accept_committed_state=Mock())
+    memory = SimpleNamespace(content=[], _compressed_summary="")
+    binding = ArchiveBinding(
+        store=store,
+        memory=memory,
+        chat_id="chat-1",
+        execution=execution,
+        root_provider=Mock(return_value={}),
+        authority=object(),
+    )
+    message = Msg(
+        "system",
+        [{"type": "tool_result", "id": "call-1", "output": "safe"}],
+        "system",
+    )
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+    ).new_attempt()
+
+    with bind_context(context):
+        span = instrumentation.Observability().span(
+            "Tool",
+            "execute",
+            name="registered.tool",
+            tool={
+                "tool_key": "read_file",
+                "tool_call_id": "call-1",
+                "tool_execution_id": "00000000-0000-4000-8000-000000000001",
+                "executor_kind": "agent_tool",
+            },
+        )
+        with instrumentation.bind_tool_span(span):
+            if compacted:
+                instrumentation.mark_tool_output_compacted(message.id)
+            await binding.append(message)
+        span.end(status="succeeded")
+    emitter.close()
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    evidence_events = [
+        event
+        for event in events
+        if isinstance(event.get("event_type"), str)
+        and event["event_type"].startswith("evidence.")
+        and event.get("content_type") == "tool_output"
+    ]
+    pending, evidence = evidence_events
+    from swe.observability.projector import _validate_payload
+
+    assert _validate_payload(json.dumps(evidence))["event_type"] == (
+        "evidence.linked"
+    )
+
+    store.append_message.assert_awaited_once()
+    execution.accept_committed_state.assert_called_once_with(
+        {"revision": 1},
+    )
+    assert evidence["chat_id"] == "chat-1"
+    assert evidence["message_id"] == message.id
+    assert "occurrence_id" not in evidence
+    assert evidence["content_type"] == "tool_output"
+    assert evidence["saved_state"] == (
+        "compacted" if compacted else "available"
+    )
+    assert pending["event_type"] == "evidence.pending"
+    assert pending["saved_state"] == "pending"
+    assert pending["reference_id"] == evidence["reference_id"]
+    assert "message_id" in pending and "occurrence_id" not in pending
+    assert "safe" not in json.dumps(evidence)
+
+
+async def test_failed_message_publication_leaves_only_pending_evidence(
+    monkeypatch,
+):
+    import io
+
+    from swe.app.conversation_storage.archive_binding import ArchiveBinding
+    from swe.observability import instrumentation
+    from swe.observability.config import EmitterConfig
+    from swe.observability.context import bind_context
+    from swe.observability.emitter import JsonlEmitter
+    from swe.observability.models import ObservabilityContext, Scope
+
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(instrumentation, "default_emitter", lambda: emitter)
+    store = SimpleNamespace(append_message=AsyncMock(side_effect=OSError))
+    execution = SimpleNamespace(accept_committed_state=Mock())
+    binding = ArchiveBinding(
+        store,
+        SimpleNamespace(content=[], _compressed_summary=""),
+        "chat-1",
+        execution,
+        Mock(return_value={}),
+        object(),
+    )
+    message = Msg(
+        "system",
+        [{"type": "tool_result", "id": "call-1", "output": "private"}],
+        "system",
+    )
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+    ).new_attempt()
+    with bind_context(context):
+        span = instrumentation.Observability().span("Tool", "execute")
+        with instrumentation.bind_tool_span(span):
+            with pytest.raises(OSError):
+                await binding.append(message)
+    assert emitter.close(timeout=1) == 0
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    evidence = [
+        event
+        for event in events
+        if isinstance(event.get("event_type"), str)
+        and event["event_type"].startswith("evidence.")
+    ]
+    assert len(evidence) == 1
+    assert evidence[0]["event_type"] == "evidence.pending"
+    assert evidence[0]["saved_state"] == "pending"
+    assert "private" not in json.dumps(evidence)
+    execution.accept_committed_state.assert_not_called()
+
+
+async def test_assistant_answer_evidence_uses_exact_model_invocation(
+    monkeypatch,
+):
+    import io
+
+    from swe.app.conversation_storage.archive_binding import ArchiveBinding
+    from swe.observability import instrumentation
+    from swe.observability.config import EmitterConfig
+    from swe.observability.context import bind_context
+    from swe.observability.emitter import JsonlEmitter
+    from swe.observability.models import ObservabilityContext, Scope
+
+    class Model:
+        model_name = "test-model"
+        stream = False
+
+        async def __call__(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                id="response-invocation-1",
+                content=[{"type": "text", "text": "private assistant answer"}],
+                usage=None,
+                metadata={},
+            )
+
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(instrumentation, "default_emitter", lambda: emitter)
+    store = SimpleNamespace(
+        append_message=AsyncMock(
+            return_value=SimpleNamespace(recovery_state={"revision": 1}),
+        ),
+    )
+    execution = SimpleNamespace(accept_committed_state=Mock())
+    memory = SimpleNamespace(content=[], _compressed_summary="")
+    binding = ArchiveBinding(
+        store=store,
+        memory=memory,
+        chat_id="chat-assistant",
+        execution=execution,
+        root_provider=Mock(return_value={"revision": 0}),
+        authority=object(),
+    )
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+        business_ref={"chat_id": "chat-assistant"},
+    ).new_attempt()
+
+    with bind_context(context):
+        response = await instrumentation.ObservabilityModelWrapper(
+            Model(),
+            provider_key="test-provider",
+            model_key="test-model",
+        )([])
+        message = Msg(
+            "assistant",
+            response.content,
+            "assistant",
+            invocation_id=response.id,
+        )
+        memory.content = [(message, [])]
+        await binding.append(message)
+    emitter.close()
+
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    span = next(
+        event
+        for event in events
+        if event["event_name"] == "span.started"
+        and event.get("operation") == "chat"
+    )
+    evidence_events = [
+        event
+        for event in events
+        if isinstance(event.get("event_type"), str)
+        and event["event_type"].startswith("evidence.")
+        and event.get("content_type") == "assistant_answer"
+    ]
+    pending, evidence = evidence_events
+
+    store.append_message.assert_awaited_once()
+    assert evidence["obs_span_id"] == span["obs_span_id"]
+    assert evidence["chat_id"] == "chat-assistant"
+    assert evidence["message_id"] == message.id
+    assert evidence["content_type"] == "assistant_answer"
+    assert evidence["saved_state"] == "available"
+    assert pending["event_type"] == "evidence.pending"
+    assert pending["saved_state"] == "pending"
+    assert "invocation_id" not in evidence
+    assert "private assistant answer" not in json.dumps(evidence)
 
 
 async def test_request_binding_prunes_memory_only_after_confirmed_publication(

@@ -32,7 +32,10 @@ async def prepare_query_preflight(
     if approval_response is not None:
         return _QueryPreflight(
             response=approval_response,
-            cleanup_denied_memory=True,
+            cleanup_denied_memory=not (approval_response.metadata or {}).get(
+                "approval_already_resolved",
+                False,
+            ),
             approval_consumed=approval_consumed,
             approved_tool_call=approved_tool_call,
         )

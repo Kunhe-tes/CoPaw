@@ -79,6 +79,7 @@ class ArchiveCommit:
     boundary: ConversationArchiveBoundary | None = None
     record: CheckpointRecord | None = None
     state: CheckpointArchiveState | None = None
+    source_occurrence_no: int | None = None
 
 
 class MySQLArchiveStore:
@@ -275,6 +276,19 @@ class MySQLArchiveStore:
             facts={"message_id": message.id, "role": message.role},
             source_refs=(f"message:{message.id}",),
         )
+        occurrence = await self.db.fetch_one(
+            "SELECT COALESCE(MAX(source_occurrence_no),-1)+1 AS next_occurrence "
+            "FROM swe_conversation_messages WHERE source_msg_key=%s AND "
+            "((session_id=%s AND layer IN ('memory','task','error') "
+            "AND current_visible=1 AND deleted_at IS NULL) OR "
+            "(archive_chat_id=%s AND layer='archive' AND deleted_at IS NULL))",
+            (
+                message.id.encode(),
+                session["id"],
+                chat["id"],
+            ),
+        )
+        source_occurrence_no = int(occurrence["next_occurrence"])
         plan = CommitPlan(
             recovery_block="recovery",
             messages=(
@@ -283,6 +297,7 @@ class MySQLArchiveStore:
                     "memory",
                     message.role,
                     source_msg_key=message.id,
+                    source_occurrence_no=source_occurrence_no,
                     turn_id=authority.turn_id if authority else None,
                     context_epoch=session["context_epoch"],
                     in_context=True,
@@ -291,7 +306,7 @@ class MySQLArchiveStore:
             ),
             events=EventInstall("events", event.sequence, event.sequence),
         )
-        return await self._publish(
+        committed = await self._publish(
             session,
             chat,
             recovery_state,
@@ -302,6 +317,10 @@ class MySQLArchiveStore:
                 _block("message", "message", message.to_dict()),
                 _block("events", "events", [event.to_dict()]),
             ],
+        )
+        return replace(
+            committed,
+            source_occurrence_no=source_occurrence_no,
         )
 
     async def _source_rows(self, session, messages):

@@ -13,7 +13,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from ...constant import TOOL_GUARD_APPROVAL_TIMEOUT_SECONDS
 from ...security.tool_guard.approval import ApprovalDecision
@@ -73,6 +73,7 @@ class ApprovalService:
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
+        self._resolved_audit_lock = asyncio.Lock()
         self._pending: dict[str, PendingApproval] = {}
         self._completed: dict[str, PendingApproval] = {}
         self._channel_manager: Any | None = None
@@ -240,6 +241,18 @@ class ApprovalService:
         decision: ApprovalDecision,
     ) -> PendingApproval | None:
         """Resolve one pending approval request."""
+        record, _ = await self.resolve_request_once(request_id, decision)
+        return record
+
+    async def resolve_request_once(
+        self,
+        request_id: str,
+        decision: ApprovalDecision,
+        *,
+        on_transition: Callable[[PendingApproval], None] | None = None,
+    ) -> tuple[PendingApproval | None, bool]:
+        """Return the record and whether this call changed its state."""
+        replay: PendingApproval | None = None
         async with self._lock:
             scope_id = self._get_current_scope_id()
             pending = self._pending.get(request_id)
@@ -288,17 +301,43 @@ class ApprovalService:
                         self._debug_record_summary(pending),
                         self._debug_record_summary(completed),
                     )
-                    return None
-                return completed
+                    return None, False
+                replay = completed
+            else:
+                pending = self._pending.pop(request_id)
+                if pending is None:
+                    replay = self._completed.get(request_id)
+                else:
+                    pending.status = decision.value
+                    pending.resolved_at = time.time()
+                    self._completed[request_id] = pending
+                    self._gc_completed_locked()
 
-            pending = self._pending.pop(request_id)
-            if pending is None:
-                return self._completed.get(request_id)
+        if replay is not None:
+            if replay.status in {
+                ApprovalDecision.APPROVED.value,
+                ApprovalDecision.DENIED.value,
+                ApprovalDecision.TIMEOUT.value,
+            }:
+                async with self._resolved_audit_lock:
+                    await self._persist_request(replay)
+                    await self.record_event(
+                        replay,
+                        "resolved",
+                        status=replay.status,
+                    )
+            return replay, False
+        if pending is None:
+            return None, False
 
-            pending.status = decision.value
-            pending.resolved_at = time.time()
-            self._completed[request_id] = pending
-            self._gc_completed_locked()
+        if on_transition is not None:
+            try:
+                on_transition(pending)
+            except Exception:
+                logger.debug(
+                    "Approval transition observer failed",
+                    exc_info=True,
+                )
 
         if not pending.future.done():
             pending.future.set_result(decision)
@@ -321,9 +360,14 @@ class ApprovalService:
                     exc_info=True,
                 )
 
-        await self._persist_request(pending)
-        await self.record_event(pending, "resolved", status=pending.status)
-        return pending
+        async with self._resolved_audit_lock:
+            await self._persist_request(pending)
+            await self.record_event(
+                pending,
+                "resolved",
+                status=pending.status,
+            )
+        return pending, True
 
     async def get_request(self, request_id: str) -> PendingApproval | None:
         """按当前 scope 获取 pending 或已完成的审批请求。"""

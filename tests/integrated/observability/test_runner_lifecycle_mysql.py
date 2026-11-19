@@ -17,6 +17,7 @@ from agentscope.message import Msg
 from fastapi import FastAPI, Request
 
 from swe.database import DatabaseConfig, DatabaseConnection
+from swe.observability import Scope
 from swe.observability.emitter import JsonlEmitter
 from swe.observability.instrumentation import Observability
 from swe.observability.projector import InboxProjector, _validate_payload
@@ -205,10 +206,12 @@ async def _assert_projected_run_available(
             headers={"X-User-Role": "manager"},
             params={"attempt_id": attempt_ids[-1]},
         )
+    assert response.status_code == 200, response.text
     api_row = next(
         item for item in response.json()["items"] if item["run_id"] == run_id
     )
     assert response.status_code == 200 and api_row["status"] == expected_status
+    _assert_run_model_summary(row, api_row, records)
     if llm_span is not None:
         assert (
             detail_response.status_code == 200
@@ -217,7 +220,7 @@ async def _assert_projected_run_available(
         api_llm_span = next(
             span
             for span in detail_response.json()["spans"]
-            if span["span_type"] == "LLM"
+            if span["span_type"] == "LLM" and span["operation"] == "chat"
         )
         assert api_llm_span["input_tokens"] == llm_span["input_tokens"]
         assert api_llm_span["output_tokens"] == llm_span["output_tokens"]
@@ -272,6 +275,57 @@ def _identity_text(value):
     return value.decode() if isinstance(value, bytes) else value
 
 
+def _assert_run_model_summary(row, api_row, records):
+    logical_model_ends = [
+        record
+        for record in records
+        if record.get("event_name") == "span.ended"
+        and record.get("span_type") == "LLM"
+        and record.get("operation") == "chat"
+    ]
+    if not logical_model_ends:
+        assert row["llm_calls"] is None
+        assert api_row["llm_calls"] is None
+        assert row["agent_loops"] is None
+        assert api_row["agent_loops"] is None
+        assert row["input_tokens"] is None
+        assert row["output_tokens"] is None
+        assert api_row["input_tokens"] is None
+        assert api_row["output_tokens"] is None
+        return
+    assert row["llm_calls"] == len(logical_model_ends)
+    assert api_row["llm_calls"] == len(logical_model_ends)
+    step_indexes = [record.get("step_index") for record in logical_model_ends]
+    expected_agent_loops = (
+        len(
+            {
+                (
+                    record.get("parent_obs_span_id")
+                    or record.get("obs_attempt_id"),
+                    step_index,
+                )
+                for record, step_index in zip(logical_model_ends, step_indexes)
+            },
+        )
+        if all(step_index is not None for step_index in step_indexes)
+        else None
+    )
+    assert row["agent_loops"] == expected_agent_loops
+    assert api_row["agent_loops"] == expected_agent_loops
+    for field in ("input_tokens", "output_tokens"):
+        values = [
+            (record.get("metrics") or {}).get(field)
+            for record in logical_model_ends
+        ]
+        expected = (
+            sum(value for value in values if value is not None)
+            if all(value is not None for value in values)
+            else None
+        )
+        assert row[field] == expected
+        assert api_row[field] == row[field]
+
+
 def _assert_agent_retry_lifecycle(records):
     starts = [
         record
@@ -308,16 +362,52 @@ def _inject_agent_retry(runner):
 
 def _assert_runner_lifecycle_records(records, *, agent_retry):
     event_names = [record["event_name"] for record in records]
-    assert event_names[:3] == [
+    assert event_names[:4] == [
         "run.accepted",
+        "asset.used",
         "run.state",
         "attempt.started",
     ]
     if agent_retry:
         _assert_agent_retry_lifecycle(records)
     assert event_names[-2:] == ["attempt.ended", "run.ended"]
-    assert event_names.count("span.started") == 1
-    assert event_names.count("span.ended") == 1
+    request_attempts = [
+        record
+        for record in records
+        if record.get("span_type") == "LLM"
+        and record.get("operation") == "request_attempt"
+    ]
+    request_starts = [
+        record
+        for record in request_attempts
+        if record["event_name"] == "span.started"
+    ]
+    assert request_starts
+    assert all(record["step_index"] == 1 for record in request_starts)
+    request_ends = [
+        record
+        for record in request_attempts
+        if record["event_name"] == "span.ended"
+    ]
+    assert request_starts and len(request_starts) == len(request_ends)
+    logical_ends = [
+        record
+        for record in records
+        if record.get("span_type") == "LLM"
+        and record.get("operation") == "chat"
+        and record["event_name"] == "span.ended"
+    ]
+    assert len(logical_ends) == 1
+    logical_starts = [
+        record
+        for record in records
+        if record.get("span_type") == "LLM"
+        and record.get("operation") == "chat"
+        and record["event_name"] == "span.started"
+    ]
+    assert len(logical_starts) == 1
+    assert event_names.count("span.started") == len(request_starts) + 1
+    assert event_names.count("span.ended") == len(request_ends) + 1
 
 
 async def _assert_llm_span_projection(store, records, run_id):
@@ -327,6 +417,7 @@ async def _assert_llm_span_projection(store, records, run_id):
             for record in records
             if record["event_name"] == "span.ended"
             and record["span_type"] == "LLM"
+            and record.get("operation") == "chat"
         ),
         None,
     )
@@ -334,7 +425,9 @@ async def _assert_llm_span_projection(store, records, run_id):
         return None
     projected_spans = await store.list_spans(run_id=run_id, limit=50)
     llm_span = next(
-        span for span in projected_spans if span["span_type"] == "LLM"
+        span
+        for span in projected_spans
+        if span["span_type"] == "LLM" and span["operation"] == "chat"
     )
     assert llm_span["input_tokens"] == model_end["metrics"]["input_tokens"]
     assert llm_span["output_tokens"] == model_end["metrics"]["output_tokens"]
@@ -348,9 +441,14 @@ async def _assert_llm_span_projection(store, records, run_id):
     assert decode(llm_span["model_key"]) == "response-model"
     assert llm_span["model_key_source"] == "response"
     assert llm_span["streaming"] == model_end["streaming"]
+    assert llm_span["step_index"] == model_end["step_index"] == 1
     assert decode(llm_span["finish_reason"]) == "stop"
-    assert llm_span["time_to_first_chunk_us"] is None
-    assert llm_span["time_to_first_visible_text_us"] is None
+    if model_end["streaming"]:
+        assert llm_span["time_to_first_chunk_us"] is not None
+        assert llm_span["time_to_first_visible_text_us"] is not None
+    else:
+        assert llm_span["time_to_first_chunk_us"] is None
+        assert llm_span["time_to_first_visible_text_us"] is None
     assert llm_span["quality"] == "observed"
     return llm_span
 
@@ -465,7 +563,7 @@ def _make_runner_case(
     )
 
 
-def _install_deterministic_provider(monkeypatch):
+def _install_deterministic_provider(monkeypatch, *, streaming=False):
     from agentscope.model._model_response import ChatResponse
     from agentscope.model._model_usage import ChatUsage
     from swe.agents import model_factory
@@ -480,16 +578,31 @@ def _install_deterministic_provider(monkeypatch):
         def __deepcopy__(self, _memo):
             return self
 
-    model = DeterministicChatModel(
-        [
-            ChatResponse(
-                content=[{"type": "text", "text": "hello from the agent"}],
-                usage=ChatUsage(input_tokens=3, output_tokens=4, time=0.0),
-                metadata={"model": "response-model", "finish_reason": "stop"},
-            ),
-        ]
-        * 4,
-    )
+    responses = [
+        ChatResponse(
+            content=[{"type": "text", "text": "hello from the agent"}],
+            usage=ChatUsage(input_tokens=3, output_tokens=4, time=0.0),
+            metadata={"model": "response-model", "finish_reason": "stop"},
+        ),
+    ] * 4
+    if streaming:
+
+        class DeterministicStreamingChatModel(DeterministicChatModel):
+            def __init__(self):
+                super().__init__(responses, stream=True)
+
+            async def __call__(self, *args, **kwargs):
+                self.calls.append({"args": args, "kwargs": kwargs})
+                item = self.responses.pop(0)
+
+                async def chunks():
+                    yield item
+
+                return chunks()
+
+        model = DeterministicStreamingChatModel()
+    else:
+        model = DeterministicChatModel(responses)
     provider_manager = FakeProviderManager(CopyableFakeProvider(model))
 
     async def get_provider_manager(_tenant_id=None):
@@ -564,6 +677,257 @@ def _register_expert_main_for_request(
             turn_id=turn_id,
         )
     )
+
+
+async def _emit_model_failure_records(monkeypatch, failure_mode):
+    from swe.observability import Scope, bind_context
+    from swe.observability.instrumentation import (
+        ObservabilityModelWrapper,
+        record_model_request_attempt,
+    )
+    from swe.providers.retry_chat_model import (
+        RateLimitConfig,
+        RetryChatModel,
+        RetryConfig,
+    )
+
+    sink = StringIO()
+    emitter = JsonlEmitter(stream=sink)
+    observer = Observability(emitter)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+    context = observer.admit_run(
+        scope=Scope("swe", "runner-integration", "tenant-a", "agent-a"),
+        business_ref={
+            "chat_id": "model-failure-chat",
+            "root_question_msgid": "question-a",
+        },
+        enabled=True,
+    )
+    attempt = observer.start_attempt(context)
+    source_closed = False
+
+    class FailingModel:
+        model_name = "test-model"
+        stream = failure_mode == "stream"
+
+        async def __call__(self, *_args, **_kwargs):
+            nonlocal source_closed
+            if failure_mode == "request":
+                raise RuntimeError("private provider failure detail")
+
+            async def chunks():
+                nonlocal source_closed
+                try:
+                    yield SimpleNamespace(
+                        content=[
+                            {"type": "text", "text": "private partial output"},
+                        ],
+                    )
+                    raise RuntimeError("private stream failure detail")
+                finally:
+                    source_closed = True
+
+            return chunks()
+
+    async def on_attempt(index, streaming):
+        record_model_request_attempt(index, streaming=streaming)
+
+    wrapped = ObservabilityModelWrapper(
+        RetryChatModel(
+            FailingModel(),
+            retry_config=RetryConfig(enabled=False, max_retries=1),
+            rate_limit_config=RateLimitConfig(max_qpm=0),
+            on_request_attempt=on_attempt,
+        ),
+        provider_key="test-provider",
+        model_key="test-model",
+    )
+    with bind_context(attempt):
+        try:
+            result = await wrapped([{"text": "private prompt body"}])
+            async for _chunk in result:
+                pass
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("model failure did not propagate")
+        observer.end_attempt(attempt, status="failed")
+        observer.end_run(context, status="failed")
+    assert emitter.close(timeout=1) == 0
+    records = [json.loads(line) for line in sink.getvalue().splitlines()]
+    assert all(
+        _validate_payload(json.dumps(record, ensure_ascii=False))
+        for record in records
+    )
+    assert all(
+        private not in sink.getvalue()
+        for private in (
+            "private provider failure detail",
+            "private stream failure detail",
+            "private partial output",
+            "private prompt body",
+        )
+    )
+    if failure_mode == "stream":
+        assert source_closed
+
+    return records, context.obs_run_id
+
+
+async def _project_model_failure(connection, records, run_id, failure_mode):
+    store = ObservabilityStore(connection)
+    projector = InboxProjector(store, poll_seconds=0.01)
+    async with connection.transaction() as session:
+        for record in records:
+            await session.insert(
+                "INSERT INTO swe_agentobs_inbox (payload_text) VALUES (%s)",
+                (json.dumps(record, separators=(",", ":")),),
+            )
+    while await projector.project_batch():
+        pass
+    async with connection.acquire() as session:
+        run = await session.fetch_one(
+            "SELECT status,ended_at,llm_calls,input_tokens,output_tokens "
+            "FROM swe_agentobs_runs WHERE run_id=%s",
+            (run_id,),
+        )
+        llm_span = await session.fetch_one(
+            "SELECT status,technical_status,error_type,streaming "
+            "FROM swe_agentobs_spans WHERE run_id=%s AND span_type='LLM' "
+            "AND operation='chat'",
+            (run_id,),
+        )
+        request_attempt = await session.fetch_one(
+            "SELECT status,error_type FROM swe_agentobs_spans "
+            "WHERE run_id=%s AND operation='request_attempt'",
+            (run_id,),
+        )
+    assert run["status"] == "failed"
+    assert run["ended_at"] is not None
+    assert run["llm_calls"] == 1
+    assert run["input_tokens"] is None
+    assert run["output_tokens"] is None
+    assert llm_span["status"] == "failed"
+    assert llm_span["technical_status"] == "ERROR"
+    assert llm_span["error_type"] == "RuntimeError"
+    assert llm_span["streaming"] == int(failure_mode == "stream")
+    assert request_attempt["status"] == "failed"
+    assert request_attempt["error_type"] == "RuntimeError"
+    return store
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_mode", ["request", "stream"])
+async def test_model_failure_projects_through_mysql_and_authorized_api(
+    monkeypatch,
+    failure_mode,
+):
+    monkeypatch.setenv(
+        "SWE_AGENTOBS_CURSOR_SECRET",
+        "runner-integration-secret-at-least-32",
+    )
+    records, run_id = await _emit_model_failure_records(
+        monkeypatch,
+        failure_mode,
+    )
+    connection = DatabaseConnection(_config())
+    await connection.connect()
+    try:
+        store = await _project_model_failure(
+            connection,
+            records,
+            run_id,
+            failure_mode,
+        )
+        api = FastAPI()
+        api.state.agent_observability_store = store
+
+        @api.middleware("http")
+        async def bind_source(request: Request, call_next):
+            request.state.source_id = "runner-integration"
+            return await call_next(request)
+
+        api.include_router(observability_router)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=api),
+            base_url="http://runner.test",
+        ) as client:
+            response = await client.get(
+                f"/agent-observability/runs/{run_id}",
+                headers={"X-User-Role": "manager"},
+            )
+        assert response.status_code == 200
+        run = response.json()["run"]
+        assert run["status"] == "failed"
+        assert run["ended_at"]
+        assert run["llm_calls"] == 1
+        assert run["input_tokens"] is None
+        assert run["output_tokens"] is None
+        api_span = next(
+            span
+            for span in response.json()["spans"]
+            if span["span_type"] == "LLM" and span["operation"] == "chat"
+        )
+        api_request_attempt = next(
+            span
+            for span in response.json()["spans"]
+            if span["span_type"] == "LLM"
+            and span["operation"] == "request_attempt"
+        )
+        assert api_span["status"] == "failed"
+        assert api_span["technical_status"] == "ERROR"
+        assert api_span["error_type"] == "RuntimeError"
+        assert api_request_attempt["status"] == "failed"
+        assert api_request_attempt["error_type"] == "RuntimeError"
+        assert "metadata_text" not in api_span
+    finally:
+        await connection.close()
+
+
+@pytest.mark.asyncio
+async def test_run_without_model_span_keeps_usage_summary_unknown(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "SWE_AGENTOBS_CURSOR_SECRET",
+        "runner-integration-secret-at-least-32",
+    )
+    sink = StringIO()
+    emitter = JsonlEmitter(stream=sink)
+    observer = Observability(emitter)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+    context = observer.admit_run(
+        scope=Scope(
+            "swe",
+            "runner-integration",
+            "tenant-a",
+            "agent-a",
+        ),
+        enabled=True,
+    )
+    attempt = observer.start_attempt(context)
+    observer.end_attempt(attempt, status="succeeded")
+    observer.end_run(context, status="succeeded")
+    assert emitter.close(timeout=1) == 0
+    records = [json.loads(line) for line in sink.getvalue().splitlines()]
+    assert not any(
+        record.get("event_name") == "span.ended"
+        and record.get("span_type") == "LLM"
+        and record.get("operation") == "chat"
+        for record in records
+    )
+    connection = DatabaseConnection(_config())
+    await connection.connect()
+    try:
+        await _assert_projected_run_available(connection, records)
+    finally:
+        await connection.close()
 
 
 @pytest.mark.asyncio
@@ -643,8 +1007,9 @@ async def test_runner_admission_settlement_emits_and_projects_one_run(
         assert emitter.close(timeout=1) == 0
         records = [json.loads(line) for line in sink.getvalue().splitlines()]
         event_names = [record["event_name"] for record in records]
-        assert event_names[:3] == [
+        assert event_names[:4] == [
             "run.accepted",
+            "asset.used",
             "run.state",
             "attempt.started",
         ]
@@ -679,11 +1044,12 @@ async def test_runner_admission_settlement_emits_and_projects_one_run(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "expert_main,agent_retry",
+    "expert_main,agent_retry,streaming",
     [
-        pytest.param(False, False, id="standard"),
-        pytest.param(True, False, id="expert-main"),
-        pytest.param(False, True, id="agent-retry"),
+        pytest.param(False, False, False, id="standard"),
+        pytest.param(True, False, False, id="expert-main"),
+        pytest.param(False, True, False, id="agent-retry"),
+        pytest.param(False, False, True, id="streaming"),
     ],
 )
 async def test_real_agent_runner_question_emits_and_projects_one_run(
@@ -691,6 +1057,7 @@ async def test_real_agent_runner_question_emits_and_projects_one_run(
     tmp_path,
     expert_main,
     agent_retry,
+    streaming,
 ):
     monkeypatch.setenv("SWE_ALLOW_MISSING_TRACE_SDK", "true")
     monkeypatch.setenv("SWE_AGENTOBS_ENABLED", "true")
@@ -704,7 +1071,7 @@ async def test_real_agent_runner_question_emits_and_projects_one_run(
     from swe.observability import runner_lifecycle
 
     workspace_dir = _create_agent_workspace(tmp_path, monkeypatch)
-    model = _install_deterministic_provider(monkeypatch)
+    model = _install_deterministic_provider(monkeypatch, streaming=streaming)
 
     sink = StringIO()
     emitter = JsonlEmitter(stream=sink)

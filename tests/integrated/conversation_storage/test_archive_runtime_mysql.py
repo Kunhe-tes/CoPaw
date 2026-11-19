@@ -2,6 +2,8 @@
 """Runtime façade uses existing workspace bundles and SQL occurrence locators."""
 
 import asyncio
+import io
+import json
 from types import SimpleNamespace
 
 from agentscope.message import Msg
@@ -197,6 +199,227 @@ async def test_runtime_binding_updates_complete_root_only_after_compact_confirma
         "alice",
     )
     assert restored == current
+
+
+async def test_tool_output_evidence_follows_committed_message_locator(
+    conversation_test_database,
+    tmp_path,
+    monkeypatch,
+):
+    from swe.app.conversation_storage.archive_binding import ArchiveBinding
+    from swe.app.conversation_storage.history import HistoryStore
+    from swe.observability import instrumentation
+    from swe.observability.config import EmitterConfig
+    from swe.observability.context import bind_context
+    from swe.observability.emitter import JsonlEmitter
+    from swe.observability.models import ObservabilityContext, Scope
+    from swe.observability.projector import _validate_payload
+
+    db = conversation_test_database
+    _, _, _, store = await setup(db, tmp_path)
+    message = Msg(
+        "system",
+        [
+            {
+                "type": "tool_result",
+                "id": "call-evidence",
+                "name": "read_file",
+                "output": [{"type": "text", "text": "private tool output"}],
+            },
+        ],
+        "system",
+    )
+    memory = SimpleNamespace(
+        content=[(message, [])],
+        _compressed_summary="",
+    )
+    execution = SimpleNamespace(accept_committed_state=lambda _state: None)
+
+    async def root_provider():
+        return {
+            "revision": 0,
+            "agent": {
+                "memory": {
+                    "content": [[message.to_dict(), []]],
+                    "_compressed_summary": "",
+                },
+            },
+        }
+
+    binding = ArchiveBinding(
+        store=store,
+        memory=memory,
+        chat_id="first",
+        execution=execution,
+        root_provider=root_provider,
+        authority=None,
+    )
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(instrumentation, "default_emitter", lambda: emitter)
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("swe", "source", "tenant", "agent"),
+        business_ref={"chat_id": "first"},
+    ).new_attempt()
+
+    with bind_context(context):
+        span = instrumentation.Observability().span(
+            "Tool",
+            "execute",
+            name="registered.tool",
+            tool={
+                "tool_key": "read_file",
+                "tool_call_id": "call-evidence",
+                "tool_execution_id": ("00000000-0000-4000-8000-000000000001"),
+                "executor_kind": "agent_tool",
+            },
+        )
+        with instrumentation.bind_tool_span(span):
+            await binding.append(message)
+        span.end(status="succeeded")
+    emitter.close()
+
+    history = HistoryStore(
+        db,
+        store.scope,
+        store.reader.bundles,
+        cursor_secret=b"tool-output-evidence-test",
+    )
+    saved = await history.message_occurrence("first", message.id)
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    evidence = next(
+        event
+        for event in events
+        if event.get("event_type") == "evidence.linked"
+    )
+
+    assert saved["status"] == "available"
+    assert message.id in json.dumps(saved["message"])
+    assert "private tool output" in json.dumps(saved["message"])
+    assert evidence["chat_id"] == "first"
+    assert evidence["message_id"] == message.id
+    assert evidence["content_type"] == "tool_output"
+    assert evidence["saved_state"] == "available"
+    assert "private tool output" not in json.dumps(evidence)
+    assert _validate_payload(json.dumps(evidence))["event_type"] == (
+        "evidence.linked"
+    )
+
+
+async def test_assistant_answer_evidence_follows_committed_message_locator(
+    conversation_test_database,
+    tmp_path,
+    monkeypatch,
+):
+    from swe.app.conversation_storage.archive_binding import ArchiveBinding
+    from swe.app.conversation_storage.history import HistoryStore
+    from swe.observability import instrumentation
+    from swe.observability.config import EmitterConfig
+    from swe.observability.context import bind_context
+    from swe.observability.emitter import JsonlEmitter
+    from swe.observability.models import ObservabilityContext, Scope
+    from swe.observability.projector import _validate_payload
+
+    db = conversation_test_database
+    _, _, _, store = await setup(db, tmp_path)
+
+    class Model:
+        model_name = "test-model"
+        stream = True
+
+        async def __call__(self, *_args, **_kwargs):
+            async def response_stream():
+                yield SimpleNamespace(
+                    id="response-answer-evidence",
+                    content=[{"type": "text", "text": "private answer body"}],
+                    usage=None,
+                    metadata={},
+                )
+
+            return response_stream()
+
+    response_chunks = []
+    message = Msg(
+        "assistant",
+        [{"type": "text", "text": "private answer body"}],
+        "assistant",
+        invocation_id=None,
+    )
+    memory = SimpleNamespace(content=[(message, [])], _compressed_summary="")
+    execution = SimpleNamespace(accept_committed_state=lambda _state: None)
+
+    async def root_provider():
+        return {
+            "revision": 0,
+            "agent": {
+                "memory": {
+                    "content": [[message.to_dict(), []]],
+                    "_compressed_summary": "",
+                },
+            },
+        }
+
+    binding = ArchiveBinding(
+        store=store,
+        memory=memory,
+        chat_id="first",
+        execution=execution,
+        root_provider=root_provider,
+        authority=None,
+    )
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(instrumentation, "default_emitter", lambda: emitter)
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("swe", "source", "tenant", "agent"),
+        business_ref={"chat_id": "first"},
+    ).new_attempt()
+
+    with bind_context(context):
+        response = await instrumentation.ObservabilityModelWrapper(
+            Model(),
+            provider_key="test-provider",
+            model_key="test-model",
+        )([])
+        response_chunks = [chunk async for chunk in response]
+        message.invocation_id = response_chunks[-1].id
+        await binding.append(message)
+    emitter.close()
+
+    history = HistoryStore(
+        db,
+        store.scope,
+        store.reader.bundles,
+        cursor_secret=b"assistant-answer-evidence-test",
+    )
+    saved = await history.message_occurrence("first", message.id)
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    answer_span = next(
+        event
+        for event in events
+        if event["event_name"] == "span.started"
+        and event.get("operation") == "chat"
+    )
+    evidence = next(
+        event
+        for event in events
+        if event.get("event_type") == "evidence.linked"
+        and event.get("content_type") == "assistant_answer"
+    )
+
+    assert saved["status"] == "available"
+    assert message.id in json.dumps(saved["message"])
+    assert "private answer body" in json.dumps(saved["message"])
+    assert evidence["obs_span_id"] == answer_span["obs_span_id"]
+    assert evidence["chat_id"] == "first"
+    assert evidence["message_id"] == message.id
+    assert evidence["saved_state"] == "available"
+    assert "private answer body" not in json.dumps(evidence)
+    assert _validate_payload(json.dumps(evidence))["event_type"] == (
+        "evidence.linked"
+    )
 
 
 async def test_source_visibility_race_rolls_back_root_archive_and_dependency(

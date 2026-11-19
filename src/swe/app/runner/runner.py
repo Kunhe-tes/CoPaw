@@ -3376,26 +3376,89 @@ class AgentRunner(Runner):
             request_id=request_id,
         )
         if pending is None:
+            if request_id:
+                completed = await svc.get_request(request_id)
+                if (
+                    completed is not None
+                    and completed.session_id == session_id
+                    and (
+                        request is None
+                        or getattr(request, "user_id", None)
+                        == completed.user_id
+                    )
+                    and completed.status in {"approved", "denied", "timeout"}
+                ):
+                    from swe.observability import runner_lifecycle
+
+                    runner_lifecycle.report_approval_resolution(
+                        None,
+                        completed.status,
+                        False,
+                    )
+                    await svc.resolve_request_once(
+                        request_id,
+                        ApprovalDecision(completed.status),
+                    )
+                    return (
+                        self._already_resolved_approval(completed),
+                        True,
+                        None,
+                    )
             return None, False, None
+
+        from swe.observability import runner_lifecycle
+
+        restored_context = runner_lifecycle.restore_approval_context(
+            self,
+            request,
+            pending,
+        )
+
+        def report_resolution(decision: str, changed: bool) -> None:
+            runner_lifecycle.report_approval_resolution(
+                restored_context,
+                decision,
+                changed,
+            )
+
+        def record_resolution(decision: str, terminal_status: str | None):
+            report_resolution(decision, True)
+            context = restored_context
+            if context is None:
+                return
+            with runner_lifecycle.bind_query_context(context):
+                runner_lifecycle.record_approval_resolved(
+                    pending.request_id,
+                    decision,
+                    started_at=pending.created_at,
+                )
+            if terminal_status is not None:
+                runner_lifecycle.finish_query_run(
+                    context,
+                    None,
+                    terminal_status,
+                )
+
+        def transition_callback(decision: str, terminal_status: str | None):
+            def on_transition(_record: Any) -> None:
+                record_resolution(decision, terminal_status)
+
+            return on_transition
 
         elapsed = time.time() - pending.created_at
         if elapsed > self._APPROVAL_TIMEOUT_SECONDS:
-            await self._discard_pending_expert_main_approval(pending, request)
-            await svc.resolve_request(
+            resolved, changed = await svc.resolve_request_once(
                 pending.request_id,
                 ApprovalDecision.TIMEOUT,
+                on_transition=transition_callback("timed_out", "timed_out"),
             )
-            from swe.observability.runner_lifecycle import (
-                finish_query_run,
-                record_approval_resolved,
-            )
-
-            context = record_approval_resolved(
-                pending.request_id,
-                "timed_out",
-                started_at=pending.created_at,
-            )
-            finish_query_run(context, None, "timed_out")
+            if not changed:
+                report_resolution(
+                    resolved.status if resolved else "unresolved",
+                    False,
+                )
+                return self._already_resolved_approval(pending), True, None
+            await self._discard_pending_expert_main_approval(pending, request)
             return (
                 _build_denial_response_msg(
                     pending,
@@ -3415,6 +3478,7 @@ class AgentRunner(Runner):
                 external_submission,
             )
         ):
+            report_resolution("unresolved", False)
             return (
                 self._external_approval_conflict_message(
                     pending,
@@ -3425,20 +3489,18 @@ class AgentRunner(Runner):
             )
 
         if _is_approval(normalized):
-            resolved = await svc.resolve_request(
+            resolved, changed = await svc.resolve_request_once(
                 pending.request_id,
                 ApprovalDecision.APPROVED,
+                on_transition=transition_callback("approved", None),
             )
+            if not changed:
+                report_resolution(
+                    resolved.status if resolved else "unresolved",
+                    False,
+                )
+                return self._already_resolved_approval(pending), True, None
             record = resolved or pending
-            from swe.observability.runner_lifecycle import (
-                record_approval_resolved,
-            )
-
-            record_approval_resolved(
-                record.request_id,
-                "approved",
-                started_at=record.created_at,
-            )
             approved_tool_call = _approved_tool_call_from_record(record)
             await self._notify_console_approval_result(
                 record,
@@ -3453,21 +3515,17 @@ class AgentRunner(Runner):
             if explicit_deny
             else ApprovalDecision.DENIED
         )
-        resolved = await svc.resolve_request(
+        resolved, changed = await svc.resolve_request_once(
             pending.request_id,
             denial_decision,
+            on_transition=transition_callback("denied", "rejected"),
         )
-        from swe.observability.runner_lifecycle import (
-            finish_query_run,
-            record_approval_resolved,
-        )
-
-        context = record_approval_resolved(
-            pending.request_id,
-            "denied",
-            started_at=pending.created_at,
-        )
-        finish_query_run(context, None, "rejected")
+        if not changed:
+            report_resolution(
+                resolved.status if resolved else "unresolved",
+                False,
+            )
+            return self._already_resolved_approval(pending), True, None
         await self._discard_pending_expert_main_approval(pending, request)
         await self._notify_console_approval_result(
             resolved or pending,
@@ -3482,6 +3540,23 @@ class AgentRunner(Runner):
             ),
             True,
             None,
+        )
+
+    @staticmethod
+    def _already_resolved_approval(pending: Any) -> Msg:
+        return Msg(
+            name="Friday",
+            role="assistant",
+            metadata={"approval_already_resolved": True},
+            content=[
+                TextBlock(
+                    type="text",
+                    text=(
+                        f"Approval request `{pending.request_id}` has already "
+                        "been resolved. Refresh the session to see its status."
+                    ),
+                ),
+            ],
         )
 
     @staticmethod

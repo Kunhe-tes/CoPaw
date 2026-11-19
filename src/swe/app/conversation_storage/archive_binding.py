@@ -4,6 +4,7 @@
 import inspect
 from copy import deepcopy
 from dataclasses import dataclass
+from typing import Any
 
 from ...agents.memory.chat_checkpoint import render_checkpoint_projection
 from .errors import ConflictError, UnknownCommit
@@ -100,6 +101,53 @@ class ArchiveBinding:
         return result.state
 
     async def append(self, message):
+        from uuid import uuid4
+
+        reference_id = str(uuid4())
+        content = getattr(message, "content", None)
+        message_id = getattr(message, "id", None)
+        blocks = content if isinstance(content, (list, tuple)) else []
+        if isinstance(message_id, str) and message_id:
+            if any(
+                _content_block_type(block) == "tool_result" for block in blocks
+            ):
+                from ...observability.instrumentation import (
+                    emit_tool_output_evidence,
+                )
+
+                emit_tool_output_evidence(
+                    chat_id=self.chat_id,
+                    message_id=message_id,
+                    saved_state="pending",
+                    reference_id=reference_id,
+                )
+            elif getattr(message, "role", None) == "assistant":
+                invocation_id = getattr(message, "invocation_id", None)
+                has_tool_use = any(
+                    _content_block_type(block) == "tool_use"
+                    for block in blocks
+                )
+                has_visible_answer = (
+                    isinstance(content, str) and bool(content.strip())
+                ) or any(
+                    _content_block_type(block) == "text"
+                    and bool(_content_block_text(block).strip())
+                    for block in blocks
+                )
+                if isinstance(invocation_id, str) and invocation_id:
+                    from ...observability.instrumentation import (
+                        emit_assistant_answer_evidence,
+                    )
+
+                    emit_assistant_answer_evidence(
+                        chat_id=self.chat_id,
+                        message_id=message_id,
+                        invocation_id=invocation_id,
+                        has_tool_use=has_tool_use,
+                        has_visible_answer=has_visible_answer,
+                        saved_state="pending",
+                        reference_id=reference_id,
+                    )
         root = await self._root(
             self.memory.content,
             getattr(self.memory, "_compressed_summary", ""),
@@ -111,6 +159,72 @@ class ArchiveBinding:
             authority=self.authority,
         )
         self.execution.accept_committed_state(result.recovery_state)
+        occurrence_id = getattr(result, "source_occurrence_no", None)
+        if not isinstance(message_id, str) or not message_id:
+            return
+        if any(
+            _content_block_type(block) == "tool_result" for block in blocks
+        ):
+            from ...observability.instrumentation import (
+                emit_tool_output_evidence,
+                tool_output_was_compacted,
+            )
+
+            saved_state = (
+                "compacted"
+                if tool_output_was_compacted(message_id)
+                else "available"
+            )
+            emit_tool_output_evidence(
+                chat_id=self.chat_id,
+                message_id=message_id,
+                saved_state=saved_state,
+                occurrence_id=occurrence_id,
+                reference_id=reference_id,
+            )
+            return
+        if getattr(message, "role", None) != "assistant":
+            return
+        invocation_id = getattr(message, "invocation_id", None)
+        if not isinstance(invocation_id, str) or not invocation_id:
+            return
+        has_tool_use = any(
+            _content_block_type(block) == "tool_use" for block in blocks
+        )
+        has_visible_answer = (
+            isinstance(content, str) and bool(content.strip())
+        ) or any(
+            _content_block_type(block) == "text"
+            and bool(_content_block_text(block).strip())
+            for block in blocks
+        )
+        from ...observability.instrumentation import (
+            emit_assistant_answer_evidence,
+        )
+
+        emit_assistant_answer_evidence(
+            chat_id=self.chat_id,
+            message_id=message_id,
+            invocation_id=invocation_id,
+            has_tool_use=has_tool_use,
+            has_visible_answer=has_visible_answer,
+            occurrence_id=occurrence_id,
+            reference_id=reference_id,
+        )
+
+
+def _content_block_type(block: Any) -> Any:
+    if isinstance(block, dict):
+        return block.get("type")
+    return getattr(block, "type", None)
+
+
+def _content_block_text(block: Any) -> str:
+    if isinstance(block, dict):
+        text = block.get("text")
+    else:
+        text = getattr(block, "text", None)
+    return text if isinstance(text, str) else ""
 
 
 def attach_bound_memory(memory, store, chat_id):
