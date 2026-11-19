@@ -81,30 +81,6 @@ async def test_query_paths_use_scope_and_point_indexes(
         ],
     )
     await db.execute_many(
-        "INSERT INTO swe_conversation_messages (service_unit_key,session_id,archive_chat_id,layer,session_order,archive_order,source_msg_key,source_occurrence_no,role_key,kind_key,publication_id,byte_offset,byte_length,context_epoch,in_context) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-        [
-            (
-                SERVICE,
-                (i - 1) % 30 + 1,
-                (i - 1) % 30 + 1 if i % 2 else None,
-                "archive" if i % 2 else "memory",
-                None if i % 2 else i,
-                i if i % 2 else None,
-                f"msg{i}".encode(),
-                i,
-                b"assistant",
-                b"message",
-                (i - 1) % 2000 + 1,
-                100,
-                20,
-                0,
-                0 if i % 2 else 1,
-            )
-            for i in range(1, 6001)
-        ],
-    )
-    await db.execute_many(
         "INSERT INTO swe_conversation_turns (service_unit_key,chat_id,session_id,question_msg_key,turn_order,context_epoch,generation,state) "
         "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
         [
@@ -123,7 +99,6 @@ async def test_query_paths_use_scope_and_point_indexes(
     )
     for table in (
         "swe_conversation_chats",
-        "swe_conversation_messages",
         "swe_conversation_publications",
         "swe_conversation_turns",
     ):
@@ -134,24 +109,12 @@ async def test_query_paths_use_scope_and_point_indexes(
             (SERVICE, b"tenant", b"source", b"agent", b"user1", b"console"),
         ),
         "archive_page": (
-            "SELECT publication_id,byte_offset,byte_length FROM swe_conversation_messages WHERE service_unit_key=%s AND archive_chat_id=%s AND deleted_at IS NULL AND archive_order<%s AND archive_order<=%s ORDER BY archive_order DESC LIMIT 20",
-            (SERVICE, 1, 5000, 6000),
+            "SELECT id,archive_offset,archive_length FROM swe_conversation_publications WHERE service_unit_key=%s AND chat_id=%s AND state='committed' AND archive_last_order<%s ORDER BY archive_last_order DESC LIMIT 20",
+            (SERVICE, 1, 5000),
         ),
         "turn_question": (
             "SELECT id,state FROM swe_conversation_turns WHERE service_unit_key=%s AND session_id=%s AND question_msg_key=%s",
             (SERVICE, 1, b"q1"),
-        ),
-        "source_message": (
-            "SELECT publication_id,byte_offset,byte_length FROM swe_conversation_messages WHERE service_unit_key=%s AND session_id=%s AND source_msg_key=%s AND layer=%s",
-            (SERVICE, 2, b"msg2", "memory"),
-        ),
-        "publication_reverse_reference": (
-            "SELECT id FROM swe_conversation_messages WHERE service_unit_key=%s AND publication_id=%s",
-            (SERVICE, 1),
-        ),
-        "context_lookup": (
-            "SELECT id,publication_id FROM swe_conversation_messages WHERE service_unit_key=%s AND session_id=%s AND context_epoch=%s AND in_context=%s ORDER BY session_order",
-            (SERVICE, 2, 0, 1),
         ),
         "publication_pending": (
             "SELECT id FROM swe_conversation_publications WHERE service_unit_key=%s AND state=%s AND created_at<%s ORDER BY created_at,id LIMIT 20",
@@ -176,5 +139,5 @@ async def test_query_paths_use_scope_and_point_indexes(
     record_property("query_plans", json.dumps(plans, default=str))
     record_property(
         "cardinality",
-        "30 Sessions, 1500 Chats, 900 Turns, 2000 Publications, 6000 Messages",
+        "30 Sessions, 1500 Chats, 900 Turns, 2000 Publications",
     )

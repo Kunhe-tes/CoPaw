@@ -258,6 +258,12 @@ class HistoryStore:
         )
 
     async def _suppress_anchors(self, chat, rows):
+        rows = [
+            row
+            for row in rows
+            if row["layer"] != "anchor"
+            or row.get("origin_chat_id") == chat["id"]
+        ]
         anchors = {
             row["source_msg_key"]
             for row in rows
@@ -529,8 +535,8 @@ class HistoryStore:
             boundaries = await self.db.fetch_all(
                 "SELECT * FROM swe_conversation_publications WHERE chat_id=%s "
                 "AND state='committed' AND archive_first_order<%s "
-                "AND archive_first_order<=%s ORDER BY archive_last_order DESC",
-                (chat["id"], bound, high),
+                "AND archive_first_order<=%s ORDER BY archive_last_order DESC LIMIT %s",
+                (chat["id"], bound, high, limit + 1),
             )
         selected_rows, used_boundaries = [], []
         from .archive_bundle_reader import read_archive_bundle
@@ -541,6 +547,7 @@ class HistoryStore:
             last = min(boundary["archive_last_order"], bound - 1, high)
             if first > last:
                 continue
+            first = max(first, last - (limit + 1 - len(selected_rows)) + 1)
             read = await read_archive_bundle(
                 self.db,
                 self.scope,
@@ -590,9 +597,6 @@ class HistoryStore:
                 selected_rows = selected_rows[-limit:]
                 break
             bound = first
-            if len(selected_rows) == limit:
-                has_more = True
-                break
         rows = selected_rows
         visible_boundaries = [
             boundary

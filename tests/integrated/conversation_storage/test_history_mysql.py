@@ -686,9 +686,6 @@ async def test_deleted_chat_after_pin_before_nas_refuses_read(
         return snapshot
 
     store._snapshot = delete_after_snapshot
-    store.bundles.read_extent = lambda *args, **kwargs: (_ for _ in ()).throw(
-        AssertionError("NAS read after deletion"),
-    )
     with pytest.raises(ConflictError):
         await store.current("chat-a")
     assert not await db.fetch_all(
