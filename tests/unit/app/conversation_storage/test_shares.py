@@ -152,6 +152,28 @@ def selection_database(**kwargs):
     return db
 
 
+def selection_proof(layer="memory"):
+    return {
+        "snapshot": {
+            "session_id": 1,
+            "chat_id": 2,
+            "state_revision": 0,
+            "history_revision": 0,
+            "session_history_high": 1,
+            "archive_history_high": 1,
+            "epoch": 1,
+        },
+        "questions": {
+            "question": {
+                "sequence": 1,
+                "publication_id": 9,
+                "layer": layer,
+                "status": "completed",
+            },
+        },
+    }
+
+
 @pytest.mark.parametrize(
     "turn_changes,occurrences",
     [
@@ -192,6 +214,7 @@ async def test_share_selection_rechecks_completed_and_first_visible_occurrence(
 
 
 async def test_share_selection_preserves_source_identity_and_duplicate_occurrences():
+    proof = selection_proof()
     turn = {
         "id": 3,
         "question_msg_key": b"question",
@@ -200,22 +223,23 @@ async def test_share_selection_preserves_source_identity_and_duplicate_occurrenc
         "history_status": "completed",
     }
     db = selection_database(
-        fetch_all=AsyncMock(
-            side_effect=[
-                [turn],
-                [
-                    {"role_key": b"user", "turn_id": 3},
-                    {"role_key": b"assistant", "turn_id": 3},
-                ],
-            ],
-        ),
+        fetch_all=AsyncMock(return_value=[turn]),
+        fetch_one=AsyncMock(return_value=proof["snapshot"]),
     )
-    plan = mutation(selected_question_keys=("question", "question"))
+    plan = mutation(
+        selected_question_keys=("question", "question"),
+        selection_proof=proof,
+    )
     assert ShareInstall.from_dict(plan.to_dict()).selected_question_keys == (
         "question",
         "question",
     )
-    await lock_share_selection(db, share_request(), plan)
+    await lock_share_selection(
+        db,
+        share_request(base_state_revision=0, base_history_revision=0),
+        plan,
+    )
+    db.fetch_all.assert_awaited_once()
     assert db.fetch_all.call_args_list[0].args[1] == (
         b"schema-test-service",
         1,
@@ -226,7 +250,8 @@ async def test_share_selection_preserves_source_identity_and_duplicate_occurrenc
     )
 
 
-async def test_archived_anchor_is_not_a_visible_share_question():
+async def test_share_selection_rejects_missing_archive_boundary():
+    proof = selection_proof("archive")
     turn = {
         "id": 3,
         "question_msg_key": b"question",
@@ -235,19 +260,17 @@ async def test_archived_anchor_is_not_a_visible_share_question():
         "history_status": "completed",
     }
     db = selection_database(
-        fetch_all=AsyncMock(
-            side_effect=[
-                [turn],
-                [{"layer": "anchor", "role_key": b"user", "turn_id": 3}],
-                [{"id": 9}],
-            ],
-        ),
+        fetch_all=AsyncMock(return_value=[turn]),
+        fetch_one=AsyncMock(side_effect=[proof["snapshot"], None]),
     )
     with pytest.raises(ConflictError, match="visible"):
         await lock_share_selection(
             db,
-            share_request(),
-            mutation(selected_question_keys=("question",)),
+            share_request(base_state_revision=0, base_history_revision=0),
+            mutation(
+                selected_question_keys=("question",),
+                selection_proof=proof,
+            ),
         )
 
 

@@ -119,9 +119,13 @@ class Recorder:
         key = kind, position
         if key not in self.assignments:
             self.assignments[key] = {
-                "target_id": int(
-                    sha256((kind + position).encode()).hexdigest()[:12],
-                    16,
+                "target_id": (
+                    1 + sum(key[0] == kind for key in self.assignments)
+                    if kind == "publication"
+                    else int(
+                        sha256((kind + position).encode()).hexdigest()[:12],
+                        16,
+                    )
                 ),
                 "operation_key": sha256(
                     (kind + position).encode(),
@@ -189,10 +193,11 @@ class Recorder:
                 "session",
                 "chat",
                 "turn",
-            }, "message tickets must use bounded batches"
+            }, "entity tickets must use bounded batches"
             return self.allocate(*args, **kwargs)
         if name == "allocate_many":
             kind, positions = args
+            assert kind != "message"
             self.batch_allocations.append((kind, tuple(positions)))
             return {
                 position: self.allocate(kind, position)
@@ -220,6 +225,8 @@ async def serial_run(record, source, target, tmp_path):
     importer.bundle_stores = {"svc": SimpleNamespace(root=tmp_path)}
     importer.stores = {"svc": record}
     importer.session_ids, importer.chat_ids, importer.turn_ids = {}, {}, {}
+    importer.session_message_refs = {}
+    importer.session_message_directory = {}
     importer.manifest = SimpleNamespace(
         migration_id=target.migration_id,
         data=record.manifest_data,
@@ -278,10 +285,12 @@ async def test_workspace_domain_publications_match_serial(tmp_path, frozen):
         block.kind for blocks in parallel.blocks.values() for block in blocks
     }
     memory_ids = [
-        load_metadata_json(block.content)["id"]
+        entry["raw_id"]
         for blocks in parallel.blocks.values()
         for block in blocks
-        if block.kind == "memory"
+        if block.kind == "message_directory"
+        for entry in load_metadata_json(block.content)
+        if entry["layer"] == "memory"
     ]
     assert memory_ids == ["question", "answer"]
     imported = [
@@ -299,7 +308,8 @@ async def test_workspace_domain_publications_match_serial(tmp_path, frozen):
     assert turns[0]["history_status"] == "completed"
     assert {
         "recovery",
-        "archive",
+        "archive_manifest",
+        "message_bodies",
         "checkpoint",
         "events",
         "content_meta",
@@ -447,6 +457,8 @@ async def test_legacy_identity_allocation_keeps_first_use_order(tmp_path):
     importer.bundle_stores = {"svc": SimpleNamespace(root=tmp_path)}
     importer.stores = {"svc": record}
     importer.session_ids, importer.chat_ids, importer.turn_ids = {}, {}, {}
+    importer.session_message_refs = {}
+    importer.session_message_directory = {}
     importer.manifest = SimpleNamespace(
         migration_id=target.migration_id,
         data=record.manifest_data,

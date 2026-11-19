@@ -389,7 +389,7 @@ async def test_coordinated_two_service_import_keeps_same_identity_nas_separate(
         b"service-one",
         b"service-two",
     }
-    for table in ("turns", "messages"):
+    for table in ("turns", "publications"):
         counts = await db.fetch_all(
             "SELECT service_unit_key,COUNT(*) AS n FROM swe_conversation_"
             + table

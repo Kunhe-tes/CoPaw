@@ -709,11 +709,17 @@ async def _verify_session_messages(
         task_projections(messages, expected)
     messages = display_order_messages(messages)
     assignments = manifest.data["assignments"].get("publication", {})
-    expected_count = len(messages)
+    prefix = session["position"] + "/messages:"
+    batches = [
+        (int(position[len(prefix) :]), assignment)
+        for position, assignment in assignments.items()
+        if position.startswith(prefix)
+    ]
+    batches.sort(key=lambda batch: batch[0])
     seen = 0
-    for position, assignment in sorted(assignments.items()):
-        if not position.startswith(session["position"] + "/messages:"):
-            continue
+    for start, assignment in batches:
+        if start != seen:
+            raise ValueError("Session message batch order differs")
         publication = await database.fetch_one(
             "SELECT * FROM swe_conversation_publications WHERE id=%s AND state='committed' AND gc_state='live'",
             (assignment["target_id"],),
@@ -725,36 +731,42 @@ async def _verify_session_messages(
             path,
             expected_length=publication["byte_length"],
         )
-        directory = decode_message_directory(
-            bundles.read_extent(
-                path,
-                index.blocks["message_directory"].offset,
-                index.blocks["message_directory"].length,
-                expected_length=index.byte_length,
+        directory_raw, bodies_raw = await _read_extents(
+            bundles,
+            path,
+            (
+                index.blocks["message_directory"],
+                index.blocks["message_bodies"],
             ),
+            io=io,
         )
-        bodies = decode_message_bodies(
-            bundles.read_extent(
-                path,
-                index.blocks["message_bodies"].offset,
-                index.blocks["message_bodies"].length,
-                expected_length=index.byte_length,
-            ),
-        )
-        if len(directory) != len(bodies):
+        directory = decode_message_directory(directory_raw)
+        bodies = decode_message_bodies(bodies_raw)
+        if len(directory) != len(bodies) or seen + len(directory) > len(
+            messages,
+        ):
             raise ValueError("Session message directory/body count differs")
-        for entry, body in zip(directory, bodies):
+        for position, (entry, body) in enumerate(zip(directory, bodies)):
             expected_message = messages[seen]
+            locator = {
+                "publication_id": "self",
+                "block_name": "message_bodies",
+                "position": position,
+            }
+            if entry["sequence"] != seen + 1 or entry["body"] != locator:
+                raise ValueError("Message directory order or locator differs")
             if (
                 body != expected_message["payload"]
                 or entry["layer"] != expected_message["layer"]
+                or entry["raw_id"]
+                != (expected_message["source_msg_key"] or "")
+                or not entry["visible"]
                 or entry["source_occurrence"]
                 != expected_message["source_occurrence_no"]
-                or entry["sequence"] != seen + 1
             ):
                 raise ValueError("Message directory/body/order differs")
             seen += 1
-    if seen != expected_count:
+    if seen != len(messages):
         raise ValueError("Session Message occurrence count differs")
 
 
