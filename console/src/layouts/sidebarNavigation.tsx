@@ -243,12 +243,6 @@ export function createSidebarNavigation(
           icon: <SearchCheck size={size} />,
           visible: visibility.showSystemCheck,
         },
-        {
-          key: "agent-observability",
-          label: t("nav.agentObservability", "Agent 执行"),
-          icon: <Activity size={size} />,
-          visible: visibility.showSourceManagement,
-        },
       ],
     },
     {
