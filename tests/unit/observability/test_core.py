@@ -1362,3 +1362,36 @@ def test_queue_budget_counts_in_flight_event_and_shutdown_is_bounded():
     remaining = emitter.close(timeout=0.01)
     assert remaining == 1
     stream.release.set()
+
+
+def test_nested_metrics_preserve_delay_ms_but_drop_unknown_keys():
+    """白名单只放开 delay_ms，其他未知嵌套键仍应被投影剔除。"""
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    assert emitter.emit(
+        {
+            "schema_version": 1,
+            "event_id": "event",
+            "event_name": "span.event",
+            "occurred_at": "now",
+            "producer_id": "test",
+            "entity_kind": "span",
+            "entity_id": "span",
+            "phase_key": "event",
+            "local_seq": 0,
+            "obs_run_id": "run",
+            "run_started_at": "now",
+            "capture_enabled": True,
+            "scope": {
+                "service_unit_id": "service",
+                "source_id": "source",
+                "tenant_id": "tenant",
+                "agent_id": "agent",
+            },
+            "event_type": "model.retry_scheduled",
+            "metrics": {"delay_ms": 250, "bogus_key": 1},
+        },
+    )
+    emitter.close()
+    record = json.loads(stream.getvalue())
+    assert record["metrics"] == {"delay_ms": 250}
