@@ -1,6 +1,14 @@
 # Conversation MySQL/NAS 离线切换
 
-适用：旧文件实现 → 七张 MySQL 元数据表及原 NAS 上的不可变 bundle。整个过程是一次连续停机；不做双写，不启新 workspace，不把 `SWE_DB_NAME` 改为源快照，也不备份/恢复整个共享业务库。
+## 当前迁移入口
+
+新版会话存储使用 Chat、Session、Turn、Publication 和 Retention 五张 MySQL 元数据表。恢复快照和归档 bundle 保存在 NAS；消息正文、顺序、可见性及重复消息 ID 的出现位置由 bundle 记录。备份与回收沿发布指针和依赖记录追踪文件。
+
+DBA 使用当前分支的 SQL 脚本准备空目标库，服务和 CLI 使用同一版本。先用 `prepare` 登记 workspace 与 source，然后对同一 manifest 执行 `migrate --apply`。导入器读取旧 `chats.json`、`sessions` 和 `dialog`。中断后用原 manifest 续跑，已发布 source 会跳过。历史分享处于迁移排除范围。
+
+## 历史流程与故障记录
+
+下文保留旧版 staging 安装、回退和故障排查记录。旧版的表数、分享导入及安装命令适用于对应历史版本。
 
 ## 启动期循环导入（2026-11-13）
 

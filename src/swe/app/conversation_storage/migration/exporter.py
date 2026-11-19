@@ -3,7 +3,7 @@
 
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import timezone
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
@@ -62,6 +62,11 @@ def _text(value):
 def _stamp(value):
     if value is None:
         return None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return value
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat()
@@ -494,6 +499,7 @@ class ConversationExporter:
         _atomic_json(destination / "shares.json", rows)
 
     def _archives(self, destination):
+        (destination / "dialog").mkdir(exist_ok=True)
         for chat in self.snapshot["chats"]:
             self._archive(destination, chat)
 

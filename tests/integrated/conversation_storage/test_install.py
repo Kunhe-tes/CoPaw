@@ -33,7 +33,7 @@ def manifest_for(tmp_path):
     return manifest
 
 
-def test_plan_renames_exactly_seven_tables_and_preserves_old_share(tmp_path):
+def test_plan_renames_six_tables_and_preserves_old_share(tmp_path):
     from swe.app.conversation_storage.migration.install import (
         ConversationInstaller,
         TABLES,
@@ -45,7 +45,7 @@ def test_plan_renames_exactly_seven_tables_and_preserves_old_share(tmp_path):
     installer = ConversationInstaller(None, manifest, target)
     sql = installer.rename_sql()
     assert sql.startswith("RENAME TABLE ")
-    assert sql.count(" TO ") == 8
+    assert sql.count(" TO ") == 7
     assert (
         f"`app`.`swe_chat_shares` TO `{staging}`.`{installer.old_share}`"
         in sql
@@ -53,7 +53,7 @@ def test_plan_renames_exactly_seven_tables_and_preserves_old_share(tmp_path):
     for table in TABLES:
         assert f"`{staging}`.`{table}` TO `app`.`{table}`" in sql
     reverse = installer.rename_sql(reverse=True)
-    assert reverse.count(" TO ") == 8
+    assert reverse.count(" TO ") == 7
     assert (
         f"`{staging}`.`{installer.old_share}` TO `app`.`swe_chat_shares`"
         in reverse
