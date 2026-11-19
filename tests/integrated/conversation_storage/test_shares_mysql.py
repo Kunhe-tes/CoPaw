@@ -62,45 +62,34 @@ async def setup(db, root):
             "history_status": "completed",
         },
     )
-    publication = await insert_row(
-        db,
-        "swe_conversation_publications",
-        {
-            "operation_key": b"old-question-publication",
-            "tenant_key": b"tenant",
-            "source_key": b"source",
-            "agent_key": b"agent",
-            "session_id": session,
-            "chat_id": chat,
-            "kind": "import",
-            "state": "committed",
-            "generation": 0,
-            "owner_key": b"offline",
-            "relative_path": b"old-question.bundle",
-            "format_key": b"swe-bundle-v1",
-            "created_at": "2026-10-30",
-        },
+    from tests.integrated.conversation_storage.test_history_mysql import (
+        _SESSION_BODIES,
+        _SESSION_MESSAGES,
+        add_messages,
+        source,
     )
-    await insert_row(
+    from swe.app.conversation_storage.history import HistoryStore
+
+    scope = WorkspaceScope(
+        "tenant",
+        "source",
+        "agent",
+        service_unit_id="schema-test-service",
+    )
+    history = HistoryStore(
         db,
-        "swe_conversation_messages",
-        {
-            "session_id": session,
-            "origin_chat_id": chat,
-            "layer": "memory",
-            "session_order": 1,
-            "turn_id": turn,
-            "source_msg_key": b"question",
-            "source_occurrence_no": 0,
-            "role_key": b"user",
-            "kind_key": b"message",
-            "publication_id": publication,
-            "byte_offset": 0,
-            "byte_length": 2,
-            "context_epoch": 0,
-            "in_context": 1,
-            "current_visible": 1,
-        },
+        scope,
+        BundleStore(root),
+        cursor_secret=b"share-test",
+    )
+    _SESSION_MESSAGES[id(db)] = {}
+    _SESSION_BODIES[id(db)] = {}
+    await add_messages(
+        db,
+        history,
+        session,
+        chat,
+        [("memory", source("question", "user"), 1)],
     )
     return chat, ShareStorage(
         db,
@@ -113,6 +102,58 @@ async def setup(db, root):
         ),
         service_unit_id="schema-test-service",
     )
+
+
+async def selection_proof(storage):
+    snapshot = await storage.selection_snapshot("chat")
+    questions = await storage._selection_occurrences(
+        "chat",
+        snapshot,
+        ("question",),
+    )
+    return {"snapshot": snapshot, "questions": questions}
+
+
+async def test_selection_proof_checks_question_position_and_status(
+    conversation_test_database,
+    tmp_path,
+):
+    from swe.app.conversation_storage.history import HistoryStore
+
+    db = conversation_test_database
+    _, storage = await setup(db, tmp_path)
+    history = HistoryStore(
+        db,
+        storage.scope,
+        storage.bundles,
+        cursor_secret=b"share",
+    )
+    messages = (await history.current("chat")).messages
+    snapshot = await storage.selection_snapshot("chat")
+    proof = await storage.prove_selection(
+        "chat",
+        snapshot,
+        ("question",),
+        messages,
+        {"question": "completed"},
+    )
+    assert proof["questions"]["question"]["sequence"] == 1
+    with pytest.raises(ValueError):
+        await storage.prove_selection(
+            "chat",
+            snapshot,
+            ("question",),
+            [],
+            {"question": "completed"},
+        )
+    with pytest.raises(ValueError):
+        await storage.prove_selection(
+            "chat",
+            snapshot,
+            ("question",),
+            messages,
+            {"question": "failed"},
+        )
 
 
 async def test_permanent_share_survives_chat_deletion_and_counts_access(
@@ -131,6 +172,7 @@ async def test_permanent_share_survives_chat_deletion_and_counts_access(
         tenant_id="tenant",
         payload=payload,
         selected_question_keys=("question",),
+        selection_proof=await selection_proof(storage),
     )
     assert record.publication_id and record.byte_offset and record.byte_length
     await db.execute(
@@ -245,6 +287,7 @@ async def test_lost_share_commit_retains_original_bundle_and_one_token(
     )
     chat = await db.fetch_one("SELECT * FROM swe_conversation_chats")
     operation = new_operation_key()
+    proof = await selection_proof(storage)
     plan = ShareInstall(
         "fixed-token",
         "chat",
@@ -253,6 +296,7 @@ async def test_lost_share_commit_retains_original_bundle_and_one_token(
         "legacy/key",
         "2026-10-30T00:00:00Z",
         selected_question_keys=("question",),
+        selection_proof=proof,
     )
     request = PublicationRequest(
         operation,
@@ -262,6 +306,8 @@ async def test_lost_share_commit_retains_original_bundle_and_one_token(
         0,
         session_id=chat["session_id"],
         chat_id=chat["id"],
+        base_state_revision=proof["snapshot"]["state_revision"],
+        base_history_revision=proof["snapshot"]["history_revision"],
     )
     await publications.reserve(request, CommitPlan(share=plan))
     index = await publications.write_bundle(
@@ -290,6 +336,7 @@ async def test_missing_body_and_failed_count_are_unavailable_not_empty(
         tenant_id="tenant",
         payload={"messages": []},
         selected_question_keys=("question",),
+        selection_proof=await selection_proof(storage),
     )
     count = storage.store.record_access
 
@@ -322,6 +369,7 @@ async def test_token_cannot_be_repointed_to_another_share_same_scope(
         tenant_id="tenant",
         payload={"chat_name": "first", "messages": []},
         selected_question_keys=("question",),
+        selection_proof=await selection_proof(storage),
     )
     second = await storage.create_snapshot(
         chat_id="chat",
@@ -329,6 +377,7 @@ async def test_token_cannot_be_repointed_to_another_share_same_scope(
         tenant_id="tenant",
         payload={"chat_name": "second", "messages": []},
         selected_question_keys=("question",),
+        selection_proof=await selection_proof(storage),
     )
     await db.execute(
         "UPDATE swe_chat_shares SET publication_id=%s,byte_offset=%s,byte_length=%s WHERE token=%s",
@@ -356,6 +405,7 @@ async def test_share_commit_rejects_selection_changed_after_snapshot(
         (chat_id,),
     )
     operation = new_operation_key()
+    proof = await selection_proof(storage)
     request = PublicationRequest(
         operation,
         storage.scope,
@@ -364,7 +414,10 @@ async def test_share_commit_rejects_selection_changed_after_snapshot(
         0,
         session_id=chat["session_id"],
         chat_id=chat_id,
+        base_state_revision=proof["snapshot"]["state_revision"],
+        base_history_revision=proof["snapshot"]["history_revision"],
     )
+    proof = await selection_proof(storage)
     plan = ShareInstall(
         "selected-token",
         "chat",
@@ -373,6 +426,7 @@ async def test_share_commit_rejects_selection_changed_after_snapshot(
         "legacy/key",
         "2026-10-30T00:00:00Z",
         selected_question_keys=("question",),
+        selection_proof=proof,
     )
     publications = PublicationStore(
         db,
@@ -391,7 +445,7 @@ async def test_share_commit_rejects_selection_changed_after_snapshot(
         )
     else:
         await db.execute(
-            "UPDATE swe_conversation_messages SET current_visible=0 WHERE session_id=%s",
+            "UPDATE swe_conversation_sessions SET state_revision=state_revision+1 WHERE id=%s",
             (chat["session_id"],),
         )
     with pytest.raises(ConflictError):

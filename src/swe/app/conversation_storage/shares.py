@@ -380,9 +380,14 @@ class ShareStorage:
         statuses,
     ):
         """Bind the legacy slice to real source occurrences and fixed revisions."""
+        from ..runner.api import _slice_answer_turn
+
         keys = tuple(dict.fromkeys(keys))
         for key in keys:
-            if statuses.get(key) != "completed":
+            if (
+                statuses.get(key) != "completed"
+                or _slice_answer_turn(messages, msgid=key) is None
+            ):
                 raise ValueError("Only completed answer turns can be shared")
         questions = await self._selection_occurrences(chat_id, snapshot, keys)
         if await self.selection_snapshot(chat_id) != snapshot:
