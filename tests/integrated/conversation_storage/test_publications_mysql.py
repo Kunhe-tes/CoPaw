@@ -18,6 +18,7 @@ from swe.app.conversation_storage.publications import (
     PublicationRequest,
     PublicationStore,
 )
+from swe.app.conversation_storage.session_adapter import MySQLSessionAdapter
 from tests.integrated.conversation_storage.test_schema import (
     insert_chat,
     insert_row,
@@ -187,8 +188,19 @@ async def test_lost_mysql_commit_response_keeps_one_original_operation(
     assert session["recovery_publication_id"] == reserved["id"]
     assert (session["recovery_offset"], session["recovery_length"]) == (
         index.blocks["root"].offset,
-        2,
+        index.blocks["root"].length,
     )
+    adapter = MySQLSessionAdapter(
+        db,
+        operation.scope,
+        store.bundles,
+        channel="console",
+    )
+    assert await adapter.get_session_state_dict(
+        session["external_session_key"].decode(),
+        session["user_key"].decode(),
+        allow_not_exist=False,
+    ) == {"revision": 1}
     assert (
         await db.fetch_one(
             "SELECT COUNT(*) AS count FROM swe_conversation_publications",

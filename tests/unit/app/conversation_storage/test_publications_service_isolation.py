@@ -12,52 +12,49 @@ from swe.app.conversation_storage.commit_plan import CommitPlan
 from swe.app.conversation_storage.errors import IntegrityError
 
 
-@pytest.mark.parametrize("reference", ["source", "prune"])
-async def test_plan_message_ids_reject_foreign_service_before_nas(
-    reference,
+async def test_archive_source_rejects_foreign_service(
     tmp_path,
+    monkeypatch,
 ):
     from tests.unit.app.conversation_storage.test_publications import (
         PublicationDatabase,
         request,
     )
     from swe.app.conversation_storage.bundle import BundleStore
+    from swe.app.conversation_storage.archive_reader import ArchiveReader
     from swe.app.conversation_storage.message_installs import MessageInstall
+    from swe.app.conversation_storage.source_messages import snapshot_sources
 
-    class Database(PublicationDatabase):
-        async def fetch_all(self, query, params=None):
-            if "swe_conversation_messages" in query:
-                return [
-                    {
-                        "id": 999,
-                        "session_id": 1,
-                        "service_unit_key": b"foreign",
-                    },
-                ]
-            return await super().fetch_all(query, params)
+    async def foreign_occurrence(reader, session_id, *, high):
+        assert session_id == 1 and high == 999
+        return [
+            {
+                "id": high,
+                "session_id": session_id,
+                "service_unit_key": b"foreign",
+            },
+        ]
+
+    monkeypatch.setattr(ArchiveReader, "session_messages", foreign_occurrence)
 
     store = PublicationStore(
-        Database(),
+        PublicationDatabase(),
         BundleStore(tmp_path),
         service_unit_id="schema-test-service",
     )
-    plan = (
-        CommitPlan(prune_ids=(999,), recovery_block="root")
-        if reference == "prune"
-        else CommitPlan(
-            messages=(
-                MessageInstall(
-                    "body",
-                    "archive",
-                    "user",
-                    source_message_id=999,
-                    archive_chat_id=2,
-                ),
+    plan = CommitPlan(
+        messages=(
+            MessageInstall(
+                "body",
+                "archive",
+                "user",
+                source_message_id=999,
+                archive_chat_id=2,
             ),
-        )
+        ),
     )
     with pytest.raises(IntegrityError, match="service"):
-        await store._validate_reference_ownership(request(), plan)
+        await snapshot_sources(store, request(), plan)
 
 
 async def test_foreign_service_request_is_rejected_before_database_or_nas():
