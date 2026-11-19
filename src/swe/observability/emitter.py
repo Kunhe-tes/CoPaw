@@ -276,6 +276,43 @@ class JsonlEmitter:
             self._condition.notify()
             return True
 
+    def emit_raw(self, line: bytes) -> bool:
+        """Forward one already-projected JSONL line from a child process.
+
+        worker 子进程已完成白名单投影与序列化；父进程只做单写者转发与预算控制，
+        避免父子进程并发写同一 fd 造成行交错。
+        """
+        if not isinstance(line, (bytes, bytearray)) or not line:
+            self._drop()
+            return False
+        payload = bytes(line)
+        if not payload.endswith(b"\n"):
+            payload += b"\n"
+        if len(payload) > self.config.max_event_bytes:
+            self._drop()
+            return False
+        try:
+            if not isinstance(json.loads(payload), dict):
+                self._drop()
+                return False
+        except (UnicodeDecodeError, ValueError):
+            self._drop()
+            return False
+        with self._condition:
+            if (
+                self._closed
+                or self._outstanding_events >= self.config.max_queue_events
+                or self._outstanding_bytes + len(payload)
+                > self.config.max_queue_bytes
+            ):
+                self._dropped += 1
+                return False
+            self._queue.append(payload)
+            self._outstanding_events += 1
+            self._outstanding_bytes += len(payload)
+            self._condition.notify()
+            return True
+
     def _drop(self) -> None:
         with self._condition:
             self._dropped += 1

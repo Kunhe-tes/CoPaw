@@ -16,6 +16,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 from typing import Any, Literal, Mapping
 from uuid import uuid4
@@ -122,6 +123,9 @@ class _ActiveRun:
     parent_chat_id: str = ""
     parent_msgid: str = ""
     cancel_task: asyncio.Task[BackgroundSubAgentRunRecord] | None = None
+    event_thread: threading.Thread | None = None
+    observability_carrier: dict[str, Any] | None = None
+    saw_subagent_end: bool = False
 
 
 def _worker_parent_agent_config(
@@ -589,6 +593,11 @@ class BackgroundSubAgentSupervisor:
         scope_id = get_current_scope_id()
         if scope_id is not None:
             worker_context["scope_id"] = scope_id
+        observability_carrier = worker_context.get(
+            "agent_observability_context",
+        )
+        if not isinstance(observability_carrier, dict):
+            observability_carrier = None
         launch_spec = WorkerLaunchSpec(
             run_id=record.run_id,
             run_store_dir=str(scope.run_store_dir),
@@ -667,13 +676,16 @@ class BackgroundSubAgentSupervisor:
                 _GENERIC_FAILURE_MESSAGE,
                 error_code="worker_start_failed",
             )
-        active[record.run_id] = _ActiveRun(
+        handle = _ActiveRun(
             scope=scope,
             process=process,
             stderr_log_path=stderr_log_path,
             parent_chat_id=spec.parent_chat_id,
             parent_msgid=spec.parent_msgid,
+            observability_carrier=observability_carrier,
         )
+        active[record.run_id] = handle
+        self._start_event_reader(handle, record.run_id)
         return await store.mark_running(
             record.run_id,
             worker_pid=process.pid,
@@ -830,6 +842,12 @@ class BackgroundSubAgentSupervisor:
     ) -> BackgroundSubAgentRunRecord:
         """Keep ownership while blocking process cleanup runs off the loop."""
         await asyncio.to_thread(self._terminate_process_group, handle.process)
+        await asyncio.to_thread(self._join_event_reader, handle, run_id)
+        self._emit_worker_end_fallback(
+            handle,
+            run_id,
+            status="cancelled",
+        )
         scope = handle.scope
         _remove_private_launch_snapshot(
             str(scope.run_store_dir / f".{run_id}.mcp.json"),
@@ -905,6 +923,13 @@ class BackgroundSubAgentSupervisor:
     ) -> BackgroundSubAgentRunRecord | None:
         if handle.cancel_task is not None or handle.process.poll() is None:
             return None
+        await asyncio.to_thread(self._join_event_reader, handle, run_id)
+        if handle.process.returncode != 0:
+            self._emit_worker_end_fallback(
+                handle,
+                run_id,
+                status="failed",
+            )
         _remove_private_launch_snapshot(
             str(scope.run_store_dir / f".{run_id}.mcp.json"),
             scope.run_store_dir,
@@ -961,7 +986,7 @@ class BackgroundSubAgentSupervisor:
         try:
             process = self._popen_factory(
                 command,
-                stdout=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
                 stderr=stderr_handle,
                 stdin=subprocess.DEVNULL,
                 close_fds=True,
@@ -970,6 +995,120 @@ class BackgroundSubAgentSupervisor:
         finally:
             stderr_handle.close()
         return process
+
+    def _start_event_reader(self, handle: _ActiveRun, run_id: str) -> None:
+        """把 worker 的 JSONL stdout 转发给父进程 emitter。"""
+        stream = getattr(handle.process, "stdout", None)
+        if stream is None:
+            return
+        span_id = None
+        if handle.observability_carrier is not None:
+            span_id = handle.observability_carrier.get("obs_span_id")
+
+        def pump() -> None:
+            try:
+                for line in iter(stream.readline, b""):
+                    if not line:
+                        break
+                    self._record_worker_event(handle, line, span_id)
+                    try:
+                        from ...observability.emitter import (
+                            default_emitter,
+                        )
+
+                        default_emitter().emit_raw(line)
+                    except Exception:
+                        logger.warning(
+                            "background_subagent_event_forward_failed "
+                            "run_id=%s",
+                            run_id,
+                            exc_info=True,
+                        )
+            except Exception:
+                logger.warning(
+                    "background_subagent_event_reader_failed run_id=%s",
+                    run_id,
+                    exc_info=True,
+                )
+            finally:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+        thread = threading.Thread(
+            target=pump,
+            name=f"agentobs-worker-{run_id}",
+            daemon=True,
+        )
+        handle.event_thread = thread
+        thread.start()
+
+    @staticmethod
+    def _record_worker_event(
+        handle: _ActiveRun,
+        line: bytes,
+        span_id: str | None,
+    ) -> None:
+        """记录 worker 是否已发出 SubAgent 的结束事件。"""
+        if handle.saw_subagent_end:
+            return
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            return
+        if not isinstance(event, dict):
+            return
+        if event.get("event_name") != "span.ended":
+            return
+        if span_id is not None:
+            if event.get("obs_span_id") != span_id:
+                return
+        elif event.get("span_type") != "SubAgent":
+            return
+        handle.saw_subagent_end = True
+
+    @staticmethod
+    def _join_event_reader(handle: _ActiveRun, run_id: str) -> None:
+        """等待读线程读到 EOF；超时只告警，不阻塞进程回收。"""
+        thread = handle.event_thread
+        if thread is None:
+            return
+        thread.join(timeout=2.0)
+        if thread.is_alive():
+            logger.warning(
+                "background_subagent_event_reader_still_running run_id=%s",
+                run_id,
+            )
+        handle.event_thread = None
+
+    @staticmethod
+    def _emit_worker_end_fallback(
+        handle: _ActiveRun,
+        run_id: str,
+        *,
+        status: str,
+    ) -> None:
+        """worker 未发出结束事件时，由 launcher 补发终态。
+
+        只在确认 worker 没有自行结束时调用，避免与真实结果互相覆盖。
+        """
+        if handle.saw_subagent_end or handle.observability_carrier is None:
+            return
+        try:
+            from ...observability.instrumentation import Observability
+
+            Observability().end_carried_span(
+                handle.observability_carrier,
+                status=status,
+                subagent={"mode": "background"},
+            )
+        except Exception:
+            logger.warning(
+                "background_subagent_end_fallback_failed run_id=%s",
+                run_id,
+                exc_info=True,
+            )
 
     def _terminate_process_group(self, process: Any) -> None:
         # Capture descendants before terminating the worker: independent Shell

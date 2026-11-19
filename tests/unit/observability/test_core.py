@@ -1395,3 +1395,19 @@ def test_nested_metrics_preserve_delay_ms_but_drop_unknown_keys():
     emitter.close()
     record = json.loads(stream.getvalue())
     assert record["metrics"] == {"delay_ms": 250}
+
+
+def test_emit_raw_forwards_child_lines_and_rejects_bad_payloads():
+    """worker 转发只接受合法单行 JSON，并计入丢弃计数。"""
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    line = b'{"event_name":"span.ended","obs_span_id":"span-1"}\n'
+
+    assert emitter.emit_raw(line) is True
+    assert emitter.emit_raw(b"not-json") is False
+    assert emitter.emit_raw(b"") is False
+    assert emitter.emit_raw(b'{"ok":1}' + b"x" * (24 * 1024)) is False
+    emitter.close()
+
+    assert stream.getvalue() == line.decode("utf-8")
+    assert emitter.dropped_count == 3

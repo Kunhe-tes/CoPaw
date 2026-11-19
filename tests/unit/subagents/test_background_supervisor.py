@@ -8,6 +8,7 @@ import json
 import asyncio
 import fcntl
 import hashlib
+import io
 import os
 from pathlib import Path
 import subprocess
@@ -37,6 +38,7 @@ from swe.app.subagents import (
 from swe.config.config import AgentProfileConfig, MCPClientConfig, MCPConfig
 from swe.app.tenant_context import bind_tenant_context
 from swe.app.subagents.models import AgentOwnedDefinitionMetadata
+from swe.app.subagents.supervisor import _ActiveRun
 from swe.app.subagents.builtins import _builtin
 
 
@@ -1284,3 +1286,125 @@ async def _assert_aged_reservation_remains_occupied(
     finally:
         other_path.unlink()
         os.close(other_lease)
+
+
+class _PipeProcess:
+    """Minimal process stand-in that exposes a readable stdout pipe."""
+
+    def __init__(self, payload: bytes = b"", returncode: int = 0):
+        self.pid = 4242
+        self.stdout = io.BytesIO(payload)
+        self.returncode = returncode
+
+    def poll(self):
+        return self.returncode
+
+
+class _RecordingEmitter:
+    def __init__(self):
+        self.lines: list[bytes] = []
+
+    def emit_raw(self, line: bytes) -> bool:
+        self.lines.append(bytes(line))
+        return True
+
+
+def _active_run(tmp_path: Path, process, carrier=None) -> _ActiveRun:
+    return _ActiveRun(
+        scope=_scope(tmp_path),
+        process=process,
+        stderr_log_path=tmp_path / "worker.stderr.log",
+        observability_carrier=carrier,
+    )
+
+
+def test_start_process_pipes_worker_stdout(tmp_path):
+    """worker stdout 必须接管为 PIPE，供父进程转发事件。"""
+    captured: dict[str, object] = {}
+
+    class _Factory:
+        def __call__(self, _command, **kwargs):
+            captured.update(kwargs)
+            return _PipeProcess()
+
+    supervisor = BackgroundSubAgentSupervisor(popen_factory=_Factory())
+    supervisor._start_process(
+        ["python", "-m", "worker"],
+        tmp_path / "worker.stderr.log",
+    )
+
+    assert captured["stdout"] is subprocess.PIPE
+
+
+def test_event_reader_forwards_lines_and_detects_subagent_end(
+    tmp_path,
+    monkeypatch,
+):
+    """读线程把 JSONL 交给父 emitter，并识别 SubAgent 结束事件。"""
+    recorder = _RecordingEmitter()
+
+    def emitter_factory():
+        return recorder
+
+    monkeypatch.setattr(
+        "swe.observability.emitter.default_emitter",
+        emitter_factory,
+    )
+    line = (
+        json.dumps(
+            {
+                "event_name": "span.ended",
+                "span_type": "SubAgent",
+                "obs_span_id": "span-1",
+            },
+        ).encode()
+        + b"\n"
+    )
+    handle = _active_run(
+        tmp_path,
+        _PipeProcess(line),
+        carrier={"obs_span_id": "span-1"},
+    )
+
+    supervisor = BackgroundSubAgentSupervisor()
+    supervisor._start_event_reader(handle, "run-1")
+    assert handle.event_thread is not None
+    handle.event_thread.join(2)
+
+    assert recorder.lines == [line]
+    assert handle.saw_subagent_end is True
+
+
+def test_worker_end_fallback_only_when_worker_did_not_end(
+    tmp_path,
+    monkeypatch,
+):
+    """只有确认 worker 未发结束事件时才补发 launcher 终态。"""
+    calls: list[tuple[str, dict]] = []
+
+    class _FakeObservability:
+        def end_carried_span(self, carrier, *, status, **attributes):
+            calls.append((status, attributes))
+            return True
+
+    def observability_factory():
+        return _FakeObservability()
+
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.Observability",
+        observability_factory,
+    )
+    handle = _active_run(
+        tmp_path,
+        _PipeProcess(returncode=1),
+        carrier={"obs_span_id": "span-1"},
+    )
+
+    supervisor = BackgroundSubAgentSupervisor()
+    supervisor._emit_worker_end_fallback(handle, "run-1", status="failed")
+    assert calls == [("failed", {"subagent": {"mode": "background"}})]
+
+    calls.clear()
+    handle.saw_subagent_end = True
+    supervisor._emit_worker_end_fallback(handle, "run-1", status="failed")
+    assert calls == []
