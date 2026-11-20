@@ -1986,11 +1986,7 @@ class ToolGuardMixin:
             )
             self._observe_guard_decision(
                 tool_call,
-                (
-                    "waiting_approval"
-                    if hook_reason == "hook_waiting_approval"
-                    else "rejected"
-                ),
+                self._hook_guard_status(hook_reason),
                 reason_code=hook_reason,
             )
             return hook_result
@@ -2051,14 +2047,10 @@ class ToolGuardMixin:
             return result
 
         if action is not None and action.kind != "preapproved":
-            guard_status = "rejected"
-            request_context = getattr(self, "_request_context", {}) or {}
-            if (
-                action.kind == "needs_approval"
-                and request_context.get("agent_role") != "subagent"
-            ):
-                guard_status = "waiting_approval"
-            self._observe_guard_decision(tool_call, guard_status)
+            self._observe_guard_decision(
+                tool_call,
+                self._guard_decision_status(action),
+            )
             result = await self._execute_guard_action(action, tool_call)
             await self._emit_tool_trace_end(span_id, result)
             return result
@@ -2069,6 +2061,24 @@ class ToolGuardMixin:
             tool_name,
             tool_input,
             span_id,
+        )
+
+    def _guard_decision_status(self, action: Any) -> str:
+        """根据 Guard 决策与 Agent 角色给出 Span 状态。"""
+        if action.kind != "needs_approval":
+            return "rejected"
+        request_context = getattr(self, "_request_context", {}) or {}
+        if request_context.get("agent_role") == "subagent":
+            return "rejected"
+        return "waiting_approval"
+
+    @staticmethod
+    def _hook_guard_status(reason: str) -> str:
+        """把 hook 短路原因映射为 Guard Span 状态。"""
+        return (
+            "waiting_approval"
+            if reason == "hook_waiting_approval"
+            else "rejected"
         )
 
     def _observe_guard_decision(

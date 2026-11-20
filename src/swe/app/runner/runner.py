@@ -3384,39 +3384,14 @@ class AgentRunner(Runner):
             user_id=user_id,
         )
         if pending is None:
-            if request_id:
-                completed = await svc.get_request(
-                    request_id,
-                    user_id=user_id,
-                )
-                if (
-                    completed is not None
-                    and completed.session_id == session_id
-                    and (
-                        request is None
-                        or getattr(request, "user_id", None)
-                        == completed.user_id
-                    )
-                    and completed.status in {"approved", "denied", "timeout"}
-                ):
-                    from swe.observability import runner_lifecycle
-
-                    runner_lifecycle.report_approval_resolution(
-                        None,
-                        completed.status,
-                        False,
-                    )
-                    await svc.resolve_request_once(
-                        request_id,
-                        ApprovalDecision(completed.status),
-                        user_id=user_id,
-                    )
-                    return (
-                        self._already_resolved_approval(completed),
-                        True,
-                        None,
-                    )
-            return None, False, None
+            replay = await self._approval_replay_response(
+                svc,
+                session_id=session_id,
+                request_id=request_id,
+                user_id=user_id,
+                request=request,
+            )
+            return replay if replay is not None else (None, False, None)
 
         from swe.observability import runner_lifecycle
 
@@ -3434,81 +3409,214 @@ class AgentRunner(Runner):
             pending,
         )
 
-        def report_resolution(decision: str, changed: bool) -> None:
-            runner_lifecycle.report_approval_resolution(
+        report_resolution = lambda decision, changed: (
+            self._report_approval_resolution(
                 restored_context,
                 decision,
                 changed,
             )
-
-        def record_resolution(decision: str, terminal_status: str | None):
-            report_resolution(decision, True)
-            context = restored_context
-            if context is None:
-                return
-            with runner_lifecycle.bind_query_context(context):
-                runner_lifecycle.record_approval_resolved(
-                    pending.request_id,
-                    decision,
-                    started_at=pending.created_at,
-                )
-            if terminal_status is not None:
-                runner_lifecycle.finish_query_run(
-                    context,
-                    None,
-                    terminal_status,
-                )
-
-        def transition_callback(decision: str, terminal_status: str | None):
-            def on_transition(_record: Any) -> None:
-                record_resolution(decision, terminal_status)
-
-            return on_transition
+        )
+        transition_callback = lambda decision, terminal: (
+            self._approval_transition_callback(
+                restored_context,
+                pending,
+                decision,
+                terminal,
+            )
+        )
 
         elapsed = time.time() - pending.created_at
         if elapsed > self._APPROVAL_TIMEOUT_SECONDS:
-            resolved, changed = await svc.resolve_request_once(
-                pending.request_id,
-                ApprovalDecision.TIMEOUT,
-                on_transition=transition_callback("timed_out", "timed_out"),
-                user_id=user_id,
-            )
-            if not changed:
-                report_resolution(
-                    resolved.status if resolved else "unresolved",
-                    False,
-                )
-                return self._already_resolved_approval(pending), True, None
-            await self._discard_pending_expert_main_approval(pending, request)
-            return (
-                _build_denial_response_msg(
-                    pending,
-                    f"⏰ Tool `{pending.tool_name}` approval "
-                    f"timed out ({int(elapsed)}s) — denied.\n"
-                    f"工具 `{pending.tool_name}` 审批超时"
-                    f"（{int(elapsed)}s），已拒绝执行。",
-                ),
-                True,
-                None,
+            return await self._timed_out_approval_response(
+                svc,
+                pending,
+                request,
+                user_id,
+                elapsed,
+                transition_callback,
+                report_resolution,
             )
 
+        conflict = self._external_approval_conflict_response(
+            pending,
+            request,
+            report_resolution,
+        )
+        if conflict is not None:
+            return conflict
+
+        return await self._resolve_approval_decision(
+            svc,
+            pending,
+            request,
+            normalized,
+            user_id,
+            transition_callback,
+            report_resolution,
+        )
+
+    async def _approval_replay_response(
+        self,
+        svc: Any,
+        *,
+        session_id: str,
+        request_id: str | None,
+        user_id: str | None,
+        request: Any | None,
+    ) -> tuple[Msg | None, bool, dict[str, Any] | None] | None:
+        """已决议审批的回放响应；无匹配时返回 None。"""
+        if not request_id:
+            return None
+        completed = await svc.get_request(request_id, user_id=user_id)
+        if not (
+            completed is not None
+            and completed.session_id == session_id
+            and (
+                request is None
+                or getattr(request, "user_id", None) == completed.user_id
+            )
+            and completed.status in {"approved", "denied", "timeout"}
+        ):
+            return None
+        from swe.observability import runner_lifecycle
+
+        runner_lifecycle.report_approval_resolution(
+            None,
+            completed.status,
+            False,
+        )
+        await svc.resolve_request_once(
+            request_id,
+            ApprovalDecision(completed.status),
+            user_id=user_id,
+        )
+        return self._already_resolved_approval(completed), True, None
+
+    def _report_approval_resolution(
+        self,
+        restored_context: Any,
+        decision: str,
+        changed: bool,
+    ) -> None:
+        from swe.observability import runner_lifecycle
+
+        runner_lifecycle.report_approval_resolution(
+            restored_context,
+            decision,
+            changed,
+        )
+
+    def _record_approval_resolution(
+        self,
+        restored_context: Any,
+        pending: Any,
+        decision: str,
+        terminal_status: str | None,
+    ) -> None:
+        from swe.observability import runner_lifecycle
+
+        self._report_approval_resolution(restored_context, decision, True)
+        if restored_context is None:
+            return
+        with runner_lifecycle.bind_query_context(restored_context):
+            runner_lifecycle.record_approval_resolved(
+                pending.request_id,
+                decision,
+                started_at=pending.created_at,
+            )
+        if terminal_status is not None:
+            runner_lifecycle.finish_query_run(
+                restored_context,
+                None,
+                terminal_status,
+            )
+
+    def _approval_transition_callback(
+        self,
+        restored_context: Any,
+        pending: Any,
+        decision: str,
+        terminal_status: str | None,
+    ):
+        def on_transition(_record: Any) -> None:
+            self._record_approval_resolution(
+                restored_context,
+                pending,
+                decision,
+                terminal_status,
+            )
+
+        return on_transition
+
+    async def _timed_out_approval_response(
+        self,
+        svc: Any,
+        pending: Any,
+        request: Any | None,
+        user_id: str | None,
+        elapsed: float,
+        transition_callback,
+        report_resolution,
+    ) -> tuple[Msg | None, bool, dict[str, Any] | None]:
+        resolved, changed = await svc.resolve_request_once(
+            pending.request_id,
+            ApprovalDecision.TIMEOUT,
+            on_transition=transition_callback("timed_out", "timed_out"),
+            user_id=user_id,
+        )
+        if not changed:
+            report_resolution(
+                resolved.status if resolved else "unresolved",
+                False,
+            )
+            return self._already_resolved_approval(pending), True, None
+        await self._discard_pending_expert_main_approval(pending, request)
+        return (
+            _build_denial_response_msg(
+                pending,
+                f"⏰ Tool `{pending.tool_name}` approval "
+                f"timed out ({int(elapsed)}s) — denied.\n"
+                f"工具 `{pending.tool_name}` 审批超时"
+                f"（{int(elapsed)}s），已拒绝执行。",
+            ),
+            True,
+            None,
+        )
+
+    def _external_approval_conflict_response(
+        self,
+        pending: Any,
+        request: Any | None,
+        report_resolution,
+    ) -> tuple[Msg | None, bool, dict[str, Any] | None] | None:
         external_submission = _external_approval_submission(pending)
-        if external_submission is not None and (
-            not _request_matches_external_approval_submission(
+        if external_submission is None or (
+            _request_matches_external_approval_submission(
                 request,
                 external_submission,
             )
         ):
-            report_resolution("unresolved", False)
-            return (
-                self._external_approval_conflict_message(
-                    pending,
-                    external_submission,
-                ),
-                True,
-                None,
-            )
+            return None
+        report_resolution("unresolved", False)
+        return (
+            self._external_approval_conflict_message(
+                pending,
+                external_submission,
+            ),
+            True,
+            None,
+        )
 
+    async def _resolve_approval_decision(
+        self,
+        svc: Any,
+        pending: Any,
+        request: Any | None,
+        normalized: str,
+        user_id: str | None,
+        transition_callback,
+        report_resolution,
+    ) -> tuple[Msg | None, bool, dict[str, Any] | None]:
         if _is_approval(normalized):
             resolved, changed = await svc.resolve_request_once(
                 pending.request_id,
@@ -3531,15 +3639,9 @@ class AgentRunner(Runner):
             )
             return None, True, approved_tool_call
 
-        explicit_deny = _is_denial(normalized)
-        denial_decision = (
-            ApprovalDecision.DENIED
-            if explicit_deny
-            else ApprovalDecision.DENIED
-        )
         resolved, changed = await svc.resolve_request_once(
             pending.request_id,
-            denial_decision,
+            ApprovalDecision.DENIED,
             on_transition=transition_callback("denied", "rejected"),
             user_id=user_id,
         )
@@ -3552,7 +3654,7 @@ class AgentRunner(Runner):
         await self._discard_pending_expert_main_approval(pending, request)
         await self._notify_console_approval_result(
             resolved or pending,
-            denial_decision,
+            ApprovalDecision.DENIED,
             request,
         )
         return (
