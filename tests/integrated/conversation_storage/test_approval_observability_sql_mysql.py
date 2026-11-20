@@ -272,6 +272,9 @@ async def _project_and_fetch_detail(database, records, run_id):
     @api.middleware("http")
     async def bind_source(api_request: Request, call_next):
         api_request.state.source_id = "source"
+        api_request.state.effective_tenant_id = records[0]["scope"][
+            "tenant_id"
+        ]
         return await call_next(api_request)
 
     api.include_router(observability_router)
