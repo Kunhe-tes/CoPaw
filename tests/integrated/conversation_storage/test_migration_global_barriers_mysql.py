@@ -151,8 +151,7 @@ async def test_all_service_cutoffs_are_durable_before_first_workspace(
         _restore_roots(roots)
 
 
-# pylint: disable-next=too-many-statements
-async def test_finalize_rechecks_source_after_fast_verification(
+async def test_finalize_does_not_reparse_source_after_fast_verification(
     conversation_test_database,
     tmp_path,
     monkeypatch,
@@ -169,35 +168,8 @@ async def test_finalize_rechecks_source_after_fast_verification(
             db,
             SQL_ROOT / "conversation_share_service_unit_finalize.sql",
         )
-        observed, rechecked = [], []
-        original_recheck = command._recheck_spooled_inventory
+        observed = []
         original_verify = command.verify_import
-
-        async def record_recheck(
-            manifest,
-            expected,
-            base,
-            *,
-            disk_limit,
-            record_limit,
-            protected,
-            workers,
-            io_workers,
-            memory_bytes,
-        ):
-            result = await original_recheck(
-                manifest,
-                expected,
-                base,
-                disk_limit=disk_limit,
-                record_limit=record_limit,
-                protected=protected,
-                workers=workers,
-                io_workers=io_workers,
-                memory_bytes=memory_bytes,
-            )
-            rechecked.append(result)
-            return result
 
         async def verify_then_fault(*args, **kwargs):
             result = await original_verify(*args, **kwargs)
@@ -210,31 +182,22 @@ async def test_finalize_rechecks_source_after_fast_verification(
             return result
 
         monkeypatch.setattr(command, "verify_import", verify_then_fault)
-        monkeypatch.setattr(
-            command,
-            "_recheck_spooled_inventory",
-            record_recheck,
-        )
         output = tmp_path / "completion-output"
-        with pytest.raises(
-            ValueError,
-            match="source inventory changed",
-        ):
-            await _run(
-                "finalize",
-                manifest,
-                work,
-                apply=True,
-                output_dir=output,
-            )
+        result = await _run(
+            "finalize",
+            manifest,
+            work,
+            apply=True,
+            output_dir=output,
+        )
         assert observed == [True]
-        assert rechecked == [False]
+        assert result["passed"] is True
+        assert not hasattr(command, "_recheck_spooled_inventory")
         state = await db.fetch_one(
             "SELECT state FROM swe_conversation_migration_jobs WHERE migration_id=%s",
             (manifest.migration_id,),
         )
-        assert state["state"] != "ready"
-        assert not (output / "completion.json").exists()
-        assert list(output.glob("*.runtime.json")) == []
+        assert state["state"] == "ready"
+        assert (output / "completion.json").exists()
     finally:
         _restore_roots(roots)

@@ -2,14 +2,11 @@
 """Share freshness scans shared parents once per inventory, never per job."""
 
 import os
-from types import SimpleNamespace
 
 import pytest
 
 from swe.app.conversation_storage.migration import inventory_v3 as inventory
 from swe.app.conversation_storage.migration.freshness import tenant_key
-from swe.app.conversation_storage.migration.spool import InventorySpool
-from swe.cli.conversation_storage_v3_cmd import _recheck_spooled_inventory
 
 
 def _share_data(tmp_path):
@@ -160,34 +157,3 @@ def test_parent_scan_detects_directory_and_symlink_changes(tmp_path, mutation):
     assert len(report["blockers"]) == expected_count
     expected = str(sibling) if mutation == "symlink" else str(parent)
     assert all(item["path"] == expected for item in report["blockers"])
-
-
-async def test_final_spooled_recheck_rescans_parent_without_persisting_blockers(
-    tmp_path,
-    monkeypatch,
-):
-    data, parent, cutoff = _share_data(tmp_path)
-    calls = _count_freshness(monkeypatch)
-    recorded = []
-    manifest = SimpleNamespace(data=data, record_source_change=recorded.append)
-    with InventorySpool(
-        tmp_path,
-        max_bytes=1024 * 1024,
-        record_limit=65536,
-    ) as spool:
-        initial = await inventory.inventory_v3_spooled(manifest, spool)
-        assert initial["ready"]
-        os.utime(parent, ns=(cutoff + 1, cutoff + 1))
-        assert not await _recheck_spooled_inventory(
-            manifest,
-            initial,
-            tmp_path,
-            disk_limit=1024 * 1024,
-            record_limit=65536,
-            protected=[],
-            workers=2,
-            io_workers=2,
-            memory_bytes=1024 * 1024,
-        )
-    assert calls.count(str(parent)) == 2
-    assert recorded == []

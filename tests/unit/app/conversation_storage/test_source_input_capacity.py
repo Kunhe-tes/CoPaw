@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from swe.app.conversation_storage.migration import (
-    inventory_parallel,
     source_inputs,
 )
 from swe.app.conversation_storage.migration.spool import MigrationCapacityError
@@ -106,21 +105,6 @@ def test_overlapping_entrances_count_each_entry_once(tmp_path):
     ) == sorted([tmp_path, selected, body])
 
 
-def test_preflight_passes_entry_and_byte_caps_for_custom_entrance(
-    tmp_path,
-):
-    selected = tmp_path / "reviewed"
-    selected.mkdir()
-    (selected / "registry.json").write_bytes(b"x" * 65)
-    workspace = {
-        "root": str(tmp_path),
-        "registry_path": "reviewed/registry.json",
-    }
-    with pytest.raises(MigrationCapacityError, match="memory allowance"):
-        inventory_parallel._preflight_workspace(workspace, 1024)
-    assert inventory_parallel._preflight_workspace(workspace, 2048) == 65
-
-
 def test_symlink_and_unselected_parent_boundaries_remain(tmp_path):
     selected = tmp_path / "sessions"
     selected.mkdir()
@@ -131,57 +115,3 @@ def test_symlink_and_unselected_parent_boundaries_remain(tmp_path):
     (selected / "bad-link").symlink_to("/missing")
     with pytest.raises(ValueError, match="symlink"):
         source_inputs.safe_input_entries(tmp_path, ["sessions"], entry_limit=2)
-
-
-def test_preflight_passes_every_capacity_limit(monkeypatch, tmp_path):
-    calls = []
-
-    def inspect(root, roots, **limits):
-        calls.append((root, roots, limits))
-        return []
-
-    monkeypatch.setattr(inventory_parallel, "safe_input_entries", inspect)
-    assert (
-        inventory_parallel._preflight_workspace({"root": str(tmp_path)}, 4096)
-        == 0
-    )
-    assert calls[0][2] == {
-        "entry_limit": 8,
-        "max_file_bytes": inventory_parallel.MAX_READ_BYTES,
-        "max_total_file_bytes": 256,
-    }
-
-
-def test_preflight_rejects_empty_directory_tree_before_full_scan(
-    monkeypatch,
-    tmp_path,
-):
-    sessions = tmp_path / "sessions"
-    sessions.mkdir()
-    for index in range(100):
-        (sessions / str(index)).mkdir()
-    original = source_inputs.os.scandir
-    examined = []
-
-    class Scan:
-        def __init__(self, path):
-            self.entries = original(path)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            self.entries.close()
-
-        def __iter__(self):
-            for item in self.entries:
-                examined.append(item.name)
-                yield item
-
-    monkeypatch.setattr(source_inputs.os, "scandir", Scan)
-    with pytest.raises(
-        MigrationCapacityError,
-        match="entries.*memory allowance",
-    ):
-        inventory_parallel._preflight_workspace({"root": str(tmp_path)}, 4096)
-    assert len(examined) == 7

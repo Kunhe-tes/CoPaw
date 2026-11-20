@@ -4,16 +4,13 @@
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime, timezone
-from hashlib import sha256
 from pathlib import Path
 import json
 import os
-import stat
 from uuid import uuid4
 
 from ..chat_mutations import load_metadata_json
 from ..identity import WorkspaceScope, service_unit_bytes
-from .legacy import safe_files
 from .v3_manifest import V3Manifest
 from .failure_scope import (
     config_candidates,
@@ -66,58 +63,6 @@ def _read_json(path):
 
     require_unpublished(path)
     return load_metadata_json(path.read_bytes())
-
-
-def fingerprints(services):
-    """Capture complete read-only inputs, rejecting unsafe filesystem objects."""
-    result = []
-    roots = set()
-    for service in services:
-        for key in ("source_root", "config_root", "snapshot_root"):
-            if service.get(key):
-                roots.add(service[key])
-    # Nested config/snapshot roots are already covered by their parent.
-    roots = [Path(root) for root in sorted(roots)]
-    roots = [
-        root
-        for root in roots
-        if not any(
-            root != other and root.is_relative_to(other) for other in roots
-        )
-    ]
-    for root in roots:
-        for path in [root, *safe_files(root)]:
-            if stat.S_IMODE(path.stat().st_mode) & 0o222:
-                raise ValueError("source must be read-only before discovery")
-            if path.is_file():
-                digest = sha256()
-                with path.open("rb") as stream:
-                    while block := stream.read(1024 * 1024):
-                        digest.update(block)
-                result.append(
-                    {
-                        "root": str(root),
-                        "path": path.relative_to(root).as_posix(),
-                        "bytes": path.stat().st_size,
-                        "sha256": digest.hexdigest(),
-                    },
-                )
-
-        def failed(error):
-            raise error
-
-        for directory, names, _ in os.walk(root, onerror=failed):
-            names.sort()
-            if stat.S_IMODE(Path(directory).stat().st_mode) & 0o222:
-                raise ValueError("source directory must be read-only")
-            result.append(
-                {
-                    "root": str(root),
-                    "path": Path(directory).relative_to(root).as_posix(),
-                    "kind": "directory",
-                },
-            )
-    return sorted(result, key=lambda item: (item["root"], item["path"]))
 
 
 def _block(report, code, position, error):
@@ -421,7 +366,14 @@ def _coverage(service, known, report, overrides):
             ):
                 from .tenant_discovery import _candidate_identity
 
-                if _candidate_identity(service, path) is None:
+                if (
+                    service.get("config_root")
+                    and _candidate_identity(
+                        service,
+                        path,
+                    )
+                    is None
+                ):
                     continue
                 _block(
                     report,
@@ -636,19 +588,6 @@ def _set_source_binding_storage(report, storage, source_isolation):
     report["source_binding_storage"] = storage
 
 
-def _capture_discovery_digests(report, semantic_validator):
-    if report.get("freshness_protocol") or report.get(
-        "source_binding_storage",
-    ):
-        return
-    from .tenant_inputs import capture_input_digests
-
-    capture_input_digests(
-        report,
-        mapper=getattr(semantic_validator, "map_input_digests", None),
-    )
-
-
 def _validate_isolation_options(tenant_isolation, source_isolation, in_place):
     if source_isolation and not tenant_isolation:
         raise ValueError("source isolation requires tenant isolation")
@@ -794,8 +733,6 @@ def discover_services(
             semantic_validator,
             semantic_inventory=semantic_inventory,
         )
-        if semantic_inventory:
-            _capture_discovery_digests(report, semantic_validator)
     elif not report["blockers"]:
         from .inventory_v3 import inventory_discovery
 
@@ -884,7 +821,7 @@ def freeze_discovery(
     application_schema,
     *,
     semantic_validator=None,
-    revalidate=True,
+    revalidate=False,
 ):
     """Revalidate discovery and atomically save a v3 manifest outside the source."""
     if (not report.get("ready") or report.get("blockers")) and not report.get(
@@ -904,8 +841,6 @@ def freeze_discovery(
         )
         if report.get("tenant_isolation"):
             report = _freeze_tenant_report(report, current)
-        elif current["fingerprints"] != report["fingerprints"]:
-            raise ValueError("source changed since discovery")
         elif current != report:
             raise ValueError(
                 "discovery report differs from verified source evidence",

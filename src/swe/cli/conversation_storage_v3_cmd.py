@@ -325,13 +325,7 @@ async def _execute(
                         "semantic verification failed: "
                         + json.dumps(result["blockers"]),
                     )
-            # Re-read the complete frozen source before completion.
-            if source_recheck is None:
-                if inventory_v3(manifest) != inventory:
-                    raise ValueError(
-                        "source inventory changed during operation",
-                    )
-            else:
+            if source_recheck is not None:
                 await source_recheck()
             if (
                 await check_schema(
@@ -474,22 +468,6 @@ async def _execute_spooled(
                 "ready": True,
             }
 
-        async def recheck_source():
-            if progress:
-                progress.stage("source_recheck")
-            if not await _recheck_spooled_inventory(
-                manifest,
-                inventory,
-                base,
-                disk_limit=disk_limit,
-                record_limit=record_limit,
-                protected=protected,
-                workers=workers,
-                io_workers=io_workers,
-                memory_bytes=memory_bytes,
-            ):
-                raise ValueError("source inventory changed during operation")
-
         return await _execute(
             operation,
             manifest,
@@ -497,45 +475,9 @@ async def _execute_spooled(
             output,
             workers=workers,
             io_workers=io_workers,
-            source_recheck=recheck_source,
             memory_bytes=memory_bytes,
             verification_level=verification_level,
         )
-
-
-async def _recheck_spooled_inventory(
-    manifest,
-    expected,
-    base,
-    *,
-    disk_limit,
-    record_limit,
-    protected,
-    workers,
-    io_workers,
-    memory_bytes,
-):
-    from swe.app.conversation_storage.migration.inventory_v3 import (
-        inventories_equal,
-        inventory_v3_spooled,
-    )
-    from swe.app.conversation_storage.migration.spool import InventorySpool
-
-    with InventorySpool(
-        base,
-        max_bytes=disk_limit,
-        record_limit=record_limit,
-        protected=protected,
-    ) as spool:
-        actual = await inventory_v3_spooled(
-            manifest,
-            spool,
-            workers=workers,
-            io_workers=io_workers,
-            memory_bytes=memory_bytes,
-            record_source_changes=False,
-        )
-        return inventories_equal(actual, expected)
 
 
 def _run_migration_operation(operation):

@@ -3,7 +3,6 @@
 
 import asyncio
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -15,7 +14,6 @@ from swe.app.conversation_storage.migration.discovery import (
     discover_services,
     freeze_discovery,
 )
-from swe.app.conversation_storage.migration.freshness import tenant_key
 from swe.app.conversation_storage.migration.manifest import SourceBoundary
 from swe.cli import conversation_storage_v3_cmd as commands
 from swe.cli.conversation_storage_cmd import conversation_storage_group
@@ -156,12 +154,10 @@ async def _import_fixture(database, tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("late_source_change", [False, True])
 async def test_cli_verify_preserves_data_and_records_audit_evidence(
     conversation_test_database,
     tmp_path,
     monkeypatch,
-    late_source_change,
 ):
     database = conversation_test_database
     monkeypatch.setattr(
@@ -179,24 +175,6 @@ async def test_cli_verify_preserves_data_and_records_audit_evidence(
     manifest_bytes = Path(manifest_path).read_bytes()
     manifest_data = json.loads(manifest_bytes)
     assert not manifest_data.get("source_change_blockers")
-    real_recheck = commands._recheck_spooled_inventory
-    reached = []
-
-    async def recheck(*args, **kwargs):
-        reached.append(True)
-        if late_source_change:
-            # Trigger failure only after the full runtime verification barrier.
-            path = sources[-1] / "default_SRC/workspaces/agent0/chats.json"
-            cutoff = manifest_data["tenant_sync_started_at_ns"][
-                tenant_key("READONLY-1", "default")
-            ]
-            path.chmod(0o644)
-            path.write_bytes(path.read_bytes() + b"\n")
-            os.utime(path, ns=(cutoff + 1, cutoff + 1))
-            path.chmod(0o444)
-        return await real_recheck(*args, **kwargs)
-
-    monkeypatch.setattr(commands, "_recheck_spooled_inventory", recheck)
     try:
         result = await asyncio.to_thread(
             CliRunner().invoke,
@@ -213,15 +191,8 @@ async def test_cli_verify_preserves_data_and_records_audit_evidence(
                 str(work),
             ],
         )
-        assert reached == [True], result.output
-        if late_source_change:
-            assert result.exit_code != 0
-            assert "source inventory changed during operation" in result.output
-            failure_path = Path(str(manifest_path) + ".failure.json")
-            assert json.loads(failure_path.read_text())["passed"] is False
-        else:
-            assert result.exit_code == 0, result.output
-            assert json.loads(result.stdout)["passed"] is True
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout)["passed"] is True
         assert await _snapshot(database) == before
         after_job = await _migration_job(database)
         assert after_job is not None

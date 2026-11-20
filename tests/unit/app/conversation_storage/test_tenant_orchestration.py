@@ -335,7 +335,9 @@ def test_tenant_journal_binding_uses_complete_parent_not_filtered_view(
     journal = MigrationJournal(orchestration.db, view)
     journal.frozen_bindings_data = parent.data
     _, source = journal._bindings()
-    assert len(json.loads(source)["workspaces"]) == 3
+    binding = json.loads(source)
+    assert binding["counts"]["workspaces"] == 3
+    assert "workspaces" not in binding
     assert len(view.data["workspaces"]) == 1
 
 
@@ -454,12 +456,14 @@ async def test_failed_full_audit_is_persisted_and_reported_without_raw_blockers(
     assert "/private/path" not in str(failure)
 
 
-def test_real_source_preflight_symlink_has_domain_specific_failure(tmp_path):
-    from swe.app.conversation_storage.migration.inventory_parallel import (
-        _preflight_workspace,
+def test_real_source_boundary_rejects_symlink_and_invalid_registry(tmp_path):
+    from swe.app.conversation_storage.identity import WorkspaceScope
+    from swe.app.conversation_storage.migration.inventory import (
+        WorkspaceMapping,
     )
     from swe.app.conversation_storage.migration.source_inputs import (
         SourceInputInvalid,
+        workspace_entries,
     )
 
     root = tmp_path / "workspace"
@@ -467,12 +471,24 @@ def test_real_source_preflight_symlink_has_domain_specific_failure(tmp_path):
     target = tmp_path / "target"
     target.write_text("[]")
     (root / "chats.json").symlink_to(target)
+    mapping = WorkspaceMapping(
+        WorkspaceScope(
+            "tenant",
+            "source",
+            "agent",
+            service_unit_id="service",
+        ),
+        root,
+    )
     with pytest.raises(SourceInputInvalid, match="symlink"):
-        _preflight_workspace({"root": str(root)}, 128 * 1024 * 1024)
+        workspace_entries(mapping)
     with pytest.raises(SourceInputInvalid, match="relative"):
-        _preflight_workspace(
-            {"root": str(root), "registry_path": "../outside"},
-            128 * 1024 * 1024,
+        workspace_entries(
+            WorkspaceMapping(
+                mapping.scope,
+                root,
+                registry_path="../outside",
+            ),
         )
 
 

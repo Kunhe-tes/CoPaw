@@ -67,7 +67,6 @@ def test_discovers_disabled_profile_and_rebases_absolute_path(tmp_path):
 
 def test_new_discovery_avoids_fingerprints_and_keeps_service_authority(
     tmp_path,
-    monkeypatch,
 ):
     from swe.app.conversation_storage.migration import discovery
     from swe.app.conversation_storage.migration.discovery import (
@@ -80,14 +79,6 @@ def test_new_discovery_avoids_fingerprints_and_keeps_service_authority(
 
     service = fixture_service(tmp_path)
     report = discover_services([service])
-    fingerprint_calls = []
-    original_fingerprints = discovery.fingerprints
-
-    def count_fingerprints(services):
-        fingerprint_calls.append(True)
-        return original_fingerprints(services)
-
-    monkeypatch.setattr(discovery, "fingerprints", count_fingerprints)
     boundary = SourceBoundary(
         "snapshot",
         "2026-11-02T00:00:00Z",
@@ -100,7 +91,7 @@ def test_new_discovery_avoids_fingerprints_and_keeps_service_authority(
         boundary,
         "business",
     )
-    assert fingerprint_calls == []
+    assert not hasattr(discovery, "fingerprints")
     assert manifest.data["version"] == 3
     assert inventory_v3(manifest)["ready"]
     assert "tenant_sync_started_at_ns" not in manifest.data
@@ -470,6 +461,7 @@ def test_freeze_rejects_modified_discovery_identity(tmp_path):
             tmp_path / "manifest.json",
             boundary,
             "business",
+            revalidate=True,
         )
 
 

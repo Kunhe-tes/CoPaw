@@ -32,6 +32,7 @@ async def test_recheck_prefetched_uses_borrowed_io_and_preserves_failure_scope(
     root.mkdir()
     source = root / "tenant" / "chats.json"
     data = {
+        "freshness_protocol": "chats-mtime-v1",
         "services": [
             {
                 "source_root": str(root),
@@ -69,7 +70,7 @@ async def test_recheck_prefetched_uses_borrowed_io_and_preserves_failure_scope(
         if error is not None:
             raise error
 
-    monkeypatch.setattr(tenant_inputs, "verify_input_digest", verify)
+    monkeypatch.setattr(tenant_inputs, "verify_chats_mtimes", verify)
     async with MigrationIO(2) as io:
         async with MigrationResources(
             workers=1,

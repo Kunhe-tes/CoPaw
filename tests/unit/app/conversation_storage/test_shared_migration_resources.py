@@ -17,21 +17,17 @@ from swe.app.conversation_storage.migration.tenant_discovery import (
 )
 
 
-def test_manifest_v1_automatic_review_skips_capacity_preflights(monkeypatch):
+def test_manifest_v1_automatic_review_skips_share_capacity_preflight(
+    monkeypatch,
+):
     from swe.app.conversation_storage.migration import (
-        inventory_parallel,
         inventory_v3,
         tenant_discovery,
     )
 
     def unexpected(*args, **kwargs):
-        raise AssertionError("manifest-v1 must not run capacity preflights")
+        raise AssertionError("manifest-v1 must not preflight share capacity")
 
-    monkeypatch.setattr(
-        inventory_parallel,
-        "_preflight_workspace",
-        unexpected,
-    )
     monkeypatch.setattr(
         inventory_v3,
         "_preflight_share_budget",
@@ -84,11 +80,6 @@ async def test_tenants_share_parser_slots_memory_and_borrowed_io(
                 active -= 1
 
     monkeypatch.setattr(inventory_parallel, "inventory_workspace", parse)
-    monkeypatch.setattr(
-        inventory_parallel,
-        "_preflight_workspace",
-        lambda *_: 0,
-    )
     spools = [
         InventorySpool(tmp_path, max_bytes=1000000, record_limit=100000)
         for _ in range(4)
@@ -164,11 +155,6 @@ def test_discovery_tenant_pool_is_bounded_and_keeps_local_failures(
                 active -= 1
 
     monkeypatch.setattr(inventory_v3, "inventory_workspace", inventory)
-    monkeypatch.setattr(
-        inventory_parallel,
-        "_preflight_workspace",
-        lambda *_: 0,
-    )
     data = [
         {"tenant": name, "workspaces": [{}], "shares": []}
         for name in ("a", "bad", "c", "d")
@@ -204,11 +190,6 @@ def test_discovery_pool_copies_readonly_boundary_context_and_propagates_shared(
         raise OSError("shared mount failed")
 
     monkeypatch.setattr(inventory_v3, "inventory_workspace", inventory)
-    monkeypatch.setattr(
-        inventory_parallel,
-        "_preflight_workspace",
-        lambda *_: 0,
-    )
     with pytest.raises(OSError, match="shared mount"):
         list(
             map_tenant_semantics(
@@ -242,19 +223,18 @@ async def test_shared_budget_waiter_cancellation_releases_gate():
         assert shared.memory.used == 0
 
 
-def test_discovery_keeps_single_workspace_budget_for_large_tenant(monkeypatch):
+def test_discovery_parses_every_workspace_without_workspace_budget_gate(
+    monkeypatch,
+):
     from swe.app.conversation_storage.migration import (
         inventory_parallel,
         inventory_v3,
     )
 
-    allowances = []
-
-    def preflight(_workspace, allowance):
-        allowances.append(allowance)
-        return allowance // 16
+    parsed = []
 
     def inventory(_data, index):
+        parsed.append(index)
         return {
             "workspaces": [
                 {
@@ -266,7 +246,6 @@ def test_discovery_keeps_single_workspace_budget_for_large_tenant(monkeypatch):
             "blockers": [],
         }
 
-    monkeypatch.setattr(inventory_parallel, "_preflight_workspace", preflight)
     monkeypatch.setattr(inventory_v3, "inventory_workspace", inventory)
     results = list(
         map_tenant_semantics(
@@ -276,7 +255,8 @@ def test_discovery_keeps_single_workspace_budget_for_large_tenant(monkeypatch):
         ),
     )
     assert len(results[0]["workspaces"]) == 12
-    assert allowances == [100000] * 12
+    assert parsed == list(range(12))
+    assert not hasattr(inventory_parallel, "_preflight_workspace")
 
 
 def test_input_digests_share_bounded_pool_and_skip_retained(monkeypatch):

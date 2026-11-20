@@ -103,12 +103,18 @@ def test_v3_oversized_registry_is_rejected_before_metadata_read(
     tmp_path,
     monkeypatch,
 ):
+    from swe.app.conversation_storage.migration import (
+        inventory as inventory_module,
+    )
     from swe.app.conversation_storage.migration import inventory_v3
 
     monkeypatch.setattr(inventory_v3, "MAX_READ_BYTES", 16)
+    monkeypatch.setattr(inventory_module, "MAX_READ_BYTES", 16)
     root, _ = source(tmp_path)
     with (root / "chats.json").open("wb") as stream:
         stream.truncate(17)
+    for session in (root / "sessions").iterdir():
+        session.write_bytes(b"x")
     make_readonly(root)
 
     def unexpected_read(*args, **kwargs):

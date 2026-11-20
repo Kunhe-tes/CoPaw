@@ -17,7 +17,7 @@ from swe.app.conversation_storage.migration.progress import MigrationProgress
 
 
 @pytest.mark.parametrize("count", [2, 4])
-async def test_preflight_uses_shared_io_and_inventory_counters(
+async def test_parser_uses_shared_io_and_inventory_counters(
     tmp_path,
     monkeypatch,
     count,
@@ -29,12 +29,14 @@ async def test_preflight_uses_shared_io_and_inventory_counters(
     active = peak = 0
     source_bytes = 0
     mappings = []
+    sizes = []
     for index in range(count):
         root = tmp_path / str(index)
         root.mkdir()
         content = b"source" * (index + 1)
         (root / "chats.json").write_bytes(content)
         source_bytes += len(content)
+        sizes.append(len(content))
         mappings.append(
             {
                 "root": str(root),
@@ -43,9 +45,8 @@ async def test_preflight_uses_shared_io_and_inventory_counters(
                 "tenant_id": "tenant",
             },
         )
-    original = inventory_parallel._preflight_workspace
 
-    def preflight(workspace, allowance):
+    def parse(_data, index):
         nonlocal active, peak
         assert threading.get_ident() != owner_thread
         with lock:
@@ -53,12 +54,9 @@ async def test_preflight_uses_shared_io_and_inventory_counters(
             peak = max(peak, active)
         try:
             barrier.wait(timeout=5)
-            return original(workspace, allowance)
         finally:
             with lock:
                 active -= 1
-
-    def parse(_data, index):
         return {
             "workspaces": [
                 {
@@ -68,11 +66,10 @@ async def test_preflight_uses_shared_io_and_inventory_counters(
                     "chats": [{}] * (index + 2),
                 },
             ],
-            "files": [],
+            "files": [{"bytes": sizes[index], "workspace": index}],
             "blockers": [{"code": "fixture"}] if index == 0 else [],
         }
 
-    monkeypatch.setattr(inventory_parallel, "_preflight_workspace", preflight)
     monkeypatch.setattr(inventory_parallel, "inventory_workspace", parse)
     progress = MigrationProgress(
         "inventory",
@@ -223,7 +220,7 @@ async def test_invalid_workers_rejected_before_parsing(tmp_path):
             await spool_workspaces({"workspaces": []}, spool, workers=0)
 
 
-async def test_workspace_input_preflight_does_not_reject_large_input(
+async def test_large_workspace_enters_parser_under_global_budget(
     tmp_path,
     monkeypatch,
 ):
@@ -232,7 +229,8 @@ async def test_workspace_input_preflight_does_not_reject_large_input(
 
     root = tmp_path / "large-workspace"
     root.mkdir()
-    (root / "chats.json").write_bytes(b"x" * 2048)
+    with (root / "chats.json").open("wb") as stream:
+        stream.truncate(9 * 1024 * 1024)
     mapping = {
         "service_unit_id": "service",
         "tenant_id": "tenant",
@@ -277,9 +275,10 @@ async def test_workspace_input_preflight_does_not_reject_large_input(
             data,
             spool,
             workers=1,
-            memory_bytes=16 * 1024,
+            memory_bytes=512 * 1024 * 1024,
         )
     assert parsed == [0]
+    assert not hasattr(inventory_parallel, "_preflight_workspace")
 
 
 async def test_spooled_v3_inventory_matches_serial_inventory(tmp_path):
@@ -353,61 +352,10 @@ async def test_spooled_v3_inventory_matches_serial_inventory(tmp_path):
         assert inventories_equal(actual, expected)
 
 
-async def test_spooled_recheck_compares_before_temporary_records_close(
-    tmp_path,
-):
-    from swe.app.conversation_storage.migration.inventory_v3 import (
-        inventory_discovery,
-    )
-    from swe.cli.conversation_storage_v3_cmd import (
-        _recheck_spooled_inventory,
-    )
+def test_cli_has_no_full_inventory_recheck_hook():
+    from swe.cli import conversation_storage_v3_cmd
 
-    root = tmp_path / "source"
-    root.mkdir()
-    (root / "chats.json").write_text(json.dumps({"chats": []}))
-    (root / "agent.json").write_text(json.dumps({"id": "agent"}))
-    for path in root.iterdir():
-        path.chmod(0o444)
-    root.chmod(0o555)
-    mappings = [
-        {
-            "service_unit_id": "service",
-            "tenant_id": "tenant",
-            "source_id": "source",
-            "agent_id": "agent",
-            "root": str(root),
-            "position": source_key("workspace", "agent"),
-        },
-    ]
-    boundary = {
-        "snapshot_id": "snapshot",
-        "captured_at": "2026-11-12T00:00:00Z",
-        "old_image_digest": "old@sha256:" + "a" * 64,
-        "evidence_refs": ["stopped", "readonly"],
-    }
-
-    class Manifest:
-        data = {
-            "workspaces": mappings,
-            "services": [],
-            "shares": [],
-            "fingerprints": [],
-            "source_boundary": boundary,
-        }
-
-    expected = inventory_discovery(Manifest.data)
-    expected["source_boundary"] = boundary
-    base = tmp_path / "verification-spool"
-    base.mkdir()
-    assert await _recheck_spooled_inventory(
-        Manifest(),
-        expected,
-        base,
-        disk_limit=1024 * 1024,
-        record_limit=128 * 1024,
-        protected=[root],
-        workers=1,
-        io_workers=1,
-        memory_bytes=1024 * 1024,
+    assert not hasattr(
+        conversation_storage_v3_cmd,
+        "_recheck_spooled_inventory",
     )

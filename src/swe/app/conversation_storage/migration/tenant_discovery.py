@@ -87,7 +87,6 @@ def map_tenant_semantics(
 
 
 def _compact_tenant_inventory(data, allowance):
-    from .inventory_parallel import _preflight_workspace
     from .inventory_v3 import (
         inventory_workspace,
         _inventory_shares,
@@ -96,15 +95,6 @@ def _compact_tenant_inventory(data, allowance):
 
     summaries, references, blockers = [], [], []
     for index, workspace in enumerate(data["workspaces"]):
-        if data.get("source_binding_storage") != "manifest-v1":
-            if data.get("freshness_protocol"):
-                _preflight_workspace(
-                    workspace,
-                    allowance,
-                    require_readonly=True,
-                )
-            else:
-                _preflight_workspace(workspace, allowance)
         result = inventory_workspace(data, index)
         parsed = result["workspaces"][0]
         summaries.append(
@@ -231,7 +221,11 @@ def _candidate_identity(service, path):
         return None
     if _is_default_scope_encoding(relative.parts[0]):
         return None
-    config = Path(service["config_root"]) / relative.parts[0] / "config.json"
+    config = (
+        Path(service.get("config_root", service["source_root"]))
+        / relative.parts[0]
+        / "config.json"
+    )
     try:
         return _identity(config, service)
     except (ValueError, TypeError, KeyError):
@@ -473,6 +467,21 @@ def _freeze_tenant_boundaries(report, *, freeze_identity_evidence=True):
     from .source_inputs import SourceInputInvalid
     from .spool import MigrationCapacityError
 
+    if report.get("in_place"):
+        overlaps = _overlapping_in_place_tenants(report)
+        for tenant in report["tenants"]:
+            if (
+                tenant["state"] == "discovered"
+                and unit_key(report, tenant) in overlaps
+            ):
+                blocker = {
+                    "code": "tenant_input_invalid",
+                    "position": json.dumps(unit_key(report, tenant)),
+                    "detail": "in-place tenant workspaces overlap",
+                }
+                tenant["state"] = "failed"
+                tenant["blockers"].append(blocker)
+                report["blockers"].append(blocker)
     if (
         report.get("in_place")
         and freeze_identity_evidence
@@ -499,3 +508,43 @@ def _freeze_tenant_boundaries(report, *, freeze_identity_evidence=True):
                     tenant["state"] = "failed"
                     tenant["blockers"].append(blocker)
                     report["blockers"].append(blocker)
+
+
+def _overlapping_in_place_tenants(report):
+    """Find overlapping tenant roots without reading workspace contents."""
+    entries = {}
+    for workspace in report["workspaces"]:
+        key = unit_key(report, workspace)
+        entries.setdefault(key, set()).add(
+            Path(workspace["root"]).resolve(),
+        )
+    ordered = sorted(
+        (
+            path,
+            path.parts,
+            key,
+        )
+        for key, paths in entries.items()
+        for path in paths
+    )
+    overlapping = set()
+    ancestors = []
+    for path, parts, key in ordered:
+        while ancestors and not path.is_relative_to(ancestors[-1][0]):
+            ancestors.pop()
+        if any(
+            ancestor_key != key
+            and (path == ancestor_path or path.is_relative_to(ancestor_path))
+            for ancestor_path, ancestor_key in ancestors
+        ):
+            overlapping.add(key)
+            overlapping.update(
+                ancestor_key
+                for ancestor_path, ancestor_key in ancestors
+                if ancestor_key != key
+                and (
+                    path == ancestor_path or path.is_relative_to(ancestor_path)
+                )
+            )
+        ancestors.append((path, key))
+    return overlapping

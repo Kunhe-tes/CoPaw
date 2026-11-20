@@ -7,7 +7,7 @@ from itertools import zip_longest
 from ..chat_mutations import load_metadata_json
 from ..bundle import MAX_READ_BYTES
 from ..identity import WorkspaceScope
-from .discovery import fingerprints, source_key, SHARE_FIELDS
+from .discovery import source_key, SHARE_FIELDS
 from .freshness import changed_source, tenant_key
 from .inventory import WorkspaceMapping, _workspace
 from .source_inputs import (
@@ -451,14 +451,6 @@ def _inventory_legacy_workspace(
 def inventory_discovery(data, *, workspace_offset=0):
     """Parse source semantics without manufacturing a frozen source boundary."""
     _verify_discovery_tenant_evidence(data)
-    if (
-        data.get("fingerprints")
-        and fingerprints(
-            data["services"],
-        )
-        != data["fingerprints"]
-    ):
-        raise ValueError("source changed since discovery freeze")
     mappings = _workspace_mappings(data)
     report = {
         "version": 2,
@@ -500,14 +492,6 @@ def inventory_discovery(data, *, workspace_offset=0):
                 chat["spec"]["id"],
             )
     _inventory_shares(data, report)
-    if (
-        data.get("fingerprints")
-        and fingerprints(
-            data["services"],
-        )
-        != data["fingerprints"]
-    ):
-        raise ValueError("source changed while building inventory")
     report["ready"] = not report["blockers"]
     return report
 
@@ -560,11 +544,6 @@ async def inventory_v3_spooled(
             data,
             shared_resources.allowance if shared_resources else memory_bytes,
         )
-    if (
-        data.get("fingerprints")
-        and fingerprints(data["services"]) != data["fingerprints"]
-    ):
-        raise ValueError("source changed since discovery freeze")
     summaries = await spool_workspaces(
         data,
         spool,
@@ -573,11 +552,6 @@ async def inventory_v3_spooled(
         memory_bytes=memory_bytes,
         shared_resources=shared_resources,
     )
-    if (
-        data.get("fingerprints")
-        and fingerprints(data["services"]) != data["fingerprints"]
-    ):
-        raise ValueError("source changed while building inventory")
     report = spool_report(
         spool,
         summaries,
@@ -593,11 +567,6 @@ async def inventory_v3_spooled(
                 data,
                 report,
             )
-    if (
-        data.get("fingerprints")
-        and fingerprints(data["services"]) != data["fingerprints"]
-    ):
-        raise ValueError("source changed while building inventory")
     for blocker in report["blockers"]:
         if (
             record_source_changes

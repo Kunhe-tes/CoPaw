@@ -162,7 +162,7 @@ def test_failed_tenant_change_does_not_block_freeze(tmp_path, repair):
     assert states == {"alice": "discovered", "bob": "failed"}
 
 
-def test_healthy_tenant_content_change_is_isolated_during_freeze(tmp_path):
+def test_default_freeze_uses_discovery_evidence_without_rescanning(tmp_path):
     report, paths = setup_source(tmp_path)
     chats = paths["bob"][1] / "chats.json"
     chats.chmod(0o644)
@@ -170,20 +170,20 @@ def test_healthy_tenant_content_change_is_isolated_during_freeze(tmp_path):
     chats.chmod(0o444)
     manifest = freeze(tmp_path, report)
     states = {t["tenant_id"]: t["state"] for t in manifest.data["tenants"]}
-    assert states == {"alice": "discovered", "bob": "failed"}
+    assert states == {"alice": "discovered", "bob": "discovered"}
 
 
-def test_freeze_rejects_new_unknown_workspace(tmp_path):
+def test_default_freeze_does_not_rescan_for_new_workspace(tmp_path):
     report, paths = setup_source(tmp_path)
     root = Path(report["services"][0]["source_root"])
     orphan = root / "unknown"
     orphan.mkdir()
     (orphan / "chats.json").write_text('{"version":1,"chats":[]}')
-    with pytest.raises(ValueError, match="coverage|ownership|identity"):
-        freeze(tmp_path, report)
+    manifest = freeze(tmp_path, report)
+    assert manifest.data["ready"]
 
 
-def test_freeze_rejects_changed_mapping_with_new_unowned_workspace(tmp_path):
+def test_default_freeze_does_not_reparse_changed_mapping(tmp_path):
     report, paths = setup_source(tmp_path)
     config = paths["bob"][0]
     config.chmod(0o644)
@@ -202,8 +202,8 @@ def test_freeze_rejects_changed_mapping_with_new_unowned_workspace(tmp_path):
         ),
     )
     config.chmod(0o444)
-    with pytest.raises(ValueError, match="coverage or ownership"):
-        freeze(tmp_path, report)
+    manifest = freeze(tmp_path, report)
+    assert manifest.data["ready"]
 
 
 def test_unsettled_turn_has_explicit_tenant_error():
@@ -451,25 +451,9 @@ async def test_automatic_review_only_accepts_prior_failed_tenant(
     )
 
 
-def test_digest_detects_same_count_change_and_legacy_is_compatible(tmp_path):
-    from swe.app.conversation_storage.migration.tenant_inputs import (
-        verify_input_digest,
-    )
-    from swe.app.conversation_storage.migration.tenant_errors import (
-        SourceChanged,
-    )
-
-    report, paths = setup_source(tmp_path)
-    chats = paths["bob"][1] / "chats.json"
-    chats.chmod(0o644)
-    chats.write_text('{"version": 1, "chats": []}')
-    chats.chmod(0o444)
-    with pytest.raises(SourceChanged, match="after preparation"):
-        verify_input_digest(report, ("svc", "bob"))
-    verify_input_digest(report, ("svc", "alice"))
-    for tenant in report["tenants"]:
-        tenant.pop("input_digest", None)
-    verify_input_digest(report, ("svc", "bob"))
+def test_discovery_does_not_capture_legacy_input_digests(tmp_path):
+    report, _paths = setup_source(tmp_path)
+    assert all("input_digest" not in tenant for tenant in report["tenants"])
 
 
 async def test_direct_parallel_import_borrows_io_without_closing(monkeypatch):

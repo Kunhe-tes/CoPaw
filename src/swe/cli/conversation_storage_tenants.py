@@ -15,7 +15,6 @@ from swe.app.conversation_storage.migration.direct_import import (
     DirectTarget,
 )
 from swe.app.conversation_storage.migration.inventory_v3 import (
-    inventories_equal,
     inventory_v3_spooled,
 )
 from swe.app.conversation_storage.migration.journal import (
@@ -290,16 +289,12 @@ async def _inventory(view, spool, resources):
     try:
         from swe.app.conversation_storage.migration.tenant_inputs import (
             verify_chats_mtimes,
-            verify_input_digest,
         )
 
-        if not _manifest_source_binding(view.data):
-            function = (
-                verify_chats_mtimes
-                if view.data.get("freshness_protocol")
-                else verify_input_digest
-            )
-            await inspect(function, view.data, view.key)
+        if not _manifest_source_binding(
+            view.data,
+        ) and view.data.get("freshness_protocol"):
+            await inspect(verify_chats_mtimes, view.data, view.key)
         result = await inventory_v3_spooled(
             view,
             spool,
@@ -406,10 +401,6 @@ async def _final_source_check(view, inventory, base, resources):
         except TenantInputError as error:
             raise TenantFailure(str(error)) from error
         return
-    with _spool(base, view.data) as check_spool:
-        actual = await _inventory(view, check_spool, resources)
-        if not inventories_equal(inventory, actual):
-            raise TenantFailure("tenant source changed during operation")
 
 
 async def _one_tenant(operation, view, db, states, guard, base, resources):
@@ -1134,20 +1125,17 @@ async def _recheck_prefetched(view, resources):
         return
     from swe.app.conversation_storage.migration.tenant_inputs import (
         verify_chats_mtimes,
-        verify_input_digest,
     )
     from swe.app.conversation_storage.migration.source_inputs import (
         SourceInputInvalid,
     )
 
+    if not view.data.get("freshness_protocol"):
+        return
     try:
         async with resources["_shared_resources"].reserve():
             await resources["_shared_io"].call(
-                (
-                    verify_chats_mtimes
-                    if view.data.get("freshness_protocol")
-                    else verify_input_digest
-                ),
+                verify_chats_mtimes,
                 view.data,
                 view.key,
             )

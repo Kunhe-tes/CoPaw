@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Business trees never enter conversation inventory or capacity accounting."""
+"""Business trees never enter conversation inventory."""
 
 import json
 import os
@@ -13,14 +13,10 @@ from swe.app.conversation_storage.migration.inventory import (
     WorkspaceMapping,
     _source_files,
 )
-from swe.app.conversation_storage.migration.inventory_parallel import (
-    _preflight_workspace,
-)
 from swe.app.conversation_storage.migration.source_inputs import (
     safe_input_entries,
     workspace_files,
 )
-from swe.app.conversation_storage.migration.spool import MigrationCapacityError
 
 
 def _mapping(root, **options):
@@ -56,7 +52,6 @@ def test_unrelated_large_attachment_and_code_are_never_enumerated(
         return original(path)
 
     monkeypatch.setattr(Path, "iterdir", selected_only)
-    assert _preflight_workspace({"root": str(tmp_path)}, 1024 * 1024) == 2
     (tmp_path / "chats.json").chmod(0o444)
     tmp_path.chmod(0o555)
     try:
@@ -103,31 +98,6 @@ def test_writable_conversation_files_are_allowed(tmp_path):
     ) == [chats]
 
 
-def test_preflight_keeps_legacy_reader_size_limit(tmp_path, monkeypatch):
-    from swe.app.conversation_storage.migration import inventory_parallel
-
-    monkeypatch.setattr(inventory_parallel, "MAX_READ_BYTES", 16)
-    sessions = tmp_path / "sessions"
-    sessions.mkdir()
-    with (sessions / "large.json").open("wb") as stream:
-        stream.truncate(17)
-    with pytest.raises(MigrationCapacityError, match="bounded reader limit"):
-        _preflight_workspace({"root": str(tmp_path)}, 512 * 1024 * 1024)
-
-
-@pytest.mark.parametrize("mode", ["bytes", "count"])
-def test_selected_inputs_keep_total_and_file_count_limits(tmp_path, mode):
-    sessions = tmp_path / "sessions"
-    sessions.mkdir()
-    if mode == "bytes":
-        (sessions / "one.json").write_bytes(b"x" * 65)
-    else:
-        for index in range(3):
-            (sessions / f"{index}.json").write_text("{}")
-    with pytest.raises(MigrationCapacityError, match="memory allowance"):
-        _preflight_workspace({"root": str(tmp_path)}, 1024)
-
-
 def test_override_includes_only_its_session_and_associated_ledger(
     tmp_path,
     monkeypatch,
@@ -162,17 +132,6 @@ def test_override_includes_only_its_session_and_associated_ledger(
         parent / "session.json",
         ledger / "metadata.json",
     }
-    expected = (parent / "session.json").stat().st_size + 2
-    assert (
-        _preflight_workspace(
-            {
-                "root": str(tmp_path),
-                "session_paths": [{"path": "reviewed/session.json"}],
-            },
-            1024 * 1024,
-        )
-        == expected
-    )
 
 
 @pytest.mark.parametrize("relative", ["../outside.json", "/outside.json", "."])

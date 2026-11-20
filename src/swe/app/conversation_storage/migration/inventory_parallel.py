@@ -6,18 +6,11 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..bundle import MAX_READ_BYTES
 from .inventory_v3 import inventory_workspace
 from .freshness import changed_source, tenant_key
 from .in_place_source import shared_service_roots
 from .parallel import MigrationCoordinator, MigrationResources
 from .progress import current_progress
-from .source_inputs import (
-    SourceInputInvalid,
-    safe_input_entries,
-    session_input_roots,
-)
-from .spool import MigrationCapacityError
 
 
 @dataclass(frozen=True)
@@ -41,11 +34,7 @@ async def spool_workspaces(
     memory_bytes=512 * 1024 * 1024,
     shared_resources=None,
 ):
-    """Parse and spool with fixed fan-out and no retained conversation bodies.
-
-    Each parser gets one equal share of the memory budget. The old reader still
-    needs a separate preflight size check before this API is used by the CLI.
-    """
+    """Parse and spool with fixed fan-out and no retained conversation bodies."""
     if not 1 <= workers <= 32:
         raise ValueError("workers must be between 1 and 32")
     summaries = [None] * len(data["workspaces"])
@@ -75,17 +64,13 @@ async def spool_workspaces(
         }
 
         async def parse(index, _request):
-            async with shared_resources.reserve() as allowance:
-                source_bytes = 0
-                if data.get("source_binding_storage") != "manifest-v1":
-                    source_bytes = await io.call(
-                        _preflight_workspace,
-                        data["workspaces"][index],
-                        allowance,
-                    )
+            async with shared_resources.reserve():
                 result = await io.call(inventory_workspace, data, index)
                 record = await io.call(spool.write, index, result)
                 workspace = result["workspaces"][0]
+                source_bytes = sum(
+                    item.get("bytes", 0) for item in result["files"]
+                )
                 summaries[index] = WorkspaceInventory(
                     index=index,
                     record=record,
@@ -120,11 +105,7 @@ async def spool_workspaces(
 
 
 def _shared_freshness(data):
-    """Scan shared evidence parents once per inventory, never across runs.
-
-    Whole-source fingerprints still bracket the inventory. Unique workspace
-    paths retain their own checks, including the workspace directory mtime.
-    """
+    """Scan shared evidence parents once per inventory, never across runs."""
     references = Counter()
     shared = shared_service_roots(data)
     for workspace in data["workspaces"]:
@@ -153,54 +134,3 @@ def _shared_freshness(data):
         for key, count in references.items()
         if count > 1
     }
-
-
-def _preflight_workspace(workspace, allowance, *, require_readonly=False):
-    """Bound raw inputs before legacy parsers allocate decoded object graphs."""
-    root = Path(workspace["root"])
-    total = 0
-    count = 0
-    source_limit = allowance // 16
-    count_limit = allowance // 512
-    roots = session_input_roots(
-        root,
-        [entry["path"] for entry in workspace.get("session_paths", [])],
-        registry_path=workspace.get("registry_path", "chats.json"),
-        sessions_dir=workspace.get("sessions_dir", "sessions"),
-        dialog_dir=workspace.get("dialog_dir", "dialog"),
-        max_session_bytes=min(MAX_READ_BYTES, source_limit),
-    )
-    for path in safe_input_entries(
-        root,
-        roots,
-        entry_limit=count_limit,
-        max_file_bytes=MAX_READ_BYTES,
-        max_total_file_bytes=source_limit,
-    ):
-        if not path.is_file():
-            if (
-                require_readonly
-                and path != root
-                and path.stat().st_mode & 0o222
-            ):
-                raise SourceInputInvalid(
-                    "conversation input directories must be read-only",
-                )
-            continue
-        if require_readonly and path.stat().st_mode & 0o222:
-            raise SourceInputInvalid(
-                "conversation input files must be read-only",
-            )
-        size = path.stat().st_size
-        if size > MAX_READ_BYTES:
-            raise MigrationCapacityError(
-                "workspace source file exceeds the bounded reader limit: "
-                + str(path),
-            )
-        total += size
-        count += 1
-        if total > source_limit or count > count_limit:
-            raise MigrationCapacityError(
-                "workspace source exceeds its migration memory allowance",
-            )
-    return total

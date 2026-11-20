@@ -72,22 +72,15 @@ def _semantic_validator(*, workers, io_workers, memory_budget_mib, work_dir):
             ),
         )
 
-    from functools import partial
     from swe.app.conversation_storage.migration.tenant_discovery import (
         map_tenant_semantics,
-        map_tenant_calls,
     )
 
-    validate.map_tenants = partial(
-        map_tenant_semantics,
+    validate.map_tenants = lambda items: map_tenant_semantics(
+        items,
         workers=workers,
         io_workers=io_workers,
         memory_bytes=memory_budget_mib * 1024 * 1024,
-    )
-    validate.map_input_digests = partial(
-        map_tenant_calls,
-        workers=workers,
-        io_workers=io_workers,
     )
     return validate
 
@@ -107,7 +100,6 @@ async def _semantic_spooled(
         _preflight_share_budget,
         _inventory_shares,
     )
-    from swe.app.conversation_storage.migration.discovery import fingerprints
     from swe.app.conversation_storage.migration.spool import InventorySpool
     from swe.app.conversation_storage.migration.spool_report import (
         spool_report,
@@ -130,9 +122,6 @@ async def _semantic_spooled(
     if base is None:
         raise ValueError("no work directory is separate from source roots")
     memory_bytes = memory_budget_mib * 1024 * 1024
-    baseline = data.get("fingerprints")
-    if baseline and fingerprints(data["services"]) != baseline:
-        raise ValueError("source changed during discovery")
     _preflight_share_budget(data, memory_bytes)
     protected = [
         item[key]
@@ -160,8 +149,6 @@ async def _semantic_spooled(
             source_boundary=None,
         )
         _inventory_shares(data, semantic)
-        if baseline and fingerprints(data["services"]) != baseline:
-            raise ValueError("source changed during discovery")
         return {
             "blockers": semantic["blockers"],
             "workspaces": [
