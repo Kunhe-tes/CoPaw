@@ -295,6 +295,7 @@ class OfflineImportStore(PublicationStore):
     def __init__(self, database, bundles, target, *, service_unit_id):
         super().__init__(database, bundles, service_unit_id=service_unit_id)
         self.target = target
+        self._target_validated = False
         self._reservation_ids = {}
         self._confirm_tickets = {}
         self._confirm_receipts = {}
@@ -352,6 +353,9 @@ class OfflineImportStore(PublicationStore):
 
     async def commit_evidence(self, evidence):
         return await self._commit_stages.commit(evidence)
+
+    async def commit_evidences(self, evidences):
+        return await self._commit_stages.commit_many(evidences)
 
     def _check_confirm_ticket(self, ticket):
         if self._confirm_tickets.get(id(ticket)) is not ticket:
@@ -420,50 +424,65 @@ class OfflineImportStore(PublicationStore):
         return await self._commit_bundle_receipt(receipt)
 
     async def _commit_bundle_receipt(self, receipt):
-        known = self._confirm_receipts.get(id(receipt))
-        if (
-            known is None
-            or known[0] is not receipt
-            or known[1] != receipt.index
-        ):
-            raise IntegrityError(
-                "unknown or altered offline confirmation receipt",
-            )
-        ticket = receipt.ticket
-        self._check_confirm_ticket(ticket)
+        return (await self.commit_bundle_receipts((receipt,)))[0]
+
+    async def commit_bundle_receipts(self, receipts):
+        if not receipts:
+            return ()
+        prepared = []
+        for receipt in receipts:
+            known = self._confirm_receipts.get(id(receipt))
+            if (
+                known is None
+                or known[0] is not receipt
+                or known[1] != receipt.index
+            ):
+                raise IntegrityError(
+                    "unknown or altered offline confirmation receipt",
+                )
+            self._check_confirm_ticket(receipt.ticket)
+            prepared.append((receipt, known))
+        prepared.sort(key=lambda item: item[0].ticket.publication_id)
         try:
             async with self.db.transaction():
-                row = await self.get(ticket.request.operation_key)
-                if row is None or row["state"] != "prepared":
-                    raise ConflictError(
-                        "publication ended during NAS confirmation",
-                    )
-                await self._validate_prepared_references(row)
-                current = await self.get(
-                    ticket.request.operation_key,
-                    lock=True,
-                )
-                self._matches(current, ticket.request, ticket.plan_text)
-                if (
-                    current["id"] != ticket.publication_id
-                    or BundleStore.validate_publication_locator(current)
-                    != ticket.relative_path
-                ):
-                    raise IntegrityError(
-                        "offline confirmation publication changed",
-                    )
-                await self._mark_durable(
-                    ticket.request.operation_key,
-                    known[1],
-                )
+                for receipt, _known in prepared:
+                    await self._commit_bundle_receipt_locked(receipt)
         except StorageError:
             raise
         except (Exception, asyncio.CancelledError) as error:
-            raise UnknownCommit(ticket.request.operation_key) from error
-        self._confirm_receipts.pop(id(receipt))
-        self._confirm_tickets.pop(id(ticket))
-        self._write_stages.prepared.pop(id(ticket), None)
-        return receipt.index
+            raise UnknownCommit(
+                prepared[0][0].ticket.request.operation_key,
+            ) from error
+        for receipt, _known in prepared:
+            ticket = receipt.ticket
+            self._confirm_receipts.pop(id(receipt))
+            self._confirm_tickets.pop(id(ticket))
+            self._write_stages.prepared.pop(id(ticket), None)
+        return tuple(receipt.index for receipt in receipts)
+
+    async def _commit_bundle_receipt_locked(self, receipt):
+        ticket = receipt.ticket
+        current = await self.get(ticket.request.operation_key, lock=True)
+        if current is None or current["state"] != "prepared":
+            raise ConflictError(
+                "publication ended during NAS confirmation",
+            )
+        self._matches(current, ticket.request, ticket.plan_text)
+        if (
+            current["id"] != ticket.publication_id
+            or BundleStore.validate_publication_locator(current)
+            != ticket.relative_path
+        ):
+            raise IntegrityError(
+                "offline confirmation publication changed",
+            )
+        await self._validate_prepared_references(current)
+        await self._assert_writes_allowed(ticket.request)
+        await self.db.execute(
+            "UPDATE swe_conversation_publications "
+            "SET byte_length=%s,durable_at=UTC_TIMESTAMP(6) WHERE id=%s",
+            (receipt.index.byte_length, current["id"]),
+        )
 
     async def confirm_bundle(self, operation_key):
         ticket = await self.prepare_confirm_bundle(operation_key)
@@ -484,6 +503,8 @@ class OfflineImportStore(PublicationStore):
         PublicationStore._validate_associations(request, *associations)
 
     async def validate_target(self):
+        if self._target_validated:
+            return
         row = await self.db.fetch_one("SELECT DATABASE() AS schema_name")
         if (
             not row
@@ -493,6 +514,7 @@ class OfflineImportStore(PublicationStore):
             raise IntegrityError(
                 "offline import target differs from verified staging schema",
             )
+        self._target_validated = True
 
     async def reserve_batch(self, request, publication_id, plan=None):
         await self.validate_target()

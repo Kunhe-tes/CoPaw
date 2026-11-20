@@ -57,7 +57,12 @@ def test_bundle_metrics_preserve_nested_calls_errors_and_snapshot(monkeypatch):
     }.items():
         monkeypatch.setattr(bench.BundleStore, name, function)
     metrics = bench._track_bundle_io(monkeypatch)
-    before = bench._metric_snapshot("start", {"calls": 0}, metrics)
+    before = bench._metric_snapshot(
+        "start",
+        {"calls": 0},
+        {"calls": 0},
+        metrics,
+    )
     assert bench.BundleStore.publish() is marker
     with pytest.raises(ValueError, match="private body"):
         bench.BundleStore.inspect()
@@ -65,6 +70,7 @@ def test_bundle_metrics_preserve_nested_calls_errors_and_snapshot(monkeypatch):
     assert metrics["read_extent"]["calls"] == 1
     assert metrics["inspect"]["failed_calls"] == 1
     assert metrics["confirm_durable"]["calls"] == 0
+    assert before["sql_owner"]["calls"] == 0
     assert before["bundle_io"]["publish"]["calls"] == 0
     assert "private" not in json.dumps(metrics)
 

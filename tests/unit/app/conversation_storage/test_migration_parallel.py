@@ -214,6 +214,118 @@ async def test_single_worker_preserves_order_and_rejects_unknown_command():
         await coordinator.request("raw SQL", "DROP TABLE")
 
 
+async def test_sql_owner_batches_commands_without_crossing_results():
+    owner = asyncio.current_task()
+    batches = []
+
+    async def commit(_value):
+        pytest.fail("batched command ran through the single-command handler")
+
+    async def commit_batch(commands):
+        assert asyncio.current_task() is owner
+        values = tuple(command.arguments[0] for command in commands)
+        batches.append(values)
+        await asyncio.sleep(0)
+        return tuple(value * 2 for value in values)
+
+    results = {}
+
+    async def workspace(value, request):
+        results[value] = await request("commit", value)
+
+    coordinator = MigrationCoordinator(
+        {"commit": commit},
+        workers=4,
+        batch_handlers={"commit": commit_batch},
+    )
+    await coordinator.run(range(100), workspace)
+
+    assert sorted(results) == list(range(100))
+    assert all(result == value * 2 for value, result in results.items())
+    assert sum(len(batch) for batch in batches) == 100
+    assert max(len(batch) for batch in batches) > 1
+
+
+async def test_sql_batch_failure_reaches_every_waiter_and_stops_next_query():
+    from collections import deque
+
+    failure = ValueError("batched transaction failed")
+    commands = []
+    later_batches = []
+
+    async def commit(_value):
+        pytest.fail("batched command ran through the single-command handler")
+
+    async def commit_batch(commands):
+        values = tuple(command.arguments[0] for command in commands)
+        later_batches.append(values)
+        raise failure
+
+    async def workspace(value, request):
+        await request("commit", value)
+
+    coordinator = MigrationCoordinator(
+        {"commit": commit},
+        workers=4,
+        batch_handlers={"commit": commit_batch},
+    )
+
+    class ObservedCommands(deque):
+        def append(self, x):
+            commands.append(x)
+            super().append(x)
+
+    coordinator._commands = ObservedCommands()
+    with pytest.raises(ValueError) as stopped:
+        await asyncio.wait_for(coordinator.run(range(100), workspace), 1)
+
+    assert stopped.value is failure
+    assert later_batches
+    assert len(later_batches) == 1
+    assert commands
+    assert all(command.result.done() for command in commands)
+    assert all(command.result.exception() is failure for command in commands)
+
+
+async def test_sql_batch_observations_identify_last_owner_transaction():
+    from swe.app.conversation_storage.migration.progress import (
+        MigrationProgress,
+    )
+
+    progress = MigrationProgress("migrate", "migration")
+
+    async def commit(_value):
+        pytest.fail("batched command ran through the single-command handler")
+
+    async def commit_batch(commands):
+        await asyncio.sleep(0.002)
+        return tuple(command.arguments[0] for command in commands)
+
+    async def workspace(value, request):
+        await request("commit", value)
+
+    items = [{"position": "workspace-A", "value": value} for value in range(4)]
+
+    async def run_workspace(item, request):
+        await workspace(item["value"], request)
+
+    with progress.activate():
+        coordinator = MigrationCoordinator(
+            {"commit": commit},
+            workers=4,
+            batch_handlers={"commit": commit_batch},
+        )
+        await coordinator.run(items, run_workspace)
+
+    snapshot = progress.snapshot()
+    assert snapshot["sql_batches"] == 1
+    assert snapshot["sql_batch_size_peak"] == 4
+    assert snapshot["last_sql_command"] == "commit"
+    assert snapshot["last_sql_position"] == "workspace-A"
+    assert snapshot["last_sql_succeeded"] is True
+    assert snapshot["last_sql_seconds"] >= 0.002
+
+
 async def test_reused_io_thread_has_fresh_context_for_each_call():
     binding = ContextVar("thread-state", default=None)
     async with MigrationIO(1) as io:

@@ -228,6 +228,58 @@ async def test_manifest_binding_import_runs_without_tenant_cutoff():
     assert processed == [("svc", "tenant", "source", "0")]
 
 
+async def test_journal_batch_unpacks_context_positional_arguments():
+    from swe.app.conversation_storage.migration.parallel_import import (
+        MigrationDomainRouter,
+    )
+
+    calls = []
+
+    class BatchedJournal:
+        async def set_batch_states(self, commands):
+            calls.append(commands)
+            return tuple(None for _command in commands)
+
+    router = MigrationDomainRouter(lambda _workspace: None, BatchedJournal())
+    key = object()
+    router._contexts[key] = SimpleNamespace()
+    command = SimpleNamespace(
+        arguments=(key, ("batch-position", "importing"), {}),
+    )
+
+    result = await router.batch_handlers()["journal.set_batch_state"](
+        (command,),
+    )
+
+    assert result == (None,)
+    assert calls == [(("batch-position", "importing"),)]
+
+
+async def test_store_batch_unpacks_single_context_argument():
+    from swe.app.conversation_storage.migration.parallel_import import (
+        MigrationDomainRouter,
+    )
+
+    calls = []
+
+    class BatchedStore:
+        async def commit_bundle_receipts(self, receipts):
+            calls.append(receipts)
+            return tuple(receipt.upper() for receipt in receipts)
+
+    router = MigrationDomainRouter(lambda _workspace: None, Journal())
+    key = object()
+    router._contexts[key] = BatchedStore()
+    command = SimpleNamespace(arguments=(key, ("receipt",), {}))
+
+    result = await router.batch_handlers()["store.commit_written_bundle"](
+        (command,),
+    )
+
+    assert result == ("RECEIPT",)
+    assert calls == [("receipt",)]
+
+
 async def test_parallel_workspace_import_keeps_legacy_stage_order():
     from swe.app.conversation_storage.migration.importer import (
         ParallelWorkspaceImporter,

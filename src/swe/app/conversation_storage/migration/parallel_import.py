@@ -24,10 +24,14 @@ def _freeze(value):
 
 def workspace_source_copy(value):
     """Restore worker-private JSON containers for legacy extraction helpers."""
-    if isinstance(value, (dict, MappingProxyType)):
+    if isinstance(value, MappingProxyType):
         return {
             key: workspace_source_copy(item) for key, item in value.items()
         }
+    if isinstance(value, dict):
+        # Spool records are owned by one workspace worker. Detach only the
+        # top-level migration fields that the importer removes.
+        return dict(value)
     if isinstance(value, (list, tuple)):
         return [workspace_source_copy(item) for item in value]
     return deepcopy(value)
@@ -78,6 +82,25 @@ class MigrationDomainRouter:
                 "store." + name: self._store_handler(name)
                 for name in self.STORE
             },
+        }
+
+    def batch_handlers(self):
+        return {
+            "store.commit_confirm_bundle": self._store_batch_handler(
+                "commit_bundle_receipts",
+            ),
+            "store.commit_written_bundle": self._store_batch_handler(
+                "commit_bundle_receipts",
+            ),
+            "store.commit_evidence": self._store_batch_handler(
+                "commit_evidences",
+            ),
+            "journal.refresh_batch": self._journal_batch_handler(
+                "refresh_batches",
+            ),
+            "journal.set_batch_state": self._journal_batch_handler(
+                "set_batch_states",
+            ),
         }
 
     async def _open(self, workspace):
@@ -131,6 +154,58 @@ class MigrationDomainRouter:
             if name in ("get", "reserve_batch"):
                 return deepcopy(result)
             return result
+
+        return handle
+
+    def _store_batch_handler(self, name):
+        async def handle(commands):
+            results = [None] * len(commands)
+            contexts = {}
+            for index, command in enumerate(commands):
+                key = command.arguments[0]
+                if key not in self._contexts:
+                    raise KeyError("closed or foreign workspace context")
+                args, kwargs = command.arguments[1:]
+                if len(args) != 1 or kwargs:
+                    raise ValueError(
+                        "batched migration command requires one argument",
+                    )
+                contexts.setdefault(key, []).append((index, args[0]))
+            for key, items in contexts.items():
+                values = await getattr(self._contexts[key], name)(
+                    tuple(value for _, value in items),
+                )
+                if len(values) != len(items):
+                    raise ValueError("batched migration result count differs")
+                for (index, _value), result in zip(items, values):
+                    results[index] = result
+            return tuple(results)
+
+        return handle
+
+    def _journal_batch_handler(self, name):
+        async def handle(commands):
+            results = [None] * len(commands)
+            contexts = {}
+            for index, command in enumerate(commands):
+                key = command.arguments[0]
+                if key not in self._contexts:
+                    raise KeyError("closed or foreign workspace context")
+                args, kwargs = command.arguments[1:]
+                if kwargs:
+                    raise ValueError("batched journal command has keywords")
+                contexts.setdefault(key, []).append((index, args))
+            for key, items in contexts.items():
+                # The journal is shared, but retain workspace ownership checks
+                # and process one owner context at a time.
+                values = await getattr(self._journal, name)(
+                    tuple(args for _, args in items),
+                )
+                if len(values) != len(items):
+                    raise ValueError("batched journal result count differs")
+                for (index, _args), result in zip(items, values):
+                    results[index] = result
+            return tuple(results)
 
         return handle
 
@@ -340,6 +415,7 @@ class ParallelImportPrototype:
             self._router.handlers(),
             workers=self._workers,
             health_check=self._health_check,
+            batch_handlers=self._router.batch_handlers(),
         )
 
         async def run_workspace(workspace, request):
@@ -374,7 +450,7 @@ class ParallelImportPrototype:
             )
             try:
                 importer = importer_factory(context)
-                await importer.run_workspace(_freeze(workspace))
+                await importer.run_workspace(workspace)
                 await request("workspace.complete", key, importer.chat_ids)
             finally:
                 await request("workspace.close", key)

@@ -210,14 +210,58 @@ class OfflineCommitStages:
         return evidence
 
     async def commit(self, evidence):
+        return (await self.commit_many((evidence,)))[0]
+
+    async def commit_many(self, evidences):
+        evidences = tuple(evidences)
+        if not evidences:
+            return ()
+        known = []
+        for evidence in evidences:
+            receipt = self.receipts.get(id(evidence))
+            if (
+                receipt is None
+                or receipt[0] is not evidence
+                or receipt[1] != evidence
+            ):
+                raise IntegrityError(
+                    "unknown or altered offline commit evidence",
+                )
+            known.append((evidence, receipt[1]))
+        ordered = sorted(
+            known,
+            key=lambda item: item[0].ticket.publication_id,
+        )
+        try:
+            results = {}
+            if len(ordered) == 1:
+                evidence, frozen = ordered[0]
+                results[id(evidence)] = await self._commit_one(
+                    evidence,
+                    frozen,
+                )
+            else:
+                # Nested _commit_install transactions join this one. Sorting
+                # by publication identity gives every batched commit one
+                # stable lock order while preserving prepared -> committed.
+                async with self.store.db.transaction():
+                    for evidence, frozen in ordered:
+                        results[id(evidence)] = await self._commit_one(
+                            evidence,
+                            frozen,
+                        )
+        except StorageError:
+            raise
+        except (Exception, asyncio.CancelledError) as error:
+            first = ordered[0][0].ticket.request
+            raise UnknownCommit(first.operation_key, first) from error
+        return tuple(results[id(evidence)] for evidence in evidences)
+
+    async def _commit_one(self, evidence, frozen):
         from .install_records import _PLAN, _LOCKED
 
-        known = self.receipts.get(id(evidence))
-        if known is None or known[0] is not evidence or known[1] != evidence:
-            raise IntegrityError("unknown or altered offline commit evidence")
         ticket = evidence.ticket
         initial = self._ticket(ticket)
-        frozen = known[1]
         request = ticket.request
         plan = _evidence_plan(frozen)
         store = self.store
@@ -272,10 +316,6 @@ class OfflineCommitStages:
             self.receipts.pop(id(evidence))
             self.tickets.pop(id(ticket))
             return result
-        except StorageError:
-            raise
-        except (Exception, asyncio.CancelledError) as error:
-            raise UnknownCommit(request.operation_key, request) from error
         finally:
             try:
                 if sources is not None:

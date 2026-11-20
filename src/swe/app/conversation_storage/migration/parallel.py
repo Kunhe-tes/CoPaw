@@ -15,6 +15,8 @@ from swe.database.observation import observe_operations
 from .progress import current_progress
 
 HEALTH_CHECK_INTERVAL = 15.0
+SQL_BATCH_GRACE_SECONDS = 0.003
+SQL_BATCH_LIMIT = 32
 _WORK_POSITION = ContextVar("migration_work_position", default=None)
 
 
@@ -177,11 +179,23 @@ class MigrationCoordinator:
     its complete transaction and must not wait for work done by a worker.
     """
 
-    def __init__(self, handlers, *, workers=4, health_check=None):
+    def __init__(
+        self,
+        handlers,
+        *,
+        workers=4,
+        health_check=None,
+        batch_handlers=None,
+        batch_limit=SQL_BATCH_LIMIT,
+    ):
         if not 1 <= workers <= 32:
             raise ValueError("workers must be between 1 and 32")
+        if not 1 <= batch_limit <= 256:
+            raise ValueError("SQL batch limit must be between 1 and 256")
         self._progress = current_progress()
         self._handlers = dict(handlers)
+        self._batch_handlers = dict(batch_handlers or {})
+        self._batch_limit = batch_limit
         self._workers = workers
         self._commands = deque()
         self._slots = asyncio.Semaphore(2 * workers)
@@ -301,32 +315,31 @@ class MigrationCoordinator:
                     # Observe it before admitting another domain transaction.
                     continue
             if self._commands:
-                command = self._commands.popleft()
-                started = time.monotonic()
-                if self._progress:
-                    self._progress.data["sql_queue_depth"] = len(
-                        self._commands,
-                    )
-                    self._progress.data["sql_wait_seconds"] += (
-                        started - command.queued_at
-                    )
-                try:
-                    value = await self._handlers[command.name](
-                        *command.arguments,
-                    )
-                except BaseException as error:
-                    if self._progress:
-                        self._progress.failed_at(command.position)
-                        self._progress.data["sql_seconds"] += (
-                            time.monotonic() - started
-                        )
-                    command.result.set_exception(error)
-                    raise
-                if self._progress:
-                    self._progress.data["sql_seconds"] += (
-                        time.monotonic() - started
-                    )
-                command.result.set_result(value)
+                first = self._commands.popleft()
+                batch_handler = self._batch_handlers.get(first.name)
+                if batch_handler is not None:
+                    commands = [first]
+                    if self._commands:
+                        await asyncio.sleep(SQL_BATCH_GRACE_SECONDS)
+                    while (
+                        len(commands) < self._batch_limit
+                        and self._commands
+                        and self._commands[0].name == first.name
+                    ):
+                        commands.append(self._commands.popleft())
+                    for task in tasks:
+                        if not task.done():
+                            continue
+                        try:
+                            task.result()
+                        except BaseException as error:
+                            for command in commands:
+                                if not command.result.done():
+                                    command.result.set_exception(error)
+                            raise
+                    await self._run_batch(batch_handler, commands)
+                    continue
+                await self._run_single(first)
                 continue
             self._wake.clear()
             if self._health_check is None:
@@ -341,6 +354,81 @@ class MigrationCoordinator:
                     await asyncio.wait_for(self._wake.wait(), remaining)
                 except asyncio.TimeoutError:
                     pass
+
+    async def _run_single(self, command):
+        started = time.monotonic()
+        if self._progress:
+            self._progress.data["sql_queue_depth"] = len(self._commands)
+            self._progress.data["sql_wait_seconds"] += (
+                started - command.queued_at
+            )
+        try:
+            value = await self._handlers[command.name](*command.arguments)
+        except BaseException as error:
+            if self._progress:
+                self._progress.failed_at(command.position)
+                self._record_sql(
+                    command,
+                    started,
+                    succeeded=False,
+                    batch_size=1,
+                )
+            command.result.set_exception(error)
+            raise
+        if self._progress:
+            self._record_sql(
+                command,
+                started,
+                succeeded=True,
+                batch_size=1,
+            )
+        command.result.set_result(value)
+
+    async def _run_batch(self, handler, commands):
+        started = time.monotonic()
+        if self._progress:
+            self._progress.data["sql_queue_depth"] = len(self._commands)
+            self._progress.data["sql_wait_seconds"] += sum(
+                started - command.queued_at for command in commands
+            )
+        try:
+            values = await handler(tuple(commands))
+            if len(values) != len(commands):
+                raise ValueError("migration SQL batch result count differs")
+        except BaseException as error:
+            if self._progress:
+                self._progress.failed_at(commands[0].position)
+                self._record_sql(
+                    commands[0],
+                    started,
+                    succeeded=False,
+                    batch_size=len(commands),
+                )
+            for command in commands:
+                command.result.set_exception(error)
+            raise
+        if self._progress:
+            self._record_sql(
+                commands[0],
+                started,
+                succeeded=True,
+                batch_size=len(commands),
+            )
+        for command, value in zip(commands, values):
+            command.result.set_result(value)
+
+    def _record_sql(self, command, started, *, succeeded, batch_size):
+        elapsed = time.monotonic() - started
+        self._progress.data["sql_seconds"] += elapsed
+        self._progress.data["sql_batches"] += 1
+        self._progress.data["sql_batch_size_peak"] = max(
+            self._progress.data["sql_batch_size_peak"],
+            batch_size,
+        )
+        self._progress.data["last_sql_command"] = command.name
+        self._progress.data["last_sql_position"] = command.position
+        self._progress.data["last_sql_seconds"] = round(elapsed, 6)
+        self._progress.data["last_sql_succeeded"] = succeeded
 
     def _reject_pending(self):
         if self._progress:

@@ -3,6 +3,7 @@
 
 import asyncio
 from hashlib import sha256
+import io
 import json
 import shutil
 import os
@@ -40,10 +41,20 @@ def _run_bounded_command(operation, manifest_path, **options):
     from swe.app.conversation_storage.migration.disk_manifest import (
         disk_index_policy,
     )
+    from swe.app.conversation_storage.migration.progress import (
+        MigrationProgress,
+    )
 
     directory = options.get("work_dir", Path(manifest_path).parent / "work")
     with disk_index_policy(directory, shutil.disk_usage(directory).free // 4):
-        report = run_v3_command(operation, manifest_path, **options)
+        progress = MigrationProgress(
+            operation,
+            "benchmark",
+            stream=io.StringIO(),
+            interval=3600,
+        )
+        with progress.activate():
+            report = run_v3_command(operation, manifest_path, **options)
         if "batches" in report:
             report = {
                 "migration_id": report["migration_id"],
@@ -220,11 +231,11 @@ async def _interrupt_import_and_resume(
 ):
     from swe.app.conversation_storage.migration.journal import MigrationJournal
 
-    original_finish = MigrationJournal.refresh_batch
+    original_finish = MigrationJournal.refresh_batches
     interrupted = [False]
 
-    async def interrupt_after_first_commit(importer, position):
-        await original_finish(importer, position)
+    async def interrupt_after_first_commit(importer, commands):
+        await original_finish(importer, commands)
         if not interrupted[0]:
             interrupted[0] = True
             raise RuntimeError("benchmark interruption after commit")
@@ -233,7 +244,7 @@ async def _interrupt_import_and_resume(
     with monkeypatch.context() as interruption:
         interruption.setattr(
             MigrationJournal,
-            "refresh_batch",
+            "refresh_batches",
             interrupt_after_first_commit,
         )
         with pytest.raises(RuntimeError, match="benchmark interruption"):
@@ -312,6 +323,7 @@ async def test_10k_workspace_import_resume_verify_finalize(
     peak_spool_bytes = _track_spool_peak(monkeypatch)
     peak_index_bytes = _track_index_peak(monkeypatch)
     sql_metrics = _track_sql_queries(monkeypatch)
+    sql_owner_metrics = _track_sql_owner(monkeypatch)
     bundle_metrics = _track_bundle_io(monkeypatch)
     phases = {}
     observations = []
@@ -320,7 +332,12 @@ async def test_10k_workspace_import_resume_verify_finalize(
     def begin_stage(stage):
         current_stage.update(name=stage, started=time.perf_counter())
         observations.append(
-            _metric_snapshot(stage, sql_metrics, bundle_metrics),
+            _metric_snapshot(
+                stage,
+                sql_metrics,
+                sql_owner_metrics,
+                bundle_metrics,
+            ),
         )
         _progress(stage, workers)
 
@@ -423,12 +440,14 @@ async def test_10k_workspace_import_resume_verify_finalize(
                         "peak_spool_bytes": peak_spool_bytes[0],
                         "peak_index_bytes": peak_index_bytes[0],
                         "sql_queries": sql_metrics,
+                        "sql_owner": sql_owner_metrics,
                         "bundle_io": bundle_metrics,
                         "metric_observations": observations
                         + [
                             _metric_snapshot(
                                 "exit",
                                 sql_metrics,
+                                sql_owner_metrics,
                                 bundle_metrics,
                             ),
                         ],
@@ -529,10 +548,11 @@ def _progress(stage, workers):
     )
 
 
-def _metric_snapshot(stage, sql, bundle):
+def _metric_snapshot(stage, sql, owner, bundle):
     return {
         "stage": stage,
         "sql_queries": dict(sql),
+        "sql_owner": dict(owner),
         "bundle_io": {name: dict(values) for name, values in bundle.items()},
     }
 
@@ -541,7 +561,15 @@ def _track_sql_queries(monkeypatch):
     """Count cursor queries only; excludes pool wait and driver BEGIN/COMMIT."""
     from swe.database.session import DatabaseSession
 
-    metrics = {"calls": 0, "failed_calls": 0, "summed_seconds": 0.0}
+    metrics = {
+        "calls": 0,
+        "failed_calls": 0,
+        "summed_seconds": 0.0,
+        "slowest_query": None,
+        "slowest_seconds": 0.0,
+        "last_query": None,
+        "last_query_seconds": 0.0,
+    }
     lock = threading.Lock()
     original = DatabaseSession._query
 
@@ -553,12 +581,72 @@ def _track_sql_queries(monkeypatch):
             failed = False
             return result
         finally:
+            seconds = time.perf_counter() - started
+            summary = " ".join(query.split())[:500]
             with lock:
                 metrics["calls"] += 1
                 metrics["failed_calls"] += int(failed)
-                metrics["summed_seconds"] += time.perf_counter() - started
+                metrics["summed_seconds"] += seconds
+                metrics["last_query"] = summary
+                metrics["last_query_seconds"] = seconds
+                if seconds > metrics["slowest_seconds"]:
+                    metrics["slowest_query"] = summary
+                    metrics["slowest_seconds"] = seconds
 
     monkeypatch.setattr(DatabaseSession, "_query", measured)
+    return metrics
+
+
+def _track_sql_owner(monkeypatch):
+    """Observe the logical SQL owner transactions independently of cursors."""
+    from swe.app.conversation_storage.migration.parallel import (
+        MigrationCoordinator,
+    )
+
+    metrics = {
+        "calls": 0,
+        "commands": 0,
+        "failed_calls": 0,
+        "batch_size_peak": 0,
+        "last_command": None,
+        "last_batch_size": 0,
+        "last_seconds": 0.0,
+        "last_succeeded": None,
+    }
+    lock = threading.Lock()
+    original = MigrationCoordinator._record_sql
+
+    def measured(
+        coordinator,
+        command,
+        started,
+        *,
+        succeeded,
+        batch_size,
+    ):
+        try:
+            return original(
+                coordinator,
+                command,
+                started,
+                succeeded=succeeded,
+                batch_size=batch_size,
+            )
+        finally:
+            with lock:
+                metrics["calls"] += 1
+                metrics["commands"] += batch_size
+                metrics["failed_calls"] += int(not succeeded)
+                metrics["batch_size_peak"] = max(
+                    metrics["batch_size_peak"],
+                    batch_size,
+                )
+                metrics["last_command"] = command.name
+                metrics["last_batch_size"] = batch_size
+                metrics["last_seconds"] = time.monotonic() - started
+                metrics["last_succeeded"] = succeeded
+
+    monkeypatch.setattr(MigrationCoordinator, "_record_sql", measured)
     return metrics
 
 

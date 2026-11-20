@@ -105,25 +105,29 @@ class MigrationJournal:
             }
         else:
             source = {
-                key: data[key]
-                for key in (
-                    "source_boundary",
-                    "services",
-                    "workspaces",
-                    "fingerprints",
-                    "tenant_sync_started_at_ns",
-                    "shares",
-                    "discovery_version",
-                    "tenant_isolation",
-                    "source_isolation",
-                    "freshness_protocol",
-                    "in_place",
-                    "tenant_review_revision",
-                    "tenants",
-                    "source_shares",
-                    "declared_services",
-                )
-                if key in data
+                "manifest": (
+                    str(self.manifest.path)
+                    if getattr(self.manifest, "path", None) is not None
+                    else None
+                ),
+                "source_boundary": data.get("source_boundary"),
+                "services": data.get("services", []),
+                "discovery_version": data.get("discovery_version"),
+                "tenant_isolation": bool(data.get("tenant_isolation")),
+                "source_isolation": bool(data.get("source_isolation")),
+                "freshness_protocol": data.get("freshness_protocol"),
+                "in_place": bool(data.get("in_place")),
+                "tenant_review_revision": data.get("tenant_review_revision"),
+                "counts": {
+                    key: len(data.get(key) or ())
+                    for key in (
+                        "workspaces",
+                        "tenants",
+                        "shares",
+                        "source_shares",
+                        "declared_services",
+                    )
+                },
             }
         target = dict(data["target"])
         if self.server_uuid is not None:
@@ -760,60 +764,129 @@ class MigrationJournal:
 
     async def refresh_batch(self, position):
         """Mirror only this committed SQL batch, never scan all tickets."""
-        kind, key = self._key("batch", position)
-        row = await self.db.fetch_one(
+        await self.refresh_batches(((position,),))
+
+    async def refresh_batches(self, commands):
+        positions = []
+        for command in commands:
+            if len(command) != 1 or not isinstance(command[0], str):
+                raise ValueError("invalid batched migration batch position")
+            positions.append(command[0])
+        if not positions:
+            return ()
+        if len(set(positions)) != len(positions):
+            raise ValueError("duplicate batched migration batch position")
+        keys = [self._key("batch", position)[1] for position in positions]
+        rows = await self.db.fetch_all(
             "SELECT * FROM "
             + ENTRIES
-            + " WHERE migration_id=%s AND entry_kind=%s AND source_key=%s",
-            (self.migration_id, kind, key),
+            + " WHERE migration_id=%s AND entry_kind='batch' AND source_key IN ("
+            + ",".join("%s" for _ in keys)
+            + ")",
+            (self.migration_id, *keys),
         )
-        if row is None or row["state"] not in ("committed", "verified"):
+        found = {}
+        for row in rows:
+            key = row["source_key"]
+            key = key.encode() if isinstance(key, str) else key
+            entry_kind = row["entry_kind"]
+            entry_kind = (
+                entry_kind.decode()
+                if isinstance(entry_kind, bytes)
+                else entry_kind
+            )
+            if entry_kind != "batch" or key not in keys:
+                continue
+            if key in found:
+                raise ValueError("batched migration batch identity differs")
+            found[key] = row
+        if set(found) != set(keys):
             raise ValueError(
                 "completed batch has no committed SQL journal row",
             )
-        self.manifest.data["batches"][position] = row["state"]
+        values = {}
+        for position, key in zip(positions, keys):
+            state = found[key]["state"]
+            if state not in ("committed", "verified"):
+                raise ValueError(
+                    "completed batch has no committed SQL journal row",
+                )
+            values[position] = state
+        self.manifest.data["batches"].update(values)
         if self.persist_updates:
             self.manifest._persist()
+        return tuple(None for _ in commands)
 
     async def set_batch_state(self, position, state, *, mirror=True):
+        await self.set_batch_states(
+            ((position, state),),
+            mirror_positions=(position,) if mirror else (),
+        )
+
+    async def set_batch_states(
+        self,
+        commands,
+        *,
+        mirror_positions=None,
+    ):
         from .manifest import TRANSITIONS
 
+        if not commands:
+            return ()
+        normalized = []
+        for command in commands:
+            if len(command) != 2:
+                raise ValueError("invalid batched migration batch transition")
+            normalized.append(command)
+        mirror = (
+            {position for position, _state in normalized}
+            if mirror_positions is None
+            else set(mirror_positions)
+        )
+        async with self.db.transaction():
+            for position, state in normalized:
+                await self._set_batch_state_locked(
+                    position,
+                    state,
+                    TRANSITIONS,
+                )
+        for position, state in normalized:
+            if position in mirror:
+                self.manifest.data["batches"][position] = state
+        if mirror and self.persist_updates:
+            self.manifest._persist()
+        return tuple(None for _ in normalized)
+
+    async def _set_batch_state_locked(self, position, state, transitions):
         kind, key = self._key("batch", position)
         sql_state = "prepared" if state == "importing" else state
-        async with self.db.transaction():
-            row = await self.db.fetch_one(
-                "SELECT * FROM "
+        row = await self.db.fetch_one(
+            "SELECT * FROM "
+            + ENTRIES
+            + " WHERE migration_id=%s AND entry_kind=%s AND source_key=%s FOR UPDATE",
+            (self.migration_id, kind, key),
+        )
+        previous = (
+            "planned"
+            if row is None
+            else ("importing" if row["state"] == "prepared" else row["state"])
+        )
+        if state != previous and state not in transitions[previous]:
+            raise ValueError("invalid migration batch transition")
+        if row is None:
+            await self.db.execute(
+                "INSERT INTO "
                 + ENTRIES
-                + " WHERE migration_id=%s AND entry_kind=%s AND source_key=%s FOR UPDATE",
-                (self.migration_id, kind, key),
+                + " (migration_id,entry_kind,source_key,state,created_at,updated_at) VALUES (%s,%s,%s,%s,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",
+                (self.migration_id, kind, key, sql_state),
             )
-            previous = (
-                "planned"
-                if row is None
-                else (
-                    "importing" if row["state"] == "prepared" else row["state"]
-                )
+        else:
+            await self.db.execute(
+                "UPDATE "
+                + ENTRIES
+                + " SET state=%s,updated_at=UTC_TIMESTAMP(6) WHERE id=%s AND migration_id=%s",
+                (sql_state, row["id"], self.migration_id),
             )
-            if state != previous and state not in TRANSITIONS[previous]:
-                raise ValueError("invalid migration batch transition")
-            if row is None:
-                await self.db.execute(
-                    "INSERT INTO "
-                    + ENTRIES
-                    + " (migration_id,entry_kind,source_key,state,created_at,updated_at) VALUES (%s,%s,%s,%s,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",
-                    (self.migration_id, kind, key, sql_state),
-                )
-            else:
-                await self.db.execute(
-                    "UPDATE "
-                    + ENTRIES
-                    + " SET state=%s,updated_at=UTC_TIMESTAMP(6) WHERE id=%s AND migration_id=%s",
-                    (sql_state, row["id"], self.migration_id),
-                )
-        if mirror:
-            self.manifest.data["batches"][position] = state
-            if self.persist_updates:
-                self.manifest._persist()
 
     async def record_share(self, token, before, expected):
         # Called while the original share is row-locked in publication commit.

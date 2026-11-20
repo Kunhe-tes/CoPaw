@@ -51,6 +51,26 @@ def test_manifest_binding_does_not_serialize_source_mappings():
     assert len(source) < 128
 
 
+def test_direct_binding_keeps_counts_instead_of_workspace_mappings(tmp_path):
+    import json
+    from swe.app.conversation_storage.migration.journal import MigrationJournal
+
+    item = manifest()
+    item.path = tmp_path / "manifest.json"
+    item.data["workspaces"] = [{"position": str(i)} for i in range(10000)]
+    item.data["declared_services"] = item.data["services"]
+    _, source = MigrationJournal(None, item)._bindings()
+    value = json.loads(source)
+
+    assert value["manifest"] == str(item.path)
+    assert value["services"] == item.data["services"]
+    assert value["counts"]["workspaces"] == 10000
+    assert value["counts"]["declared_services"] == 1
+    assert "workspaces" not in value
+    assert "declared_services" not in value
+    assert len(source) < 1024
+
+
 class Database:
     def __init__(self):
         self.next_id = 83
@@ -849,11 +869,10 @@ async def test_binding_measurement_baseline_source_views(tmp_path, count):
     "mutation",
     [
         "target",
-        "cutoff",
         "revision",
-        "workspace",
+        "workspace_count",
         "service",
-        "tenant",
+        "tenant_count",
         "reload",
     ],
 )
@@ -876,16 +895,14 @@ async def test_binding_checks_never_trust_prior_mutable_evidence(mutation):
     old_target, old_source = journal._bindings()
     if mutation == "target":
         frozen.data["target"]["nas_roots"]["svc"] = "/different"
-    elif mutation == "cutoff":
-        frozen.data["tenant_sync_started_at_ns"]["source"] = 2
     elif mutation == "revision":
         frozen.data["tenant_review_revision"] = 2
-    elif mutation == "workspace":
-        frozen.data["workspaces"][0]["evidence"]["digest"] = "changed"
+    elif mutation == "workspace_count":
+        frozen.data["workspaces"].append({})
     elif mutation == "service":
         frozen.data["services"][0]["nas_root"] = "/different"
-    elif mutation == "tenant":
-        frozen.data["tenants"][0]["evidence"]["digest"] = "changed"
+    elif mutation == "tenant_count":
+        frozen.data["tenants"].append({})
     else:
         frozen.data = deepcopy(frozen.data)
         frozen.data["source_boundary"]["snapshot_id"] = "reloaded"
