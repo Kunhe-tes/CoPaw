@@ -406,8 +406,30 @@ def _assert_runner_lifecycle_records(records, *, agent_retry):
         and record["event_name"] == "span.started"
     ]
     assert len(logical_starts) == 1
-    assert event_names.count("span.started") == len(request_starts) + 1
-    assert event_names.count("span.ended") == len(request_ends) + 1
+    agent_starts = [
+        record
+        for record in records
+        if record.get("span_type") == "Agent"
+        and record["event_name"] == "span.started"
+    ]
+    agent_ends = [
+        record
+        for record in records
+        if record.get("span_type") == "Agent"
+        and record["event_name"] == "span.ended"
+    ]
+    assert len(agent_starts) == len(agent_ends) == 1
+    agent_span_id = agent_starts[0]["obs_span_id"]
+    assert all(
+        record.get("parent_obs_span_id") == agent_span_id
+        for record in logical_starts
+    )
+    assert event_names.count("span.started") == (
+        len(request_starts) + len(logical_starts) + len(agent_starts)
+    )
+    assert event_names.count("span.ended") == (
+        len(request_ends) + len(logical_ends) + len(agent_ends)
+    )
 
 
 async def _assert_llm_span_projection(store, records, run_id):
