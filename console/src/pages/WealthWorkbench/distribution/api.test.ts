@@ -151,23 +151,40 @@ it("错误分行根及畸形人员响应不能当作成功空数据", async () =
   );
 });
 
-it("Excel 导入上传原始文件，按服务端结果回填人员及机构编码", async () => {
-  const file = new File(["excel fixture"], "分发名单.xlsx");
-  mock.mockResolvedValue({
+const parsedUser = {
+  sapId: "00012",
+  sapName: "李四",
+  frsBbkOrgId: "755",
+  frsBbkOrgNm: "深圳分行",
+  bbkOrgId: "001",
+  bbkOrgNm: "二级分行",
+  cprhBrnOrgId: "003",
+  cprhBrnOrgNm: "综合支行",
+  brnOrgId: "005",
+  brnOrgNm: "网点",
+  queryStatus: 1,
+};
+
+function parseResponse(
+  successList: Array<{
+    [K in keyof typeof parsedUser]: (typeof parsedUser)[K] | null;
+  }> = [parsedUser],
+) {
+  return {
     code: "200",
+    success: true,
     data: {
-      users: [
-        {
-          sapID: "00012",
-          userName: "李四",
-          branchID: "120",
-          subBranchID: "12001",
-          subBranchName: "异地支行",
-        },
-      ],
-      duplicates: 1,
+      successList,
+      successCount: successList.length,
+      failedCount: 0,
+      failedRows: [],
     },
-  });
+  };
+}
+
+it("Excel 导入上传原始文件，并将一级分行及网点映射为发布字段", async () => {
+  const file = new File(["excel fixture"], "分发名单.xlsx");
+  mock.mockResolvedValue(parseResponse([parsedUser, parsedUser]));
   await expect(
     importExcelPeople(file, new AbortController().signal),
   ).resolves.toEqual({
@@ -175,9 +192,10 @@ it("Excel 导入上传原始文件，按服务端结果回填人员及机构编�
       {
         sapId: "00012",
         name: "李四",
-        orgName: "异地支行",
-        bbkId: "120",
-        bbkOrgId: "12001",
+        orgName: "网点",
+        branchName: "深圳分行",
+        bbkId: "755",
+        bbkOrgId: "005",
       },
     ],
     errors: [],
@@ -185,14 +203,71 @@ it("Excel 导入上传原始文件，按服务端结果回填人员及机构编�
   });
   expect(mock).toHaveBeenCalledOnce();
   expect(mock).toHaveBeenCalledWith(
-    "/agent/workspace/users/import-excel",
+    "/agent/workspace/claw-customer-list/parse",
     expect.objectContaining({ method: "POST", body: expect.any(FormData) }),
   );
   const body = mock.mock.calls[0][1]?.body as FormData;
   expect(body.get("file")).toBe(file);
 });
 
-it("Excel 导入返回逐行错误，超限文件不发送请求", async () => {
+it.each([
+  { missing: {}, id: "005", name: "网点" },
+  { missing: { brnOrgId: "" }, id: "003", name: "综合支行" },
+  { missing: { brnOrgId: "", cprhBrnOrgId: "" }, id: "001", name: "二级分行" },
+  {
+    missing: { brnOrgId: "", cprhBrnOrgId: "", bbkOrgId: "" },
+    id: "755",
+    name: "深圳分行",
+  },
+  { missing: { brnOrgNm: "" }, id: "005", name: "005" },
+])("机构编码和名称取同一级，逐级回退到 $id", async ({ missing, id, name }) => {
+  mock.mockResolvedValue(parseResponse([{ ...parsedUser, ...missing }]));
+  const result = await importExcelPeople(
+    new File(["fixture"], "名单.xlsx"),
+    new AbortController().signal,
+  );
+  expect(result.people[0]).toMatchObject({
+    bbkId: "755",
+    bbkOrgId: id,
+    orgName: name,
+  });
+});
+
+it("queryStatus=0 的人员保留姓名和 ID，机构字段为空且不报错", async () => {
+  mock.mockResolvedValue(
+    parseResponse([
+      parsedUser,
+      {
+        sapId: "60024211",
+        sapName: "李XX",
+        queryStatus: 0,
+        frsBbkOrgId: null,
+        frsBbkOrgNm: null,
+        bbkOrgId: null,
+        bbkOrgNm: null,
+        cprhBrnOrgId: null,
+        cprhBrnOrgNm: null,
+        brnOrgId: null,
+        brnOrgNm: null,
+      },
+    ]),
+  );
+  const result = await importExcelPeople(
+    new File(["fixture"], "名单.xlsx"),
+    new AbortController().signal,
+  );
+  expect(result.people).toHaveLength(2);
+  expect(result.people[1]).toEqual({
+    sapId: "60024211",
+    name: "李XX",
+    orgName: "",
+    bbkId: "",
+    bbkOrgId: "",
+  });
+  expect(result.errors).toEqual([]);
+});
+
+it("Excel 导入返回失败数量，超限文件不发送请求", async () => {
   const signal = new AbortController().signal;
   const oversized = new File(
     [new Uint8Array(5 * 1024 * 1024 + 1)],
@@ -204,13 +279,41 @@ it("Excel 导入返回逐行错误，超限文件不发送请求", async () => {
   expect(mock).not.toHaveBeenCalled();
   mock.mockResolvedValue({
     code: "200",
-    data: { users: [], errors: ["第 2 行：客户经理不存在"] },
+    success: true,
+    data: {
+      successList: [],
+      successCount: 0,
+      failedCount: 2,
+      failedRows: [1, 3],
+    },
   });
   await expect(
     importExcelPeople(new File(["fixture"], "名单.xlsx"), signal),
   ).resolves.toEqual({
     people: [],
-    errors: ["第 2 行：客户经理不存在"],
+    errors: ["Excel 第 1、3 行的客户经理ID或姓名为空或有误，请核对后重新上传"],
     duplicates: 0,
   });
+});
+
+it("按数字行号提示必填项错误，请求结果只按 code 判断", async () => {
+  const file = new File(["fixture"], "名单.xlsx");
+  const response = parseResponse([]);
+  mock.mockResolvedValue({
+    ...response,
+    data: {
+      ...response.data,
+      failedCount: 3,
+      failedRows: [1, 3, 5],
+    },
+  });
+  expect(
+    (await importExcelPeople(file, new AbortController().signal)).errors,
+  ).toEqual([
+    "Excel 第 1、3、5 行的客户经理ID或姓名为空或有误，请核对后重新上传",
+  ]);
+  mock.mockResolvedValue({ ...parseResponse(), success: false });
+  await expect(
+    importExcelPeople(file, new AbortController().signal),
+  ).resolves.toMatchObject({ errors: [] });
 });

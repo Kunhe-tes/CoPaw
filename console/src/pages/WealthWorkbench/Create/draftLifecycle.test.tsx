@@ -239,9 +239,8 @@ it("白名单默认 Excel，切换保留手选，发布只提交剔除后的 Exc
     await screen.findByText("已选 2 人");
     expect(screen.getByText("外分行客户经理")).toBeVisible();
     expect(screen.getByText("待移除人员")).toBeVisible();
-    fireEvent.change(screen.getByRole("combobox", { name: "筛选分行" }), {
-      target: { value: "110" },
-    });
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "筛选分行" }));
+    fireEvent.click(await screen.findByText("北京分行（1 人）"));
     expect(screen.queryByText("外分行客户经理")).toBeNull();
     fireEvent.click(
       screen.getByRole("button", { name: "移除 待移除人员 000456" }),
@@ -256,6 +255,14 @@ it("白名单默认 Excel，切换保留手选，发布只提交剔除后的 Exc
       .getState()
       .dialog?.buttons.find((button) => button.label === "确认发布");
     expect(confirm).toBeDefined();
+    const confirmation = render(<>{useWealthStore.getState().dialog?.body}</>);
+    expect(confirmation.container.textContent).toContain("分发目标（1 人）");
+    expect(confirmation.container.textContent).toContain("外分行客户经理");
+    expect(confirmation.container.textContent).not.toContain("分发方式");
+    expect(
+      confirmation.container.querySelector('input[type="search"]'),
+    ).toBeNull();
+    confirmation.unmount();
     confirm?.onClick?.();
     await waitFor(() =>
       expect(publish).toHaveBeenCalledWith(
@@ -429,8 +436,8 @@ it("机构缺少名称时显示编码，有名称时也能按编码搜索", () =
       ]}
     />,
   );
-  expect(screen.getByText("00001 · 北京分行 · 110001")).toBeVisible();
-  expect(screen.getByText("00002 · 北京分行 · 朝阳支行")).toBeVisible();
+  expect(screen.getByText("北京分行 · 110001")).toBeVisible();
+  expect(screen.getByText("北京分行 · 朝阳支行")).toBeVisible();
   const search = screen.getByRole("searchbox", { name: "搜索已选人员" });
   fireEvent.change(search, { target: { value: "110001" } });
   expect(screen.getByText("历史收件人")).toBeVisible();
@@ -467,14 +474,63 @@ it("分行名称优先取同分行人员提供的名称，历史人员也能按�
       ]}
     />,
   );
-  expect(screen.getByText("00001 · 上海分行 · 120001")).toBeVisible();
-  expect(
-    screen.getByRole("option", { name: "上海分行（2 人）" }),
-  ).toBeInTheDocument();
+  expect(screen.getByText("上海分行 · 120001")).toBeVisible();
+  fireEvent.mouseDown(screen.getByRole("combobox", { name: "筛选分行" }));
+  expect(screen.getByText("上海分行（2 人）")).toBeInTheDocument();
   fireEvent.change(screen.getByRole("searchbox", { name: "搜索已选人员" }), {
     target: { value: "上海分行" },
   });
   expect(screen.getByText("历史收件人")).toBeVisible();
   expect(screen.getByText("新增收件人")).toBeVisible();
   expect(screen.queryByText("其他分行收件人")).toBeNull();
+});
+
+it("机构未查到的人员正常展示标记并可以发布，机构字段保持为空", async () => {
+  vi.stubGlobal("__env__", { wealthExcelDistributionUsers: ["publisher"] });
+  useWealthStore.setState({
+    accountId: "president",
+    editingId: null,
+    plansLoaded: true,
+  });
+  const recipient = {
+    sapId: "60024211",
+    name: "李XX",
+    orgName: "",
+    bbkId: "",
+    bbkOrgId: "",
+  };
+  vi.mocked(importExcelPeople).mockResolvedValue({
+    people: [recipient],
+    errors: [],
+    duplicates: 0,
+  });
+  const publish = vi.spyOn(api, "publishPlan").mockResolvedValue({
+    created: true,
+    plans: [],
+    planId: "created",
+  });
+  try {
+    renderWorkbench();
+    fireEvent.change(screen.getByLabelText("选择 Excel 名单文件"), {
+      target: { files: [new File(["fixture"], "名单.xlsx")] },
+    });
+    await screen.findByText("李XX");
+    expect(screen.getByText("机构信息未查到")).toBeVisible();
+    expect(screen.getByText(/0 家分行 · 1 人机构信息未查到/)).toBeVisible();
+    fireEvent.click(screen.getAllByRole("button", { name: "发布规划" })[0]);
+    useWealthStore
+      .getState()
+      .dialog?.buttons.find((button) => button.label === "确认发布")
+      ?.onClick?.();
+    await waitFor(() =>
+      expect(publish).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        null,
+        [recipient],
+      ),
+    );
+  } finally {
+    publish.mockRestore();
+  }
 });

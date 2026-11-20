@@ -403,7 +403,7 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 ### Excel 名单分发
 
 - 独立前端白名单 `wealthExcelDistributionUsers` 默认关闭，匹配真实登录 SAP 用户 ID。排查入口缺失时检查白名单和当前角色的选人权限，运维白名单不授予 Excel 分发权限。
-- `distribution/api.ts::importExcelPeople` 通过统一请求上传原始 Excel，外部智拓服务解析并返回人员及异常行。前端校验 5 MB 文件上限、映射人员信息并按 ID 处理追加去重。联调时核对路径、上传字段、响应和授权规则。
+- `distribution/api.ts::importExcelPeople` 通过统一请求上传原始 Excel，外部智拓服务解析并返回人员及异常行。前端校验 5 MB 文件上限、映射人员信息并按 ID 处理追加去重。接口为 `POST /agent/workspace/claw-customer-list/parse`，`file` 上传文件，`data.successList` 返回人员。发布分行取 `frsBbkOrgId`，机构按 `brnOrgId → cprhBrnOrgId → bbkOrgId → frsBbkOrgId` 取首个有效编码和对应名称。模板 ID 和姓名均为必填，后端通过 `failedRows` 数字行号数组返回错误行，前端提示对应行核对 ID 和姓名。联调时核对授权规则。
 - `Create/index.tsx` 隔离 Excel 和机构选人，发布时只取当前方式。外部服务的白名单授权和跨分行下发需要实测后启用。回归入口为 `Create/draftLifecycle.test.tsx` 和 `distribution/api.test.ts`。
 
 ## 财富任务列表后台刷新显示
