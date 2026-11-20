@@ -2,7 +2,6 @@
 """Tenant-isolated direct migration, retaining the original job and SQL tickets."""
 
 from contextlib import nullcontext, asynccontextmanager
-from hashlib import sha256
 import json
 from pathlib import Path
 import shutil
@@ -10,7 +9,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 
-from swe.app.conversation_storage.bundle import BundleStore
+from swe.app.conversation_storage.bundle import BundleStore, UNBOUNDED
 from swe.app.conversation_storage.migration.direct_import import (
     DirectImporter,
     DirectTarget,
@@ -22,6 +21,7 @@ from swe.app.conversation_storage.migration.inventory_v3 import (
 from swe.app.conversation_storage.migration.journal import (
     BUSINESS_TABLES,
     MigrationJournal,
+    JournalRecovery,
     JOBS,
 )
 from swe.app.conversation_storage.migration.parallel import MigrationIO
@@ -31,7 +31,7 @@ from swe.app.conversation_storage.migration.tenant_errors import (
 from swe.app.conversation_storage.migration.preflight import (
     DMLDatabase,
     check_schema,
-    check_tenant_schema,
+    check_migration_schema,
 )
 from swe.app.conversation_storage.migration.spool import (
     InventorySpool,
@@ -45,6 +45,13 @@ from swe.app.conversation_storage.migration.isolation import (
     state_store,
 )
 from swe.app.conversation_storage.migration.verify import verify_import
+from swe.app.conversation_storage.migration.progress import current_progress
+
+
+def _stage(name):
+    progress = current_progress()
+    if progress is not None:
+        progress.stage(name)
 
 
 def _states(db, manifest):
@@ -53,8 +60,82 @@ def _states(db, manifest):
     return state_store(db, manifest)
 
 
+def _manifest_source_binding(data):
+    return data.get("source_binding_storage") == "manifest-v1"
+
+
 class TenantFailure(ValueError):
     """An explicitly identified tenant data failure, never a shared SQL error."""
+
+
+class VerificationFailure(TenantFailure):
+    def __init__(self, result):
+        super().__init__(
+            (
+                "tenant semantic verification failed"
+                if result.get("verification_level") == "full"
+                else "tenant fast verification failed"
+            ),
+        )
+        self.result = result
+
+
+_VIEW_FIELDS = ("tenants", "workspaces", "shares", "source_change_blockers")
+
+
+def _grouped_view(parent, key):
+    """Index positions, not evidence copies, under the command's disk budget."""
+    from swe.app.conversation_storage.migration.disk_manifest import DiskGroups
+
+    signature = (
+        parent.data.get("source_isolation"),
+        parent.data.get("tenant_review_revision"),
+        *(
+            (id(parent.data.get(name)), len(parent.data.get(name, [])))
+            for name in _VIEW_FIELDS
+        ),
+    )
+    cached = getattr(parent, "_source_view_index", None)
+    if cached is None or cached[0] != signature or cached[1].closed:
+        if cached is not None:
+            cached[1].close()
+        positions = DiskGroups()
+        try:
+            for name in _VIEW_FIELDS:
+                for offset, item in enumerate(parent.data.get(name, [])):
+                    scope = (
+                        tuple(item.get("scope", []))
+                        if name == "source_change_blockers"
+                        else tuple(
+                            item.get(field)
+                            for field in (
+                                "service_unit_id",
+                                "tenant_id",
+                                "source_id",
+                            )[: len(key)]
+                        )
+                    )
+                    group = json.dumps((name, scope))
+                    positions.add(group, offset)
+        except BaseException:
+            positions.close()
+            raise
+        parent._source_view_index = signature, positions
+    else:
+        positions = cached[1]
+    return {
+        name: [
+            parent.data[name][offset]
+            for offset in positions.positions(json.dumps((name, key)))
+        ]
+        for name in _VIEW_FIELDS
+    }
+
+
+async def _state_rows(states, data):
+    keys = (unit_key(data, tenant) for tenant in data["tenants"])
+    async for key, row in states.get_many(keys):
+        yield key, row
 
 
 class TenantManifest:
@@ -64,25 +145,7 @@ class TenantManifest:
         self.parent = parent
         self.migration_id, self.path = parent.migration_id, parent.path
         self.key = unit_key(parent.data, tenant)
-        self.data = {
-            **parent.data,
-            "tenants": [
-                item
-                for item in parent.data["tenants"]
-                if belongs(item, self.key)
-            ],
-            "workspaces": [
-                w for w in parent.data["workspaces"] if belongs(w, self.key)
-            ],
-            "shares": [
-                s for s in parent.data["shares"] if belongs(s, self.key)
-            ],
-            "source_change_blockers": [
-                b
-                for b in parent.data.get("source_change_blockers", [])
-                if tuple(b.get("scope", [])) == self.key
-            ],
-        }
+        self.data = {**parent.data, **_grouped_view(parent, self.key)}
 
     def _persist(self):
         for name in ("assignments", "batches"):
@@ -145,11 +208,17 @@ def _work_base(work_dir, data):
     raise ValueError("no tenant work directory is separate from source roots")
 
 
-def _spool(base, data, memory_bytes, workers):
+def _spool(base, data, memory_bytes=None, workers=None):
+    disk_limit = (
+        UNBOUNDED
+        if data.get("source_binding_storage") == "manifest-v1"
+        else shutil.disk_usage(base).free * 3 // 4
+    )
     return InventorySpool(
         base,
-        max_bytes=shutil.disk_usage(base).free * 3 // 4,
-        record_limit=memory_bytes // workers,
+        max_bytes=disk_limit,
+        record_limit=disk_limit,
+        checksum=data.get("source_binding_storage") != "manifest-v1",
         protected=[
             s[k]
             for s in data["services"]
@@ -186,7 +255,7 @@ async def _inventory(view, spool, resources):
                 return function(*args)
             return await io.call(function, *args)
 
-    if view.data.get("in_place"):
+    if view.data.get("in_place") and not _manifest_source_binding(view.data):
         from swe.app.conversation_storage.in_place_admission import (
             tenant_write_boundaries,
         )
@@ -220,10 +289,17 @@ async def _inventory(view, spool, resources):
 
     try:
         from swe.app.conversation_storage.migration.tenant_inputs import (
+            verify_chats_mtimes,
             verify_input_digest,
         )
 
-        await inspect(verify_input_digest, view.data, view.key)
+        if not _manifest_source_binding(view.data):
+            function = (
+                verify_chats_mtimes
+                if view.data.get("freshness_protocol")
+                else verify_input_digest
+            )
+            await inspect(function, view.data, view.key)
         result = await inventory_v3_spooled(
             view,
             spool,
@@ -276,79 +352,17 @@ async def _inventory(view, spool, resources):
     return result
 
 
-async def _compare_shares(db, view):
-    from .conversation_storage_v3_cmd import SHARE_FIELDS, _stamp
-
-    # Unpublished shares have no service key yet. Include NULL and this service,
-    # but do not compare another service's already published share counters.
-    rows = await db.fetch_all(
-        "SELECT "
-        + ",".join(SHARE_FIELDS)
-        + ",service_unit_key FROM swe_chat_shares "
-        "WHERE BINARY tenant_id=%s AND (service_unit_key IS NULL OR service_unit_key=%s) ORDER BY token",
-        (view.key[1].encode(), view.key[0].encode()),
-    )
-
-    def normalized(row):
-        return {
-            k: (
-                _stamp(row[k])
-                if k in ("created_at", "last_access_at")
-                else row[k]
-            )
-            for k in SHARE_FIELDS
-        }
-
-    expected = {s["token"]: normalized(s) for s in view.data["shares"]}
-    known = {
-        s["token"]
-        for s in view.parent.data.get(
-            "source_shares",
-            view.parent.data["shares"],
-        )
-    }
-    if view.data.get("source_isolation"):
-        for row in rows:
-            if row["token"] in known:
-                continue
-            owner = await db.fetch_one(
-                "SELECT source_key,scope_kind FROM swe_conversation_publications "
-                "WHERE id=(SELECT publication_id FROM swe_chat_shares WHERE token=%s) "
-                "AND service_unit_key=%s AND tenant_key=%s AND state='committed' AND gc_state='live'",
-                (row["token"], view.key[0].encode(), view.key[1].encode()),
-            )
-            if owner is None or owner["scope_kind"] != "workspace":
-                raise TenantFailure("unregistered source share appeared")
-            owner_key = (
-                view.key[0],
-                view.key[1],
-                owner["source_key"].decode(),
-            )
-            from swe.app.conversation_storage.migration.source_state import (
-                SourceState,
-            )
-
-            state = await SourceState(db, view.migration_id).get(*owner_key)
-            if (
-                owner_key == view.key
-                or state is None
-                or state["state"] != "published"
-            ):
-                raise TenantFailure("unregistered source share appeared")
-        rows = [row for row in rows if row["token"] in expected]
-    elif any(s["token"] not in known for s in rows):
-        raise TenantFailure("unregistered tenant share appeared")
-    actual = {
-        s["token"]: normalized(s)
-        for s in rows
-        if s["token"] in expected
-        or s["service_unit_key"] == view.key[0].encode()
-    }
-    if len(expected) != len(view.data["shares"]) or actual != expected:
-        raise TenantFailure("unpublished tenant original shares changed")
-
-
-async def _verify(db, bundles, view, inventory, target, resources, guard):
+async def _verify(
+    db,
+    bundles,
+    view,
+    inventory,
+    target,
+    resources,
+    guard,
+    *,
+    verification_level="fast",
+):
     readonly = SimpleNamespace(
         data=view.data,
         migration_id=view.migration_id,
@@ -367,11 +381,35 @@ async def _verify(db, bundles, view, inventory, target, resources, guard):
             target,
             io=io,
             health_check=guard.check,
+            verification_level=verification_level,
             **{k: v for k, v in resources.items() if not k.startswith("_")},
         )
     if not result["passed"]:
-        raise TenantFailure("tenant semantic verification failed")
+        raise VerificationFailure(result)
     return result
+
+
+async def _final_source_check(view, inventory, base, resources):
+    if _manifest_source_binding(view.data):
+        return
+    if view.data.get("freshness_protocol"):
+        from swe.app.conversation_storage.migration.tenant_inputs import (
+            verify_chats_mtimes,
+        )
+
+        try:
+            await resources["_shared_io"].call(
+                verify_chats_mtimes,
+                view.data,
+                view.key,
+            )
+        except TenantInputError as error:
+            raise TenantFailure(str(error)) from error
+        return
+    with _spool(base, view.data) as check_spool:
+        actual = await _inventory(view, check_spool, resources)
+        if not inventories_equal(inventory, actual):
+            raise TenantFailure("tenant source changed during operation")
 
 
 async def _one_tenant(operation, view, db, states, guard, base, resources):
@@ -379,27 +417,34 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
 
     schema = view.data["offline"]["application_schema"]
     target = DirectTarget(schema, schema, view.migration_id)
-    journal = MigrationJournal(db, view, server_uuid=guard.server_uuid)
+    journal = MigrationJournal(
+        db,
+        view,
+        server_uuid=guard.server_uuid,
+        recovery=resources.get("_journal_recovery"),
+    )
     journal.active_tenant = view.key
     journal.frozen_bindings_data = view.parent.data
     bundles = {
-        s["service_unit_id"]: BundleStore(s["nas_root"])
+        s["service_unit_id"]: (
+            BundleStore(s["nas_root"], unbounded=True)
+            if view.data.get("source_binding_storage") == "manifest-v1"
+            else BundleStore(s["nas_root"])
+        )
         for s in view.data["services"]
     }
-    with _spool(
-        base,
-        view.data,
-        resources["memory_bytes"],
-        resources["workers"],
-    ) as spool:
+    verification_level = resources.get("_verification_level", "fast")
+    verification_result = None
+    with _spool(base, view.data) as spool:
+        _stage("inventory")
         inventory = resources.get("_prefetched")
         if inventory is None:
             inventory = await _inventory(view, spool, resources)
         else:
             await _recheck_prefetched(view, resources)
-        await _compare_shares(db, view)
         row = await states.get(*view.key)
         if operation in ("import", "resume", "migrate"):
+            _stage("import")
             await DirectImporter(
                 db,
                 bundles,
@@ -419,7 +464,8 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
             await journal.hydrate(persist=False)
             await journal.validate_ownership()
         if operation in ("verify", "finalize", "migrate"):
-            await _verify(
+            _stage("verify")
+            verification_result = await _verify(
                 db,
                 bundles,
                 view,
@@ -427,27 +473,24 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
                 target,
                 resources,
                 guard,
+                verification_level=verification_level,
             )
-        with _spool(
-            base,
-            view.data,
-            resources["memory_bytes"],
-            resources["workers"],
-        ) as check_spool:
-            actual = await _inventory(view, check_spool, resources)
-            if not inventories_equal(inventory, actual):
-                raise TenantFailure("tenant source changed during operation")
-        await _compare_shares(db, view)
+        _stage("final_source_check")
+        await _final_source_check(view, inventory, base, resources)
         await guard.check()
-        await check_schema(db, schema, finalized=False)
-        await check_tenant_schema(
+        await check_migration_schema(
             db,
             schema,
             source_isolation=view.data.get("source_isolation", False),
         )
         if operation in ("verify", "finalize", "migrate"):
-            await states.transition(*view.key, "verified")
+            await states.transition(
+                *view.key,
+                "verified",
+                verification_result,
+            )
         if operation in ("finalize", "migrate"):
+            _stage("publish")
             # The receipt is service-local; only this tenant's roots are checked.
             selected = {
                 **view.data,
@@ -463,7 +506,10 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
                 raise TenantFailure(
                     "tenant runtime root is unavailable",
                 ) from error
-            await states.publish(*view.key, tenant_receipt(view))
+            await states.publish(
+                *view.key,
+                tenant_receipt(view),
+            )
 
 
 _TENANT_FAILURE_REASONS = {
@@ -475,6 +521,7 @@ _TENANT_FAILURE_REASONS = {
     "unregistered tenant share appeared": "出现未登记的分享记录",
     "unpublished tenant original shares changed": "未发布租户的原始分享记录发生变化",
     "tenant semantic verification failed": "导入结果与源会话语义校验不一致",
+    "tenant fast verification failed": "导入结果结构校验失败；该来源未发布",
     "complete tenant import is required": "租户导入未完成；先执行 resume --apply",
     "tenant source changed during operation": "迁移期间冻结会话输入发生变化",
     "tenant runtime root is unavailable": "运行时 workspace 目录缺失或不安全",
@@ -523,21 +570,6 @@ def _write_failures(manifest, operation, failures):
     )
     _write_json(destination, failures)
     return str(destination)
-
-
-def _write_runtime(output, manifest):
-    from .conversation_storage_v3_cmd import _write_json
-
-    output.mkdir(parents=True, exist_ok=True)
-    for service in manifest.data["services"]:
-        document = {
-            "version": 3,
-            "migration_id": manifest.migration_id,
-            "service_unit_id": service["service_unit_id"],
-            "nas_root": service["nas_root"],
-        }
-        name = sha256(service["service_unit_id"].encode()).hexdigest()
-        _write_json(output / (name + ".runtime.json"), document)
 
 
 def _review_report(manifest, outcome):
@@ -602,6 +634,48 @@ async def _rollback_command(
     }
 
 
+@asynccontextmanager
+async def _migration_sql_owner(control, schema, manifest):
+    from swe.database.connection import _named_lock_name
+    from swe.app.conversation_storage.migration.lock_guard import (
+        MigrationLockGuard,
+    )
+
+    db = DMLDatabase(control)
+    if _manifest_source_binding(manifest.data) or manifest.data.get(
+        "freshness_protocol",
+    ):
+        identity = await db.fetch_one(
+            "SELECT @@server_uuid AS server_uuid,DATABASE() AS schema_name",
+        )
+        if identity["schema_name"] != schema or not identity["server_uuid"]:
+            raise ValueError("database identity differs from target")
+        control.expect_identity(identity["server_uuid"], schema)
+        guard = await MigrationLockGuard.capture_identity(
+            db,
+            schema=schema,
+            server_uuid=identity["server_uuid"],
+        )
+        yield db, guard
+        return
+    async with control.named_lock(
+        "conversation-migration:" + schema,
+        timeout=0,
+    ):
+        identity = await db.fetch_one(
+            "SELECT @@server_uuid AS server_uuid,DATABASE() AS schema_name",
+        )
+        if identity["schema_name"] != schema or not identity["server_uuid"]:
+            raise ValueError("database identity differs from target")
+        guard = await MigrationLockGuard.capture(
+            db,
+            _named_lock_name("conversation-migration:" + schema),
+            schema=schema,
+            server_uuid=identity["server_uuid"],
+        )
+        yield db, guard
+
+
 async def run_tenants(
     operation,
     manifest,
@@ -614,13 +688,11 @@ async def run_tenants(
     apply,
     reviewed_discovery=None,
     rollback_inputs=None,
+    verification_level="fast",
 ):
     """Run one SQL-owner job; skip published tenants before reading old input."""
     from swe.database.config import get_database_config
-    from swe.database.connection import DatabaseConnection, _named_lock_name
-    from swe.app.conversation_storage.migration.lock_guard import (
-        MigrationLockGuard,
-    )
+    from swe.database.connection import DatabaseConnection
 
     base = _work_base(work_dir, manifest.data)
     _validate_tenant_roots(manifest.data)
@@ -628,6 +700,7 @@ async def run_tenants(
         "workers": workers,
         "io_workers": io_workers,
         "memory_bytes": memory_budget_mib * 1024 * 1024,
+        "_verification_level": verification_level,
     }
     config = get_database_config()
     schema = manifest.data["offline"]["application_schema"]
@@ -637,28 +710,14 @@ async def run_tenants(
         config.model_copy(update={"time_zone": "+00:00"}),
     )
     try:
+        _stage("database_setup")
         await control.connect()
-        async with control.named_lock(
-            "conversation-migration:" + schema,
-            timeout=0,
-        ):
-            db = DMLDatabase(control)
-            identity = await db.fetch_one(
-                "SELECT @@server_uuid AS server_uuid,DATABASE() AS schema_name",
-            )
-            if (
-                identity["schema_name"] != schema
-                or not identity["server_uuid"]
-            ):
-                raise ValueError("database identity differs from target")
-            guard = await MigrationLockGuard.capture(
-                db,
-                _named_lock_name("conversation-migration:" + schema),
-                schema=schema,
-                server_uuid=identity["server_uuid"],
-            )
-            await check_schema(db, schema, finalized=False)
-            await check_tenant_schema(
+        async with _migration_sql_owner(
+            control,
+            schema,
+            manifest,
+        ) as (db, guard):
+            await check_migration_schema(
                 db,
                 schema,
                 source_isolation=manifest.data.get("source_isolation", False),
@@ -668,9 +727,20 @@ async def run_tenants(
                 review_retry,
             )
 
-            await recover_pending_review(db, manifest)
+            if not (
+                _manifest_source_binding(manifest.data)
+                or manifest.data.get("freshness_protocol")
+            ):
+                await recover_pending_review(db, manifest)
             # Fix cutoffs under the same lock before first recording SQL binding.
-            if operation in ("import", "resume", "migrate") and apply:
+            if (
+                operation in ("import", "resume", "migrate")
+                and apply
+                and not (
+                    _manifest_source_binding(manifest.data)
+                    or manifest.data.get("freshness_protocol")
+                )
+            ):
                 manifest.begin_tenant_syncs(
                     [
                         unit_key(manifest.data, t)
@@ -681,12 +751,17 @@ async def run_tenants(
             if operation == "migrate":
                 if not apply:
                     raise ValueError("migrate requires --apply")
-                resources["_retained_attempts"] = await _auto_review(
-                    db,
-                    manifest,
-                    guard,
-                    resources,
-                )
+                if not (
+                    _manifest_source_binding(manifest.data)
+                    or manifest.data.get("freshness_protocol")
+                ):
+                    _stage("automatic_review")
+                    resources["_retained_attempts"] = await _auto_review(
+                        db,
+                        manifest,
+                        guard,
+                        resources,
+                    )
             if operation == "retry-review":
                 if not apply or reviewed_discovery is None:
                     raise ValueError(
@@ -713,6 +788,51 @@ async def run_tenants(
                     rollback_inputs,
                 )
             if operation == "preflight":
+                if _manifest_source_binding(manifest.data):
+                    failures = [
+                        _failure(tenant, "discover")
+                        for tenant in manifest.data["tenants"]
+                        if tenant.get("state") == "failed"
+                    ]
+                    return {
+                        "version": 3,
+                        "operation": "preflight",
+                        "status": (
+                            "partial_success" if failures else "success"
+                        ),
+                        "migration_id": manifest.migration_id,
+                        "tenant_isolation": True,
+                        "source_isolation": True,
+                        "passed": not failures,
+                        "state": "preflight_passed",
+                        "tenants": len(manifest.data["tenants"]),
+                        "published": 0,
+                        "completed": 0,
+                        "failed": len(failures),
+                        "pending_schema_finalize": False,
+                        "failure_report": _write_failures(
+                            manifest,
+                            "prepare",
+                            failures,
+                        ),
+                    }
+                if manifest.data.get("freshness_protocol"):
+                    return {
+                        "version": 3,
+                        "operation": "preflight",
+                        "status": "success",
+                        "migration_id": manifest.migration_id,
+                        "tenant_isolation": True,
+                        "source_isolation": True,
+                        "passed": True,
+                        "state": "preflight_passed",
+                        "tenants": len(manifest.data["tenants"]),
+                        "published": 0,
+                        "completed": 0,
+                        "failed": 0,
+                        "pending_schema_finalize": False,
+                        "failure_report": None,
+                    }
                 result = await _preview(
                     operation,
                     manifest,
@@ -745,6 +865,7 @@ async def run_tenants(
 
 
 async def _register_tenants(db, manifest, states, guard):
+    _stage("registration")
     tenants = manifest.data["tenants"]
     if not tenants:
         raise ValueError("migration requires at least one discovered tenant")
@@ -775,19 +896,19 @@ async def _select_registered_tenants(
 ):
     tenants = manifest.data["tenants"]
     selected = []
-    for tenant in tenants:
-        view = TenantManifest(manifest, tenant)
-        row = await states.get(*view.key)
+    iterator = iter(tenants)
+    async for key, row in _state_rows(states, manifest.data):
+        tenant = next(iterator)
         if row["state"] == "published":
             published += 1
             continue
-        if tenant["state"] == "failed" and view.key not in resources.get(
+        if tenant["state"] == "failed" and key not in resources.get(
             "_retained_attempts",
             set(),
         ):
             failure = _failure(tenant, "discover")
             await states.fail(
-                *view.key,
+                *key,
                 "discover",
                 failure["code"],
                 failure["reason"],
@@ -811,8 +932,18 @@ async def _run_registered(
     tenants = manifest.data["tenants"]
     if not tenants:
         raise ValueError("tenant migration has no identifiable tenants")
-    await _register_tenants(db, manifest, states, guard)
+    if resources.get("_registered_manifest") is manifest.data:
+        # Automatic review already registered or atomically revised evidence.
+        # Recheck the complete SQL binding before using that registration.
+        await _check_job_binding(db, manifest, guard.server_uuid)
+    else:
+        await _register_tenants(db, manifest, states, guard)
     failures, published, completed = [], 0, 0
+    resources = {
+        **resources,
+        "_journal_recovery": JournalRecovery(db, manifest),
+    }
+    _stage("selection")
     selected, failures, published = await _select_registered_tenants(
         manifest,
         states,
@@ -825,6 +956,8 @@ async def _run_registered(
     context = (
         tenant_pipeline(selected, base, manifest, resources)
         if operation == "migrate"
+        and not manifest.data.get("freshness_protocol")
+        and not _manifest_source_binding(manifest.data)
         else _serial_tenants(selected, resources)
     )
     async with context as results:
@@ -851,6 +984,9 @@ async def _run_registered(
                 TenantInputError,
                 MigrationCapacityError,
             ) as error:
+                # A failed source may have committed SQL before mirroring it.
+                # Reconcile durable tickets before processing the next source.
+                resources["_journal_recovery"].confirmed = None
                 failures.append(
                     await _record_tenant_failure(
                         states,
@@ -892,11 +1028,10 @@ async def _run_registered(
     )
     if changed != 1:
         raise ValueError("migration job completion was not confirmed")
-    if operation in ("finalize", "migrate"):
-        _write_runtime(output, manifest)
     return {
         "version": 3,
         "migration_id": manifest.migration_id,
+        "excluded_scopes": ["historical_shares"],
         "tenant_isolation": True,
         **(
             {"source_isolation": True, "counter_unit": "sources"}
@@ -913,6 +1048,16 @@ async def _run_registered(
         "failed": len(failures),
         "pending_schema_finalize": pending_schema,
         "failure_report": _write_failures(manifest, operation, failures),
+        **(
+            {
+                "verification_level": resources.get(
+                    "_verification_level",
+                    "fast",
+                ),
+            }
+            if operation in ("verify", "finalize", "migrate")
+            else {}
+        ),
     }
 
 
@@ -927,6 +1072,14 @@ async def _serial_tenants(tenants, resources):
 
 async def _record_tenant_failure(states, tenant, operation, error):
     failure = _failure(tenant, operation, error=error)
+    if isinstance(error, VerificationFailure):
+        key = unit_key({"source_isolation": "source_id" in tenant}, tenant)
+        await states.record_verification(*key, error.result)
+        failure["verification"] = {
+            "verification_level": error.result["verification_level"],
+            "passed": False,
+            "blocker_count": len(error.result.get("blockers", [])),
+        }
     await states.fail(
         *unit_key({"source_isolation": "source_id" in tenant}, tenant),
         operation,
@@ -977,7 +1130,10 @@ def _validate_tenant_roots(data):
 
 
 async def _recheck_prefetched(view, resources):
+    if _manifest_source_binding(view.data):
+        return
     from swe.app.conversation_storage.migration.tenant_inputs import (
+        verify_chats_mtimes,
         verify_input_digest,
     )
     from swe.app.conversation_storage.migration.source_inputs import (
@@ -987,7 +1143,11 @@ async def _recheck_prefetched(view, resources):
     try:
         async with resources["_shared_resources"].reserve():
             await resources["_shared_io"].call(
-                verify_input_digest,
+                (
+                    verify_chats_mtimes
+                    if view.data.get("freshness_protocol")
+                    else verify_input_digest
+                ),
                 view.data,
                 view.key,
             )
@@ -1008,10 +1168,11 @@ async def _auto_review(db, manifest, guard, resources):
 
     states = _states(db, manifest)
     await _register_tenants(db, manifest, states, guard)
+    _stage("automatic_review")
     eligible = set()
-    for tenant in manifest.data["tenants"]:
-        key = unit_key(manifest.data, tenant)
-        row = await states.get(*key)
+    iterator = iter(manifest.data["tenants"])
+    async for key, row in _state_rows(states, manifest.data):
+        tenant = next(iterator)
         if row["state"] != "published" and (
             row["state"] == "failed" or tenant["state"] == "failed"
         ):
@@ -1066,7 +1227,9 @@ async def _auto_review(db, manifest, guard, resources):
             ):
                 continue
             allowed.add(key)
+        resources["_registered_manifest"] = manifest.data
         return allowed
+    resources["_registered_manifest"] = manifest.data
     return set()
 
 
@@ -1097,8 +1260,9 @@ async def _check_job_binding(db, manifest, server_uuid):
 async def _preview(operation, manifest, base, resources, *, states):
     failures, completed = [], 0
     selected = []
-    for tenant in manifest.data["tenants"]:
-        row = await states.get(*unit_key(manifest.data, tenant))
+    iterator = iter(manifest.data["tenants"])
+    async for _key, row in _state_rows(states, manifest.data):
+        tenant = next(iterator)
         if row and row["state"] == "published":
             completed += 1
             continue
@@ -1123,6 +1287,7 @@ async def _preview(operation, manifest, base, resources, *, states):
     return {
         "version": 3,
         "migration_id": manifest.migration_id,
+        "excluded_scopes": ["historical_shares"],
         "tenant_isolation": True,
         **(
             {"source_isolation": True, "counter_unit": "sources"}

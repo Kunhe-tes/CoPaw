@@ -57,6 +57,23 @@ def test_spool_roundtrip_private_files_and_cleanup(tmp_path):
     assert not directory.exists()
 
 
+def test_spool_can_skip_checksum(tmp_path, monkeypatch):
+    from swe.app.conversation_storage.migration import spool as module
+
+    def unexpected_hash(*_args):
+        raise AssertionError("unexpected checksum")
+
+    monkeypatch.setattr(module, "sha256", unexpected_hash)
+    with InventorySpool(
+        tmp_path,
+        max_bytes=4096,
+        record_limit=2048,
+        checksum=False,
+    ) as spool:
+        record = spool.write(0, {"body": "conversation"})
+        assert spool.read(record) == {"body": "conversation"}
+
+
 def test_capacity_failure_does_not_leave_partial_record(tmp_path):
     with InventorySpool(tmp_path, max_bytes=32, record_limit=16) as spool:
         with pytest.raises(MigrationCapacityError):

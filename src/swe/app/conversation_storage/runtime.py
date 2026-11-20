@@ -2,7 +2,6 @@
 """Installed scope mappings inject SQL storage into original workspaces."""
 
 import os
-from pathlib import Path
 
 from .bundle import BundleStore
 from .chat_mutations import load_metadata_json
@@ -11,7 +10,6 @@ from .identity import WorkspaceScope, service_unit_bytes, service_unit_from_env
 from .shares import ShareStorage
 
 AUTHORITY_ENV = "SWE_CONVERSATION_STORAGE_AUTHORITY"
-MAPPING_ENV = "SWE_CONVERSATION_SCOPE_MANIFEST"
 CURSOR_ENV = "SWE_CONVERSATION_ARCHIVE_CURSOR_SECRET"
 _runtime = None
 
@@ -211,14 +209,6 @@ class ConversationRuntime:
             from .tenant_admission import TenantNotPublished
 
             raise TenantNotPublished()
-        if self.admission is not None:
-            from .in_place_admission import require_workspace_boundary
-
-            require_workspace_boundary(
-                self.admission.source_binding,
-                resolved,
-                root,
-            )
         if scope is None:
             require_empty_conversation(root)
             if resolved in self.mappings.values():
@@ -272,41 +262,46 @@ async def configure_runtime(database):
         raise RuntimeError(
             "conversation storage requires a connected database",
         )
-    path = os.environ.get(MAPPING_ENV)
     secret = os.environ.get(CURSOR_ENV)
-    if not path or not secret:
-        raise RuntimeError(
-            "conversation storage requires installed scopes and cursor secret",
-        )
-    document = load_metadata_json(Path(path).read_bytes())
     service_unit_id = service_unit_from_env()
-    from .migration.authority import validate_authority
-
-    if document.get("version") == 3:
-        from .tenant_admission import TenantAdmission
-
-        from .migration.preflight import check_tenant_schema
-
-        identity = await database.fetch_one("SELECT DATABASE() AS schema_name")
-        admission = TenantAdmission(database, document)
-        await admission.validate()
-        await check_tenant_schema(
-            database,
-            identity["schema_name"],
-            source_isolation=admission.source_binding.get(
-                "source_isolation",
-                False,
-            ),
+    if not secret:
+        raise RuntimeError(
+            "conversation storage requires an archive cursor secret",
         )
-        authority = None
-    else:
-        authority = await validate_authority(database, document)
+    from .tenant_admission import TenantAdmission, partial_jobs
+    from .migration.preflight import check_tenant_schema
+
+    jobs = await partial_jobs(database, service_unit_id)
+    if len(jobs) != 1:
+        raise RuntimeError(
+            "conversation storage requires exactly one tenant migration job",
+        )
+    row, binding = jobs[0]
+    migration_id = row["migration_id"]
+    if isinstance(migration_id, bytes):
+        migration_id = migration_id.decode()
+    document = {
+        "version": 3,
+        "migration_id": migration_id,
+        "service_unit_id": service_unit_id,
+        "nas_root": binding["nas_roots"][service_unit_id],
+    }
+    admission = TenantAdmission(database, document)
+    await admission.validate()
+    identity = await database.fetch_one("SELECT DATABASE() AS schema_name")
+    await check_tenant_schema(
+        database,
+        identity["schema_name"],
+        source_isolation=admission.source_binding.get(
+            "source_isolation",
+            False,
+        ),
+    )
     candidate = ConversationRuntime(
         database,
         document,
         secret.encode(),
         service_unit_id=service_unit_id,
-        authority_validated=authority is not None,
     )
     await candidate.verify()
     _runtime = candidate

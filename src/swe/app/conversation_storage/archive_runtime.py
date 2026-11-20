@@ -254,6 +254,7 @@ class MySQLArchiveStore:
         await self.publications.write_bundle(
             operation,
             [_block("recovery", "recovery", committed), *blocks],
+            plan=plan,
         )
         publication = await self.publications.commit(operation)
         return ArchiveCommit(committed, publication)
@@ -276,19 +277,22 @@ class MySQLArchiveStore:
             facts={"message_id": message.id, "role": message.role},
             source_refs=(f"message:{message.id}",),
         )
-        occurrence = await self.db.fetch_one(
-            "SELECT COALESCE(MAX(source_occurrence_no),-1)+1 AS next_occurrence "
-            "FROM swe_conversation_messages WHERE source_msg_key=%s AND "
-            "((session_id=%s AND layer IN ('memory','task','error') "
-            "AND current_visible=1 AND deleted_at IS NULL) OR "
-            "(archive_chat_id=%s AND layer='archive' AND deleted_at IS NULL))",
-            (
-                message.id.encode(),
-                session["id"],
-                chat["id"],
-            ),
+        source_key = message.id.encode()
+        active = await self.reader.session_messages(
+            session["id"],
+            layers=("memory", "task", "error"),
         )
-        source_occurrence_no = int(occurrence["next_occurrence"])
+        source_occurrence_no = (
+            max(
+                (
+                    row["source_occurrence_no"]
+                    for row in active
+                    if row.get("source_msg_key") == source_key
+                ),
+                default=-1,
+            )
+            + 1
+        )
         plan = CommitPlan(
             recovery_block="recovery",
             messages=(
@@ -298,6 +302,7 @@ class MySQLArchiveStore:
                     message.role,
                     source_msg_key=message.id,
                     source_occurrence_no=source_occurrence_no,
+                    origin_chat_id=chat["id"],
                     turn_id=authority.turn_id if authority else None,
                     context_epoch=session["context_epoch"],
                     in_context=True,
@@ -328,41 +333,25 @@ class MySQLArchiveStore:
             raise ValueError(
                 "compact source batch exceeds bounded record limit",
             )
-        rows = await self.db.fetch_all(
-            "SELECT * FROM swe_conversation_messages WHERE session_id=%s AND layer='memory' AND current_visible=1 AND deleted_at IS NULL ORDER BY session_order LIMIT %s",
-            (session["id"], len(messages)),
+        rows = await self.reader.session_messages(
+            session["id"],
+            layers=("memory",),
         )
+        rows = rows[: len(messages)]
         if len(messages) > len(rows):
             raise ConflictError("compact source prefix is not indexed")
-        selected = rows[: len(messages)]
-        async with self.db.transaction():
-            batch = await self.retentions.pin(
-                [row["publication_id"] for row in selected],
-                kind="reader",
-            )
-        try:
-            publications = {row["id"]: row for row in batch.publications}
-            for row, message in zip(selected, messages):
-                publication = publications[row["publication_id"]]
-                raw = await batch.read(
-                    self.bundles.read_extent,
-                    text(publication["relative_path"]),
-                    row["byte_offset"],
-                    row["byte_length"],
-                    expected_length=publication["byte_length"],
+        for row, message in zip(rows, messages):
+            indexed = row["message"]
+            expected = message.to_dict()
+            if (
+                indexed.get("id") != expected.get("id")
+                or indexed.get("role") != expected.get("role")
+                or indexed.get("content") != expected.get("content")
+            ):
+                raise ConflictError(
+                    "compact requires exact indexed source prefix",
                 )
-                from agentscope.message import Msg
-
-                if (
-                    Msg.from_dict(json.loads(raw)).to_dict()
-                    != message.to_dict()
-                ):
-                    raise ConflictError(
-                        "compact requires exact indexed source prefix",
-                    )
-            return selected
-        finally:
-            await self.retentions.finish_reader(batch)
+        return rows
 
     async def compact(
         self,
@@ -444,7 +433,7 @@ class MySQLArchiveStore:
         )
         boundary = ArchiveInstall(
             boundary_id,
-            "archive",
+            "archive_manifest",
             len(messages),
             sum(
                 len(agentscope_msg_to_message(message)) for message in messages
@@ -476,14 +465,6 @@ class MySQLArchiveStore:
             "compact",
             plan,
             [
-                _block(
-                    "archive",
-                    "archive",
-                    {
-                        "version": 1,
-                        "source_message_ids": [row["id"] for row in sources],
-                    },
-                ),
                 _block("checkpoint", "checkpoint", record.to_dict()),
                 _block("events", "events", [event.to_dict()]),
             ],

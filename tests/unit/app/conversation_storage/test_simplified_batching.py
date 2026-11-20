@@ -42,11 +42,11 @@ async def test_chat_revalidation_rejects_foreign_scope(tmp_path):
         await repository(db, tmp_path)._revalidate([expected])
 
 
-async def test_history_assembly_checks_chat_twice_without_message_requery(
+async def test_history_assembly_checks_snapshot_twice_without_message_requery(
     tmp_path,
 ):
     store = history(tmp_path)
-    store._validate_chat_row = AsyncMock()
+    store._validate_snapshot = AsyncMock()
     store.chats._hydrate = AsyncMock(
         return_value=[
             ChatSpec(id="chat", session_id="session", user_id="alice"),
@@ -59,7 +59,7 @@ async def test_history_assembly_checks_chat_twice_without_message_requery(
     store._finish = AsyncMock()
     result = await store._assemble(HistorySnapshot({}, [], [], []))
     assert result.messages == []
-    assert store._validate_chat_row.await_count == 2
+    assert store._validate_snapshot.await_count == 2
     store._finish.assert_awaited_once()
 
 
@@ -73,11 +73,17 @@ async def test_history_capture_does_not_lock_or_requery_messages(tmp_path):
     store.db = SimpleNamespace(
         transaction=transaction,
         fetch_one=AsyncMock(
-            return_value={"history_high": 0, "context_epoch": 0},
+            return_value={
+                "history_high": 0,
+                "context_epoch": 0,
+                "state_revision": 1,
+                "recovery_publication_id": 8,
+            },
         ),
         fetch_all=AsyncMock(return_value=[]),
     )
     store._chat = AsyncMock(return_value={"id": 1, "session_id": 2})
+    store.reader.session_messages = AsyncMock(return_value=[])
     store._pins = AsyncMock(return_value=[])
     store._boundaries = AsyncMock(return_value=[])
     store._revalidate_rows = AsyncMock(
@@ -86,7 +92,13 @@ async def test_history_capture_does_not_lock_or_requery_messages(tmp_path):
     snapshot = await store._snapshot("chat")
     assert snapshot.rows == []
     assert snapshot.context_epoch == 0
-    assert store.db.fetch_all.await_count == 1
+    assert snapshot.recovery_publication_id == 8
+    store.reader.session_messages.assert_awaited_once_with(
+        2,
+        high=0,
+        layers=None,
+    )
+    store.db.fetch_all.assert_not_awaited()
 
 
 @pytest.mark.parametrize("count", [1, 257, 4097])
@@ -170,149 +182,6 @@ async def test_pin_member_writes_use_prepared_and_keep_exact_set():
     assert len(calls[0]) == 3
     assert [row["publication_id"] for row in db.pins] == [1, 2, 3]
     assert all(row["created_at"] == "database-time" for row in db.pins)
-
-
-async def test_message_batch_preserves_duplicate_occurrences_and_order():
-    from swe.app.conversation_storage.message_installs import (
-        MessageInstall,
-        install_messages,
-    )
-    from swe.app.conversation_storage.bundle import BlockExtent, BundleIndex
-    from swe.app.conversation_storage.identity import WorkspaceScope
-
-    captured = []
-
-    async def prepared(template, rows):
-        captured.extend(rows)
-
-    db = SimpleNamespace(
-        insert=AsyncMock(),
-        insert_prepared=AsyncMock(side_effect=prepared),
-        execute=AsyncMock(),
-    )
-    request = SimpleNamespace(
-        scope=WorkspaceScope(
-            "t",
-            "s",
-            "a",
-            service_unit_id="schema-test-service",
-        ),
-        session_id=1,
-        chat_id=2,
-        turn_id=None,
-    )
-    messages = [
-        MessageInstall(f"m:{i}", "memory", "user", source_msg_key="same")
-        for i in range(101)
-    ]
-    index = BundleIndex(
-        "bundle",
-        10000,
-        {},
-        {
-            item.block_name: BlockExtent("message", 50 + i, 1)
-            for i, item in enumerate(messages)
-        },
-    )
-    await install_messages(
-        db,
-        request,
-        messages,
-        {"id": 3},
-        index,
-        ({"history_high": 9}, {"history_high": 0}, None),
-    )
-    db.insert.assert_not_awaited()
-    db.insert_prepared.assert_awaited_once()
-    template, _rows = db.insert_prepared.await_args.args
-    rows = captured
-    fields = template.prefix.split("(", 1)[1].split(")", 1)[0].split(",")
-    decoded = [dict(zip(fields, row)) for row in rows]
-    assert [row["session_order"] for row in decoded] == list(range(10, 111))
-    assert all(row["source_msg_key"] == b"same" for row in decoded)
-    assert db.execute.await_args_list[0].args[1] == (110, 1)
-
-
-async def test_anchor_suppression_batches_binary_keys_by_packet(tmp_path):
-    from swe.app.conversation_storage.collection_queries import (
-        CollectionQuery,
-        query_collection,
-    )
-
-    class Database:
-        max_allowed_packet = 4096
-
-        def __init__(self):
-            self.calls = []
-
-        @asynccontextmanager
-        async def acquire(self):
-            yield self
-
-        async def fetch_all(self, query, params):
-            self.calls.append((query, params))
-            assert query.count("%s") == len(params)
-            return [{"source_msg_key": key} for key in params[2:]]
-
-    db = Database()
-    keys = [b"\x00\xff\\'" + str(i).encode() + b"x" * 100 for i in range(257)]
-    rows = await query_collection(
-        db,
-        CollectionQuery.ARCHIVED_KEYS,
-        keys,
-        (b"schema-test-service", 1),
-    )
-    assert {row["source_msg_key"] for row in rows} == set(keys)
-    assert len(db.calls) > 2
-    assert all("DISTINCT source_msg_key" in query for query, _ in db.calls)
-    assert all(len(params) <= 258 for _, params in db.calls)
-    assert (
-        await query_collection(
-            db,
-            CollectionQuery.ARCHIVED_KEYS,
-            [],
-            (b"schema-test-service", 1),
-        )
-        == []
-    )
-
-
-async def test_share_occurrence_keys_are_bounded_and_scoped():
-    from swe.app.conversation_storage.collection_queries import (
-        CollectionQuery,
-        query_collection,
-    )
-
-    class Database:
-        max_allowed_packet = 8192
-
-        @asynccontextmanager
-        async def acquire(self):
-            yield self
-
-        def __init__(self):
-            self.calls = []
-
-        async def fetch_all(self, query, params):
-            self.calls.append((query, params))
-            return [{"id": key} for key in params[6:]]
-
-    db = Database()
-    keys = [str(i).encode().ljust(256, b"x") for i in range(257)]
-    params = (b"service", 2, 10, 1, 2, 20)
-    rows = await query_collection(
-        db,
-        CollectionQuery.SHARE_OCCURRENCES,
-        keys,
-        params,
-    )
-    assert {row["id"] for row in rows} == set(keys)
-    assert len(db.calls) > 2
-    for query, arguments in db.calls:
-        assert arguments[:6] == params
-        assert len(arguments) - 6 <= 256
-        assert query.count("%s") == len(arguments)
-        assert "m.service_unit_key=%s" in query
 
 
 @pytest.mark.parametrize("corruption", ["missing", "extra", "released"])
@@ -436,41 +305,29 @@ def message_batch(*, bad_at=None):
 @pytest.mark.parametrize("bad_at", [0, 100, 200])
 async def test_late_message_validation_failure_prevents_partial_commit(
     protocol_db,
-    monkeypatch,
     bad_at,
 ):
     from swe.app.conversation_storage.message_installs import install_messages
-    from tests.unit.database.test_connection import Connection, Cursor
+    from tests.unit.database.test_connection import Connection
 
-    original = Connection.cursor
-
-    async def cursor(self, **kwargs):
-        return (
-            Cursor(self)
-            if kwargs == {"prepared": True}
-            else await original(self, **kwargs)
-        )
-
-    monkeypatch.setattr(Connection, "cursor", cursor)
     request, messages, index = message_batch(bad_at=bad_at)
-    with pytest.raises(RuntimeError, match="session"):
+    with pytest.raises(ConflictError, match="context epoch"):
         async with protocol_db.transaction():
-            with pytest.raises(ConflictError):
-                await install_messages(
-                    protocol_db,
-                    request,
-                    messages,
-                    {"id": 3},
-                    index,
-                    ({"history_high": 9}, {"history_high": 0}, None),
-                )
+            await install_messages(
+                protocol_db,
+                request,
+                messages,
+                {"id": 3},
+                index,
+                ({"history_high": 9}, {"history_high": 0}, None),
+            )
     calls = Connection.instances[0].calls
     inserts = [
         sql
         for sql, _ in calls
-        if sql.startswith("INSERT INTO swe_conversation_messages")
+        if sql.startswith("INSERT INTO swe_conversation_")
     ]
-    assert len(inserts) == bad_at // 100
+    assert not inserts
     assert "ROLLBACK" in [sql for sql, _ in calls]
     assert "COMMIT" not in [sql for sql, _ in calls]
     assert not any(
@@ -478,26 +335,12 @@ async def test_late_message_validation_failure_prevents_partial_commit(
     )
 
 
-async def test_messages_use_three_wire_statements_for_201_rows(
+async def test_messages_update_only_watermarks_for_201_occurrences(
     protocol_db,
-    monkeypatch,
 ):
-    from swe.app.conversation_storage.message_installs import (
-        install_messages,
-        MESSAGE_FIELDS,
-    )
-    from tests.unit.database.test_connection import Connection, Cursor
+    from swe.app.conversation_storage.message_installs import install_messages
+    from tests.unit.database.test_connection import Connection
 
-    original = Connection.cursor
-
-    async def cursor(self, **kwargs):
-        return (
-            Cursor(self)
-            if kwargs == {"prepared": True}
-            else await original(self, **kwargs)
-        )
-
-    monkeypatch.setattr(Connection, "cursor", cursor)
     request, messages, index = message_batch()
     async with protocol_db.transaction():
         await install_messages(
@@ -512,13 +355,13 @@ async def test_messages_use_three_wire_statements_for_201_rows(
     inserted = [
         params
         for sql, params in calls
-        if sql.startswith("INSERT INTO swe_conversation_messages")
+        if sql.startswith("INSERT INTO swe_conversation_")
     ]
-    assert [len(params) // len(MESSAGE_FIELDS) for params in inserted] == [
-        100,
-        100,
-        1,
-    ]
+    assert not inserted
+    assert (
+        sum(sql.startswith("UPDATE swe_conversation_") for sql, _ in calls)
+        == 2
+    )
     assert (
         "UPDATE swe_conversation_sessions SET history_high=%s WHERE id=%s",
         (210, 1),
@@ -620,56 +463,6 @@ async def test_delete_batches_freeze_candidates_and_keep_one_transaction(
     )
     assert last_session < first_chat
     assert all(sql.count("%s") == len(params) for sql, params in db.calls)
-
-
-@pytest.mark.parametrize("failure_at", [1, 2, 3])
-async def test_prune_later_batch_sql_failure_cannot_commit_prefix(
-    protocol_db,
-    monkeypatch,
-    failure_at,
-):
-    from swe.app.conversation_storage.archive import _prune
-    from tests.unit.app.conversation_storage.test_publications import request
-    from tests.unit.database.test_connection import Connection, Cursor
-
-    updates = []
-    original_execute = Cursor.execute
-
-    async def execute(self, sql, params=None):
-        await original_execute(self, sql, params)
-        if sql.startswith("UPDATE swe_conversation_messages"):
-            updates.append(params)
-            if len(updates) == failure_at:
-                raise RuntimeError("prune SQL failed")
-
-    async def fetchall(self):
-        sql, params = self.conn.calls[-1]
-        assert "FOR UPDATE" in sql
-        return [
-            {
-                "id": i,
-                "service_unit_key": params[0],
-                "session_id": 1,
-                "layer": "memory",
-                "context_epoch": 0,
-            }
-            for i in params[1:]
-        ]
-
-    monkeypatch.setattr(Cursor, "execute", execute)
-    monkeypatch.setattr(Cursor, "fetchall", fetchall)
-    with pytest.raises(RuntimeError, match="prune SQL failed"):
-        async with protocol_db.transaction():
-            await _prune(
-                protocol_db,
-                request(),
-                tuple(range(1, 514)),
-                context_epoch=0,
-            )
-    assert len(updates) == failure_at
-    commands = [sql for sql, _ in Connection.instances[0].calls]
-    assert "ROLLBACK" in commands
-    assert "COMMIT" not in commands
 
 
 async def test_share_read_keeps_full_identity_plan_with_narrow_pin_rows(
@@ -782,88 +575,8 @@ async def test_read_only_lease_does_not_expose_mutations(protocol_db):
         assert not hasattr(session, "execute")
         assert not hasattr(session, "insert_prepared")
         with pytest.raises(RuntimeError, match="read-only"):
-            await session.fetch_all("DELETE FROM swe_conversation_messages")
+            await session.fetch_all("DELETE FROM swe_conversation_sessions")
         assert await session.fetch_all("SELECT 1") == [
             {"value": 1},
             {"value": 2},
         ]
-
-
-@pytest.mark.parametrize("missing_last", [False, True])
-async def test_share_proof_batches_exact_occurrences_and_checks_last_batch(
-    missing_last,
-):
-    from swe.app.conversation_storage.reference_queries import (
-        MESSAGE_LOCATOR_FIELDS,
-    )
-    from swe.app.conversation_storage.shares import lock_share_selection
-    from tests.unit.app.conversation_storage.test_shares import (
-        mutation,
-        share_request,
-    )
-
-    request = share_request(base_state_revision=0, base_history_revision=0)
-    snapshot = {
-        "session_id": 1,
-        "chat_id": 2,
-        "state_revision": 0,
-        "history_revision": 0,
-        "session_history_high": 257,
-        "archive_history_high": 0,
-        "epoch": 0,
-    }
-    keys = tuple(str(i) for i in range(1, 258))
-    proof = {
-        "snapshot": snapshot,
-        "questions": {
-            str(i): {
-                "message_id": i,
-                "publication_id": 500,
-                "layer": "memory",
-                "status": "completed",
-            }
-            for i in range(1, 258)
-        },
-    }
-    rows = {
-        i: {
-            **dict.fromkeys(MESSAGE_LOCATOR_FIELDS),
-            "id": i,
-            "service_unit_key": request.scope.sql_values[0],
-            "session_id": 1,
-            "source_msg_key": str(i).encode(),
-            "role_key": b"user",
-            "publication_id": 500,
-            "layer": "memory",
-            "current_visible": 1,
-            "session_order": i,
-            "archive_chat_id": None,
-            "archive_order": None,
-        }
-        for i in range(1, 258)
-    }
-    if missing_last:
-        rows.pop(257)
-
-    class Database(ReferenceDatabase):
-        async def fetch_one(self, query, params):
-            return snapshot
-
-        async def fetch_all(self, query, params):
-            if "swe_conversation_turns" in query:
-                self.calls.append((query, params))
-                return (
-                    []
-                )  # Historical completed questions may have no typed Turn.
-            return await super().fetch_all(query, params)
-
-    db = Database(messages=rows)
-    plan = mutation(selected_question_keys=keys, selection_proof=proof)
-    if missing_last:
-        with pytest.raises(ConflictError, match="occurrence changed"):
-            await lock_share_selection(db, request, plan)
-    else:
-        await lock_share_selection(db, request, plan)
-    assert len(db.calls) == 4
-    assert all(query.endswith("FOR UPDATE") for query, _ in db.calls)
-    assert all(len(params) <= 258 for _, params in db.calls)

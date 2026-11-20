@@ -11,6 +11,10 @@ from swe.app.conversation_storage.bundle import (
     new_operation_key,
 )
 from swe.app.conversation_storage.errors import ConflictError, IntegrityError
+from swe.app.conversation_storage.message_bundle import (
+    encode_archive_manifest,
+    encode_message_bodies,
+)
 from swe.app.conversation_storage.history import HistoryStore
 from swe.app.conversation_storage.identity import WorkspaceScope
 from swe.app.runner import api
@@ -21,6 +25,10 @@ from tests.integrated.conversation_storage.test_schema import (
     insert_publication,
     NOW,
 )
+
+_SESSION_MESSAGES = {}
+_SESSION_BODIES = {}
+_ARCHIVE_BODIES = {}
 
 
 def source(
@@ -40,6 +48,9 @@ def source(
 
 
 async def dataset(db, tmp_path):
+    _SESSION_MESSAGES[id(db)] = {}
+    _SESSION_BODIES[id(db)] = {}
+    _ARCHIVE_BODIES[id(db)] = {}
     session = await insert_session(db)
     first = await insert_chat(db, session, b"chat-a")
     second = await insert_chat(db, session, b"chat-b", registry_order=2)
@@ -68,17 +79,91 @@ async def dataset(db, tmp_path):
 
 async def add_messages(db, store, session, chat, items, *, boundary=False):
     operation = new_operation_key()
+    is_archive = boundary or all(layer == "archive" for layer, _, _ in items)
+    chat_row = await db.fetch_one(
+        "SELECT external_chat_key,epoch FROM swe_conversation_chats WHERE id=%s",
+        (chat,),
+    )
+    bodies = [payload for _, payload, _ in items]
+    entries = []
+    for index, (layer, payload, order) in enumerate(items):
+        entries.append(
+            {
+                "sequence": order,
+                "raw_id": payload["id"],
+                "layer": layer,
+                "visible": True,
+                "current_visible": True,
+                "in_context": layer == "memory",
+                "session_order": None if is_archive else order,
+                "chat_id": chat if layer in ("anchor", "archive") else None,
+                "origin_chat_id": chat if layer == "anchor" else None,
+                "archive_chat_id": chat if is_archive else None,
+                "archive_order": order if is_archive else None,
+                "source_occurrence_no": index,
+                "role": payload.get("role") or "assistant",
+                "kind": "message",
+                "timestamp": payload.get("timestamp"),
+                "body": {
+                    "publication_id": "self",
+                    "block_name": "message_bodies",
+                    "position": index,
+                },
+            },
+        )
     blocks = [
         BundleBlock(
-            str(i),
-            "message",
-            json.dumps(payload, ensure_ascii=False).encode(),
-        )
-        for i, (_, payload, _) in enumerate(items)
+            "message_directory",
+            "message_directory",
+            json.dumps(entries, ensure_ascii=False).encode(),
+        ),
+        BundleBlock(
+            "message_bodies",
+            "message_bodies",
+            encode_message_bodies(bodies),
+        ),
     ]
     index = store.bundles.publish(
         operation,
-        blocks,
+        blocks
+        + (
+            [
+                BundleBlock(
+                    "archive_manifest",
+                    "archive_manifest",
+                    encode_archive_manifest(
+                        {
+                            "format": "swe.archive-manifest.v1",
+                            "chat_id": bytes(
+                                chat_row["external_chat_key"],
+                            ).decode(),
+                            "epoch": chat_row["epoch"],
+                            "first_sequence": min(
+                                order for _, _, order in items
+                            ),
+                            "last_sequence": max(
+                                order for _, _, order in items
+                            ),
+                            "chunks": [
+                                {
+                                    "publication_id": "self",
+                                    "first_sequence": min(
+                                        order for _, _, order in items
+                                    ),
+                                    "last_sequence": max(
+                                        order for _, _, order in items
+                                    ),
+                                    "directory_block": "message_directory",
+                                },
+                            ],
+                        },
+                    ),
+                ),
+            ]
+            if is_archive
+            else []
+        ),
+        scope=store.scope,
         metadata={"operation_key": operation},
     )
     values = {
@@ -90,50 +175,176 @@ async def add_messages(db, store, session, chat, items, *, boundary=False):
         "committed_at": NOW,
         "relative_path": index.relative_path.encode(),
     }
-    if boundary:
+    if is_archive:
+        orders = [order for _, _, order in items]
+        manifest_extent = index.blocks["archive_manifest"]
         values.update(
-            boundary_key=b"boundary",
-            boundary_order=1,
-            archive_first_order=1,
-            archive_last_order=max(order for _, _, order in items),
+            epoch=chat_row["epoch"],
+            boundary_key=f"boundary-{min(orders)}".encode(),
+            boundary_order=min(orders),
+            archive_first_order=min(orders),
+            archive_last_order=max(orders),
             archive_source_count=len(items),
             archive_display_count=len(items),
+            archive_offset=manifest_extent.offset,
+            archive_length=manifest_extent.length,
             archive_first_source_msg_key=items[0][1]["id"].encode(),
             archive_last_source_msg_key=items[-1][1]["id"].encode(),
         )
     publication = await insert_publication(db, operation.encode(), **values)
-    for i, (layer, payload, order) in enumerate(items):
-        extent = index.blocks[str(i)]
-        await insert_row(
-            db,
-            "swe_conversation_messages",
-            {
-                "session_id": session,
-                "origin_chat_id": chat if layer == "anchor" else None,
-                "archive_chat_id": chat if layer == "archive" else None,
-                "layer": layer,
-                "session_order": None if layer == "archive" else order,
-                "archive_order": order if layer == "archive" else None,
-                "source_msg_key": payload["id"].encode(),
-                "source_occurrence_no": i,
-                "role_key": payload["role"].encode(),
-                "kind_key": b"message",
-                "publication_id": publication,
-                "byte_offset": extent.offset,
-                "byte_length": extent.length,
-                "archive_publication_id": (
-                    publication if layer == "archive" else None
-                ),
-                "context_epoch": 0,
-                "in_context": int(layer == "memory"),
-            },
-        )
-    if boundary:
+    if is_archive:
+        _ARCHIVE_BODIES[id(db)][publication] = bodies
         await db.execute(
             "UPDATE swe_conversation_chats SET history_high=%s WHERE id=%s",
             (max(order for _, _, order in items), chat),
         )
+    else:
+        current = _SESSION_MESSAGES[id(db)].setdefault(session, [])
+        start_order = max(
+            (entry["session_order"] for entry in current),
+            default=0,
+        )
+        body_start = len(_SESSION_BODIES[id(db)].setdefault(session, []))
+        current.extend(
+            {
+                **entry,
+                "sequence": start_order + position + 1,
+                "session_order": start_order + position + 1,
+                "body": {
+                    "publication_id": "self",
+                    "block_name": "message_bodies",
+                    "position": body_start + position,
+                },
+            }
+            for position, entry in enumerate(entries)
+        )
+        session_bodies = _SESSION_BODIES[id(db)].setdefault(session, [])
+        session_bodies.extend(bodies)
+        publication, index = await _publish_session_snapshot(
+            db,
+            store,
+            session,
+        )
     return publication, index
+
+
+async def _publish_session_snapshot(db, store, session):
+    entries = _SESSION_MESSAGES[id(db)][session]
+    bodies = _SESSION_BODIES[id(db)][session]
+    operation = new_operation_key()
+    envelope = {
+        "format": "swe-recovery-projection",
+        "version": 1,
+        "state": {},
+        "lists": [],
+        "turns": [],
+        "identity": {"operation_key": operation},
+        "message_directory": entries,
+    }
+    index = store.bundles.publish(
+        operation,
+        [
+            BundleBlock("recovery", "recovery", json.dumps(envelope).encode()),
+            BundleBlock(
+                "message_bodies",
+                "message_bodies",
+                encode_message_bodies(bodies),
+            ),
+        ],
+        scope=store.scope,
+        metadata={"operation_key": operation},
+    )
+    publication = await insert_publication(
+        db,
+        operation.encode(),
+        state="committed",
+        session_id=session,
+        byte_length=index.byte_length,
+        durable_at=NOW,
+        committed_at=NOW,
+        relative_path=index.relative_path.encode(),
+    )
+    extent = index.blocks["recovery"]
+    await db.execute(
+        "UPDATE swe_conversation_sessions SET recovery_publication_id=%s,"
+        "recovery_offset=%s,recovery_length=%s,state_revision=state_revision+1,"
+        "history_high=%s WHERE id=%s",
+        (publication, extent.offset, extent.length, len(entries), session),
+    )
+    return publication, index
+
+
+async def _update_session_directory(db, store, session, update):
+    entries = _SESSION_MESSAGES[id(db)][session]
+    update(entries)
+    return await _publish_session_snapshot(db, store, session)
+
+
+async def _update_archive_directory(db, store, publication_id, update):
+    row = await db.fetch_one(
+        "SELECT relative_path,byte_length FROM swe_conversation_publications "
+        "WHERE id=%s",
+        (publication_id,),
+    )
+    index = store.bundles.inspect(
+        bytes(row["relative_path"]).decode(),
+        expected_length=row["byte_length"],
+    )
+    extent = index.blocks["message_directory"]
+    entries = json.loads(
+        store.bundles.read_extent(
+            index.relative_path,
+            extent.offset,
+            extent.length,
+            expected_length=index.byte_length,
+        ),
+    )
+    update(entries)
+    operation = new_operation_key()
+    old_manifest = json.loads(
+        store.bundles.read_extent(
+            index.relative_path,
+            index.blocks["archive_manifest"].offset,
+            index.blocks["archive_manifest"].length,
+            expected_length=index.byte_length,
+        ),
+    )
+    blocks = [
+        BundleBlock(
+            "message_directory",
+            "message_directory",
+            json.dumps(entries).encode(),
+        ),
+        BundleBlock(
+            "message_bodies",
+            "message_bodies",
+            encode_message_bodies(_ARCHIVE_BODIES[id(db)][publication_id]),
+        ),
+        BundleBlock(
+            "archive_manifest",
+            "archive_manifest",
+            encode_archive_manifest(old_manifest),
+        ),
+    ]
+    replacement = store.bundles.publish(
+        operation,
+        blocks,
+        scope=store.scope,
+        metadata={"operation_key": operation},
+    )
+    await db.execute(
+        "UPDATE swe_conversation_publications SET operation_key=%s,"
+        "relative_path=%s,byte_length=%s,archive_offset=%s,archive_length=%s "
+        "WHERE id=%s",
+        (
+            operation.encode(),
+            replacement.relative_path.encode(),
+            replacement.byte_length,
+            replacement.blocks["archive_manifest"].offset,
+            replacement.blocks["archive_manifest"].length,
+            publication_id,
+        ),
+    )
 
 
 async def test_shared_memory_and_chat_anchors_archive_are_independent(
@@ -475,9 +686,6 @@ async def test_deleted_chat_after_pin_before_nas_refuses_read(
         return snapshot
 
     store._snapshot = delete_after_snapshot
-    store.bundles.read_extent = lambda *args, **kwargs: (_ for _ in ()).throw(
-        AssertionError("NAS read after deletion"),
-    )
     with pytest.raises(ConflictError):
         await store.current("chat-a")
     assert not await db.fetch_all(
@@ -572,11 +780,11 @@ async def test_corrupt_publication_scope_or_extent_fails_not_empty(
         (b"source", publication),
     )
     await db.execute(
-        "UPDATE swe_conversation_messages SET byte_length=999999 "
-        "WHERE publication_id=%s",
+        "UPDATE swe_conversation_publications SET byte_length=999999 "
+        "WHERE id=%s",
         (publication,),
     )
-    with pytest.raises(IntegrityError, match="extent"):
+    with pytest.raises(IntegrityError, match="length"):
         await store.current("chat-a")
 
 
@@ -654,12 +862,21 @@ async def test_archived_turn_stays_hidden_but_visible_typed_turn_is_readable(
             "history_status": "completed",
         },
     )
-    await db.execute(
-        "UPDATE swe_conversation_messages SET turn_id=%s,"
-        "current_visible=0,in_context=0 WHERE session_id=%s",
-        (turn, session),
+    memory_publication, _ = await _update_session_directory(
+        db,
+        store,
+        session,
+        lambda entries: [
+            entry.update(
+                turn_id=turn,
+                visible=False,
+                current_visible=False,
+                in_context=False,
+            )
+            for entry in entries
+        ],
     )
-    await add_messages(
+    archive_publication, _ = await add_messages(
         db,
         store,
         session,
@@ -670,17 +887,27 @@ async def test_archived_turn_stays_hidden_but_visible_typed_turn_is_readable(
         ],
         boundary=True,
     )
-    await db.execute(
-        "UPDATE swe_conversation_messages SET turn_id=%s "
-        "WHERE archive_chat_id=%s",
-        (turn, a),
+    await _update_archive_directory(
+        db,
+        store,
+        archive_publication,
+        lambda entries: [entry.update(turn_id=turn) for entry in entries],
     )
     with pytest.raises(KeyError):
         await store.answer_turn("cold-q", chat_id="chat-a", user_id="alice")
+    memory_publication, _ = await _update_session_directory(
+        db,
+        store,
+        session,
+        lambda entries: [
+            entry.update(visible=True, current_visible=True)
+            for entry in entries
+        ],
+    )
     await db.execute(
-        "UPDATE swe_conversation_messages SET current_visible=1 "
-        "WHERE turn_id=%s AND layer='memory'",
-        (turn,),
+        "UPDATE swe_conversation_sessions SET recovery_publication_id=%s "
+        "WHERE id=%s",
+        (memory_publication, session),
     )
     result = await store.answer_turn(
         "cold-q",

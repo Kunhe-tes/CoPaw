@@ -67,7 +67,7 @@ async def test_empty_references_do_not_acquire():
     assert (
         await fetch_reference_rows(
             db,
-            ReferenceQuery.MESSAGE_OWNERSHIP,
+            ReferenceQuery.PUBLICATION_OWNERSHIP,
             [],
             SERVICE,
         )
@@ -92,14 +92,17 @@ async def test_reference_queries_are_bounded_and_ignore_return_order(count):
             "id": i,
             "service_unit_key": SERVICE,
             "session_id": 1,
-            "publication_id": 1,
+            "scope_kind": "workspace",
+            "tenant_key": b"t",
+            "source_key": b"s",
+            "agent_key": b"a",
         }
         for i in range(1, count + 1)
     }
-    db = ReferenceDatabase(messages=rows)
+    db = ReferenceDatabase(publications=rows)
     result = await fetch_reference_rows(
         db,
-        ReferenceQuery.MESSAGE_OWNERSHIP,
+        ReferenceQuery.PUBLICATION_OWNERSHIP,
         [*reversed(rows), 1],
         SERVICE,
     )
@@ -156,12 +159,12 @@ async def test_packet_budget_can_reduce_batch_or_fail_before_sql():
         fetch_reference_rows,
     )
 
-    db = ReferenceDatabase(messages={})
+    db = ReferenceDatabase(publications={})
     db.max_allowed_packet = 2048
     assert (
         await fetch_reference_rows(
             db,
-            ReferenceQuery.MESSAGE_OWNERSHIP,
+            ReferenceQuery.PUBLICATION_OWNERSHIP,
             range(1, 257),
             SERVICE,
         )
@@ -174,7 +177,7 @@ async def test_packet_budget_can_reduce_batch_or_fail_before_sql():
     with pytest.raises(StorageUnavailable, match="packet"):
         await fetch_reference_rows(
             db,
-            ReferenceQuery.MESSAGE_OWNERSHIP,
+            ReferenceQuery.PUBLICATION_OWNERSHIP,
             [1],
             SERVICE,
         )
@@ -204,7 +207,7 @@ async def test_structurally_invalid_result_is_not_silently_accepted(bad):
     with pytest.raises(IntegrityError):
         await fetch_reference_rows(
             db,
-            ReferenceQuery.MESSAGE_OWNERSHIP,
+            ReferenceQuery.PUBLICATION_OWNERSHIP,
             [1],
             SERVICE,
         )
@@ -215,23 +218,23 @@ async def test_fixed_query_shapes_cover_all_required_columns():
         ReferenceQuery,
         fetch_reference_rows,
     )
-    from swe.app.conversation_storage.source_messages import SOURCE_FIELDS
 
-    db = ReferenceDatabase(messages={}, turns={}, publications={}, chats={})
+    db = ReferenceDatabase(
+        turns={},
+        publications={},
+        chats={},
+        sessions={},
+    )
     for kind in ReferenceQuery:
         await fetch_reference_rows(db, kind, [2**64 - 1], SERVICE)
     assert len(db.calls) == len(ReferenceQuery)
     for query, params in db.calls:
         assert params == (SERVICE, 2**64 - 1)
-        if "in_context" in query:
-            columns = set(query[7:].split(" FROM ")[0].split(","))
-            assert set(SOURCE_FIELDS) <= columns
         assert "result_metadata_text" not in query
         assert "execution_identity_text" not in query
-    assert sum(query.endswith("FOR SHARE") for query, _ in db.calls) == 1
-    assert sum(query.endswith("FOR UPDATE") for query, _ in db.calls) == 3
+    assert sum(query.endswith("FOR UPDATE") for query, _ in db.calls) == 1
     with pytest.raises(ValueError):
-        await fetch_reference_rows(db, "DROP TABLE messages", [1], SERVICE)
+        await fetch_reference_rows(db, "DROP TABLE publications", [1], SERVICE)
 
 
 @pytest.mark.parametrize(
@@ -249,12 +252,15 @@ async def test_query_failure_and_cancel_propagate_without_partial_result(
     )
 
     db = ReferenceDatabase(
-        messages={
+        publications={
             i: {
                 "id": i,
                 "service_unit_key": SERVICE,
                 "session_id": 1,
-                "publication_id": 1,
+                "scope_kind": "workspace",
+                "tenant_key": b"t",
+                "source_key": b"s",
+                "agent_key": b"a",
             }
             for i in range(1, 258)
         },
@@ -270,7 +276,7 @@ async def test_query_failure_and_cancel_propagate_without_partial_result(
     with pytest.raises(type(error)):
         await fetch_reference_rows(
             db,
-            ReferenceQuery.MESSAGE_OWNERSHIP,
+            ReferenceQuery.PUBLICATION_OWNERSHIP,
             range(1, 258),
             SERVICE,
         )

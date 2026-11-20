@@ -42,6 +42,12 @@ async def test_bad_revision_fails_tenant_and_continues_registered_loop(
         get=AsyncMock(return_value={"state": "discovered"}),
         fail=AsyncMock(),
     )
+
+    async def get_many(keys):
+        for key in keys:
+            yield key, {"state": "discovered"}
+
+    states.get_many = get_many
     monkeypatch.setattr(cli, "TenantState", lambda *_: states)
     monkeypatch.setattr(cli, "_register_tenants", AsyncMock())
     monkeypatch.setattr(cli, "_write_failures", lambda *_: "failures.json")
@@ -82,15 +88,15 @@ def test_bad_message_timestamp_is_an_explicit_tenant_error(value):
         _timestamp(value)
 
 
-async def test_late_revision_guard_is_an_explicit_tenant_error():
-    importer = SimpleNamespace(session_ids={"session": 1})
+def test_late_revision_guard_is_an_explicit_tenant_error():
     session = {"position": "session", "legacy": {"state": {"revision": "bad"}}}
     with pytest.raises(TenantInputError, match="revision"):
-        await ConversationImporter._root_and_turns(
-            importer,
+        ConversationImporter._session_recovery_updates(
+            object(),
             session,
-            None,
+            session["legacy"]["state"],
             {},
+            1,
             0,
         )
 

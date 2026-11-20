@@ -9,25 +9,13 @@ from .reference_queries import MAX_QUERY_BYTES, MAX_REFERENCE_IDS
 _SCOPE = (
     "service_unit_key=%s AND tenant_key=%s AND source_key=%s AND agent_key=%s"
 )
-_BOUNDARY_FIELDS = (
-    "id,service_unit_key,chat_id,boundary_key,boundary_order,archive_display_count,"
-    "archive_first_source_msg_key,archive_last_source_msg_key,committed_at,"
-    "archive_first_timestamp,archive_last_timestamp,archive_last_order"
-)
 
 
 class CollectionQuery(Enum):
     """SQL identifiers, predicates and lock types are application-owned."""
 
-    ARCHIVED_KEYS = (
-        "SELECT DISTINCT source_msg_key FROM swe_conversation_messages "
-        "WHERE service_unit_key=%s AND archive_chat_id=%s AND deleted_at IS NULL "
-        "AND source_msg_key IN (",
-        ")",
-        1024,
-    )
     BOUNDARIES = (
-        f"SELECT {_BOUNDARY_FIELDS} FROM swe_conversation_publications "
+        "SELECT * FROM swe_conversation_publications "
         "WHERE service_unit_key=%s AND chat_id=%s AND state='committed' "
         "AND boundary_key IS NOT NULL AND id IN (",
         ") ORDER BY boundary_order",
@@ -61,29 +49,6 @@ class CollectionQuery(Enum):
         "AND question_msg_key IN (",
         ") ORDER BY id FOR UPDATE",
         256,
-    )
-    SHARE_OCCURRENCES = (
-        "SELECT m.* FROM swe_conversation_messages m WHERE m.service_unit_key=%s AND ("
-        "(m.archive_chat_id=%s AND m.deleted_at IS NULL AND m.archive_order<=%s) OR ("
-        "m.session_id=%s AND m.current_visible=1 AND m.deleted_at IS NULL "
-        "AND (m.layer IN ('memory','task','error') OR (m.layer='anchor' "
-        "AND (m.origin_chat_id=%s OR m.origin_chat_id IS NULL))) "
-        "AND m.session_order<=%s)) AND m.source_msg_key IN (",
-        ") ORDER BY m.archive_order,m.session_order,m.id",
-        256,
-    )
-    VISIBLE_OCCURRENCES = (
-        "SELECT id FROM swe_conversation_messages "
-        "WHERE service_unit_key=%s AND session_id=%s "
-        "AND current_visible=1 AND deleted_at IS NULL AND id IN (",
-        ")",
-        None,
-    )
-    PRUNE = (
-        "UPDATE swe_conversation_messages SET in_context=0,current_visible=0 "
-        "WHERE service_unit_key=%s AND id IN (",
-        ")",
-        None,
     )
 
 

@@ -70,7 +70,15 @@ class InventorySpool:
     It does not make the original parser's allocations bounded by itself.
     """
 
-    def __init__(self, directory, *, max_bytes, record_limit, protected=()):
+    def __init__(
+        self,
+        directory,
+        *,
+        max_bytes,
+        record_limit,
+        protected=(),
+        checksum=True,
+    ):
         from .progress import current_progress
 
         self._progress = current_progress()
@@ -98,6 +106,7 @@ class InventorySpool:
         self.root = Path(tempfile.mkdtemp(prefix="migration-", dir=base))
         self._max_bytes = max_bytes
         self._record_limit = record_limit
+        self._checksum = checksum
         self._used = 0
         self._records = {}
         self._closed = False
@@ -157,7 +166,7 @@ class InventorySpool:
                 self._progress.disk_change(size)
         destination = self.root / (str(index) + ".json")
         temporary = self.root / (str(index) + ".tmp")
-        digest = sha256()
+        digest = sha256() if self._checksum else None
         written = 0
         try:
             with temporary.open("xb") as handle:
@@ -167,11 +176,16 @@ class InventorySpool:
                     if written > size:
                         raise ValueError("inventory changed during encoding")
                     handle.write(raw)
-                    digest.update(raw)
+                    if digest is not None:
+                        digest.update(raw)
             if written != size:
                 raise ValueError("inventory changed during encoding")
             os.replace(temporary, destination)
-            record = SpoolRecord(index, size, digest.hexdigest())
+            record = SpoolRecord(
+                index,
+                size,
+                digest.hexdigest() if digest else "",
+            )
             with self._lock:
                 self._records[index] = record
             return record
@@ -196,9 +210,8 @@ class InventorySpool:
             path = self.root / (str(record.index) + ".json")
             with path.open("rb") as handle:
                 raw = handle.read(record.byte_length + 1)
-            if (
-                len(raw) != record.byte_length
-                or sha256(raw).hexdigest() != record.digest
+            if len(raw) != record.byte_length or (
+                record.digest and sha256(raw).hexdigest() != record.digest
             ):
                 raise ValueError("temporary inventory record changed")
             return load_metadata_json(raw)

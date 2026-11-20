@@ -208,6 +208,26 @@ async def test_parallel_import_requires_fixed_tenant_cutoff():
         await prototype.run(workspaces(1), lambda _context: None)
 
 
+async def test_manifest_binding_import_runs_without_tenant_cutoff():
+    journal = Journal()
+    prototype = ParallelImportPrototype(
+        lambda _workspace: Store(),
+        journal,
+        {"source_binding_storage": "manifest-v1"},
+        workers=1,
+    )
+    processed = []
+
+    class Importer:
+        chat_ids = {}
+
+        async def run_workspace(self, workspace):
+            processed.append(tuple(workspace["scope"]))
+
+    await prototype.run(workspaces(1), lambda _context: Importer())
+    assert processed == [("svc", "tenant", "source", "0")]
+
+
 async def test_parallel_workspace_import_keeps_legacy_stage_order():
     from swe.app.conversation_storage.migration.importer import (
         ParallelWorkspaceImporter,

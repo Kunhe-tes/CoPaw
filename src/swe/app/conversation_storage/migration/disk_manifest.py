@@ -197,6 +197,58 @@ class DiskMap(MutableMapping):
         self.close()
 
 
+class DiskGroups(DiskMap):
+    """Read-only grouped position lookup without repeatedly copying a group."""
+
+    def __init__(self):
+        super().__init__()
+        self._db.execute(
+            "CREATE TABLE members (ordinal INTEGER PRIMARY KEY, scope TEXT, position INTEGER)",
+        )
+        self._db.execute(
+            "CREATE INDEX member_scope ON members(scope, ordinal)",
+        )
+
+    @property
+    def closed(self):
+        return self._db is None
+
+    def add(self, scope, position):
+        with self._lock, self._policy.lock if self._policy else self._lock:
+            if self._policy:
+                self._policy.limit(self)
+            try:
+                self._db.execute(
+                    "INSERT INTO members(scope,position) VALUES (?,?)",
+                    (scope, position),
+                )
+            except sqlite3.OperationalError as error:
+                if "full" in str(error).lower():
+                    raise MigrationCapacityError(
+                        "migration control index disk budget exceeded",
+                    ) from error
+                raise
+            if self._policy:
+                self._policy.peak_bytes = max(
+                    self._policy.peak_bytes,
+                    self._policy.used_bytes(),
+                )
+
+    def positions(self, scope):
+        last = 0
+        while True:
+            with self._lock:
+                rows = self._db.execute(
+                    "SELECT ordinal,position FROM members WHERE scope=? AND ordinal>? ORDER BY ordinal LIMIT 256",
+                    (scope, last),
+                ).fetchall()
+            if not rows:
+                return
+            for ordinal, position in rows:
+                yield position
+            last = rows[-1][0]
+
+
 class _Reader:
     def __init__(self, stream, max_value_bytes):
         self.stream = stream

@@ -3,7 +3,7 @@
 
 from .parallel import MigrationCoordinator
 from .disk_manifest import DiskMap
-from ..bundle import BundleStore, MAX_READ_BYTES, HEADER, MAX_INDEX_BYTES
+from ..bundle import BundleStore, MAX_READ_BYTES, UNBOUNDED
 from ..errors import IntegrityError
 
 
@@ -12,6 +12,12 @@ class PrefetchedBundles:
 
     def __init__(self, original):
         self.root = original.root
+        self.max_read_bytes = getattr(
+            original,
+            "max_read_bytes",
+            MAX_READ_BYTES,
+        )
+        self.unbounded = getattr(original, "unbounded", False)
         self.indexes = {}
         self.blocks = {}
 
@@ -45,7 +51,7 @@ class PrefetchedBundles:
             or type(length) is not int
             or offset < 0
             or length < 0
-            or length > MAX_READ_BYTES
+            or length > self.max_read_bytes
         ):
             raise IntegrityError("invalid prefetched extent")
         self.inspect(relative_path, expected_length=expected_length)
@@ -56,58 +62,78 @@ class PrefetchedBundles:
             "runtime locator is absent from fresh body evidence",
         )
 
-
-def _inspect_bounded(original, path, byte_length, allowance):
-    # Inspect's JSON decoder is bounded by format maxima, but reserve its input
-    # expansion before invoking it. _open preserves BundleStore path safety.
-    with original._open(path) as source:
-        raw = source.read(HEADER.size)
-    if len(raw) != HEADER.size:
-        raise IntegrityError("truncated runtime bundle header")
-    _magic, _version, meta_size, table_size, _payload = HEADER.unpack(raw)
-    if meta_size > MAX_INDEX_BYTES or table_size > MAX_INDEX_BYTES:
-        raise IntegrityError("runtime bundle index exceeds format limit")
-    reservation = (meta_size + table_size) * 16 + 4096
-    if reservation > allowance:
-        raise ValueError("runtime index exceeds workspace memory allowance")
-    return original.inspect(path, expected_length=byte_length), reservation
-
-
-async def _prefetch(original, rows, io, allowance):
-    cache = PrefetchedBundles(original)
-    # Reserve SQL rows, parsed indexes and runtime JSON expansion headroom.
-    # This is a conservative admission budget, not a process RSS guarantee.
-    used = len(rows) * 16384
-    for row in rows:
-        path = original.validate_publication_locator(row)
-        index, reservation = await io.call(
-            _inspect_bounded,
-            original,
-            path,
-            row["byte_length"],
-            allowance - used,
+    def read_extents(
+        self,
+        relative_path,
+        extents,
+        *,
+        expected_length=None,
+        max_bytes=None,
+    ):
+        """对缓存证据提供同等总字节预算的多块兼容接口。"""
+        extents = tuple(extents)
+        max_bytes = self.max_read_bytes if max_bytes is None else max_bytes
+        if sum(block.length for block in extents) > max_bytes:
+            raise IntegrityError("prefetched multi-read exceeds byte budget")
+        return tuple(
+            self.read_extent(
+                relative_path,
+                block.offset,
+                block.length,
+                expected_length=expected_length,
+            )
+            for block in extents
         )
-        used += reservation
+
+
+def _read_bounded(original, path, byte_length, allowance, *, unbounded=None):
+    """预留索引与正文膨胀预算后，在同一文件描述符中读取全部块。"""
+    if unbounded is None:
+        unbounded = getattr(original, "unbounded", False)
+    with original.open_reader(
+        path,
+        expected_length=byte_length,
+        index_allowance=UNBOUNDED if unbounded else allowance,
+    ) as reader:
+        index = reader.index
         extents = list(index.blocks.values())
         size = sum(block.length * 16 + 512 for block in extents)
-        if size + used > allowance or any(
-            block.length > MAX_READ_BYTES for block in extents
+        reservation = reader.index_reservation + size
+        if not unbounded and (
+            reservation > allowance
+            or any(block.length > MAX_READ_BYTES for block in extents)
         ):
             raise ValueError(
                 "runtime body evidence exceeds workspace memory allowance",
             )
-        used += size
+        bodies = reader.read_extents(
+            extents,
+            max_bytes=sum(block.length for block in extents),
+        )
+        return (
+            index,
+            list(zip((block.offset for block in extents), bodies)),
+            reservation,
+        )
+
+
+async def _prefetch(original, rows, io, allowance):
+    cache = PrefetchedBundles(original)
+    used = 0 if cache.unbounded else len(rows) * 16384
+    for row in rows:
+        remaining = UNBOUNDED if cache.unbounded else allowance - used
+        path = original.validate_publication_locator(row)
+        index, blocks, reservation = await io.call(
+            _read_bounded,
+            original,
+            path,
+            row["byte_length"],
+            remaining,
+            unbounded=cache.unbounded,
+        )
+        used += reservation
         cache.indexes[path] = index
-        cache.blocks[path] = []
-        for block in extents:
-            body = await io.call(
-                original.read_extent,
-                path,
-                block.offset,
-                block.length,
-                expected_length=row["byte_length"],
-            )
-            cache.blocks[path].append((block.offset, body))
+        cache.blocks[path] = blocks
     return cache
 
 
@@ -144,6 +170,7 @@ async def verify_prefetched_workspaces(
 
     async def locators(index):
         workspace = inventory["workspaces"][index]
+        original = stores.get(workspace["scope"][0])
         scope = tuple(value.encode() for value in workspace["scope"])
         rows = []
         after = None
@@ -168,7 +195,10 @@ async def verify_prefetched_workspaces(
                 )
                 pins.setdefault(index, []).append((retention, batch))
             rows.extend(page)
-            if len(rows) * 16384 > allowance:
+            if (
+                not getattr(original, "unbounded", False)
+                and len(rows) * 16384 > allowance
+            ):
                 raise ValueError(
                     "runtime locator evidence exceeds workspace memory allowance",
                 )

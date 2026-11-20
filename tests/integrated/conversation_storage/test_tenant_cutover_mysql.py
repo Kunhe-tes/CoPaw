@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from agentscope.message import Msg
 
 from swe.app.chat_sharing.store import ChatShareStore
 from swe.app.conversation_storage.identity import WorkspaceScope
@@ -25,7 +26,6 @@ from tests.integrated.conversation_storage.conftest import (
 
 
 def _frozen_tenant(source, original, tenant):
-    from agentscope.message import Msg
     from swe.app.runner.models import ChatSpec, ChatsFile
 
     folder = encode_scope_id(tenant, "SRC")
@@ -109,34 +109,6 @@ async def test_tenant_publication_retry_preserves_online_tenant(
     nas.mkdir()
     chat_a, runtime_a = _frozen_tenant(source, original, "alice")
     _chat_b, runtime_b = _frozen_tenant(source, original, "bob")
-    snapshot = source / "alice" / "chat_shares" / "token-a.json"
-    snapshot.parent.mkdir(parents=True)
-    snapshot.write_text(
-        json.dumps(
-            {
-                "chat_name": "shared",
-                "messages": [
-                    {"role": "user", "content": "question"},
-                ],
-            },
-        ),
-    )
-    await db.execute(
-        "INSERT INTO swe_chat_shares (token,chat_id,creator_id,tenant_id,snapshot_key,created_at,access_count,last_access_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-        (
-            "token-a",
-            chat_a,
-            "alice",
-            "alice",
-            "alice/chat_shares/token-a.json",
-            "2026-11-01 00:00:00",
-            7,
-            None,
-        ),
-    )
-    shares = await db.fetch_all(
-        "SELECT token,chat_id,creator_id,tenant_id,snapshot_key,created_at,access_count,last_access_at FROM swe_chat_shares",
-    )
     for path in source.rglob("*"):
         path.chmod(0o555 if path.is_dir() else 0o444)
     source.chmod(0o555)
@@ -151,7 +123,6 @@ async def test_tenant_publication_retry_preserves_online_tenant(
                 "nas_root": str(nas),
             },
         ],
-        shares=shares,
         tenant_isolation=True,
     )
     assert report["ready"], report["blockers"]
@@ -249,12 +220,6 @@ async def test_tenant_publication_retry_preserves_online_tenant(
 
     rollback_root = Path(rollback["services"]["svc"])
     assert (
-        json.loads((rollback_root / "shares.json").read_text())[0][
-            "access_count"
-        ]
-        == 7
-    )
-    assert (
         rollback_root
         / encode_scope_id("bob", "SRC")
         / "workspaces"
@@ -299,11 +264,6 @@ async def test_tenant_publication_retry_preserves_online_tenant(
     # A's runtime shares the journal allocator. Advance well beyond the old
     # migration ticket head before B allocates its own entity tickets.
     from swe.app.conversation_storage.runtime_ids import runtime_identity
-    from swe.app.conversation_storage.message_installs import (
-        MessageInstall,
-        install_messages,
-    )
-    from swe.app.conversation_storage.bundle import BundleIndex, BlockExtent
 
     existing = await db.fetch_one(
         "SELECT * FROM swe_conversation_chats WHERE tenant_key=%s",
@@ -334,80 +294,46 @@ async def test_tenant_publication_retry_preserves_online_tenant(
     assert len(set(online_ids)) == 20
     assert min(online_ids) > ticket_head["head"]
 
-    # Exercise the actual batched message installer (no monkeypatched SQL or
-    # fake allocator). Reuse an existing immutable payload as two new retained
-    # occurrences, each with its own runtime ticket and Session order.
+    # Append duplicate source IDs through the live NAS publication path.
     session = await db.fetch_one(
         "SELECT * FROM swe_conversation_sessions WHERE id=%s",
         (existing["session_id"],),
     )
-    source_message = await db.fetch_one(
-        "SELECT * FROM swe_conversation_messages WHERE session_id=%s ORDER BY id LIMIT 1",
+    state = await storage.session_for("console").get_session_state_dict(
+        "session",
+        "alice",
+    )
+    for ordinal in range(2):
+        message = Msg("user", f"online {ordinal}", "user")
+        message.id = "same-online-id"
+        state["agent"]["memory"]["content"].append([message.to_dict(), []])
+        result = await storage.archive.append_message(
+            chat_a,
+            message,
+            recovery_state=state,
+            authority=None,
+        )
+        state = result.recovery_state
+    online_messages = await storage.archive.reader.session_messages(
+        session["id"],
+        layers=("memory",),
+    )
+    assert [
+        row["message"]["content"]
+        for row in online_messages
+        if row["message"]["id"] == "same-online-id"
+    ] == ["online 0", "online 1"]
+    session_before = await db.fetch_one(
+        "SELECT * FROM swe_conversation_sessions WHERE id=%s",
         (session["id"],),
     )
-    messages = [
-        MessageInstall(
-            f"online:{ordinal}",
-            "memory",
-            "user",
-            source_msg_key=f"online:{ordinal}",
-            context_epoch=session["context_epoch"],
-        )
-        for ordinal in range(2)
-    ]
-    index = BundleIndex(
-        "existing",
-        0,
-        {},
-        {
-            message.block_name: BlockExtent(
-                "message",
-                source_message["byte_offset"],
-                source_message["byte_length"],
-            )
-            for message in messages
-        },
-    )
-    async with runtime_db.transaction():
-        await install_messages(
-            runtime_db,
-            SimpleNamespace(
-                scope=WorkspaceScope(
-                    "alice",
-                    "SRC",
-                    "agent",
-                    service_unit_id="svc",
-                ),
-                session_id=session["id"],
-                chat_id=None,
-                turn_id=None,
-            ),
-            messages,
-            {"id": source_message["publication_id"]},
-            index,
-            (session, None, None),
-        )
-    online_messages = await db.fetch_all(
-        "SELECT m.* FROM swe_conversation_messages m JOIN swe_conversation_migration_entries e ON e.id=m.id AND e.entry_kind='runtime_id' WHERE m.session_id=%s ORDER BY m.id",
-        (session["id"],),
-    )
-    assert len(online_messages) == 2
-    assert all(row["id"] > max(online_ids) for row in online_messages)
     await db.execute(
         "UPDATE swe_conversation_chats SET title=%s WHERE id=%s",
         ("online title", existing["id"]),
     )
-    await db.execute(
-        "UPDATE swe_chat_shares SET access_count=access_count+3,last_access_at=%s WHERE token=%s",
-        ("2026-11-13 01:00:00", "token-a"),
-    )
     before = await db.fetch_all(
         "SELECT * FROM swe_conversation_chats WHERE tenant_key=%s ORDER BY id",
         (b"alice",),
-    )
-    share_before = await db.fetch_one(
-        "SELECT * FROM swe_chat_shares WHERE token=%s",
-        ("token-a",),
     )
     failing_b = False
     parsed.clear()
@@ -449,15 +375,15 @@ async def test_tenant_publication_retry_preserves_online_tenant(
     )
     assert (
         await db.fetch_one(
-            "SELECT * FROM swe_chat_shares WHERE token=%s",
-            ("token-a",),
+            "SELECT * FROM swe_conversation_sessions WHERE id=%s",
+            (session["id"],),
         )
-        == share_before
+        == session_before
     )
     assert (
-        await db.fetch_all(
-            "SELECT m.* FROM swe_conversation_messages m JOIN swe_conversation_migration_entries e ON e.id=m.id AND e.entry_kind='runtime_id' WHERE m.session_id=%s ORDER BY m.id",
-            (session["id"],),
+        await storage.archive.reader.session_messages(
+            session["id"],
+            layers=("memory",),
         )
         == online_messages
     )

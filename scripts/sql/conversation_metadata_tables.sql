@@ -5,13 +5,13 @@
 -- Service-unit amendment: docs/superpowers/specs/2026-11-02-conversation-service-unit-isolation-design.md
 -- Target DDL only: this is not an ALTER/backfill procedure for existing tables.
 -- Deploy only with service-aware adapters, schema readiness and migration tooling.
--- Six NEW tables. Existing swe_chat_shares uses the separate extension script.
+-- Five NEW tables. Existing swe_chat_shares uses the separate extension script.
 -- Finalize share service ownership after verified backfill with conversation_share_service_unit_finalize.sql.
--- DBA precreates these six tables in the application schema; v3 CLI uses DML only.
+-- DBA precreates these five tables in the application schema; v3 CLI uses DML only.
 -- DBA separately applies conversation_migration_control_tables.sql for v3 journals.
 -- Proposed target: MySQL 8.0.21+, InnoDB DYNAMIC, page size >= 16 KiB, strict mode.
 -- Confirm actual MySQL/TDSQL compatibility; no automatic startup DDL.
--- Explicitly select the reviewed schema. These six table names must not exist.
+-- Explicitly select the reviewed schema. These five table names must not exist.
 -- Other application tables, including the original share table, may already exist.
 -- Existing conversation tables require inspected migrations; do not replay this file.
 -- DDL implicitly commits. There is deliberately no IF NOT EXISTS or DROP.
@@ -185,49 +185,11 @@ CREATE TABLE swe_conversation_publications (
     KEY ix_conv_publication_pending (service_unit_key, state, created_at, id),
     KEY ix_conv_publication_gc (service_unit_key, gc_state, state, retained_history, id),
     KEY ix_conv_publication_events (chat_id, epoch, event_last, id),
+    KEY ix_conv_publication_archive (chat_id, archive_last_order, id),
     KEY ix_conv_publication_chat (chat_id, id),
     KEY ix_conv_publication_session (session_id, id),
     KEY ix_conv_publication_turn (turn_id, id)
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARSET=utf8mb4 COMMENT='NAS不可变内容发布操作、归档及checkpoint批次元数据';
-
-CREATE TABLE swe_conversation_messages (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '保留消息occurrence内部ID；源Msg ID可重复，不能据其去重',
-    service_unit_key VARBINARY(256) NOT NULL COMMENT '所属服务单元原值，与Session及正文和归档publication一致',
-    session_id BIGINT UNSIGNED NOT NULL COMMENT '关联逻辑Session内部ID，由应用事务校验关联和作用域',
-    origin_chat_id BIGINT UNSIGNED NULL COMMENT '准入anchor的来源Chat；NULL兼容旧无归属anchor',
-    archive_chat_id BIGINT UNSIGNED NULL COMMENT '归档occurrence所属Chat；非归档行保持NULL',
-    layer VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT '消息层：memory/task/error/anchor/archive',
-    session_order BIGINT UNSIGNED NULL COMMENT '非归档消息的Session稳定顺序；归档行NULL，跨epoch不复用',
-    archive_order BIGINT UNSIGNED NULL COMMENT 'Chat归档稳定顺序；非归档行NULL，跨epoch不复用',
-    turn_id BIGINT UNSIGNED NULL COMMENT '关联问答Turn内部ID；旧数据无可靠关联时可为空',
-    source_msg_key VARBINARY(1024) NULL COMMENT '原始Msg ID，不唯一，保留现有source及fragment身份契约',
-    source_occurrence_no BIGINT UNSIGNED NOT NULL COMMENT '原来源中该消息occurrence序号，用于区分重复源ID',
-    role_key VARBINARY(32) NOT NULL COMMENT '原消息角色，如user/assistant/system/tool',
-    kind_key VARBINARY(64) NOT NULL COMMENT '原消息类型，用于装配历史显示投影',
-    task_run_key VARBINARY(256) NULL COMMENT '原任务运行标识，保持任务分组和step/final显示',
-    publication_id BIGINT UNSIGNED NOT NULL COMMENT '消息正文所属publication内部ID，可不同于归档成员所属发布',
-    byte_offset BIGINT UNSIGNED NOT NULL COMMENT '内容在不可变NAS bundle中的字节偏移',
-    byte_length BIGINT UNSIGNED NOT NULL COMMENT '内容字节长度，读取前校验extent未越界',
-    archive_publication_id BIGINT UNSIGNED NULL COMMENT '所属归档边界publication内部ID，不替代正文locator',
-    context_epoch BIGINT UNSIGNED NOT NULL COMMENT 'Session共享上下文重置代次，不等于Chat的checkpoint epoch',
-    in_context TINYINT UNSIGNED NOT NULL COMMENT '模型上下文成员标记，与历史是否可见独立',
-    current_visible TINYINT UNSIGNED NOT NULL DEFAULT 1 COMMENT '当前在线视图可见标记，裁剪与恢复根同事务更新',
-    message_timestamp DATETIME(6) NULL COMMENT '消息规范UTC时间；缺失时NULL，原始显示格式保留在NAS内容',
-    deleted_at DATETIME(6) NULL COMMENT '逻辑删除UTC时间；NULL表示未删除，权限即时生效',
-    PRIMARY KEY (id),
-    UNIQUE KEY uq_conv_message_session_order (session_id, session_order),
-    UNIQUE KEY uq_conv_message_archive_order (archive_chat_id, archive_order),
-    KEY ix_conv_message_current (session_id, current_visible, layer, deleted_at, session_order),
-    KEY ix_conv_message_anchor (session_id, origin_chat_id, layer, session_order),
-    KEY ix_conv_message_origin_chat (origin_chat_id, id),
-    KEY ix_conv_message_turn (turn_id, session_order, id),
-    KEY ix_conv_message_source (session_id, source_msg_key, layer),
-    KEY ix_conv_message_context (session_id, context_epoch, in_context, session_order),
-    KEY ix_conv_message_archive_page (archive_chat_id, deleted_at, archive_order),
-    KEY ix_conv_message_archive_source (archive_chat_id, source_msg_key, deleted_at),
-    KEY ix_conv_message_publication (publication_id),
-    KEY ix_conv_message_archive_ref (archive_publication_id)
-) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARSET=utf8mb4 COMMENT='在线及归档消息occurrence、稳定顺序和NAS正文范围索引';
 
 CREATE TABLE swe_conversation_retentions (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '内部自增主键',

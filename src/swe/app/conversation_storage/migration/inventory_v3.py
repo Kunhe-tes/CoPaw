@@ -15,6 +15,7 @@ from .source_inputs import (
     safe_input_entries,
     workspace_entries,
 )
+from .tenant_errors import SourceChanged
 from .manifest import SourceBoundary
 from .failure_scope import isolated_inventory, raise_shared_failure
 from .in_place_source import evidence_paths, verify_evidence
@@ -142,14 +143,27 @@ def _inventory_shares(data, report):
             if blocker:
                 report["blockers"].append(blocker)
                 continue
-        safe_input_entries(
-            snapshot_path.parent,
-            [snapshot_path.name],
-            recursive=False,
-        )
+        if data.get("source_binding_storage") == "manifest-v1":
+            safe_input_entries(
+                snapshot_path.parent,
+                [snapshot_path.name],
+                recursive=False,
+                trusted_root=snapshot_path.parent,
+                allow_in_root_symlinks=True,
+                skip_unselected_unsafe=True,
+            )
+        else:
+            safe_input_entries(
+                snapshot_path.parent,
+                [snapshot_path.name],
+                recursive=False,
+            )
         if not snapshot_path.is_file():
             raise SourceInputInvalid("share snapshot must be a regular file")
-        if snapshot_path.stat().st_size > MAX_READ_BYTES:
+        if (
+            data.get("source_binding_storage") != "manifest-v1"
+            and snapshot_path.stat().st_size > MAX_READ_BYTES
+        ):
             report["blockers"].append(
                 {
                     "code": "share_snapshot_oversized",
@@ -208,7 +222,10 @@ def _inventory_native_files(mapping, report, index, position, files):
         report["files"].append(
             {"workspace": index, "path": relative, "bytes": size},
         )
-        if size > MAX_READ_BYTES:
+        if (
+            size > MAX_READ_BYTES
+            and report.get("source_binding_storage") != "manifest-v1"
+        ):
             report["blockers"].append(
                 {
                     "code": "source_artifact_oversized",
@@ -251,14 +268,189 @@ def _verify_tenant_evidence(data):
             verify_evidence(data, tenant)
 
 
+def _verify_discovery_tenant_evidence(data):
+    if not data.get("freshness_protocol") and not data.get(
+        "source_binding_storage",
+    ):
+        _verify_tenant_evidence(data)
+
+
+def _verify_discovery_workspace_evidence(data, mapped):
+    if not data.get("freshness_protocol") and not data.get(
+        "source_binding_storage",
+    ):
+        verify_evidence(data, mapped)
+
+
+def _legacy_source_cutoff(data, mapping):
+    if data.get("freshness_protocol") or data.get("source_binding_storage"):
+        return None
+    key = (
+        tenant_key(*mapping.scope.values[:3])
+        if data.get("source_isolation")
+        else tenant_key(*mapping.scope.values[:2])
+    )
+    return data.get("tenant_sync_started_at_ns", {}).get(key)
+
+
 def _workspace_source_paths(data, mapped, entries):
     return [str(path) for path in entries] + evidence_paths(data, mapped)
+
+
+def _inventory_manifest_workspace(
+    mapping,
+    report,
+    index,
+    workspace_offset,
+):
+    workspace_index = index + workspace_offset
+    workspace = _workspace(
+        mapping,
+        report,
+        workspace_index,
+        chats_authoritative=True,
+    )
+    workspace["source_paths"] = [
+        str(Path(workspace["root"]) / item["path"])
+        for item in report["files"]
+        if item["workspace"] == workspace_index
+    ]
+    workspace["tenant_sync_started_at_ns"] = None
+    return workspace
+
+
+def _inventory_legacy_workspace(
+    data,
+    mapping,
+    mapped,
+    report,
+    index,
+    workspace_offset,
+):
+    _verify_discovery_workspace_evidence(data, mapped)
+    cutoff = _legacy_source_cutoff(data, mapping)
+    entries = workspace_entries(mapping)
+    input_files = [path for path in entries if path.is_file()]
+    source_paths = _workspace_source_paths(data, mapped, entries)
+    has_unmapped_structure = _has_unmapped_structure(mapping, entries)
+    if cutoff is not None:
+        blocker = _source_change(
+            mapped["position"],
+            tuple(
+                (
+                    mapping.scope.values[:3]
+                    if data.get("source_isolation")
+                    else mapping.scope.values[:2]
+                ),
+            ),
+            source_paths,
+            cutoff,
+            cached=data.get("_freshness_cache"),
+            recursive=False,
+        )
+        if blocker:
+            report["blockers"].append(blocker)
+            workspace = {
+                "root": str(mapping.root),
+                "scope": [
+                    mapping.scope.service_unit_id,
+                    mapping.scope.tenant_id,
+                    mapping.scope.source_id,
+                    mapping.scope.agent_id,
+                ],
+                "sessions": [],
+                "chats": [],
+                "source_paths": source_paths,
+                "tenant_sync_started_at_ns": cutoff,
+            }
+            return workspace
+    registry = mapping.path(mapping.registry_path)
+    if registry.exists() and registry.stat().st_size > MAX_READ_BYTES:
+        workspace = _workspace(
+            mapping,
+            report,
+            index + workspace_offset,
+        )
+    elif registry.exists():
+        try:
+            raw = load_metadata_json(registry.read_bytes())
+        except (OSError, ValueError, UnicodeError) as error:
+            raise_shared_failure(error)
+            raw = None
+        required = {
+            "id",
+            "session_id",
+            "user_id",
+            "channel",
+            "created_at",
+            "updated_at",
+        }
+        if (
+            not isinstance(raw, dict)
+            or not isinstance(raw.get("chats"), list)
+            or any(
+                not isinstance(chat, dict) or not required.issubset(chat)
+                for chat in raw["chats"]
+            )
+        ):
+            report["blockers"].append(
+                {
+                    "code": "registry_invalid",
+                    "position": mapped["position"],
+                    "detail": "registry lacks persisted identity or timestamp fields",
+                },
+            )
+            workspace = {
+                "root": str(mapping.root),
+                "scope": [
+                    mapping.scope.service_unit_id,
+                    mapping.scope.tenant_id,
+                    mapping.scope.source_id,
+                    mapping.scope.agent_id,
+                ],
+                "sessions": [],
+                "chats": [],
+            }
+        else:
+            workspace = _workspace(
+                mapping,
+                report,
+                index + workspace_offset,
+            )
+    elif input_files or has_unmapped_structure:
+        workspace = _workspace(
+            mapping,
+            report,
+            index + workspace_offset,
+        )
+    else:
+        _inventory_native_files(
+            mapping,
+            report,
+            index + workspace_offset,
+            mapped["position"],
+            input_files,
+        )
+        workspace = {
+            "root": str(mapping.root),
+            "scope": [
+                mapping.scope.service_unit_id,
+                mapping.scope.tenant_id,
+                mapping.scope.source_id,
+                mapping.scope.agent_id,
+            ],
+            "sessions": [],
+            "chats": [],
+        }
+    workspace["source_paths"] = source_paths
+    workspace["tenant_sync_started_at_ns"] = cutoff
+    return workspace
 
 
 @isolated_inventory
 def inventory_discovery(data, *, workspace_offset=0):
     """Parse source semantics without manufacturing a frozen source boundary."""
-    _verify_tenant_evidence(data)
+    _verify_discovery_tenant_evidence(data)
     if (
         data.get("fingerprints")
         and fingerprints(
@@ -277,123 +469,26 @@ def inventory_discovery(data, *, workspace_offset=0):
     }
     for index, mapping in enumerate(mappings):
         mapped = data["workspaces"][index]
-        verify_evidence(data, mapped)
-        cutoff = data.get("tenant_sync_started_at_ns", {}).get(
-            (
-                tenant_key(*mapping.scope.values[:3])
-                if data.get("source_isolation")
-                else tenant_key(*mapping.scope.values[:2])
-            ),
-        )
-        entries = workspace_entries(mapping)
-        input_files = [path for path in entries if path.is_file()]
-        source_paths = _workspace_source_paths(data, mapped, entries)
-        has_unmapped_structure = _has_unmapped_structure(mapping, entries)
-        if cutoff is not None:
-            blocker = _source_change(
-                mapped["position"],
-                tuple(
-                    (
-                        mapping.scope.values[:3]
-                        if data.get("source_isolation")
-                        else mapping.scope.values[:2]
-                    ),
-                ),
-                source_paths,
-                cutoff,
-                cached=data.get("_freshness_cache"),
-                recursive=False,
-            )
-            if blocker:
-                report["blockers"].append(blocker)
-                workspace = {
-                    "root": str(mapping.root),
-                    "scope": [
-                        mapping.scope.service_unit_id,
-                        mapping.scope.tenant_id,
-                        mapping.scope.source_id,
-                        mapping.scope.agent_id,
-                    ],
-                    "sessions": [],
-                    "chats": [],
-                    "source_paths": source_paths,
-                    "tenant_sync_started_at_ns": cutoff,
-                }
-                report["workspaces"].append(workspace)
-                continue
-        registry = mapping.path(mapping.registry_path)
-        if registry.exists() and registry.stat().st_size > MAX_READ_BYTES:
-            workspace = _workspace(mapping, report, index + workspace_offset)
-        elif registry.exists():
-            try:
-                raw = load_metadata_json(registry.read_bytes())
-            except (OSError, ValueError, UnicodeError) as error:
-                raise_shared_failure(error)
-                raw = None
-            required = {
-                "id",
-                "session_id",
-                "user_id",
-                "channel",
-                "created_at",
-                "updated_at",
-            }
-            if (
-                not isinstance(raw, dict)
-                or not isinstance(raw.get("chats"), list)
-                or any(
-                    not isinstance(chat, dict) or not required.issubset(chat)
-                    for chat in raw["chats"]
-                )
-            ):
-                report["blockers"].append(
-                    {
-                        "code": "registry_invalid",
-                        "position": data["workspaces"][index]["position"],
-                        "detail": "registry lacks persisted identity or timestamp fields",
-                    },
-                )
-                workspace = {
-                    "root": str(mapping.root),
-                    "scope": [
-                        mapping.scope.service_unit_id,
-                        mapping.scope.tenant_id,
-                        mapping.scope.source_id,
-                        mapping.scope.agent_id,
-                    ],
-                    "sessions": [],
-                    "chats": [],
-                }
-            else:
-                workspace = _workspace(
+        if data.get("source_binding_storage") == "manifest-v1":
+            report["workspaces"].append(
+                _inventory_manifest_workspace(
                     mapping,
                     report,
-                    index + workspace_offset,
-                )
-        elif input_files or has_unmapped_structure:
-            workspace = _workspace(mapping, report, index + workspace_offset)
-        else:
-            _inventory_native_files(
-                mapping,
-                report,
-                index + workspace_offset,
-                mapped["position"],
-                input_files,
+                    index,
+                    workspace_offset,
+                ),
             )
-            workspace = {
-                "root": str(mapping.root),
-                "scope": [
-                    mapping.scope.service_unit_id,
-                    mapping.scope.tenant_id,
-                    mapping.scope.source_id,
-                    mapping.scope.agent_id,
-                ],
-                "sessions": [],
-                "chats": [],
-            }
-        workspace["source_paths"] = source_paths
-        workspace["tenant_sync_started_at_ns"] = cutoff
-        report["workspaces"].append(workspace)
+            continue
+        report["workspaces"].append(
+            _inventory_legacy_workspace(
+                data,
+                mapping,
+                mapped,
+                report,
+                index,
+                workspace_offset,
+            ),
+        )
     for mapped, workspace in zip(data["workspaces"], report["workspaces"]):
         workspace["position"] = mapped["position"]
         for session in workspace["sessions"]:
@@ -460,15 +555,16 @@ async def inventory_v3_spooled(
     if begin_sync:
         _begin_tenant_syncs(manifest)
     data = manifest.data
+    if data.get("source_binding_storage") != "manifest-v1":
+        _preflight_share_budget(
+            data,
+            shared_resources.allowance if shared_resources else memory_bytes,
+        )
     if (
         data.get("fingerprints")
         and fingerprints(data["services"]) != data["fingerprints"]
     ):
         raise ValueError("source changed since discovery freeze")
-    _preflight_share_budget(
-        data,
-        shared_resources.allowance if shared_resources else memory_bytes,
-    )
     summaries = await spool_workspaces(
         data,
         spool,
@@ -522,7 +618,10 @@ def _preflight_share_budget(data, memory_bytes):
     count_limit = memory_bytes // 16384
     for share in data.get("shares", []):
         size = Path(share["snapshot_path"]).stat().st_size
-        if size > MAX_READ_BYTES:
+        if (
+            size > MAX_READ_BYTES
+            and data.get("source_binding_storage") != "manifest-v1"
+        ):
             raise MigrationCapacityError(
                 "share snapshot exceeds the bounded reader limit",
             )
@@ -570,7 +669,35 @@ def inventories_equal(left, right):
 def inventory_workspace(data, index):
     """Parse one workspace preserving its global artifact positions."""
     workspace = data["workspaces"][index]
-    return inventory_discovery(
+    registry = None
+    before = None
+    if data.get("freshness_protocol"):
+        registry = Path(workspace["root"]) / workspace.get(
+            "registry_path",
+            "chats.json",
+        )
+        if (
+            registry.is_symlink()
+            and data.get("source_binding_storage") != "manifest-v1"
+        ):
+            raise SourceInputInvalid("chats.json cannot be a symlink")
+        before = (
+            registry.stat()
+            if data.get("source_binding_storage") == "manifest-v1"
+            else registry.lstat()
+        )
+        if data.get(
+            "source_binding_storage",
+        ) == "manifest-v1" and not registry.resolve(
+            strict=True,
+        ).is_relative_to(
+            Path(workspace["root"]).resolve(strict=True),
+        ):
+            raise SourceInputInvalid("chats.json symlink escapes workspace")
+        expected = workspace.get("chats_mtime_ns")
+        if expected is not None and before.st_mtime_ns != expected:
+            raise SourceChanged("chats.json changed after preparation")
+    result = inventory_discovery(
         {
             **data,
             "workspaces": [workspace],
@@ -588,3 +715,10 @@ def inventory_workspace(data, index):
         },
         workspace_offset=index,
     )
+    if registry is not None:
+        after = registry.lstat()
+        if before.st_mtime_ns != after.st_mtime_ns:
+            raise SourceChanged("chats.json changed during inventory")
+        if workspace.get("chats_mtime_ns") is None:
+            workspace["chats_mtime_ns"] = after.st_mtime_ns
+    return result

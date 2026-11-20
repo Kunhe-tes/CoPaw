@@ -144,20 +144,19 @@ def test_discover_refuses_report_inside_frozen_source(tmp_path):
     assert not (source / "report.json").exists()
 
 
-def test_default_share_discovery_reads_database_without_ddl(
+def test_discovery_excludes_historical_shares_without_database_access(
     tmp_path,
     monkeypatch,
 ):
     from swe.cli import conversation_storage_discovery_cmd as module
+    from swe.database.connection import DatabaseConnection
 
     services, _, _ = inputs(tmp_path)
-    calls = []
 
-    async def shares():
-        calls.append("read")
-        return []
+    async def forbidden(*_args):
+        pytest.fail("discovery opened a database connection")
 
-    monkeypatch.setattr(module, "read_original_shares", shares)
+    monkeypatch.setattr(DatabaseConnection, "connect", forbidden)
     result = CliRunner().invoke(
         command(),
         [
@@ -169,39 +168,27 @@ def test_default_share_discovery_reads_database_without_ddl(
         ],
     )
     assert result.exit_code == 0, result.output
-    assert calls == ["read"]
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert report["shares"] == []
+    assert report["excluded_scopes"] == ["historical_shares"]
 
 
-def test_share_reader_issues_only_select_and_closes_connection(monkeypatch):
-    import asyncio
-    from contextlib import asynccontextmanager
-    from swe.cli.conversation_storage_discovery_cmd import read_original_shares
-    import swe.database
-
-    calls = []
-
-    class Database:
-        def __init__(self, _config):
-            pass
-
-        async def connect(self):
-            calls.append("connect")
-
-        async def close(self):
-            calls.append("close")
-
-        @asynccontextmanager
-        async def transaction(self):
-            yield self
-
-        async def fetch_all(self, sql, params):
-            calls.append((sql, params))
-            return []
-
-    monkeypatch.setattr(swe.database, "DatabaseConnection", Database)
-    monkeypatch.setattr(swe.database, "get_database_config", lambda: None)
-    assert asyncio.run(read_original_shares()) == []
-    assert calls[0] == "connect"
-    assert calls[-1] == "close"
-    assert calls[1][0].startswith("SELECT t.token,")
-    assert calls[1][1] == (1000, 0)
+def test_discovery_rejects_nonempty_historical_share_input(tmp_path):
+    services, _, _ = inputs(tmp_path)
+    shares = tmp_path / "shares.json"
+    shares.write_text('[{"token":"legacy-token"}]')
+    result = CliRunner().invoke(
+        command(),
+        [
+            "discover",
+            "--services",
+            str(services),
+            "--shares-file",
+            str(shares),
+            "--output",
+            str(tmp_path / "report.json"),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "historical share records are excluded" in result.output
+    assert not (tmp_path / "report.json").exists()

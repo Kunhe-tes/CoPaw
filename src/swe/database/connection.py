@@ -9,6 +9,7 @@ from hashlib import sha256
 from typing import Any
 
 from .config import DatabaseConfig
+from .observation import timed_operation
 from .pool import ConnectionPool
 from .session import DatabaseSession, ExecutionResult
 
@@ -77,6 +78,12 @@ class DatabaseConnection:
         self._connected = False
         if self._pool is not None:
             await self._pool.close()
+
+    def expect_identity(self, server_uuid, schema):
+        if not self.is_connected:
+            raise RuntimeError("Database not connected")
+        expected = (server_uuid, schema)
+        self._pool.expect_identity(expected)
 
     def _current(self):
         binding = _CURRENT_CONNECTION.get() or {}
@@ -154,11 +161,12 @@ class DatabaseConnection:
         ):
             return
         try:
-            await session._pool.run(
-                entry,
-                session._connection.rollback(),
-                self.config.cleanup_timeout,
-            )
+            with timed_operation("db_transaction_rollback"):
+                await session._pool.run(
+                    entry,
+                    session._connection.rollback(),
+                    self.config.cleanup_timeout,
+                )
         except (Exception, asyncio.CancelledError):
             logger.warning(
                 "Database transaction rollback failed",
@@ -172,10 +180,12 @@ class DatabaseConnection:
                 yield session
                 return
             try:
-                await session._run(session._connection.start_transaction())
+                with timed_operation("db_transaction_begin"):
+                    await session._run(session._connection.start_transaction())
                 session._in_transaction = True
                 yield session
-                await session._run(session._connection.commit())
+                with timed_operation("db_transaction_commit"):
+                    await session._run(session._connection.commit())
             except BaseException:
                 session._discard()
                 await self._rollback(session)

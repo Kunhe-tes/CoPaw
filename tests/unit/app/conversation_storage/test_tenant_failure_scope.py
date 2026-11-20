@@ -328,10 +328,10 @@ def test_symlink_config_directory_keeps_discovery_report_and_tenant_scope(
         ],
         tenant_isolation=True,
     )
-    assert report["blockers"][0]["code"] == "source_invalid"
     states = {item["tenant_id"]: item["state"] for item in report["tenants"]}
     if known_owner:
+        assert report["blockers"][0]["code"] == "source_invalid"
         assert states == {"alice": "discovered", "bob": "failed"}
     else:
-        # Without trustworthy ownership, conservatively block this service.
-        assert states == {"alice": "failed"}
+        assert report["blockers"] == []
+        assert states == {"alice": "discovered"}

@@ -36,6 +36,49 @@ def test_report_serializes_disk_batches_as_json_object():
         batches.close()
 
 
+def test_verify_command_exposes_optional_full_audit():
+    result = CliRunner().invoke(
+        cli,
+        ["conversation-storage", "verify", "--help"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "--full-audit" in result.output
+
+
+@pytest.mark.parametrize(
+    "args,full_audit",
+    [([], False), (["--full-audit"], True)],
+)
+def test_verify_forwards_audit_selection(
+    tmp_path,
+    monkeypatch,
+    args,
+    full_audit,
+):
+    from swe.cli import conversation_storage_cmd
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text("{}")
+    captured = []
+    monkeypatch.setattr(
+        conversation_storage_cmd,
+        "_command",
+        lambda *positional: captured.append(positional),
+    )
+    result = CliRunner().invoke(
+        cli,
+        [
+            "conversation-storage",
+            "verify",
+            "--manifest",
+            str(manifest),
+            *args,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured[0][-1] is full_audit
+
+
 @pytest.fixture
 def migration(tmp_path):
     source = tmp_path / "frozen"

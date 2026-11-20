@@ -3,7 +3,6 @@
 
 from pathlib import Path
 
-from ..bundle import MAX_READ_BYTES
 from ..chat_mutations import load_metadata_json
 from .source_inputs import safe_input_entries
 
@@ -37,7 +36,8 @@ def share_source(report, service, record):
                 root,
                 [registry],
                 recursive=False,
-                max_file_bytes=MAX_READ_BYTES,
+                trusted_root=root,
+                allow_in_root_symlinks=True,
             )
             if not path.exists():
                 checked.add(source)

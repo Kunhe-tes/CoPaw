@@ -7,7 +7,7 @@ import json
 
 from ..errors import IntegrityError
 from ..identity import WorkspaceScope
-from .exporter import OldFormatTarget
+from .exporter import OldFormatTarget, _stamp
 from .manifest import SourceBoundary
 from .source_inputs import safe_input_entries
 from .isolation import unit_key, belongs
@@ -162,7 +162,7 @@ async def _publication_states(database, manifest):
 
 
 def _validate_source_state(manifest, row):
-    from .authority import validate_receipt
+    from .authority import validate_source_verification
     from .source_state import SourceState
 
     key = tuple(
@@ -185,7 +185,9 @@ def _validate_source_state(manifest, row):
         if service is None or json.loads(row["evidence_text"]) != expected:
             raise ValueError("source frozen evidence differs")
         if row["state"] == "published":
-            proof = validate_receipt(json.loads(row["verification_text"]))
+            proof, _level = validate_source_verification(
+                row["verification_text"],
+            )
             if proof["migration_id"] != manifest.migration_id or set(
                 proof["services"],
             ) != {key[0]}:
@@ -509,7 +511,6 @@ def _share_owner(data, row, frozen_owners):
 
 def _select_share_records(context, actual):
     from .discovery import SHARE_FIELDS
-    from swe.cli.conversation_storage_v3_cmd import _stamp
 
     owners = {}
     for share in context.data["shares"]:
@@ -595,7 +596,6 @@ async def _merge_shares(context):
             + " FROM swe_chat_shares"
         )
     actual = await context.database.fetch_all(query)
-    from swe.cli.conversation_storage_v3_cmd import _stamp
 
     owners, merged = _select_share_records(context, actual)
     for row in context.data.get("source_shares", context.data["shares"]):
@@ -627,8 +627,6 @@ async def _merge_shares(context):
             source,
             context.service_roots[service] / row["snapshot_key"],
         )
-    from swe.cli.conversation_storage_v3_cmd import _stamp
-
     for service, shares in merged.items():
         for binding in context.by_scope.values():
             scope = binding["scope"]

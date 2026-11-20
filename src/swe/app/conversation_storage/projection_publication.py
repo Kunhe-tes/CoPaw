@@ -17,9 +17,11 @@ from .session_projection import (
     project_state,
     hydrate_state,
     is_projection,
+    LISTS,
     FORMAT,
     VERSION,
 )
+from .message_bundle import encode_message_directory
 
 IDENTITY_FIELDS = (
     "operation_key",
@@ -85,50 +87,144 @@ async def _existing(service, row):
     batch = ReaderPins(retentions)
     try:
         async with service.db.transaction():
-            rows = await service.db.fetch_all(
-                "SELECT * FROM swe_conversation_messages WHERE session_id=%s AND service_unit_key=%s AND layer IN ('memory','task','error') AND current_visible=1 AND deleted_at IS NULL ORDER BY session_order",
+            session = await service.db.fetch_one(
+                "SELECT * FROM swe_conversation_sessions WHERE id=%s "
+                "AND service_unit_key=%s",
                 (row["session_id"], row["service_unit_key"]),
             )
-            if any(
-                item["service_unit_key"] != row["service_unit_key"]
-                for item in rows
+            if (
+                session is None
+                or session.get("recovery_publication_id") is None
             ):
-                raise IntegrityError(
-                    "projection message service unit mismatch",
-                )
-            await batch.pin([item["publication_id"] for item in rows])
-        if not rows:
+                remember(cache_key(row), result)
+                return result
+            await batch.pin([session["recovery_publication_id"]])
+        publication = batch.publications[0]
+        if publication["session_id"] != row["session_id"]:
+            raise IntegrityError(
+                "projection root Session association mismatch",
+            )
+        index = await batch.read(
+            service.bundles.inspect,
+            _text(publication["relative_path"]),
+            expected_length=publication["byte_length"],
+        )
+        raw = await batch.read(
+            service.bundles.read_extent,
+            index.relative_path,
+            session["recovery_offset"],
+            session["recovery_length"],
+            expected_length=index.byte_length,
+        )
+        envelope = load_metadata_json(raw)
+        if not is_projection(envelope):
             return result
-        publications = {item["id"]: item for item in batch.publications}
-        for item in rows:
-            publication = publications[item["publication_id"]]
-            if publication["session_id"] != row["session_id"]:
-                raise IntegrityError(
-                    "projection source Session association mismatch",
+        from .projection_references import ref_key, snapshot_projection
+
+        source = type(
+            "ProjectionSource",
+            (),
+            {
+                "operation_key": _text(publication["operation_key"]),
+                "scope": WorkspaceScope.from_row(row),
+                "session_id": row["session_id"],
+            },
+        )()
+        snapshot = await snapshot_projection(
+            service,
+            source,
+            envelope,
+            index,
+            current_id=publication["id"],
+            retentions=retentions,
+        )
+        try:
+            for entry in envelope.get("message_directory", []):
+                layer = entry["layer"]
+                if layer not in ("memory", "task", "error"):
+                    continue
+                locator = entry["body"]
+                if locator["publication_id"] == "self":
+                    ref = {
+                        "operation_key": source.operation_key,
+                        "block_name": locator["block_name"],
+                        "position": locator["position"],
+                    }
+                else:
+                    ref = locator
+                body = snapshot.payloads[ref_key(ref)]
+                result[(layer, canonical(body))].append(
+                    {
+                        **locator,
+                        "publication_id": ref.get(
+                            "publication_id",
+                            publication["id"],
+                        ),
+                    },
                 )
-            raw = await batch.read(
-                service.bundles.read_extent,
-                _text(publication["relative_path"]),
-                item["byte_offset"],
-                item["byte_length"],
-                expected_length=publication["byte_length"],
-            )
-            value = load_metadata_json(raw)
-            result[(item["layer"], canonical(value))].append(
-                {
-                    "publication_id": item["publication_id"],
-                    "message_id": item["id"],
-                    "offset": item["byte_offset"],
-                    "length": item["byte_length"],
-                },
-            )
+        finally:
+            await snapshot.finish(retentions)
         remember(cache_key(row), result)
         return result
     finally:
         await batch.finish()
 
 
-async def prepare_recovery_blocks(service, row, plan, blocks):
+async def _previous_directory(service, row):
+    retentions = RetentionStore(
+        service.db,
+        WorkspaceScope.from_row(row),
+    )
+    batch = ReaderPins(retentions)
+    try:
+        async with service.db.transaction():
+            session = await service.db.fetch_one(
+                "SELECT * FROM swe_conversation_sessions WHERE id=%s "
+                "AND service_unit_key=%s",
+                (row["session_id"], row["service_unit_key"]),
+            )
+            if (
+                session is None
+                or session.get("recovery_publication_id") is None
+            ):
+                return []
+            await batch.pin([session["recovery_publication_id"]])
+        publication = batch.publications[0]
+        index = await batch.read(
+            service.bundles.inspect,
+            _text(publication["relative_path"]),
+            expected_length=publication["byte_length"],
+        )
+        raw = await batch.read(
+            service.bundles.read_extent,
+            index.relative_path,
+            session["recovery_offset"],
+            session["recovery_length"],
+            expected_length=index.byte_length,
+        )
+        envelope = load_metadata_json(raw)
+        directory = envelope.get("message_directory", [])
+        if not isinstance(directory, list):
+            raise IntegrityError("recovery message directory is invalid")
+        result = []
+        for item in directory:
+            entry = dict(item)
+            locator = dict(entry["body"])
+            if locator["publication_id"] == "self":
+                locator["publication_id"] = publication["id"]
+                entry["body"] = locator
+            result.append(entry)
+        return result
+    finally:
+        await batch.finish()
+
+
+async def prepare_recovery_blocks(
+    service,
+    row,
+    plan,
+    blocks,
+):  # pylint: disable=too-many-statements
     if plan.recovery_block is None:
         return blocks
     root = next(
@@ -154,7 +250,7 @@ async def prepare_recovery_blocks(service, row, plan, blocks):
     )
     supplied = {item.name: item for item in blocks}
     context = await service.db.fetch_one(
-        "SELECT context_epoch FROM swe_conversation_sessions WHERE id=%s AND service_unit_key=%s",
+        "SELECT context_epoch,history_high FROM swe_conversation_sessions WHERE id=%s AND service_unit_key=%s",
         (row["session_id"], row["service_unit_key"]),
     )
     epoch = context["context_epoch"]
@@ -172,9 +268,15 @@ async def prepare_recovery_blocks(service, row, plan, blocks):
             },
         )
 
+    resolved_bodies = {}
+
     def resolve(layer, body):
         values = available.get((layer, canonical(body)))
-        return values.popleft() if values else None
+        ref = values.popleft() if values else None
+        if ref is not None:
+            ref = {**ref, "position": ref.get("position", 0)}
+            resolved_bodies[canonical(ref)] = body
+        return ref
 
     frozen_turns = await _frozen_turns(service, row, state)
     projection = project_state(
@@ -183,8 +285,6 @@ async def prepare_recovery_blocks(service, row, plan, blocks):
         resolve_message=resolve,
         resolve_turn=lambda key, value: frozen_turns.get(key),
     )
-    if not projection.envelope["lists"] and not projection.envelope["turns"]:
-        return blocks
     installations = []
     for name, layer, body in projection.messages:
         source = body.get("id")
@@ -199,19 +299,227 @@ async def prepare_recovery_blocks(service, row, plan, blocks):
                 context_epoch=epoch,
                 in_context=layer == "memory",
                 message_timestamp=_stamp(body.get("timestamp")),
-            ).to_dict(),
+            ),
         )
     envelope = {
         **projection.envelope,
         "identity": identity(row),
-        "installations": installations,
+        "installations": [item.to_dict() for item in installations],
         "dependency_ids": list(projection.dependency_ids),
     }
-    envelope["prune_ids"] = (
-        await removed_occurrences(service, row, envelope)
-        if has_history or projection.envelope["lists"]
-        else []
+    # Keep occurrence metadata in the recovery root so current history can be
+    # reconstructed without a relational message index. Body references remain
+    # in the projection lists and are resolved by projection_references.
+    for name, _layer, body in projection.messages:
+        resolved_bodies[
+            canonical(
+                {
+                    "operation_key": _text(row["operation_key"]),
+                    "block_name": name,
+                    "position": 0,
+                },
+            )
+        ] = body
+    installs_by_name = {
+        item.block_name: item for item in (*installations, *plan.messages)
+    }
+    previous_entries = (
+        []
+        if plan.reset is not None
+        else await _previous_directory(service, row)
     )
+    previous_by_ref = {
+        canonical(entry["body"]): entry for entry in previous_entries
+    }
+    anchors_by_id = defaultdict(deque)
+    for entry in previous_entries:
+        if entry.get("layer") == "anchor":
+            anchors_by_id[entry["raw_id"]].append(entry)
+    retained_refs = set()
+    directory = []
+    seen_refs = set()
+    sequence = context.get("history_high", 0) + 1
+    projected_layers = set()
+    for series in envelope["lists"]:
+        layer = next(
+            (
+                known_layer
+                for known_path, known_layer, _ in LISTS
+                if tuple(series["path"]) == known_path
+            ),
+            "memory",
+        )
+        projected_layers.add(layer)
+        for item in series["entries"]:
+            ref = dict(item["ref"])
+            ref.setdefault("position", 0)
+            locator_key = canonical(ref)
+            if locator_key in seen_refs:
+                continue
+            seen_refs.add(locator_key)
+            body = resolved_bodies.get(locator_key)
+            if body is None:
+                raise IntegrityError("recovery body reference lacks directory")
+            install = (
+                installs_by_name.get(ref["block_name"])
+                if "publication_id" not in ref
+                else None
+            )
+            previous = previous_by_ref.get(
+                canonical(
+                    {
+                        "publication_id": ref.get("publication_id", "self"),
+                        "block_name": ref["block_name"],
+                        "position": ref["position"],
+                    },
+                ),
+            )
+            entry = {
+                "sequence": (
+                    previous.get("sequence", sequence)
+                    if previous
+                    else sequence
+                ),
+                "session_order": (
+                    previous.get("session_order", sequence)
+                    if previous
+                    else sequence
+                ),
+                "raw_id": str(body.get("id", "")),
+                "category": install.layer if install is not None else layer,
+                "layer": install.layer if install is not None else layer,
+                "role": body.get("role") or "assistant",
+                "visible": (
+                    install.current_visible if install is not None else True
+                ),
+                "current_visible": (
+                    install.current_visible if install is not None else True
+                ),
+                "in_context": (
+                    install.in_context
+                    if install is not None
+                    else layer == "memory"
+                ),
+                "body": {
+                    "publication_id": ref.get("publication_id", "self"),
+                    "block_name": ref["block_name"],
+                    "position": ref["position"],
+                },
+            }
+            if install is not None:
+                entry.update(
+                    {
+                        "turn_id": install.turn_id,
+                        "origin_chat_id": install.origin_chat_id,
+                        "source_msg_key": install.source_msg_key,
+                        "source_occurrence_no": install.source_occurrence_no,
+                        "context_epoch": install.context_epoch,
+                        "kind": install.kind,
+                        "task": install.task_run_key,
+                        "timestamp": install.message_timestamp,
+                        "chat_id": install.origin_chat_id,
+                    },
+                )
+            elif body.get("timestamp") is not None:
+                entry["timestamp"] = _stamp(body["timestamp"])
+            if previous is not None and install is None:
+                entry = {
+                    **previous,
+                    "body": entry["body"],
+                    "in_context": entry["in_context"],
+                }
+            anchors = anchors_by_id.get(entry["raw_id"])
+            if (
+                anchors
+                and layer == "memory"
+                and entry.get("origin_chat_id") is None
+            ):
+                anchor = anchors.popleft()
+                entry.update(
+                    {
+                        key: anchor[key]
+                        for key in (
+                            "turn_id",
+                            "origin_chat_id",
+                            "chat_id",
+                            "source_msg_key",
+                            "source_occurrence_no",
+                        )
+                        if anchor.get(key) is not None
+                    },
+                )
+            retained_refs.add(canonical(entry["body"]))
+            if plan.reset is not None:
+                entry.update(
+                    visible=False,
+                    current_visible=False,
+                    in_context=False,
+                )
+            directory.append(entry)
+            if previous is None:
+                sequence += 1
+    for previous in previous_entries:
+        locator_key = canonical(previous["body"])
+        if (
+            locator_key in retained_refs
+            or previous["sequence"] in plan.prune_ids
+            or previous["layer"] in projected_layers
+        ):
+            continue
+        directory.append(previous)
+    for install in plan.messages:
+        if install.layer not in ("memory", "task", "error", "anchor"):
+            continue
+        if install.block_name not in supplied:
+            continue
+        locator = {
+            "publication_id": "self",
+            "block_name": install.block_name,
+            "position": 0,
+        }
+        locator_key = canonical(locator)
+        if locator_key in retained_refs:
+            continue
+        body = load_metadata_json(supplied[install.block_name].content)
+        directory.append(
+            {
+                "sequence": sequence,
+                "session_order": sequence,
+                "raw_id": str(body.get("id", "")),
+                "category": install.layer,
+                "layer": install.layer,
+                "role": body.get("role") or "assistant",
+                "visible": install.current_visible,
+                "current_visible": install.current_visible,
+                "in_context": install.in_context,
+                "body": locator,
+                "turn_id": install.turn_id,
+                "origin_chat_id": install.origin_chat_id,
+                "source_msg_key": install.source_msg_key,
+                "source_occurrence_no": install.source_occurrence_no,
+                "context_epoch": install.context_epoch,
+                "kind": install.kind,
+                "task": install.task_run_key,
+                "timestamp": install.message_timestamp,
+                "chat_id": install.origin_chat_id,
+            },
+        )
+        retained_refs.add(locator_key)
+        sequence += 1
+    directory.sort(
+        key=lambda entry: entry.get("session_order", entry["sequence"]),
+    )
+    encode_message_directory(directory)
+    envelope["message_directory"] = directory
+    envelope["dependency_ids"] = sorted(
+        set(projection.dependency_ids)
+        | {
+            entry["body"]["publication_id"]
+            for entry in directory
+            if entry["body"]["publication_id"] != "self"
+        },
+    )
+    envelope["prune_ids"] = list(plan.prune_ids)
     turn_blocks = []
     if plan.turn_install is not None:
         turns = state.get("turn_states", {})
@@ -309,11 +617,17 @@ def _validate_ref_shape(ref):
         {"publication_id", "message_id", "offset", "length"}
         if "message_id" in ref
         else (
-            {"publication_id", "operation_key", "block_name", "turn_id"}
-            if "publication_id" in ref
-            else {"operation_key", "block_name"}
+            {"publication_id", "block_name", "position"}
+            if "publication_id" in ref and "position" in ref
+            else (
+                {"publication_id", "operation_key", "block_name", "turn_id"}
+                if "publication_id" in ref
+                else {"operation_key", "block_name"}
+            )
         )
     )
+    if set(ref) == {"operation_key", "block_name", "position"}:
+        return
     if set(ref) != allowed:
         raise IntegrityError(
             "projection reference fields are not whitelisted",
@@ -355,7 +669,13 @@ def _context_usage_projection(envelope, plan):
     return usage_text, invalid
 
 
-async def effective_recovery_plan(service, request, row, plan, index):
+async def effective_recovery_plan(
+    service,
+    request,
+    row,
+    plan,
+    index,
+):  # pylint: disable=too-many-statements
     if plan.recovery_block is None:
         return plan, None
     extent = index.blocks.get(plan.recovery_block)
@@ -399,6 +719,18 @@ async def effective_recovery_plan(service, request, row, plan, index):
         for entry in series["entries"]
     ]
     refs.extend(item["ref"] for item in envelope["turns"])
+    for entry in envelope.get("message_directory", []):
+        locator = entry["body"]
+        if locator["publication_id"] == "self":
+            refs.append(
+                {
+                    "operation_key": request.operation_key,
+                    "block_name": locator["block_name"],
+                    "position": locator["position"],
+                },
+            )
+        else:
+            refs.append(locator)
     targets = set()
     for ref in refs:
         _validate_ref_shape(ref)
@@ -425,6 +757,8 @@ async def effective_recovery_plan(service, request, row, plan, index):
                 "message",
                 "task",
                 "error",
+                "anchor",
+                "message_bodies",
             ):
                 raise IntegrityError(
                     "projection reference block kind is invalid",
@@ -473,101 +807,11 @@ async def effective_recovery_plan(service, request, row, plan, index):
         or any(type(value) is not int or value <= 0 for value in pruned)
     ):
         raise IntegrityError("projection prune occurrence IDs are invalid")
-    if sorted(set(pruned)) != await removed_occurrences(
-        service,
-        row,
-        envelope,
-    ):
-        raise IntegrityError(
-            "projection prune set differs from replaced root occurrences",
-        )
+    if sorted(set(pruned)) != sorted(set(plan.prune_ids)):
+        raise IntegrityError("projection prune set differs from install plan")
     effective = replace(
         plan,
         messages=(*plan.messages, *additions),
         prune_ids=tuple(sorted(set(plan.prune_ids) | set(pruned))),
     )
     return effective, envelope
-
-
-async def removed_occurrences(service, row, envelope):
-    """Compare only explicitly replaced paths in the previous committed root."""
-    from .projection_references import references
-
-    retentions = RetentionStore(
-        service.db,
-        WorkspaceScope.from_row(row),
-    )
-    async with service.db.transaction():
-        session = await service.db.fetch_one(
-            "SELECT * FROM swe_conversation_sessions WHERE id=%s AND service_unit_key=%s",
-            (row["session_id"], row["service_unit_key"]),
-        )
-        if session is None or session.get("recovery_publication_id") is None:
-            return []
-        batch = await retentions.pin(
-            [session["recovery_publication_id"]],
-            kind="reader",
-        )
-    try:
-        publication = batch.publications[0]
-        if publication["session_id"] != row["session_id"]:
-            raise IntegrityError("previous recovery root Session mismatch")
-        previous_index = await batch.read(
-            service.bundles.inspect,
-            _text(publication["relative_path"]),
-            expected_length=publication["byte_length"],
-        )
-        raw = await batch.read(
-            service.bundles.read_extent,
-            previous_index.relative_path,
-            session["recovery_offset"],
-            session["recovery_length"],
-            expected_length=previous_index.byte_length,
-        )
-        previous = load_metadata_json(raw)
-        if not is_projection(previous):
-            return []
-        paths = {tuple(series["path"]) for series in envelope["lists"]}
-        retained = {
-            ref.get("message_id")
-            for ref in references(envelope)
-            if "message_id" in ref
-        }
-        removed = []
-        for series in previous["lists"]:
-            if tuple(series["path"]) not in paths:
-                continue
-            for entry in series["entries"]:
-                ref = entry["ref"]
-                if "message_id" in ref:
-                    identity = ref["message_id"]
-                else:
-                    extent = previous_index.blocks.get(ref["block_name"])
-                    if (
-                        ref.get("operation_key")
-                        != _text(publication["operation_key"])
-                        or extent is None
-                    ):
-                        raise IntegrityError(
-                            "previous same-publication recovery locator is invalid",
-                        )
-                    prior = await service.db.fetch_one(
-                        "SELECT * FROM swe_conversation_messages WHERE publication_id=%s AND byte_offset=%s AND byte_length=%s AND session_id=%s AND service_unit_key=%s ORDER BY id LIMIT 1",
-                        (
-                            publication["id"],
-                            extent.offset,
-                            extent.length,
-                            row["session_id"],
-                            row["service_unit_key"],
-                        ),
-                    )
-                    if prior is None:
-                        raise IntegrityError(
-                            "previous recovery occurrence was not installed",
-                        )
-                    identity = prior["id"]
-                if identity not in retained:
-                    removed.append(identity)
-        return sorted(set(removed))
-    finally:
-        await retentions.finish_reader(batch)

@@ -51,6 +51,12 @@ def orchestration(monkeypatch, tmp_path):
         transition=AsyncMock(),
         publish=AsyncMock(),
     )
+
+    async def get_many(keys):
+        for key in keys:
+            yield key, await states.get(*key)
+
+    states.get_many = get_many
     monkeypatch.setattr(cli, "TenantState", lambda *_: states)
     journal = SimpleNamespace(
         _bindings=lambda: ("target", "source"),
@@ -73,7 +79,6 @@ def orchestration(monkeypatch, tmp_path):
     guard = SimpleNamespace(server_uuid="server", check=AsyncMock())
     writer = Mock(return_value="failures.json")
     monkeypatch.setattr(cli, "_write_failures", writer)
-    monkeypatch.setattr(cli, "_write_runtime", Mock())
     return SimpleNamespace(
         manifest=manifest,
         rows=rows,
@@ -83,6 +88,113 @@ def orchestration(monkeypatch, tmp_path):
         writer=writer,
         base=tmp_path,
     )
+
+
+async def test_unchanged_automatic_review_registers_only_once(
+    orchestration,
+    monkeypatch,
+):
+    fixture = orchestration
+    fixture.rows["a"]["state"] = "discovered"
+    resources = {"workers": 1, "io_workers": 1, "memory_bytes": 1024 * 1024}
+    await cli._auto_review(
+        fixture.db,
+        fixture.manifest,
+        fixture.guard,
+        resources,
+    )
+    monkeypatch.setattr(cli, "_one_tenant", AsyncMock())
+    await cli._run_registered(
+        "resume",
+        fixture.manifest,
+        fixture.base,
+        fixture.db,
+        fixture.guard,
+        fixture.base,
+        resources,
+    )
+    assert fixture.states.register.await_count == 1
+
+
+async def test_post_review_binding_conflict_still_stops_before_import(
+    orchestration,
+    monkeypatch,
+):
+    fixture = orchestration
+    fixture.rows["a"]["state"] = "discovered"
+    resources = {"workers": 1, "io_workers": 1, "memory_bytes": 1024 * 1024}
+    await cli._auto_review(
+        fixture.db,
+        fixture.manifest,
+        fixture.guard,
+        resources,
+    )
+    fixture.db.fetch_all.return_value[0]["source_binding_text"] = "conflict"
+    one = AsyncMock()
+    monkeypatch.setattr(cli, "_one_tenant", one)
+    with pytest.raises(ValueError, match="binding changed"):
+        await cli._run_registered(
+            "resume",
+            fixture.manifest,
+            fixture.base,
+            fixture.db,
+            fixture.guard,
+            fixture.base,
+            resources,
+        )
+    assert one.await_count == 0
+
+
+async def test_reviewed_manifest_reuses_atomic_evidence_registration(
+    orchestration,
+    monkeypatch,
+):
+    from swe.app.conversation_storage.migration import tenant_retry
+
+    fixture = orchestration
+    fixture.rows["b"]["state"] = "failed"
+
+    async def review(*args, **kwargs):
+        fixture.manifest.data = {
+            **fixture.manifest.data,
+            "tenant_review_revision": "accepted",
+            "workspaces": [
+                *fixture.manifest.data["workspaces"],
+                {
+                    "service_unit_id": "svc",
+                    "tenant_id": "b",
+                    "root": "/repaired",
+                },
+            ],
+        }
+        return {}
+
+    monkeypatch.setattr(tenant_retry, "review_retry", review)
+    resources = {"workers": 1, "io_workers": 1, "memory_bytes": 1024 * 1024}
+    await cli._auto_review(
+        fixture.db,
+        fixture.manifest,
+        fixture.guard,
+        resources,
+    )
+    roots = []
+
+    async def one(operation, view, *_args):
+        if view.key[1] == "b":
+            roots.extend(w["root"] for w in view.data["workspaces"])
+
+    monkeypatch.setattr(cli, "_one_tenant", one)
+    await cli._run_registered(
+        "resume",
+        fixture.manifest,
+        fixture.base,
+        fixture.db,
+        fixture.guard,
+        fixture.base,
+        resources,
+    )
+    assert roots == ["/frozen/b", "/repaired"]
+    assert fixture.states.register.await_count == 1
 
 
 async def run(fixture, operation="resume"):
@@ -123,6 +235,26 @@ async def test_published_a_skips_all_old_input_b_failure_does_not_stop_c(
     assert orchestration.states.fail.call_args.args[:2] == ("svc", "b")
     failures = orchestration.writer.call_args.args[2]
     assert failures[0]["tenant_id"] == "b" and "bad input" not in str(failures)
+
+
+async def test_source_failure_invalidates_owner_recovery(
+    monkeypatch,
+    orchestration,
+):
+    visited = []
+
+    async def one(operation, view, *args):
+        recovery = args[-1]["_journal_recovery"]
+        visited.append(view.key[1])
+        if view.key[1] == "b":
+            recovery.confirmed = (object(), object())
+            raise cli.TenantFailure("partial source failed")
+        assert recovery.confirmed is None
+
+    monkeypatch.setattr(cli, "_one_tenant", one)
+    result = await run(orchestration)
+    assert visited == ["b", "c"]
+    assert result["failed"] == result["completed"] == 1
 
 
 @pytest.mark.parametrize(
@@ -233,51 +365,6 @@ async def test_shared_spool_disk_missing_path_and_eio_are_not_isolated(
     orchestration.db.execute.assert_not_awaited()
 
 
-def share(token, service=None):
-    result = {
-        "token": token,
-        "chat_id": "chat",
-        "creator_id": "account",
-        "tenant_id": "same-account",
-        "snapshot_key": "same-account/chat_shares/" + token + ".json",
-        "created_at": "2026-11-01T00:00:00+00:00",
-        "access_count": 3,
-        "last_access_at": None,
-    }
-    if service is not None:
-        result["service_unit_id"] = service
-    return result
-
-
-async def test_same_account_across_services_compares_only_own_unpublished_shares():
-    own, other = share("a", "s1"), share("b", "s2")
-    parent = SimpleNamespace(
-        data={"source_shares": [own, other], "shares": [own, other]},
-    )
-    view = SimpleNamespace(
-        key=("s1", "same-account"),
-        data={"shares": [own]},
-        parent=parent,
-    )
-    db = SimpleNamespace(
-        fetch_all=AsyncMock(
-            return_value=[
-                {**share("a"), "service_unit_key": None},
-                {**share("b"), "service_unit_key": None},
-            ],
-        ),
-    )
-    await cli._compare_shares(db, view)
-    db.fetch_all.return_value = [{**share("a"), "service_unit_key": b"s1"}]
-    await cli._compare_shares(db, view)
-    # Unknown NULL-service tokens cannot be silently excluded from coverage.
-    db.fetch_all.return_value.append(
-        {**share("unknown"), "service_unit_key": None},
-    )
-    with pytest.raises(cli.TenantFailure, match="unregistered"):
-        await cli._compare_shares(db, view)
-
-
 async def test_unsafe_tenant_source_path_is_isolated_before_next_tenant(
     monkeypatch,
     orchestration,
@@ -301,6 +388,70 @@ async def test_unsafe_tenant_source_path_is_isolated_before_next_tenant(
     monkeypatch.setattr(cli, "_one_tenant", one)
     result = await run(orchestration)
     assert visited == ["b", "c"] and result["failed"] == 1
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["{invalid", '{"schema_version":3,"session_generation":"invalid"}'],
+)
+async def test_invalid_session_override_isolated_before_next_tenant(
+    monkeypatch,
+    orchestration,
+    tmp_path,
+    content,
+):
+    from swe.app.conversation_storage.migration.source_inputs import (
+        session_input_roots,
+    )
+
+    (tmp_path / "override.json").write_text(content)
+    visited = []
+
+    async def inventory(view, spool, **resources):
+        visited.append(view.key[1])
+        if view.key[1] == "b":
+            session_input_roots(tmp_path, ["override.json"])
+        return {"ready": True, "blockers": [], "workspaces": []}
+
+    async def one(operation, view, *_args):
+        await cli._inventory(view, None, {})
+
+    monkeypatch.setattr(cli, "inventory_v3_spooled", inventory)
+    monkeypatch.setattr(cli, "_one_tenant", one)
+    result = await run(orchestration)
+    assert visited == ["b", "c"] and result["failed"] == 1
+
+
+async def test_failed_full_audit_is_persisted_and_reported_without_raw_blockers():
+    calls = []
+
+    class States:
+        async def record_verification(self, *args):
+            calls.append(("verification", args))
+
+        async def fail(self, *args):
+            calls.append(("failure", args))
+
+    result = {
+        "verification_level": "full",
+        "passed": False,
+        "blockers": [{"position": "/private/path", "detail": "mismatch"}],
+    }
+    error = cli.VerificationFailure(result)
+    failure = await cli._record_tenant_failure(
+        States(),
+        {"service_unit_id": "svc", "tenant_id": "t", "source_id": "s"},
+        "verify",
+        error,
+    )
+    assert calls[0] == ("verification", ("svc", "t", "s", result))
+    assert calls[1][0] == "failure"
+    assert failure["verification"] == {
+        "verification_level": "full",
+        "passed": False,
+        "blocker_count": 1,
+    }
+    assert "/private/path" not in str(failure)
 
 
 def test_real_source_preflight_symlink_has_domain_specific_failure(tmp_path):

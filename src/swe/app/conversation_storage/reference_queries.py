@@ -8,28 +8,6 @@ from .errors import IntegrityError, StorageUnavailable
 MAX_REFERENCE_IDS = 256
 MAX_QUERY_BYTES = 64 * 1024
 
-MESSAGE_LOCATOR_FIELDS = (
-    "id",
-    "service_unit_key",
-    "session_id",
-    "origin_chat_id",
-    "turn_id",
-    "source_msg_key",
-    "source_occurrence_no",
-    "role_key",
-    "kind_key",
-    "task_run_key",
-    "publication_id",
-    "byte_offset",
-    "byte_length",
-    "context_epoch",
-    "message_timestamp",
-    "session_order",
-    "layer",
-    "current_visible",
-    "in_context",
-    "deleted_at",
-)
 TURN_REFERENCE_FIELDS = (
     "id",
     "service_unit_key",
@@ -81,25 +59,91 @@ CHAT_CHECK_FIELDS = (
 class ReferenceQuery(Enum):
     """Only trusted table, column and lock shapes can reach the helper."""
 
-    MESSAGE_PRUNE = (
-        "messages",
-        ("id", "service_unit_key", "session_id", "layer", "context_epoch"),
-        " FOR UPDATE",
-    )
-    MESSAGE_PROOF = (
-        "messages",
-        (*MESSAGE_LOCATOR_FIELDS, "archive_chat_id", "archive_order"),
-        " FOR UPDATE",
-    )
-    PUBLICATION_LOCK = ("publications", PUBLICATION_LOCK_FIELDS, " FOR UPDATE")
-    CHAT_CHECK = ("chats", CHAT_CHECK_FIELDS, "")
-    MESSAGE_LOCATOR = ("messages", MESSAGE_LOCATOR_FIELDS, "")
-    MESSAGE_CURRENT = ("messages", MESSAGE_LOCATOR_FIELDS, " FOR SHARE")
-    MESSAGE_OWNERSHIP = (
-        "messages",
-        ("id", "service_unit_key", "session_id", "publication_id"),
+    OFFLINE_SESSION = (
+        "sessions",
+        (
+            "agent_key",
+            "channel_key",
+            "created_at",
+            "external_session_key",
+            "id",
+            "service_unit_key",
+            "source_key",
+            "tenant_key",
+            "user_key",
+        ),
         "",
     )
+    OFFLINE_CHAT = (
+        "chats",
+        (
+            "agent_key",
+            "channel_key",
+            "created_at",
+            "external_chat_key",
+            "external_session_key",
+            "id",
+            "registry_order",
+            "service_unit_key",
+            "session_id",
+            "source_key",
+            "tenant_key",
+            "user_key",
+        ),
+        "",
+    )
+    OFFLINE_TURN = (
+        "turns",
+        (
+            "chat_id",
+            "context_epoch",
+            "generation",
+            "id",
+            "question_msg_key",
+            "service_unit_key",
+            "session_id",
+            "turn_order",
+        ),
+        "",
+    )
+    OFFLINE_PUBLICATION = (
+        "publications",
+        (
+            "archive_display_count",
+            "archive_first_order",
+            "archive_first_source_msg_key",
+            "archive_first_timestamp",
+            "archive_last_order",
+            "archive_last_source_msg_key",
+            "archive_last_timestamp",
+            "archive_length",
+            "archive_offset",
+            "archive_source_count",
+            "boundary_key",
+            "boundary_order",
+            "chat_id",
+            "checkpoint_base_revision",
+            "checkpoint_event_watermark",
+            "checkpoint_length",
+            "checkpoint_offset",
+            "checkpoint_revision",
+            "checkpoint_source_high",
+            "epoch",
+            "event_first",
+            "event_last",
+            "event_length",
+            "event_offset",
+            "id",
+            "retained_history",
+            "service_unit_key",
+            "session_id",
+            "turn_id",
+        ),
+        "",
+    )
+
+    PUBLICATION_LOCK = ("publications", PUBLICATION_LOCK_FIELDS, " FOR UPDATE")
+    CHAT_CHECK = ("chats", CHAT_CHECK_FIELDS, "")
     TURN_REFERENCE = ("turns", TURN_REFERENCE_FIELDS, "")
     PUBLICATION_OWNERSHIP = (
         "publications",

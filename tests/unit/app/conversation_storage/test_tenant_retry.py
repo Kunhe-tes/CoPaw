@@ -56,6 +56,31 @@ async def test_review_rejects_business_data_without_deleting():
         await retry._no_data(db, JOB, {("svc", "alice")})
 
 
+async def test_review_excludes_old_share_publications_for_new_manifests():
+    queries = []
+
+    async def fetch_one(query, _params=None):
+        queries.append(query)
+        return None
+
+    async def fetch_all(query, _params=None):
+        queries.append(query)
+        return []
+
+    db = SimpleNamespace(
+        fetch_one=AsyncMock(side_effect=fetch_one),
+        fetch_all=AsyncMock(side_effect=fetch_all),
+    )
+    await retry._no_data(
+        db,
+        JOB,
+        {("svc", "alice", "source")},
+        shares=[{"token": "old-share"}],
+        exclude_historical_shares=True,
+    )
+    assert not any("scope_kind='legacy_share'" in query for query in queries)
+
+
 @pytest.mark.parametrize("outcome", ["old", "new", "unknown"])
 @pytest.mark.parametrize("new_state", ["discovered", "failed"])
 async def test_recovery_requires_matching_sql_evidence_and_retains_unknown(
@@ -369,7 +394,7 @@ async def test_runtime_tickets_do_not_prevent_zero_data_tenant_review():
         for query in queries
     )
     assert any(
-        "swe_conversation_messages b JOIN swe_conversation_sessions" in query
+        "FROM swe_conversation_publications WHERE service_unit_key=%s" in query
         for query in queries
     )
 
@@ -732,7 +757,7 @@ async def test_review_retains_failed_tenant_with_committed_data_and_keeps_other_
         path=tmp_path / "manifest.json",
     )
 
-    async def existing_data(_db, _migration, keys, *_args):
+    async def existing_data(_db, _migration, keys, *_args, **_kwargs):
         if ("svc", "bob") in keys:
             raise retry._TenantReviewHasData("business data")
 
@@ -907,7 +932,7 @@ async def test_review_restored_ticket_owner_rechecks_final_boundaries(
         path=tmp_path / "manifest.json",
     )
 
-    async def no_data(_db, _migration, keys, *_args):
+    async def no_data(_db, _migration, keys, *_args, **_kwargs):
         if ("svc", "bob") in keys:
             raise retry._TenantReviewHasData("ticket")
 

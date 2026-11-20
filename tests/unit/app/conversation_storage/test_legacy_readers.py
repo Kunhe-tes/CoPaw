@@ -130,7 +130,9 @@ async def test_archive_v1_missing_batch_and_deleted_marker(tmp_path):
     chat = "16374f34-c02e-4bb9-87bf-eb5e64348cef"
     store = ConversationArchiveStore(tmp_path, cursor_secret=b"test")
     boundary = await store.commit(chat, [Msg("user", "body", "user")])
-    assert read_archive(tmp_path, chat)["format"] == "checkpoint-v1"
+    first = read_archive(tmp_path, chat)
+    assert first["format"] == "checkpoint-v1"
+    assert first == read_archive(tmp_path, chat)
     (tmp_path / chat / (boundary.id + ".jsonl")).unlink()
     with pytest.raises(ValueError, match="missing"):
         read_archive(tmp_path, chat)

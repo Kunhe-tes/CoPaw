@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
 """DML-only authoritative mappings in DBA-precreated control tables."""
 
+import asyncio
 import json
+import time
 from ..bundle import BundleStore, new_operation_key
 from ..identity import WorkspaceScope
 
 JOBS = "swe_conversation_migration_jobs"
 ENTRIES = "swe_conversation_migration_entries"
 HYDRATE_PAGE_SIZE = 1000
-TICKET_KINDS = frozenset({"session", "chat", "turn", "message", "publication"})
+TICKET_KINDS = frozenset({"session", "chat", "turn", "publication"})
 ENTITY_TABLES = {
     kind: "swe_conversation_" + kind + "s" for kind in TICKET_KINDS
 }
@@ -36,8 +38,47 @@ def _json(value):
     )
 
 
+class JournalRecovery:
+    """Reuse a recovered mirror only inside one locked SQL owner run."""
+
+    def __init__(self, database, manifest):
+        self.database = database
+        self.manifest = getattr(manifest, "parent", manifest)
+        self.owner = asyncio.current_task()
+        self.confirmed = None
+
+    def check(self, database, manifest):
+        parent = getattr(manifest, "parent", manifest)
+        if (
+            database is not self.database
+            or parent is not self.manifest
+            or asyncio.current_task() is not self.owner
+        ):
+            raise ValueError("SQL journal recovery owner changed")
+        return self.confirmed is not None and all(
+            manifest.data[name] is mapping
+            for name, mapping in zip(
+                ("assignments", "batches"),
+                self.confirmed,
+            )
+        )
+
+    def confirm(self, manifest):
+        self.confirmed = (
+            manifest.data["assignments"],
+            manifest.data["batches"],
+        )
+
+
 class MigrationJournal:
-    def __init__(self, database, manifest, *, server_uuid=None):
+    def __init__(
+        self,
+        database,
+        manifest,
+        *,
+        server_uuid=None,
+        recovery=None,
+    ):
         if manifest.data.get("version") != 3:
             raise ValueError("SQL journal requires manifest version 3")
         self.db, self.manifest = database, manifest
@@ -46,7 +87,9 @@ class MigrationJournal:
         self.persist_updates = True
         self._known_scopes = None
         self.active_tenant = None
+        self._allocation_owner = None
         self.frozen_bindings_data = None
+        self.recovery = recovery
 
     def _bindings(self):
         data = self.frozen_bindings_data or self.manifest.data
@@ -54,30 +97,49 @@ class MigrationJournal:
             raise ValueError(
                 "migration target must be bound before preparing SQL journal",
             )
-        source = {
-            key: data[key]
-            for key in (
-                "source_boundary",
-                "services",
-                "workspaces",
-                "fingerprints",
-                "tenant_sync_started_at_ns",
-                "shares",
-                "discovery_version",
-                "tenant_isolation",
-                "source_isolation",
-                "in_place",
-                "tenant_review_revision",
-                "tenants",
-                "source_shares",
-                "declared_services",
-            )
-            if key in data
-        }
+        if data.get("source_binding_storage") == "manifest-v1":
+            source = {
+                "source_binding_storage": "manifest-v1",
+                "tenant_isolation": True,
+                "source_isolation": True,
+            }
+        else:
+            source = {
+                key: data[key]
+                for key in (
+                    "source_boundary",
+                    "services",
+                    "workspaces",
+                    "fingerprints",
+                    "tenant_sync_started_at_ns",
+                    "shares",
+                    "discovery_version",
+                    "tenant_isolation",
+                    "source_isolation",
+                    "freshness_protocol",
+                    "in_place",
+                    "tenant_review_revision",
+                    "tenants",
+                    "source_shares",
+                    "declared_services",
+                )
+                if key in data
+            }
         target = dict(data["target"])
         if self.server_uuid is not None:
             target["server_uuid"] = self.server_uuid
-        return _json(target), _json(source)
+        started = time.perf_counter()
+        result = _json(target), _json(source)
+        from .progress import current_progress
+
+        progress = current_progress()
+        if progress is not None:
+            progress.record_persistence(
+                "binding",
+                sum(len(value.encode("utf-8")) for value in result),
+                time.perf_counter() - started,
+            )
+        return result
 
     async def prepare(self):
         target, source = self._bindings()
@@ -104,7 +166,7 @@ class MigrationJournal:
                         "SELECT id FROM " + table + " LIMIT 1",
                     ):
                         raise ValueError(
-                            "first migration requires six empty business tables; unknown rows found",
+                            "first migration requires five empty business tables; unknown rows found",
                         )
                 await self.db.execute(
                     "INSERT INTO "
@@ -134,6 +196,8 @@ class MigrationJournal:
         from .isolation import state_store
 
         row = await state_store(self.db, self.manifest).get(
+            # 租户上下文由编排器注入，pylint 仅推断到初始 None。
+            # pylint: disable-next=not-an-iterable
             *self.active_tenant,
         )
         if row is None or row["state"] == "published":
@@ -156,6 +220,7 @@ class MigrationJournal:
                 if len(self.active_tenant) == 3
                 else ""
             ),
+            # pylint: disable-next=not-an-iterable
             tuple(value.encode() for value in self.active_tenant),
         )
 
@@ -163,7 +228,7 @@ class MigrationJournal:
         clause, scope_values = self._tenant_filter("b")
         for kind, table in ENTITY_TABLES.items():
             owned_clause = clause
-            if scope_values and kind in ("turn", "message"):
+            if scope_values and kind == "turn":
                 orphan = await self.db.fetch_one(
                     "SELECT b.id FROM "
                     + table
@@ -288,6 +353,66 @@ class MigrationJournal:
             )
         return kind.encode(), position.encode()
 
+    async def allocate_many(
+        self,
+        kind,
+        positions,
+        *,
+        scope=None,
+        scope_kind="workspace",
+    ):
+        """按有界事务分配身份票据；仅在提交确认后更新镜像。"""
+        from .batch_tickets import chunks, allocate_chunk
+        from .disk_manifest import DiskMap
+
+        if kind not in TICKET_KINDS:
+            raise ValueError(
+                "only four entity kinds may allocate integer tickets",
+            )
+        if kind == "publication":
+            if scope is None:
+                raise ValueError("publication assignment requires its scope")
+            BundleStore.path_for("0" * 64, scope, scope_kind=scope_kind)
+        elif scope is not None:
+            raise ValueError("only publication assignments have bundle scope")
+        owner = asyncio.current_task()
+        if self._allocation_owner is None:
+            self._allocation_owner = owner
+        if owner is not self._allocation_owner:
+            raise ValueError("SQL journal allocation owner changed")
+        positions = list(positions)
+        if len(set(positions)) != len(positions):
+            raise ValueError("duplicate batch ticket source position")
+        keys = [
+            (position, self._key(kind, position)[1]) for position in positions
+        ]
+        if not keys:
+            return {}
+        # packet 限额来自命名锁固定的物理租约，连接门面本身无此属性。
+        async with self.db.acquire() as session:
+            packet_limit = session.max_allowed_packet
+        result = {}
+        extra = len(_json(list(scope.values)).encode()) + 1024 if scope else 0
+        for chunk in chunks(packet_limit, keys, extra_bytes=extra):
+            assignments = await allocate_chunk(
+                self,
+                kind,
+                chunk,
+                scope=scope,
+                scope_kind=scope_kind,
+            )
+            if kind not in self.manifest.data["assignments"]:
+                self.manifest.data["assignments"][kind] = (
+                    DiskMap()
+                    if isinstance(self.manifest.data["batches"], DiskMap)
+                    else {}
+                )
+            self.manifest.data["assignments"][kind].update(assignments)
+            if self.persist_updates:
+                self.manifest._persist()
+            result.update(assignments)
+        return result
+
     async def allocate(
         self,
         kind,
@@ -298,7 +423,7 @@ class MigrationJournal:
     ):
         if kind not in TICKET_KINDS:
             raise ValueError(
-                "only five entity kinds may allocate integer tickets",
+                "only four entity kinds may allocate integer tickets",
             )
         kind_key, key = self._key(kind, position)
         if kind == "publication":
@@ -418,7 +543,12 @@ class MigrationJournal:
 
     @staticmethod
     def _assignment(row, kind, *, scope=None, scope_kind="workspace"):
-        if row["id"] != row["target_id"] or not row["target_id"]:
+        if (
+            type(row["id"]) is not int
+            or type(row["target_id"]) is not int
+            or row["id"] != row["target_id"]
+            or row["target_id"] <= 0
+        ):
             raise ValueError("SQL journal integer ticket mapping is invalid")
         operation = _text(row["operation_key"])
         assignment = {
@@ -573,6 +703,11 @@ class MigrationJournal:
     async def hydrate(self, *, persist=True):
         from .disk_manifest import DiskMap
 
+        if self.recovery is not None and self.recovery.check(
+            self.db,
+            self.manifest,
+        ):
+            return
         assignments, batches = {}, DiskMap()
         async for row in self._hydration_entries():
             kind, key = _text(row["entry_kind"]), _text(row["source_key"])
@@ -620,6 +755,8 @@ class MigrationJournal:
         )
         if persist:
             self.manifest._persist()
+        if self.recovery is not None:
+            self.recovery.confirm(self.manifest)
 
     async def refresh_batch(self, position):
         """Mirror only this committed SQL batch, never scan all tickets."""
@@ -816,6 +953,7 @@ class MigrationJournal:
         if len(owners) != 1:
             raise ValueError("legacy retention publication source is unproven")
         owner = owners.pop()
+        # pylint: disable-next=unsubscriptable-object
         if owner[:2] != self.active_tenant[:2]:
             raise ValueError("legacy retention publication tenant differs")
         return owner == self.active_tenant
@@ -832,6 +970,7 @@ class MigrationJournal:
                 raise ValueError("tenant isolation requires an active tenant")
             states = {"blocked": "failed", "ready": "published"}
             return await state_store(self.db, self.manifest).transition(
+                # pylint: disable-next=not-an-iterable
                 *self.active_tenant,
                 states.get(state, state),
                 verification,
@@ -857,13 +996,28 @@ class MigrationJournal:
                 and state not in JOB_TRANSITIONS[row["state"]]
             ):
                 raise ValueError("invalid migration job transition")
+            verification_record = verification
+            if (
+                isinstance(verification, dict)
+                and "verification_level" in verification
+            ):
+                from .verification_evidence import merge_verification
+
+                verification_record = merge_verification(
+                    row["verification_text"],
+                    verification,
+                )
             await self.db.execute(
                 "UPDATE "
                 + JOBS
                 + " SET state=%s,verification_text=COALESCE(%s,verification_text),updated_at=UTC_TIMESTAMP(6) WHERE migration_id=%s",
                 (
                     state,
-                    None if verification is None else _json(verification),
+                    (
+                        None
+                        if verification is None
+                        else _json(verification_record)
+                    ),
                     self.migration_id,
                 ),
             )

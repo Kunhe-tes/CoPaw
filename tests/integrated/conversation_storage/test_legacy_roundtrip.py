@@ -29,7 +29,6 @@ from swe.app.conversation_storage.migration.install_records import (
 from swe.app.conversation_storage.migration.verify import verify_import
 from swe.app.runner.models import ChatSpec, ChatsFile
 from swe.agents.memory.conversation_archive import ConversationArchiveStore
-from swe.app.conversation_storage.shares import ShareStorage
 from swe.app.runner.session import SafeJSONSession
 from tests.integrated.conversation_storage.conftest import (
     SQL_ROOT,
@@ -156,26 +155,6 @@ async def test_complete_legacy_import_reentry_and_semantics(
             dry_run=False,
         )
     await prepare_archives(source, spec, source_version)
-    (source / "share.json").write_text(
-        json.dumps(
-            {"chat_name": "old", "messages": [], "future": "share-module"},
-        ),
-    )
-    shares = [
-        {
-            "token": "permanent",
-            "chat_id": "deleted-original",
-            "creator_id": "alice",
-            "service_unit_id": "schema-test-service",
-            "tenant_id": "tenant",
-            "snapshot_key": "original.json",
-            "created_at": "2026-10-30T00:00:00Z",
-            "access_count": 17,
-            "last_access_at": None,
-            "snapshot_workspace_index": 0,
-            "snapshot_path": "share.json",
-        },
-    ]
     before = {
         str(p.relative_to(source)): p.read_bytes()
         for p in source.rglob("*")
@@ -199,7 +178,6 @@ async def test_complete_legacy_import_reentry_and_semantics(
     report = inventory(
         [WorkspaceMapping(scope, source)],
         boundary,
-        shares=shares,
     )
     assert report["ready"], report["blockers"]
     state = report["workspaces"][0]["sessions"][0]["legacy"]["state"]
@@ -249,7 +227,6 @@ async def test_complete_legacy_import_reentry_and_semantics(
             "swe_conversation_sessions",
             "swe_conversation_chats",
             "swe_conversation_turns",
-            "swe_conversation_messages",
             "swe_conversation_publications",
             "swe_chat_shares",
         )
@@ -267,7 +244,6 @@ async def test_complete_legacy_import_reentry_and_semantics(
             "swe_conversation_sessions",
             "swe_conversation_chats",
             "swe_conversation_turns",
-            "swe_conversation_messages",
             "swe_conversation_publications",
             "swe_chat_shares",
         )
@@ -275,11 +251,6 @@ async def test_complete_legacy_import_reentry_and_semantics(
     result = await verify_import(db, bundles, manifest, report, target)
     assert result["passed"], result["blockers"]
     await reject_tampered_reentry(importer, report, db, manifest)
-    record = await db.fetch_one(
-        "SELECT access_count,last_access_at FROM swe_chat_shares WHERE token=%s",
-        ("permanent",),
-    )
-    assert record == {"access_count": 17, "last_access_at": None}
     adapter = MySQLSessionAdapter(db, scope, bundles, channel="console")
     assert await adapter.get_session_state_dict("full_session_id", "") == state
     assert (
@@ -304,20 +275,6 @@ async def test_complete_legacy_import_reentry_and_semantics(
     assert {"duplicate", "old-question"} <= {
         m.metadata.get("original_id", m.id) for m in history.messages
     }
-    assert (
-        await ShareStorage(
-            db,
-            bundles,
-            service_unit_id="schema-test-service",
-        ).get_snapshot("permanent")
-        == report["shares"][0]["snapshot"]
-    )
-    assert (
-        await db.fetch_one(
-            "SELECT access_count FROM swe_chat_shares WHERE token=%s",
-            ("permanent",),
-        )
-    )["access_count"] == 18
     assert before == {
         str(p.relative_to(source)): p.read_bytes()
         for p in source.rglob("*")
@@ -432,7 +389,7 @@ async def test_coordinated_two_service_import_keeps_same_identity_nas_separate(
         b"service-one",
         b"service-two",
     }
-    for table in ("turns", "messages"):
+    for table in ("turns", "publications"):
         counts = await db.fetch_all(
             "SELECT service_unit_key,COUNT(*) AS n FROM swe_conversation_"
             + table

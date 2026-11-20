@@ -4,90 +4,6 @@
 from .parallel import MigrationCoordinator
 
 
-class MessageEvidence:
-    """Detached rows; no database, transaction, or executable SQL capability."""
-
-    def __init__(self, sessions, archives, publications):
-        self.sessions = sessions
-        self.archives = archives
-        self.publications = publications
-
-    async def fetch_all(self, query, params=None):
-        if query == (
-            "SELECT * FROM swe_conversation_messages WHERE session_id=%s "
-            "AND layer<>%s ORDER BY session_order"
-        ):
-            return self.sessions[params[0]]
-        if query == (
-            "SELECT * FROM swe_conversation_messages WHERE archive_chat_id=%s "
-            "ORDER BY archive_order"
-        ):
-            return self.archives[params[0]]
-        prefix = "SELECT * FROM swe_conversation_publications WHERE id IN ("
-        if query.startswith(prefix):
-            return [
-                self.publications[key]
-                for key in params
-                if key in self.publications
-            ]
-        raise RuntimeError("unsupported detached message evidence lookup")
-
-
-async def collect_message_evidence(
-    database,
-    manifest,
-    workspace,
-    *,
-    memory_bytes,
-):
-    sessions = {}
-    archives = {}
-    remaining = memory_bytes // 16384
-    assignments = manifest.data["assignments"]
-    for session in workspace["sessions"]:
-        sid = assignments["session"][session["position"]]["target_id"]
-        sessions[sid] = await database.fetch_all(
-            "SELECT * FROM swe_conversation_messages WHERE session_id=%s "
-            "AND layer<>%s ORDER BY session_order LIMIT %s",
-            (sid, "archive", remaining + 1),
-        )
-        remaining -= len(sessions[sid])
-        if remaining < 0:
-            raise ValueError(
-                "workspace SQL evidence exceeds migration memory allowance",
-            )
-    for chat in workspace["chats"]:
-        cid = assignments["chat"][chat["position"]]["target_id"]
-        archives[cid] = await database.fetch_all(
-            "SELECT * FROM swe_conversation_messages WHERE archive_chat_id=%s "
-            "ORDER BY archive_order LIMIT %s",
-            (cid, remaining + 1),
-        )
-        remaining -= len(archives[cid])
-        if remaining < 0:
-            raise ValueError(
-                "workspace SQL evidence exceeds migration memory allowance",
-            )
-    identifiers = sorted(
-        {
-            row["publication_id"]
-            for rows in (*sessions.values(), *archives.values())
-            for row in rows
-        },
-    )
-    publications = {}
-    for start in range(0, len(identifiers), 128):
-        chunk = identifiers[start : start + 128]
-        rows = await database.fetch_all(
-            "SELECT id,service_unit_key,tenant_key,source_key,agent_key,scope_kind,operation_key,relative_path,byte_length FROM swe_conversation_publications WHERE id IN ("
-            + ",".join(["%s"] * len(chunk))
-            + ") AND state='committed' AND gc_state='live'",
-            tuple(chunk),
-        )
-        publications.update((row["id"], row) for row in rows)
-    return MessageEvidence(sessions, archives, publications)
-
-
 async def verify_workspace_messages(
     database,
     stores,
@@ -111,17 +27,11 @@ async def verify_workspace_messages(
     results = {}
 
     async def prepare(index):
-        workspace = inventory["workspaces"][index]
-        return await collect_message_evidence(
-            database,
-            manifest,
-            workspace,
-            memory_bytes=memory_bytes,
-        )
+        return None
 
     async def check(index, request):
         workspace = inventory["workspaces"][index]
-        evidence = await request("collect_workspace_messages", index)
+        await request("collect_workspace_messages", index)
         bundles = stores[workspace["scope"][0]]
         local = {"checked": [], "blockers": []}
         for session in workspace["sessions"]:
@@ -132,8 +42,9 @@ async def verify_workspace_messages(
                 local,
                 session["position"],
                 _verify_session_messages(
-                    evidence,
+                    database,
                     bundles,
+                    manifest,
                     workspace,
                     session,
                     sid,
@@ -149,7 +60,7 @@ async def verify_workspace_messages(
                 local,
                 chat["position"],
                 _verify_archive_rows(
-                    evidence,
+                    database,
                     bundles,
                     manifest,
                     chat,

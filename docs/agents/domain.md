@@ -10,17 +10,24 @@
 文件不存在时直接继续，不主动要求创建。
 由 domain-modeling 在术语或决策明确后按需补充。
 
-## File structure
+## Layout
 
-采用 single-context：根目录维护一份 `GLOSSARY.md`，
-架构决策统一存放于 `docs/adr/`。
+本仓库使用单上下文布局：
 
-## Use the glossary's vocabulary
+- 领域术语：根目录 `GLOSSARY.md`。
+- 架构决策：`docs/adr/`。
 
-事项标题、重构建议、假设和测试名称应使用词汇表定义的术语，
-避免使用词汇表明确排除的近义词。
-遇到缺失术语时，先检查是否偏离项目语言；确有缺口则记录给
-domain-modeling 处理。
+现有 `CONTEXT.md` 可保留用于历史兼容，但新领域定义统一写入
+`GLOSSARY.md`；两者同时存在时不得静默选择冲突定义。
+
+## Consumer rules
+
+- 分析代码前，阅读与任务相关的领域术语和 ADR。
+- 文档不存在时继续执行，不预先创建空术语表。
+- 在 spec、issue 和实现中使用领域文档定义的术语，避免使用词汇表
+  明确排除的近义词。
+- 与既有 ADR 冲突时明确指出对应 ADR 和重新讨论的理由，不静默覆盖。
+- 术语存在实际缺口时，先检查是否偏离项目语言，再通过领域建模补充。
 
 ## Flag ADR conflicts
 

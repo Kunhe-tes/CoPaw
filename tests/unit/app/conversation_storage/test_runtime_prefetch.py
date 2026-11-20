@@ -4,13 +4,33 @@
 import asyncio
 import threading
 from io import BytesIO
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
 
+from swe.app.conversation_storage.bundle import HEADER
 from swe.app.conversation_storage.migration import runtime_prefetch, readonly
 from swe.app.conversation_storage.migration.parallel import MigrationIO
 from swe.app.conversation_storage.errors import IntegrityError
+
+
+@contextmanager
+def _fake_reader(self, path, *, expected_length, index_allowance):
+    with self._open(path) as source:
+        header = HEADER.unpack(source.read(HEADER.size))
+    reservation = (header[2] + header[3]) * 16 + 4096
+    if reservation > index_allowance:
+        raise ValueError("runtime index exceeds workspace memory allowance")
+    index = self.inspect(path, expected_length=expected_length)
+    yield SimpleNamespace(
+        index=index,
+        index_reservation=reservation,
+        read_extents=lambda extents, **kwargs: tuple(
+            self.read_extent(path, block.offset, block.length)
+            for block in extents
+        ),
+    )
 
 
 @pytest.mark.parametrize("first_id", [0, 1])
@@ -53,12 +73,13 @@ async def test_runtime_prefetch_overlaps_nas_and_keeps_owner_and_pins(
             ]
 
     class Bundles:
+        open_reader = _fake_reader
         root = "/cache"
 
         @staticmethod
         def _open(_path):
             return BytesIO(
-                runtime_prefetch.HEADER.pack(b"fakehead", 1, 1, 1, 4),
+                HEADER.pack(b"fakehead", 1, 1, 1, 4),
             )
 
         @staticmethod
@@ -108,14 +129,16 @@ async def test_runtime_prefetch_overlaps_nas_and_keeps_owner_and_pins(
     assert not pinned
 
 
-async def test_runtime_prefetch_budget_fails_before_body_read():
+async def test_runtime_prefetch_reads_body_without_memory_budget_rejection():
     class Bundles:
+        open_reader = _fake_reader
         root = "/unused"
+        unbounded = True
 
         @staticmethod
         def _open(_path):
             return BytesIO(
-                runtime_prefetch.HEADER.pack(b"fakehead", 1, 1, 1, 100),
+                HEADER.pack(b"fakehead", 1, 1, 1, 100),
             )
 
         @staticmethod
@@ -130,32 +153,52 @@ async def test_runtime_prefetch_budget_fails_before_body_read():
 
         @staticmethod
         def read_extent(*_args, **_kwargs):
-            pytest.fail("budget must fail before allocation")
+            return b"x" * 100
 
     async with MigrationIO(1) as io:
-        with pytest.raises(ValueError, match="memory allowance"):
-            await runtime_prefetch._prefetch(
-                Bundles(),
-                [{"relative_path": "one", "byte_length": 100}],
-                io,
-                10,
-            )
+        cache = await runtime_prefetch._prefetch(
+            Bundles(),
+            [{"relative_path": "one", "byte_length": 100}],
+            io,
+            10,
+        )
+    assert cache.blocks["one"] == [(0, b"x" * 100)]
 
 
-def test_runtime_index_budget_precedes_json_decoder():
+def test_runtime_index_read_ignores_workspace_memory_budget():
     class Bundles:
+        open_reader = _fake_reader
+        unbounded = True
+
         @staticmethod
         def _open(_path):
             return BytesIO(
-                runtime_prefetch.HEADER.pack(b"fakehead", 1, 4096, 4096, 0),
+                HEADER.pack(b"fakehead", 1, 4096, 4096, 0),
             )
 
         @staticmethod
         def inspect(*_args, **_kwargs):
-            pytest.fail("JSON decoder must not run before budget check")
+            return SimpleNamespace(blocks={})
 
-    with pytest.raises(ValueError, match="index exceeds.*memory allowance"):
-        runtime_prefetch._inspect_bounded(Bundles(), "one", 8192, 65536)
+    index, blocks, _reservation = runtime_prefetch._read_bounded(
+        Bundles(),
+        "one",
+        8192,
+        1,
+    )
+    assert index.blocks == {}
+    assert blocks == []
+
+    class BoundedBundles(Bundles):
+        unbounded = False
+
+    with pytest.raises(ValueError, match="memory allowance"):
+        runtime_prefetch._read_bounded(
+            BoundedBundles(),
+            "one",
+            8192,
+            1,
+        )
 
 
 @pytest.mark.parametrize("kind", ["workspace", "share"])
@@ -390,12 +433,13 @@ async def test_runtime_prefetch_repeated_cancel_drains_before_release(
             return [{"id": 1, "relative_path": "one", "byte_length": 20}]
 
     class Bundles:
+        open_reader = _fake_reader
         root = "/unused"
 
         @staticmethod
         def _open(_path):
             return BytesIO(
-                runtime_prefetch.HEADER.pack(b"fakehead", 1, 1, 1, 4),
+                HEADER.pack(b"fakehead", 1, 1, 1, 4),
             )
 
         @staticmethod

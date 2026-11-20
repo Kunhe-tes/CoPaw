@@ -4,6 +4,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime
 import asyncio
+import json
 import threading
 from unittest.mock import AsyncMock
 
@@ -168,6 +169,17 @@ class PublicationDatabase:
 
     async def fetch_all(self, query, params=None):
         self.queries.append(query)
+        if " WHERE id IN (" in query and query.endswith(
+            "ORDER BY id FOR UPDATE",
+        ):
+            candidates = {
+                "sessions": self.session,
+                "chats": self.chat,
+                "turns": self.turn,
+            }
+            for table, row in candidates.items():
+                if "swe_conversation_" + table in query:
+                    return [deepcopy(row)] if row["id"] in params else []
         if "service_unit_key=%s AND id IN (" in query:
             assert query.count("%s") == len(params)
             if "swe_conversation_messages" in query:
@@ -931,7 +943,7 @@ async def test_fenced_terminal_reconciliation_installs_original_message_and_root
         turn_install=TurnInstall("terminal", history_status="completed"),
     )
     await service.reserve(operation, plan)
-    await service.write_bundle(
+    index = await service.write_bundle(
         operation.operation_key,
         [
             BundleBlock("root", "recovery", b"{}"),
@@ -941,6 +953,7 @@ async def test_fenced_terminal_reconciliation_installs_original_message_and_root
                 b'{"id":"answer","role":"assistant","content":"done"}',
             ),
         ],
+        plan=plan,
     )
     result = await service.reconcile(
         operation.operation_key,
@@ -948,9 +961,23 @@ async def test_fenced_terminal_reconciliation_installs_original_message_and_root
         expected_generation=1,
     )
     assert result["state"] == "committed"
-    assert len(db.messages) == 1
     assert db.session["recovery_publication_id"] == result["id"]
     assert db.session["state_revision"] == 1
+    root = json.loads(
+        service.bundles.read_extent(
+            index.relative_path,
+            db.session["recovery_offset"],
+            db.session["recovery_length"],
+            expected_length=index.byte_length,
+        ),
+    )
+    assert [
+        (entry["raw_id"], entry["sequence"])
+        for entry in root["message_directory"]
+    ] == [
+        ("answer", 1),
+    ]
+    assert not db.messages
 
 
 async def test_commit_preserves_imported_committed_at(tmp_path):

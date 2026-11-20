@@ -161,7 +161,7 @@ class OfflineJob:
             "files": len(inventory["files"]),
             "workspaces": len(inventory["workspaces"]),
             "blockers": inventory["blockers"],
-            "next": "explicit --apply required for mutations; verify always reruns full semantic checks",
+            "next": "explicit --apply required for mutations; verify performs a read-only structural check",
         }
         if operation == "inspect" and installer.receipt_path.exists():
             from swe.app.conversation_storage.chat_mutations import (
@@ -314,6 +314,7 @@ class OfflineJob:
                     readonly,
                     inventory,
                     self.target,
+                    verification_level="fast",
                 )
             return await installer.install(staging, bundles, inventory)
         finally:
@@ -342,6 +343,7 @@ def _command(
     io_workers=4,
     memory_budget_mib=512,
     work_dir=None,
+    full_audit=False,
 ):
     try:
         from swe.app.conversation_storage.chat_mutations import (
@@ -370,6 +372,7 @@ def _command(
                 io_workers=io_workers,
                 memory_budget_mib=memory_budget_mib,
                 work_dir=work_dir,
+                full_audit=full_audit,
             )
             return
         job = OfflineJob(path)
@@ -451,6 +454,7 @@ def _register(operation, mutable=False):
             options.get("io_workers", 4),
             options.get("memory_budget_mib", 512),
             options.get("work_dir"),
+            options.get("full_audit", False),
         )
 
     if mutable:
@@ -485,6 +489,12 @@ def _register(operation, mutable=False):
             type=click.IntRange(1, 32),
             default=4,
             show_default=True,
+        )(command)
+    if operation == "verify":
+        command = click.option(
+            "--full-audit",
+            is_flag=True,
+            help="Run the optional body-level semantic audit.",
         )(command)
     conversation_storage_group.add_command(command)
 

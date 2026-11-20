@@ -5,8 +5,6 @@ from dataclasses import asdict, dataclass, fields
 
 from .chat_mutations import utc_datetime
 from .errors import ConflictError, IntegrityError
-from .reference_queries import ReferenceQuery, fetch_reference_rows
-from .collection_queries import CollectionQuery, update_collection
 from .identity import identity_bytes
 
 
@@ -132,24 +130,8 @@ async def install_archive(
     checkpoint=None,
     events=None,
     reset=None,
-    prune_ids=(),
 ):
     session, chat, _ = associations
-    if (
-        archive is None
-        and checkpoint is None
-        and events is None
-        and reset is None
-    ):
-        if session is None:
-            raise IntegrityError("Session pruning requires a locked Session")
-        await _prune(
-            db,
-            request,
-            prune_ids,
-            context_epoch=session["context_epoch"],
-        )
-        return
     _validate_epoch(request, session, chat, reset)
     if reset is not None:
         if any(value is not None for value in (archive, checkpoint, events)):
@@ -200,7 +182,6 @@ async def install_archive(
             "UPDATE swe_conversation_chats SET next_boundary_order=next_boundary_order+1 WHERE id=%s",
             (request.chat_id,),
         )
-    await _prune(db, request, prune_ids)
 
 
 def _checkpoint_values(plan, chat, session, index, event_high):
@@ -223,7 +204,7 @@ def _checkpoint_values(plan, chat, session, index, event_high):
 
 
 def _archive_values(plan, chat, index):
-    extent = _extent(index, plan.block_name, "archive")
+    extent = _extent(index, plan.block_name, "archive_manifest")
     return {
         "boundary_key": identity_bytes(plan.boundary_key, 128),
         "boundary_order": chat["next_boundary_order"],
@@ -252,46 +233,7 @@ def _archive_values(plan, chat, index):
     }
 
 
-async def _prune(db, request, prune_ids, *, context_epoch=None):
-    if not prune_ids:
-        return
-    if len(prune_ids) > 4096 or any(
-        type(value) is not int or value <= 0 for value in prune_ids
-    ):
-        raise ValueError("prune IDs must be a bounded positive set")
-    prune_ids = tuple(sorted(set(prune_ids)))
-    current = await fetch_reference_rows(
-        db,
-        ReferenceQuery.MESSAGE_PRUNE,
-        prune_ids,
-        request.scope.sql_values[0],
-    )
-    rows = list(current.values())
-    if len(rows) != len(set(prune_ids)) or any(
-        row["service_unit_key"] != request.scope.sql_values[0]
-        or row["session_id"] != request.session_id
-        or row["layer"] == "archive"
-        or (
-            context_epoch is not None and row["context_epoch"] != context_epoch
-        )
-        for row in rows
-    ):
-        raise IntegrityError(
-            "pruned occurrence does not belong to current Session",
-        )
-    await update_collection(
-        db,
-        CollectionQuery.PRUNE,
-        prune_ids,
-        (request.scope.sql_values[0],),
-    )
-
-
 async def _reset(db, request, session, chat):
-    await db.execute(
-        "UPDATE swe_conversation_messages SET in_context=0,current_visible=0 WHERE session_id=%s AND layer<>'archive'",
-        (request.session_id,),
-    )
     await db.execute(
         "UPDATE swe_conversation_sessions SET context_epoch=context_epoch+1,context_usage_invalid=1 WHERE id=%s",
         (request.session_id,),

@@ -12,8 +12,12 @@ from .freshness import changed_source, tenant_key
 from .in_place_source import shared_service_roots
 from .parallel import MigrationCoordinator, MigrationResources
 from .progress import current_progress
+from .source_inputs import (
+    SourceInputInvalid,
+    safe_input_entries,
+    session_input_roots,
+)
 from .spool import MigrationCapacityError
-from .source_inputs import safe_input_entries, session_input_roots
 
 
 @dataclass(frozen=True)
@@ -72,11 +76,13 @@ async def spool_workspaces(
 
         async def parse(index, _request):
             async with shared_resources.reserve() as allowance:
-                source_bytes = await io.call(
-                    _preflight_workspace,
-                    data["workspaces"][index],
-                    allowance,
-                )
+                source_bytes = 0
+                if data.get("source_binding_storage") != "manifest-v1":
+                    source_bytes = await io.call(
+                        _preflight_workspace,
+                        data["workspaces"][index],
+                        allowance,
+                    )
                 result = await io.call(inventory_workspace, data, index)
                 record = await io.call(spool.write, index, result)
                 workspace = result["workspaces"][0]
@@ -149,7 +155,7 @@ def _shared_freshness(data):
     }
 
 
-def _preflight_workspace(workspace, allowance):
+def _preflight_workspace(workspace, allowance, *, require_readonly=False):
     """Bound raw inputs before legacy parsers allocate decoded object graphs."""
     root = Path(workspace["root"])
     total = 0
@@ -172,7 +178,19 @@ def _preflight_workspace(workspace, allowance):
         max_total_file_bytes=source_limit,
     ):
         if not path.is_file():
+            if (
+                require_readonly
+                and path != root
+                and path.stat().st_mode & 0o222
+            ):
+                raise SourceInputInvalid(
+                    "conversation input directories must be read-only",
+                )
             continue
+        if require_readonly and path.stat().st_mode & 0o222:
+            raise SourceInputInvalid(
+                "conversation input files must be read-only",
+            )
         size = path.stat().st_size
         if size > MAX_READ_BYTES:
             raise MigrationCapacityError(

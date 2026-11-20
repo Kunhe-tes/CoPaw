@@ -8,9 +8,11 @@ semantic comparison and rollback export rather than display-only conversion.
 
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 import shutil
 import tempfile
+from uuid import NAMESPACE_URL, uuid5
 
 from agentscope.message import Msg
 
@@ -45,9 +47,21 @@ def safe_files(root):
 
 
 @contextmanager
-def working_copy(root, *, relative_roots):
+def working_copy(
+    root,
+    *,
+    relative_roots,
+    trusted_root=None,
+    allow_in_root_symlinks=False,
+):
     root = Path(root).absolute()
-    paths = safe_input_entries(root, relative_roots)
+    paths = safe_input_entries(
+        root,
+        relative_roots,
+        trusted_root=trusted_root or root,
+        allow_in_root_symlinks=allow_in_root_symlinks,
+        skip_unselected_unsafe=allow_in_root_symlinks,
+    )
     with tempfile.TemporaryDirectory(
         prefix="conversation-legacy-",
     ) as directory:
@@ -67,9 +81,20 @@ def _json(path):
     return load_metadata_json(path.read_text(encoding="utf-8"))
 
 
-def read_session(path):
+def read_session(
+    path,
+    *,
+    trusted_root=None,
+    allow_in_root_symlinks=False,
+):
     path = Path(path).absolute()
-    safe_input_entries(path.parent, (path.name,))
+    safe_input_entries(
+        path.parent,
+        (path.name,),
+        trusted_root=trusted_root or path.parent,
+        allow_in_root_symlinks=allow_in_root_symlinks,
+        skip_unselected_unsafe=allow_in_root_symlinks,
+    )
     _, committed = _read_json_state_sync(str(path), allow_not_exist=False)
     if committed.get("schema_version") != 3:
         return {
@@ -83,7 +108,12 @@ def read_session(path):
         TurnLedger(path).directory(committed).relative_to(path.parent)
     )
     relative_roots = (path.name, generation_root)
-    with working_copy(path.parent, relative_roots=relative_roots) as root:
+    with working_copy(
+        path.parent,
+        relative_roots=relative_roots,
+        trusted_root=trusted_root or path.parent,
+        allow_in_root_symlinks=allow_in_root_symlinks,
+    ) as root:
         copied = root / path.name
         _, state = _read_json_state_sync(str(copied), allow_not_exist=False)
         original = deepcopy(state)
@@ -105,7 +135,12 @@ def read_session(path):
             "recovery_actions": actions,
             "files": [
                 str(item.relative_to(root))
-                for item in safe_input_entries(root, relative_roots)
+                for item in safe_input_entries(
+                    root,
+                    relative_roots,
+                    allow_in_root_symlinks=allow_in_root_symlinks,
+                    skip_unselected_unsafe=allow_in_root_symlinks,
+                )
                 if item.is_file()
             ],
         }
@@ -189,6 +224,14 @@ def _v2_epochs(chat_dir, chat_id):
 def _v1_epoch(store, chat_dir, chat_id):
     current = store._read_current_epoch(chat_dir)
     record = store._read_checkpoint_locked(chat_id, current)
+    if not (chat_dir / "checkpoint.json").exists():
+        record = replace(
+            record,
+            checkpoint_id=str(
+                uuid5(NAMESPACE_URL, f"legacy-checkpoint:{chat_id}:{current}"),
+            ),
+            updated_at="1970-01-01T00:00:00+00:00",
+        )
     events = _strict_events(chat_dir / "events.jsonl")
     manifest = (
         _json(chat_dir / "manifest.json")
@@ -253,12 +296,20 @@ def _validate_epoch_history(epochs, current):
         )
 
 
-def read_archive(dialog_root, chat_id):
+def read_archive(
+    dialog_root,
+    chat_id,
+    *,
+    trusted_root=None,
+    allow_in_root_symlinks=False,
+):
     ConversationArchiveStore._validate_chat_id(chat_id)
 
     with working_copy(
         dialog_root,
         relative_roots=(chat_id, Path(".deleted") / chat_id),
+        trusted_root=trusted_root or dialog_root,
+        allow_in_root_symlinks=allow_in_root_symlinks,
     ) as copied:
         store = ConversationArchiveStore(
             copied,

@@ -379,14 +379,14 @@ async def test_turn_recovery_candidate_reads_and_owner_revalidates(
 
     if scenario == "cancel":
         entered, release = threading.Event(), threading.Event()
-        original_inspect = store.bundles.inspect
+        original_inspect = store.bundles.open_reader
 
         def delayed_inspect(*args, **kwargs):
             entered.set()
             assert release.wait(3)
             return original_inspect(*args, **kwargs)
 
-        store.bundles.inspect = delayed_inspect
+        store.bundles.open_reader = delayed_inspect
         async with MigrationIO(1) as io:
             reading = asyncio.create_task(
                 store._write_stages.read_recovery(candidate, io),
@@ -431,6 +431,7 @@ async def test_turn_recovery_candidate_reads_and_owner_revalidates(
         if scenario == "different"
         else b'{"status":"done"}'
     )
+    store.bundles.open_reader = _recovery_reader(store)
     async with MigrationIO(1) as io:
         evidence = await store._write_stages.read_recovery(candidate, io)
     store.bundles = ForbiddenSurface()
@@ -461,3 +462,17 @@ async def test_turn_recovery_candidate_reads_and_owner_revalidates(
     retentions.finish_reader.assert_awaited_once_with(batch)
     assert not store._write_stages.recoveries
     assert not store._write_stages.recovery_evidence
+
+
+def _recovery_reader(store):
+    """将故障注入适配到操作级读取器，保留原测试的正文场景。"""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def open_reader(path, **kwargs):
+        yield SimpleNamespace(
+            index=store.bundles.inspect(path),
+            read_extents=lambda extents: (store.bundles.read_extent(path),),
+        )
+
+    return open_reader

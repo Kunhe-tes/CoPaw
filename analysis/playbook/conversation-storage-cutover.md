@@ -1,6 +1,41 @@
 # Conversation MySQL/NAS 离线切换
 
-适用：旧文件实现 → 七张 MySQL 元数据表及原 NAS 上的不可变 bundle。整个过程是一次连续停机；不做双写，不启新 workspace，不把 `SWE_DB_NAME` 改为源快照，也不备份/恢复整个共享业务库。
+## 当前迁移入口
+
+新版会话存储使用 Chat、Session、Turn、Publication 和 Retention 五张 MySQL 元数据表。恢复快照和归档 bundle 保存在 NAS；消息正文、顺序、可见性及重复消息 ID 的出现位置由 bundle 记录。备份与回收沿发布指针和依赖记录追踪文件。
+
+DBA 使用当前分支的 SQL 脚本准备空目标库，服务和 CLI 使用同一版本。先用 `prepare` 登记 workspace 与 source，然后对同一 manifest 执行 `migrate --apply`。导入器读取旧 `chats.json`、`sessions` 和 `dialog`。中断后用原 manifest 续跑，已发布 source 会跳过。历史分享处于迁移排除范围。
+
+### 隔离环境实测（2026-11-20）
+
+远端隔离 MySQL、测试机本地 bundle 目录、3 个 source、3 个 workspace。样本包含 257 条旧归档消息及一个 128 条消息的 Session。导入保留 1 个归档边界，形成 3 个归档数据块，完整审计按页逐条比对原文。远端链路当天的数据库等待明显高于此前本机记录，因此耗时用于同一版本的 SQL 形态与相对分析，不能替代生产容量测试。
+
+| 命令阶段 | 耗时（秒） | SQL 语句尝试数 | 已提交事务 |
+|---|---:|---:|---:|
+| `prepare` | 5.15 | 11 | 0 |
+| `import --apply` | 291.31 | 1,191 | 164 |
+| fast `verify` | 34.34 | 90 | 4 |
+| `verify --full-audit` | 475.22 | 2,009 | 162 |
+| `migrate --apply` 发布已导入的 source | 139.48 | 379 | 79 |
+| 同一 manifest 重跑 | 5.98 | 13 | 1 |
+
+业务元数据包含 3 个 Session、3 个 Chat 和 15 条 Publication。迁移控制表包含 15 条批次票据、15 条发布票据及 7 条保护票据，消息票据为 0。另一个实库用例在两个 source 发布后执行 DBA finalize，再使用同一 manifest 重跑，CLI 返回退出码 0 和 `ready`。
+
+10k workspace、2 个 source、500 个有数据的 workspace、1 worker 的容量样本未完成。dataset、preflight 分别约 24.42 秒、28.94 秒；进入 import-and-resume 后运行 2,094.34 秒，在远端数据库单次操作超过 30 秒时抛出 `Database operation timed out`。超时前记录约 17,754 次 SQL cursor 调用（累计 1,577.35 秒）、247 次 bundle publish 和 247 次 inspect；进程 RSS 峰值约 573 MiB，spool 峰值约 18.8 MiB。该结果说明 10k、1 worker 路径没有在本次测试窗口内完成，不能作为容量验收通过。
+
+迁移只读审计确认以下风险仍待容量验证：
+
+- `manifest-v1` 新版路径绕过 workspace 输入预检；旧归档和 checkpoint events 仍通过 `read_text().splitlines()` 整文件载入内存，再保留全部消息。
+- 默认预检启用时，512 MiB 内存预算按 4 个 worker 切分后，每个 workspace 可分配约 8 MiB，大型 workspace 可能过早被拒绝。
+- 完整审计和快速校验按 archive chunk 查询 Publication；完整审计还会逐 bundle inspect/read，形成 chunk 数量相关 SQL 和串行 NAS I/O。
+- source 会经过 fingerprint、spooled inventory recheck 和逐 Chat 临时目录复制等多次扫描；消息分块先编码计算大小，写入时再次编码。
+- SQL 由单一 owner task 串行执行。代表性样本队列峰值很低，但 10k 单 worker 的数据库超时表明仍需在生产链路评估延迟、重试和超时边界。
+
+发布前还应以单 Chat 100k 消息或数 GB 归档覆盖 100 个以上 chunk，记录 parser/spool RSS、临时磁盘、SQL 行数、bundle open/read 次数和分页耗时。
+
+## 历史流程与故障记录
+
+下文保留旧版 staging 安装、回退和故障排查记录。旧版的表数、分享导入及安装命令适用于对应历史版本。
 
 ## 启动期循环导入（2026-11-13）
 

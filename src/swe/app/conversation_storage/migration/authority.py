@@ -73,6 +73,31 @@ def validate_receipt(receipt):
     return receipt
 
 
+def validate_source_verification(value):
+    """Validate level metadata while accepting pre-level source receipts."""
+    if isinstance(value, str):
+        value = _json(value, "source verification")
+    if isinstance(value, dict) and {
+        "authority",
+        "verification_level",
+    }.issubset(value):
+        level = value["verification_level"]
+        if level not in ("fast", "full"):
+            raise IntegrityError("invalid source verification level")
+        results = value.get("verification_results", {})
+        if not isinstance(results, dict) or any(
+            key not in ("fast", "full")
+            or not isinstance(result, dict)
+            or type(result.get("passed")) is not bool
+            for key, result in results.items()
+        ):
+            raise IntegrityError("invalid source verification results")
+        if results and results.get("fast", {}).get("passed") is not True:
+            raise IntegrityError("source fast verification did not pass")
+        return validate_receipt(value["authority"]), level
+    return validate_receipt(value), "full"
+
+
 async def _job(database, migration_id):
     rows = await database.fetch_all(
         "SELECT migration_id,state,target_binding_text,verification_text "

@@ -135,30 +135,19 @@ async def test_message_occurrence_reads_one_exact_saved_row(tmp_path):
     store = history(tmp_path)
     chat = {"id": 7, "session_id": 11}
     row = {
-        "id": 42,
-        "service_unit_key": b"schema-test-service",
-        "session_id": 11,
-        "layer": "memory",
-        "current_visible": 1,
-        "deleted_at": None,
-        "publication_id": 99,
         "source_msg_key": b"message-1",
         "source_occurrence_no": 3,
+        "message": {"id": "message-1", "role": "user"},
     }
     store._chat = AsyncMock(return_value=chat)
-    store.db = SimpleNamespace(
-        fetch_all=AsyncMock(return_value=[row]),
-        fetch_one=AsyncMock(return_value={"id": 42}),
+    store._find_message_occurrence = AsyncMock(
+        return_value=("available", row),
     )
-    store._pins = AsyncMock(return_value=[])
-    store._validate_snapshot = AsyncMock()
-    store._validate_message_occurrence = AsyncMock()
+    store._pins = AsyncMock(return_value=["batch"])
     store.chats._hydrate = AsyncMock(
         return_value=[ChatSpec(id="chat", session_id="s", user_id="alice")],
     )
-    store._payloads = AsyncMock(
-        return_value=[{"id": "message-1", "role": "user"}],
-    )
+    store.chats._finish_batches = AsyncMock()
     from swe.app.runner.models import ChatMessage
 
     store._convert = AsyncMock(
@@ -176,7 +165,6 @@ async def test_message_occurrence_reads_one_exact_saved_row(tmp_path):
             ),
         ],
     )
-    store._finish = AsyncMock()
 
     result = await store.message_occurrence(
         "chat",
@@ -188,29 +176,33 @@ async def test_message_occurrence_reads_one_exact_saved_row(tmp_path):
     assert result["message"]["id"] == "message-1"
     assert result["message"]["content"][0]["text"] == "safe"
     assert "console_hidden_context_v1" not in result["message"]["metadata"]
-    assert store.db.fetch_all.await_args.args[1][-1] == 3
-    assert store._validate_message_occurrence.await_count == 2
+    store._find_message_occurrence.assert_awaited_once_with(
+        chat,
+        b"message-1",
+        3,
+    )
+    store.chats._finish_batches.assert_awaited_once_with(["batch"])
 
 
-async def test_message_occurrence_rejects_oversize_extent_before_read(
+async def test_message_occurrence_rejects_oversize_payload_before_convert(
     tmp_path,
 ):
     store = history(tmp_path)
     row = {
-        "id": 42,
-        "byte_length": 1024,
-        "service_unit_key": b"schema-test-service",
+        "source_msg_key": b"message-1",
+        "source_occurrence_no": 0,
+        "message": {"id": "message-1", "content": "x" * 1024},
     }
     store._chat = AsyncMock(return_value={"id": 7, "session_id": 11})
-    store.db = SimpleNamespace(fetch_all=AsyncMock(return_value=[row]))
-    store._pins = AsyncMock(return_value=[])
-    store._validate_snapshot = AsyncMock()
-    store._validate_message_occurrence = AsyncMock()
+    store._find_message_occurrence = AsyncMock(
+        return_value=("available", row),
+    )
+    store._pins = AsyncMock(return_value=["batch"])
     store.chats._hydrate = AsyncMock(
         return_value=[ChatSpec(id="chat", session_id="s", user_id="alice")],
     )
-    store._payloads = AsyncMock()
-    store._finish = AsyncMock()
+    store.chats._finish_batches = AsyncMock()
+    store._convert = AsyncMock()
     authorized = []
 
     def authorize(chat):
@@ -224,53 +216,30 @@ async def test_message_occurrence_rejects_oversize_extent_before_read(
     )
 
     assert result == {"status": "truncated", "message": None}
-    assert len(authorized) == 2
-    assert store._validate_snapshot.await_count == 2
-    assert store._validate_message_occurrence.await_count == 2
-    store._payloads.assert_not_awaited()
-    store._finish.assert_awaited_once()
-
-
-async def test_oversize_occurrence_rechecks_visibility_after_chat_hydration(
-    tmp_path,
-):
-    store = history(tmp_path)
-    row = {"id": 42, "byte_length": 1024}
-    store._chat = AsyncMock(return_value={"id": 7, "session_id": 11})
-    store.db = SimpleNamespace(fetch_all=AsyncMock(return_value=[row]))
-    store._pins = AsyncMock(return_value=[])
-    store._validate_snapshot = AsyncMock()
-    store._validate_message_occurrence = AsyncMock(
-        side_effect=[None, RuntimeError("occurrence deleted")],
-    )
-    store.chats._hydrate = AsyncMock(
-        return_value=[ChatSpec(id="chat", session_id="s", user_id="alice")],
-    )
-    store._payloads = AsyncMock()
-    store._finish = AsyncMock()
-
-    with pytest.raises(RuntimeError, match="occurrence deleted"):
-        await store.message_occurrence("chat", "message-1", max_bytes=32)
-
-    store._payloads.assert_not_awaited()
-    store._finish.assert_awaited_once()
+    assert len(authorized) == 1
+    store._convert.assert_not_awaited()
+    store.chats._finish_batches.assert_awaited_once_with(["batch"])
 
 
 async def test_message_occurrence_authorizes_before_reporting_truncation(
     tmp_path,
 ):
     store = history(tmp_path)
-    row = {"id": 42, "byte_length": 1024}
+    row = {
+        "source_msg_key": b"message-1",
+        "source_occurrence_no": 0,
+        "message": {"id": "message-1", "content": "x" * 1024},
+    }
     store._chat = AsyncMock(return_value={"id": 7, "session_id": 11})
-    store.db = SimpleNamespace(fetch_all=AsyncMock(return_value=[row]))
-    store._pins = AsyncMock(return_value=[])
-    store._validate_snapshot = AsyncMock()
-    store._validate_message_occurrence = AsyncMock()
+    store._find_message_occurrence = AsyncMock(
+        return_value=("available", row),
+    )
+    store._pins = AsyncMock(return_value=["batch"])
     store.chats._hydrate = AsyncMock(
         return_value=[ChatSpec(id="chat", session_id="s", user_id="alice")],
     )
-    store._payloads = AsyncMock()
-    store._finish = AsyncMock()
+    store.chats._finish_batches = AsyncMock()
+    store._convert = AsyncMock()
 
     def deny(_chat):
         raise KeyError("not authorized")
@@ -282,24 +251,96 @@ async def test_message_occurrence_authorizes_before_reporting_truncation(
             max_bytes=32,
             authorize=deny,
         )
-    store._payloads.assert_not_awaited()
-    store._finish.assert_awaited_once()
+    store._convert.assert_not_awaited()
+    store.chats._finish_batches.assert_awaited_once_with(["batch"])
 
 
 @pytest.mark.parametrize(
-    ("rows", "expected"),
-    [([], "unavailable"), ([{"id": 1}, {"id": 2}], "unresolved")],
+    "expected",
+    ["unavailable", "unresolved"],
 )
 async def test_message_occurrence_does_not_guess_missing_or_duplicate_ids(
     tmp_path,
-    rows,
     expected,
 ):
     store = history(tmp_path)
     store._chat = AsyncMock(return_value={"id": 7, "session_id": 11})
-    store.db = SimpleNamespace(fetch_all=AsyncMock(return_value=rows))
+    store._find_message_occurrence = AsyncMock(
+        return_value=(expected, None),
+    )
     result = await store.message_occurrence("chat", "duplicate")
     assert result == {"status": expected, "message": None}
+
+
+async def test_message_occurrence_finds_exact_active_nas_directory_row(
+    tmp_path,
+):
+    store = history(tmp_path)
+    chat = {"id": 7, "session_id": 11}
+    row = {
+        "source_msg_key": b"duplicate",
+        "source_occurrence_no": 1,
+    }
+    store.reader.session_messages = AsyncMock(
+        return_value=[
+            {"source_msg_key": b"duplicate", "source_occurrence_no": 0},
+            row,
+        ],
+    )
+    store.db = SimpleNamespace(fetch_all=AsyncMock())
+
+    status, found = await store._find_message_occurrence(
+        chat,
+        b"duplicate",
+        1,
+    )
+
+    assert status == "available"
+    assert found is row
+    store.db.fetch_all.assert_not_awaited()
+
+
+async def test_message_occurrence_falls_back_to_archived_nas_directory(
+    tmp_path,
+    monkeypatch,
+):
+    store = history(tmp_path)
+    chat = {"id": 7, "session_id": 11}
+    boundary = {"id": 9, "archive_last_order": 3}
+    store.reader.session_messages = AsyncMock(return_value=[])
+    store.db = SimpleNamespace(
+        fetch_all=AsyncMock(return_value=[boundary]),
+    )
+    read = SimpleNamespace(
+        entries=(
+            {
+                "sequence": 3,
+                "raw_id": "archived",
+                "source_occurrence_no": 2,
+                "role": "assistant",
+                "message": {"id": "archived", "role": "assistant"},
+            },
+        ),
+        pins=SimpleNamespace(finish=AsyncMock()),
+    )
+    reader = AsyncMock(return_value=read)
+    monkeypatch.setattr(
+        "swe.app.conversation_storage.archive_bundle_reader."
+        "read_archive_bundle",
+        reader,
+    )
+
+    status, found = await store._find_message_occurrence(
+        chat,
+        b"archived",
+        2,
+    )
+
+    assert status == "available"
+    assert found["archive_order"] == 3
+    assert found["source_occurrence_no"] == 2
+    reader.assert_awaited_once()
+    read.pins.finish.assert_awaited_once()
 
 
 async def test_current_route_uses_injected_history_without_file_session(
@@ -374,7 +415,7 @@ async def test_tracing_overlay_binds_target_scope_and_restores_operator(
     store = history(tmp_path)
     spec = ChatSpec(id="chat", session_id="s", user_id="bob")
     store.chats._hydrate = AsyncMock(return_value=[spec])
-    store._validate_chat_row = AsyncMock()
+    store._validate_snapshot = AsyncMock()
     store._payloads = AsyncMock(return_value=[])
     store._finish = AsyncMock()
     seen = []
@@ -436,7 +477,7 @@ async def test_target_approval_overlay_uses_actual_scope_filter(
     store = history(tmp_path)
     spec = ChatSpec(id="chat", session_id="s", user_id="bob")
     store.chats._hydrate = AsyncMock(return_value=[spec])
-    store._validate_chat_row = AsyncMock()
+    store._validate_snapshot = AsyncMock()
     store._payloads = AsyncMock(return_value=[])
     store._finish = AsyncMock()
     message = ChatMessage(
@@ -477,7 +518,7 @@ async def test_shared_session_reset_during_payload_read(
     epoch = 4
 
     async def session_row(*args):
-        return {"context_epoch": epoch}
+        return {"context_epoch": epoch, "recovery_publication_id": None}
 
     store.db = SimpleNamespace(fetch_one=session_row)
     store._validate_chat_row = AsyncMock()
@@ -511,64 +552,37 @@ async def test_shared_session_reset_during_payload_read(
 
 
 @pytest.mark.parametrize("tracing", [False, True])
-@pytest.mark.parametrize("mutation", ["compact", "recovery_prune"])
-async def test_shared_session_prune_during_payload_read(
+@pytest.mark.parametrize(
+    "change",
+    [{"state_revision": 10}, {"recovery_publication_id": 111}],
+    ids=["revision", "recovery-pointer"],
+)
+async def test_shared_session_publication_changes_during_payload_read(
     tmp_path,
     monkeypatch,
     tracing,
-    mutation,
+    change,
 ):
-    from swe.app.conversation_storage import history as history_module
-    from swe.app.conversation_storage import archive as archive_module
     from swe.app.conversation_storage.history import HistorySnapshot
     from swe.app.conversation_storage.errors import ConflictError
 
     store = history(tmp_path)
-    visible = True
-
-    async def query(database, query, ids, params):
-        assert list(ids) == [12]
-        return [{"id": 12}] if visible else []
-
-    monkeypatch.setattr(history_module, "query_collection", query)
-    store.db = SimpleNamespace(
-        fetch_one=AsyncMock(return_value={"context_epoch": 4}),
-    )
+    session = {
+        "context_epoch": 4,
+        "state_revision": 9,
+        "recovery_publication_id": 110,
+    }
+    store.db = SimpleNamespace(fetch_one=AsyncMock(return_value=session))
     store._validate_chat_row = AsyncMock()
     store.chats._hydrate = AsyncMock(
         return_value=[ChatSpec(id="B", session_id="shared", user_id="bob")],
     )
 
-    async def prune_update(*args):
-        nonlocal visible
-        visible = False
-
-    monkeypatch.setattr(
-        archive_module,
-        "fetch_reference_rows",
-        AsyncMock(
-            return_value={
-                12: {
-                    "service_unit_key": store.scope.sql_values[0],
-                    "session_id": 1,
-                    "layer": "memory",
-                    "context_epoch": 4,
-                },
-            },
-        ),
-    )
-    monkeypatch.setattr(archive_module, "update_collection", prune_update)
-
-    async def read_then_prune(snapshot):
-        await archive_module._prune(
-            store.db,
-            SimpleNamespace(scope=store.scope, session_id=1),
-            (12,),
-            context_epoch=4 if mutation == "compact" else None,
-        )
+    async def read_then_publish(snapshot):
+        session.update(change)
         return []
 
-    store._payloads = read_then_prune
+    store._payloads = read_then_publish
     store._convert = AsyncMock(return_value=[])
     store._finish = AsyncMock()
     monkeypatch.setattr(
@@ -578,10 +592,10 @@ async def test_shared_session_prune_during_payload_read(
     )
     snapshot = HistorySnapshot(
         {"id": 2, "session_id": 1},
-        [{"id": 12, "layer": "memory"}],
         [],
         [],
-        context_epoch=4,
+        [],
+        **session,
     )
     with pytest.raises(ConflictError, match="Session history changed"):
         await store._assemble(snapshot, tracing=tracing)

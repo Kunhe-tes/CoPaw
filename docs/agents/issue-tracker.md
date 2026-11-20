@@ -8,8 +8,10 @@
 - 规格文件：`.scratch/<feature-slug>/spec.md`。
 - 实施事项：`.scratch/<feature-slug>/issues/<NN>-<slug>.md`，
   从 `01` 开始编号，每项一个文件。
-- 文件顶部使用 `Status:` 记录状态：`open`、`claimed`、`resolved`。
+- 文件顶部使用 `Status:` 记录状态；技能要求的标签以原字符串记录，
+  例如 `Status: ready-for-agent`。
 - 评论与讨论追加至文件底部的 `## Comments` 下。
+- 不自动提交、推送或创建外部 issue。
 
 ## When a skill says "publish to the issue tracker"
 

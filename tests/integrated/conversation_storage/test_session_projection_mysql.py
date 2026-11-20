@@ -17,7 +17,7 @@ async def test_recovery_append_reuses_old_body_and_restores_exact_complete_state
     tmp_path,
 ):
     db = conversation_test_database
-    _, _, _, store = await setup(db, tmp_path)
+    session, _, _, store = await setup(db, tmp_path)
     first = source("duplicate", "A" * 100000)
     second = source("duplicate", "B" * 100000)
     state = {
@@ -52,9 +52,10 @@ async def test_recovery_append_reuses_old_body_and_restores_exact_complete_state
     assert rows[1]["byte_length"] < 120000
     assert (
         await db.fetch_one(
-            "SELECT COUNT(*) AS n FROM swe_conversation_messages",
+            "SELECT history_high FROM swe_conversation_sessions WHERE id=%s",
+            (session,),
         )
-    )["n"] == 2
+    )["history_high"] == 2
     assert (
         await store.session_adapter.get_session_state_dict("session", "alice")
         == saved
@@ -72,9 +73,7 @@ async def test_recovery_append_reuses_old_body_and_restores_exact_complete_state
         await store.session_adapter.get_session_state_dict("session", "alice")
         == trimmed
     )
-    visible = await db.fetch_all(
-        "SELECT source_msg_key FROM swe_conversation_messages WHERE current_visible=1 ORDER BY session_order",
-    )
+    visible = await store.reader.session_messages(session)
     assert len(visible) == 1
     third = await db.fetch_one(
         "SELECT * FROM swe_conversation_publications ORDER BY id DESC LIMIT 1",
@@ -92,7 +91,7 @@ async def test_changed_message_and_identical_occurrences_remain_separate_delta_b
     tmp_path,
 ):
     db = conversation_test_database
-    _, _, _, store = await setup(db, tmp_path)
+    session, _, _, store = await setup(db, tmp_path)
     raw = source("q", "same").to_dict()
     second = json.loads(json.dumps(raw))
     state = {
@@ -105,9 +104,10 @@ async def test_changed_message_and_identical_occurrences_remain_separate_delta_b
     )
     assert (
         await db.fetch_one(
-            "SELECT COUNT(*) AS n FROM swe_conversation_messages",
+            "SELECT history_high FROM swe_conversation_sessions WHERE id=%s",
+            (session,),
         )
-    )["n"] == 2
+    )["history_high"] == 2
     saved["agent"]["memory"]["content"][1][0]["content"] = "changed"
     saved = await store.session_adapter._save_state(
         store.session_adapter.identity("session", "alice"),
@@ -115,9 +115,10 @@ async def test_changed_message_and_identical_occurrences_remain_separate_delta_b
     )
     assert (
         await db.fetch_one(
-            "SELECT COUNT(*) AS n FROM swe_conversation_messages",
+            "SELECT history_high FROM swe_conversation_sessions WHERE id=%s",
+            (session,),
         )
-    )["n"] == 3
+    )["history_high"] == 3
     assert (
         await store.session_adapter.get_session_state_dict("session", "alice")
         == saved
@@ -244,13 +245,11 @@ async def test_request_cache_avoids_rereading_old_message_bodies_after_confirmed
             store.session_adapter.identity("session", "alice"),
             state,
         )
-        first = await db.fetch_one(
-            "SELECT * FROM swe_conversation_messages ORDER BY id LIMIT 1",
-        )
         pub = await db.fetch_one(
-            "SELECT * FROM swe_conversation_publications WHERE id=%s",
-            (first["publication_id"],),
+            "SELECT * FROM swe_conversation_publications WHERE state='committed' ORDER BY id LIMIT 1",
         )
+        path = pub["relative_path"].decode()
+        extent = store.bundles.inspect(path).blocks["delta:0"]
         calls.clear()
         state["agent"]["memory"]["content"].append(
             [source("a", "new").to_dict(), []],
@@ -260,7 +259,7 @@ async def test_request_cache_avoids_rereading_old_message_bodies_after_confirmed
             state,
         )
         assert (
-            pub["relative_path"].decode(),
-            first["byte_offset"],
-            first["byte_length"],
+            path,
+            extent.offset,
+            extent.length,
         ) not in calls

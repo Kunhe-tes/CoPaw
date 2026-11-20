@@ -202,27 +202,16 @@ class OfflineWriteStages:
         def read():
             bodies = []
             for candidate in ticket.candidates:
-                index = self.store.bundles.inspect(
+                with self.store.bundles.open_reader(
                     candidate.relative_path,
                     expected_length=candidate.byte_length,
-                )
-                if (
-                    index.metadata.get("operation_key")
-                    != candidate.operation_key
-                ):
-                    raise IntegrityError("cold Turn bundle identity mismatch")
-                block = index.blocks.get("turn:" + candidate.key)
-                if block is None or block.kind != "turn":
-                    bodies.append(None)
-                    continue
-                bodies.append(
-                    self.store.bundles.read_extent(
-                        candidate.relative_path,
-                        block.offset,
-                        block.length,
-                        expected_length=candidate.byte_length,
-                    ),
-                )
+                    expected_operation_key=candidate.operation_key,
+                ) as reader:
+                    block = reader.index.blocks.get("turn:" + candidate.key)
+                    if block is None or block.kind != "turn":
+                        bodies.append(None)
+                        continue
+                    bodies.append(reader.read_extents((block,))[0])
             return TurnRecoveryEvidence(ticket, tuple(bodies))
 
         task = asyncio.create_task(io.call(read))

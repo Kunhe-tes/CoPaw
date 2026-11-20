@@ -17,6 +17,39 @@ from swe.app.conversation_storage.migration.tenant_discovery import (
 )
 
 
+def test_manifest_v1_automatic_review_skips_capacity_preflights(monkeypatch):
+    from swe.app.conversation_storage.migration import (
+        inventory_parallel,
+        inventory_v3,
+        tenant_discovery,
+    )
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("manifest-v1 must not run capacity preflights")
+
+    monkeypatch.setattr(
+        inventory_parallel,
+        "_preflight_workspace",
+        unexpected,
+    )
+    monkeypatch.setattr(
+        inventory_v3,
+        "_preflight_share_budget",
+        unexpected,
+    )
+
+    result = tenant_discovery._compact_tenant_inventory(
+        {
+            "source_binding_storage": "manifest-v1",
+            "workspaces": [],
+            "shares": [],
+        },
+        1,
+    )
+
+    assert result == {"blockers": [], "workspaces": []}
+
+
 async def test_tenants_share_parser_slots_memory_and_borrowed_io(
     tmp_path,
     monkeypatch,

@@ -73,6 +73,38 @@ def database(state="failed", tenant="alice", *, source_mode=False):
     return db, admission
 
 
+async def test_admission_uses_database_marker_without_runtime_file(
+    monkeypatch,
+):
+    db, admission = database("published", source_mode=True)
+    original_fetch = db.fetch_one.side_effect
+    monkeypatch.delenv("SWE_CONVERSATION_SCOPE_MANIFEST", raising=False)
+
+    async def fetch(query, params=None):
+        result = await original_fetch(query, params)
+        if "migration_jobs" in query:
+            result["source_binding_text"] = json.dumps(
+                {
+                    "source_binding_storage": "manifest-v1",
+                    "tenant_isolation": True,
+                    "source_isolation": True,
+                },
+            )
+        return result
+
+    db.fetch_one.side_effect = fetch
+    assert await admission.require("alice", "SRC")
+    assert admission.source_binding == {
+        "tenant_isolation": True,
+        "source_isolation": True,
+    }
+    await admission.require("alice", "SRC")
+    calls = [call.args[0] for call in db.fetch_one.await_args_list]
+    assert sum("migration_jobs" in query for query in calls) == 1
+    assert sum("@@server_uuid" in query for query in calls) == 1
+    assert sum("migration_sources" in query for query in calls) == 2
+
+
 @pytest.mark.parametrize(
     "operation",
     ["authority", "capture", "gc", "rollback"],

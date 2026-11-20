@@ -112,42 +112,44 @@ def prepare_args(inputs):
     ]
 
 
-@pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.parametrize("invalid_chats", [False, True])
 def test_prepare_reuses_freeze_and_readonly_preflight(
     inputs,
     monkeypatch,
-    partial,
+    invalid_chats,
 ):
     from swe.cli import conversation_storage_v3_cmd as v3
 
-    if partial:
+    if invalid_chats:
         registry = inputs["workspace"] / "chats.json"
         registry.chmod(0o644)
         registry.write_text("invalid")
         registry.chmod(0o444)
     preflight = Mock(
         return_value={
-            "status": "partial_success" if partial else "success",
-            "failed": int(partial),
-            "completed": int(not partial),
-            "failure_report": "safe-failures.json",
-            "passed": not partial,
+            "status": "success",
+            "failed": 0,
+            "completed": 0,
+            "failure_report": None,
+            "passed": True,
         },
     )
     monkeypatch.setattr(v3, "run_v3_command", preflight)
     result = CliRunner().invoke(command(), prepare_args(inputs))
-    assert result.exit_code == (2 if partial else 0), result.output
+    assert result.exit_code == 0, result.output
     output = json.loads(result.output)
     assert output["operation"] == "prepare"
     frozen = json.loads(inputs["manifest"].read_text())
     assert frozen["tenant_isolation"] is True
     assert frozen["source_isolation"] is True
+    assert "freshness_protocol" not in frozen
+    assert frozen["source_binding_storage"] == "manifest-v1"
+    assert "chats_mtime_ns" not in frozen["workspaces"][0]
+    assert "input_digest" not in frozen["tenants"][0]
     assert frozen["tenants"][0]["source_id"] == "SRC"
     assert frozen["offline"]["application_schema"] == "business"
     assert frozen["assignments"] == frozen["batches"] == {}
-    assert frozen["tenants"][0]["state"] == (
-        "failed" if partial else "discovered"
-    )
+    assert frozen["tenants"][0]["state"] == "discovered"
     assert Path(output["discovery"]).stat().st_mode & 0o777 == 0o600
     assert preflight.call_args.args == ("preflight", inputs["manifest"])
     assert preflight.call_args.kwargs["apply"] is False
@@ -211,8 +213,6 @@ def test_migrate_forwards_resources_without_splitting_workflow(
         "migrate",
         "--manifest",
         str(inputs["manifest"]),
-        "--output-dir",
-        str(inputs["manifest"].parent / "runtime"),
         "--workers",
         "3",
         "--io-workers",
@@ -246,8 +246,6 @@ def test_migrate_retains_partial_exit_code(inputs, monkeypatch):
             "migrate",
             "--manifest",
             str(inputs["manifest"]),
-            "--output-dir",
-            str(inputs["manifest"].parent / "runtime"),
             "--apply",
         ],
     )
@@ -298,7 +296,8 @@ def test_prepare_in_place_mode_is_durable(inputs, monkeypatch):
     assert result.exit_code == 0, result.output
     frozen = json.loads(inputs["manifest"].read_text())
     assert frozen["in_place"] is True
-    assert frozen["workspaces"][0]["in_place_evidence"]
+    assert "freshness_protocol" not in frozen
+    assert "in_place_evidence" not in frozen["workspaces"][0]
 
 
 def test_prepare_freeze_refusal_never_starts_preflight(inputs, monkeypatch):
@@ -316,16 +315,22 @@ def test_prepare_freeze_refusal_never_starts_preflight(inputs, monkeypatch):
     assert not inputs["manifest"].exists()
 
 
-def test_prepare_option_defaults_use_readonly_share_reader(
+def test_prepare_excludes_historical_shares_without_database_access(
     inputs,
     monkeypatch,
 ):
-    from unittest.mock import AsyncMock
-    from swe.cli import conversation_storage_discovery_cmd as discovery
+    from swe.cli import conversation_storage_discovery_cmd as discovery_cmd
     from swe.cli import conversation_storage_v3_cmd as v3
 
-    shares = AsyncMock(return_value=[])
-    monkeypatch.setattr(discovery, "read_original_shares", shares)
+    discover = discovery_cmd.discover_services
+    observed = []
+
+    def record_discovery(*args, **kwargs):
+        report = discover(*args, **kwargs)
+        observed.append(report)
+        return report
+
+    monkeypatch.setattr(discovery_cmd, "discover_services", record_discovery)
     monkeypatch.setattr(
         v3,
         "run_v3_command",
@@ -338,10 +343,13 @@ def test_prepare_option_defaults_use_readonly_share_reader(
     del args[index : index + 2]
     result = CliRunner().invoke(command(), args)
     assert result.exit_code == 0, result.output
-    shares.assert_awaited_once_with()
+    assert observed[0]["shares"] == []
+    assert observed[0]["source_shares"] == []
+    assert observed[0]["excluded_scopes"] == ["historical_shares"]
+    assert len(observed) == 1
 
 
-def test_prepare_audit_report_uses_frozen_review(inputs, monkeypatch):
+def test_prepare_does_not_compare_chats_mtime(inputs, monkeypatch):
     from swe.cli import conversation_storage_discovery_cmd as discovery
     from swe.cli import conversation_storage_v3_cmd as v3
 
@@ -360,19 +368,35 @@ def test_prepare_audit_report_uses_frozen_review(inputs, monkeypatch):
     monkeypatch.setattr(
         v3,
         "run_v3_command",
-        Mock(return_value={"status": "partial_success", "passed": False}),
+        Mock(return_value={"status": "success", "passed": True}),
     )
     result = CliRunner().invoke(command(), prepare_args(inputs))
-    assert result.exit_code == 2, result.output
-    output = json.loads(result.output)
-    audit = json.loads(Path(output["discovery"]).read_text())
-    frozen = json.loads(inputs["manifest"].read_text())
-    assert audit["tenants"][0]["state"] == "failed"
-    assert any(
-        item["code"] == "source_changed_after_discovery"
-        for item in audit["blockers"]
+    assert result.exit_code == 0, result.output
+    v3.run_v3_command.assert_called_once()
+    assert inputs["manifest"].exists()
+
+
+def test_prepare_does_not_read_conversation_inputs(inputs, monkeypatch):
+    from swe.cli import conversation_storage_v3_cmd as v3
+
+    read_bytes = Path.read_bytes
+
+    def guarded_read(path):
+        if (
+            path.is_relative_to(inputs["workspace"])
+            and path.name != "agent.json"
+        ):
+            raise AssertionError("prepare read conversation input")
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read)
+    monkeypatch.setattr(
+        v3,
+        "run_v3_command",
+        Mock(return_value={"status": "success", "passed": True}),
     )
-    assert all(value == frozen[key] for key, value in audit.items())
+    result = CliRunner().invoke(command(), prepare_args(inputs))
+    assert result.exit_code == 0, result.output
 
 
 def test_prepare_rejects_empty_tenant_job(inputs, monkeypatch):

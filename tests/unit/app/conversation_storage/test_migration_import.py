@@ -296,8 +296,6 @@ def test_task_projection_preserves_raw_payload_and_final_section():
     from agentscope.message import Msg
     from swe.app.conversation_storage.migration.importer import (
         task_projections,
-        message_body,
-        _message_row,
     )
 
     state = {
@@ -315,23 +313,12 @@ def test_task_projection_preserves_raw_payload_and_final_section():
     task_projections(messages, state)
     assert messages[0]["history_projection"]["task_run_section"] == "step"
     assert messages[1]["history_projection"]["task_run_section"] == "final"
-    assert (
-        message_body(messages[1])["message"]
-        == state["agent"]["memory"]["content"][1]
-    )
-    assert (
-        _message_row(
-            1,
-            1,
-            messages[1],
-            1,
-            "message",
-            None,
-            None,
-            service_unit_id="schema-test-service",
-        )["task_run_key"]
-        == "run-1"
-    )
+    assert messages[1]["payload"] == state["agent"]["memory"]["content"][1]
+    assert messages[1]["history_projection"] == {
+        "task_run_id": "run-1",
+        "task_run_index": 0,
+        "task_run_section": "final",
+    }
 
 
 def test_archive_union_retains_old_epoch_only_batches():
@@ -472,8 +459,20 @@ async def test_verification_payloads_overlap_bounded_nas_reads_on_owner_sql_task
             active -= 1
         return json.dumps({"publication": identity}).encode()
 
+    from contextlib import contextmanager
+    from swe.app.conversation_storage.bundle import BlockExtent
+
+    @contextmanager
+    def open_reader(path, **kwargs):
+        yield SimpleNamespace(
+            index=SimpleNamespace(
+                blocks={"body": BlockExtent("message", 0, 1)},
+            ),
+            read_extents=lambda extents: (read_extent(path, 0, 1),),
+        )
+
     bundles = SimpleNamespace(
-        read_extent=read_extent,
+        open_reader=open_reader,
         validate_publication_locator=lambda row: row["relative_path"],
     )
     rows = [
@@ -502,12 +501,13 @@ async def test_verification_payloads_overlap_bounded_nas_reads_on_owner_sql_task
     assert sql_tasks == [owner]
 
 
-def test_large_recovery_is_explicitly_blocked_before_import():
+def test_large_recovery_object_is_not_limited_by_reader_size():
     from swe.app.conversation_storage.migration.importer import _block
-    from swe.app.conversation_storage.bundle import MAX_READ_BYTES
+    from swe.app.conversation_storage.bundle import BundleBlock
 
-    with pytest.raises(ValueError, match="projection required"):
-        _block("recovery", "recovery", {"huge": "x" * MAX_READ_BYTES})
+    block = _block("recovery", "recovery", {"huge": "x" * (9 * 1024 * 1024)})
+    assert isinstance(block, BundleBlock)
+    assert len(block.content) > 8 * 1024 * 1024
 
 
 def test_inventory_files_rebuilt_from_database_and_recovery_are_not_copied():
@@ -679,3 +679,66 @@ async def test_archived_only_questions_are_unselectable_but_current_duplicates_r
     history.answer_turn = AsyncMock(return_value=object())
     with pytest.raises(ValueError, match="fully archived"):
         await _verify_archived_questions(history, spec, current, chat)
+
+
+async def test_payloads_share_bundle_open_for_publication(
+    tmp_path,
+    monkeypatch,
+):
+    from contextlib import contextmanager
+    from swe.app.conversation_storage.bundle import BundleStore, BundleBlock
+    from swe.app.conversation_storage.migration.verify import _payloads
+    from swe.app.conversation_storage.migration.parallel import MigrationIO
+
+    bundles = BundleStore(tmp_path)
+    index = bundles.publish(
+        "a" * 64,
+        [
+            BundleBlock("one", "message", b'{"id":1}'),
+            BundleBlock("two", "message", b'{"id":2}'),
+        ],
+    )
+
+    class Database:
+        async def fetch_all(self, *args):
+            return [
+                {
+                    "id": 1,
+                    "service_unit_key": b"svc",
+                    "relative_path": index.relative_path,
+                    "byte_length": index.byte_length,
+                },
+            ]
+
+    opens = []
+    original = bundles._open
+
+    @contextmanager
+    def counted(path):
+        opens.append(path)
+        with original(path) as source:
+            yield source
+
+    monkeypatch.setattr(bundles, "_open", counted)
+    rows = [
+        {
+            "publication_id": 1,
+            "service_unit_key": b"svc",
+            "offset": block.offset,
+            "length": block.length,
+        }
+        for block in index.blocks.values()
+    ]
+    async with MigrationIO(2) as io:
+        actual = await _payloads(
+            Database(),
+            bundles,
+            rows,
+            "offset",
+            "length",
+            service_unit_id="svc",
+            io=io,
+            io_workers=2,
+        )
+    assert actual == [{"id": 1}, {"id": 2}]
+    assert opens == [index.relative_path]

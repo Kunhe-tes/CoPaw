@@ -317,6 +317,9 @@ class DirectImporter(ConversationImporter):
             type(cutoff_map.get(tenant_key(*scope))) is not int
             or cutoff_map[tenant_key(*scope)] <= 0
             for scope in tenants
+        ) and not (
+            self.manifest.data.get("freshness_protocol")
+            or self.manifest.data.get("source_binding_storage")
         ):
             raise ValueError(
                 "tenant cutoffs must be fixed before parallel inventory",

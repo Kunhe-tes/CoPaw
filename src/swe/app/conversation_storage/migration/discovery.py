@@ -180,6 +180,24 @@ def _identity(config_path, service):
     raise ValueError("root config requires explicit source ownership evidence")
 
 
+def _is_default_scope_encoding(component):
+    """Identify encoded scope directories for the logical default tenant."""
+    from swe.config.context import decode_scope_id, encode_scope_id
+
+    try:
+        tenant, source = decode_scope_id(component)
+    except (ValueError, UnicodeError):
+        return False
+    try:
+        encoded = encode_scope_id(tenant, source)
+    except ValueError:
+        return False
+    return tenant == "default" and component in (
+        encoded,
+        "scope.v1." + encoded,
+    )
+
+
 def _workspace_path(value, config_path, service):
     original = Path(service["original_root"])
     source = Path(service["source_root"])
@@ -214,8 +232,21 @@ def _workspace_path(value, config_path, service):
 
 def _profiles(service, report):
     workspaces = []
+    config_root = Path(service["config_root"])
     configs = config_candidates(service["config_root"])
     for config in configs:
+        # The service-root config is project bootstrap state. It has no
+        # tenant/source ownership and is never a conversation input.
+        if config == config_root / "config.json":
+            continue
+        component = config.parent.relative_to(config_root).parts[0]
+        if _is_default_scope_encoding(component):
+            continue
+        try:
+            tenant, source = _identity(config, service)
+        except (ValueError, TypeError, KeyError):
+            # A config without an explicit source is outside this migration.
+            continue
         if config.parent.is_symlink() or config.is_symlink():
             _block(
                 report,
@@ -232,7 +263,6 @@ def _profiles(service, report):
                 raise ValueError("agent profiles must be a mapping")
             if not profiles:
                 continue
-            tenant, source = _identity(config, service)
             for key, profile in sorted(profiles.items()):
                 if key != profile["id"]:
                     raise ValueError("profile key and Agent ID disagree")
@@ -389,6 +419,10 @@ def _coverage(service, known, report, overrides):
                 overrides,
                 report,
             ):
+                from .tenant_discovery import _candidate_identity
+
+                if _candidate_identity(service, path) is None:
+                    continue
                 _block(
                     report,
                     "unregistered_workspace",
@@ -586,6 +620,42 @@ def _unique_workspaces(report):
             )
 
 
+def _set_freshness_protocol(report, freshness_protocol, source_isolation):
+    if freshness_protocol is None:
+        return
+    if freshness_protocol != "chats-mtime-v1" or not source_isolation:
+        raise ValueError("unsupported source freshness protocol")
+    report["freshness_protocol"] = freshness_protocol
+
+
+def _set_source_binding_storage(report, storage, source_isolation):
+    if storage is None:
+        return
+    if storage != "manifest-v1" or not source_isolation:
+        raise ValueError("unsupported source binding storage")
+    report["source_binding_storage"] = storage
+
+
+def _capture_discovery_digests(report, semantic_validator):
+    if report.get("freshness_protocol") or report.get(
+        "source_binding_storage",
+    ):
+        return
+    from .tenant_inputs import capture_input_digests
+
+    capture_input_digests(
+        report,
+        mapper=getattr(semantic_validator, "map_input_digests", None),
+    )
+
+
+def _validate_isolation_options(tenant_isolation, source_isolation, in_place):
+    if source_isolation and not tenant_isolation:
+        raise ValueError("source isolation requires tenant isolation")
+    if in_place and not tenant_isolation:
+        raise ValueError("in-place migration requires tenant isolation")
+
+
 @isolated_discovery
 def discover_services(
     services,
@@ -596,18 +666,19 @@ def discover_services(
     tenant_isolation=False,
     source_isolation=False,
     in_place=False,
+    freshness_protocol=None,
+    source_binding_storage=None,
+    semantic_inventory=True,
 ):
     """Return complete discovery evidence without opening a DB or modifying inputs."""
-    if source_isolation and not tenant_isolation:
-        raise ValueError("source isolation requires tenant isolation")
-    if in_place and not tenant_isolation:
-        raise ValueError("in-place migration requires tenant isolation")
+    _validate_isolation_options(tenant_isolation, source_isolation, in_place)
     report = {
         "version": 3,
         "discovery_version": 1,
         "services": [],
         "workspaces": [],
         "shares": [],
+        "excluded_scopes": ["historical_shares"],
         "fingerprints": [],
         "blockers": [],
         "ready": False,
@@ -626,6 +697,12 @@ def discover_services(
         report["source_isolation"] = True
     if in_place:
         report["in_place"] = True
+    _set_freshness_protocol(report, freshness_protocol, source_isolation)
+    _set_source_binding_storage(
+        report,
+        source_binding_storage,
+        source_isolation,
+    )
     for item in services:
         try:
             service = _service(item)
@@ -711,13 +788,14 @@ def discover_services(
     if tenant_isolation:
         from .tenant_discovery import isolate_discovery
 
-        isolate_discovery(report, shares, semantic_validator)
-        from .tenant_inputs import capture_input_digests
-
-        capture_input_digests(
+        isolate_discovery(
             report,
-            mapper=getattr(semantic_validator, "map_input_digests", None),
+            shares,
+            semantic_validator,
+            semantic_inventory=semantic_inventory,
         )
+        if semantic_inventory:
+            _capture_discovery_digests(report, semantic_validator)
     elif not report["blockers"]:
         from .inventory_v3 import inventory_discovery
 
@@ -744,7 +822,12 @@ def _freeze_tenant_report(report, current):
 
         return unit_key(report, item)
 
-    for field in ("services", "declared_services", "source_shares"):
+    for field in (
+        "services",
+        "declared_services",
+        "source_shares",
+        "excluded_scopes",
+    ):
         if current.get(field) != report.get(field):
             raise ValueError("freeze service or share ownership changed")
     old_tenants = {key(t): t for t in report["tenants"]}
@@ -801,29 +884,60 @@ def freeze_discovery(
     application_schema,
     *,
     semantic_validator=None,
+    revalidate=True,
 ):
     """Revalidate discovery and atomically save a v3 manifest outside the source."""
     if (not report.get("ready") or report.get("blockers")) and not report.get(
         "tenant_isolation",
     ):
         raise ValueError("discovery contains blockers")
-    current = discover_services(
-        report.get("declared_services", report["services"]),
-        shares=report.get("source_shares", report["shares"]),
-        overrides=report.get("overrides", ()),
-        semantic_validator=semantic_validator,
-        tenant_isolation=report.get("tenant_isolation", False),
-        in_place=report.get("in_place", False),
-        source_isolation=report.get("source_isolation", False),
-    )
-    if report.get("tenant_isolation"):
-        report = _freeze_tenant_report(report, current)
-    elif current["fingerprints"] != report["fingerprints"]:
-        raise ValueError("source changed since discovery")
-    elif current != report:
-        raise ValueError(
-            "discovery report differs from verified source evidence",
+    if revalidate:
+        current = discover_services(
+            report.get("declared_services", report["services"]),
+            shares=report.get("source_shares", report["shares"]),
+            overrides=report.get("overrides", ()),
+            semantic_validator=semantic_validator,
+            tenant_isolation=report.get("tenant_isolation", False),
+            in_place=report.get("in_place", False),
+            source_isolation=report.get("source_isolation", False),
+            freshness_protocol=report.get("freshness_protocol"),
         )
+        if report.get("tenant_isolation"):
+            report = _freeze_tenant_report(report, current)
+        elif current["fingerprints"] != report["fingerprints"]:
+            raise ValueError("source changed since discovery")
+        elif current != report:
+            raise ValueError(
+                "discovery report differs from verified source evidence",
+            )
+    elif report.get("freshness_protocol"):
+        from .isolation import unit_key
+
+        failed = {
+            unit_key(report, tenant)
+            for tenant in report.get("tenants", [])
+            if tenant.get("state") == "failed"
+        }
+        for workspace in report["workspaces"]:
+            if unit_key(report, workspace) in failed:
+                continue
+            registry = Path(workspace["root"]) / workspace.get(
+                "registry_path",
+                "chats.json",
+            )
+            manifest_v1 = report.get("source_binding_storage") == "manifest-v1"
+            if (
+                (registry.is_symlink() and not manifest_v1)
+                or (
+                    manifest_v1
+                    and not registry.resolve(strict=True).is_relative_to(
+                        Path(workspace["root"]).resolve(strict=True),
+                    )
+                )
+                or registry.stat().st_mtime_ns
+                != workspace.get("chats_mtime_ns")
+            ):
+                raise ValueError("chats.json changed during preparation")
     data = {
         **deepcopy(report),
         "version": 3,

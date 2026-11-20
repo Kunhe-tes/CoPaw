@@ -19,7 +19,7 @@ from ..publications import PublicationRequest, _request
 from ..projection_references import (
     ProjectionReferences,
     _snapshot_rows,
-    _text,
+    _resolve_payload,
     references,
     ref_key,
 )
@@ -193,69 +193,75 @@ class OfflineVerifyStages:
         bundles = self.store.bundles
 
         def read_evidence():
-            index = bundles.inspect(
+            with bundles.open_reader(
                 ticket.relative_path,
                 expected_length=ticket.byte_length,
-            )
-            if (
-                index.relative_path != ticket.relative_path
-                or index.byte_length != ticket.byte_length
-                or index.metadata.get("operation_key")
-                != ticket.request.operation_key
-            ):
-                raise IntegrityError(
-                    "offline verification bundle identity mismatch",
-                )
-
-            expected_blocks = {"import_plan": "import_plan"}
-            for expected in ticket.blocks:
-                if expected.name in expected_blocks:
+                expected_operation_key=ticket.request.operation_key,
+            ) as reader:
+                index = reader.index
+                if (
+                    index.relative_path != ticket.relative_path
+                    or index.byte_length != ticket.byte_length
+                    or index.metadata.get("operation_key")
+                    != ticket.request.operation_key
+                ):
                     raise IntegrityError(
-                        "offline verification block names are duplicated",
+                        "offline verification bundle identity mismatch",
                     )
-                expected_blocks[expected.name] = expected.kind
 
-            def block(name, kind):
-                extent = index.blocks.get(name)
-                if extent is None or extent.kind != kind:
+                expected_blocks = {"import_plan": "import_plan"}
+                for expected in ticket.blocks:
+                    if expected.name in expected_blocks:
+                        raise IntegrityError(
+                            "offline verification block names are duplicated",
+                        )
+                    expected_blocks[expected.name] = expected.kind
+
+                def block(name, kind):
+                    extent = index.blocks.get(name)
+                    if extent is None or extent.kind != kind:
+                        raise IntegrityError(
+                            "original migration bundle block identity differs",
+                        )
+                    return reader.read_extents((extent,))[0]
+
+                imported = block("import_plan", "import_plan")
+                if load_metadata_json(imported) != load_metadata_json(
+                    ticket.expected_import_plan,
+                ):
                     raise IntegrityError(
-                        "original migration bundle block identity differs",
+                        "original import plan differs from current source mapping",
                     )
-                return bundles.read_extent(
-                    index.relative_path,
-                    extent.offset,
-                    extent.length,
-                    expected_length=index.byte_length,
+                recoveries = []
+                for expected in ticket.blocks:
+                    raw = block(expected.name, expected.kind)
+                    if raw == expected.content:
+                        continue
+                    envelope = load_metadata_json(raw)
+                    if expected.kind == "recovery" and is_projection(envelope):
+                        recoveries.append((expected.name, raw))
+                        _add_projection_blocks(
+                            index,
+                            envelope,
+                            expected_blocks,
+                        )
+                        continue
+                    raise IntegrityError(
+                        "original migration bundle content differs from source",
+                    )
+                actual_blocks = {
+                    name: extent.kind for name, extent in index.blocks.items()
+                }
+                if actual_blocks != expected_blocks:
+                    raise IntegrityError(
+                        "original migration bundle block set differs from source",
+                    )
+                return VerifyEvidence(
+                    ticket,
+                    index,
+                    imported,
+                    tuple(recoveries),
                 )
-
-            imported = block("import_plan", "import_plan")
-            if load_metadata_json(imported) != load_metadata_json(
-                ticket.expected_import_plan,
-            ):
-                raise IntegrityError(
-                    "original import plan differs from current source mapping",
-                )
-            recoveries = []
-            for expected in ticket.blocks:
-                raw = block(expected.name, expected.kind)
-                if raw == expected.content:
-                    continue
-                envelope = load_metadata_json(raw)
-                if expected.kind == "recovery" and is_projection(envelope):
-                    recoveries.append((expected.name, raw))
-                    _add_projection_blocks(index, envelope, expected_blocks)
-                    continue
-                raise IntegrityError(
-                    "original migration bundle content differs from source",
-                )
-            actual_blocks = {
-                name: extent.kind for name, extent in index.blocks.items()
-            }
-            if actual_blocks != expected_blocks:
-                raise IntegrityError(
-                    "original migration bundle block set differs from source",
-                )
-            return VerifyEvidence(ticket, index, imported, tuple(recoveries))
 
         try:
             evidence = await io.call(read_evidence)
@@ -324,7 +330,6 @@ class OfflineVerifyStages:
                     {
                         "name": name,
                         "envelope": envelope,
-                        "rows": deepcopy(snapshot.rows),
                         "turns": deepcopy(snapshot.turns),
                         "publications": deepcopy(snapshot.publications),
                     },
@@ -399,46 +404,32 @@ class OfflineVerifyStages:
                         publication,
                     )
                     size = publication["byte_length"]
-                    if "message_id" in ref:
-                        offset, length = ref["offset"], ref["length"]
-                    else:
-                        prior = bundles.inspect(path, expected_length=size)
-                        extent = prior.blocks.get(ref["block_name"])
-                        if extent is None or extent.kind != "turn":
-                            raise IntegrityError(
-                                "cold Turn requires an independent Turn body",
-                            )
-                        offset, length = extent.offset, extent.length
-                value = json.loads(
-                    bundles.read_extent(
-                        path,
-                        offset,
-                        length,
-                        expected_length=size,
-                    ),
+                    prior = bundles.inspect(path, expected_length=size)
+                    extent = prior.blocks.get(ref["block_name"])
+                    if extent is None or (
+                        "turn_id" in ref and extent.kind != "turn"
+                    ):
+                        raise IntegrityError(
+                            "recovery reference block is invalid",
+                        )
+                    offset, length = extent.offset, extent.length
+                raw = bundles.read_extent(
+                    path,
+                    offset,
+                    length,
+                    expected_length=size,
                 )
-                payloads[ref_key(ref)] = value
-                if "message_id" in ref:
-                    row = snapshot["rows"][ref["message_id"]]
-                    if (
-                        not isinstance(value, dict)
-                        or value.get("id") != _text(row["source_msg_key"])
-                        or (value.get("role") or "assistant")
-                        != _text(row["role_key"])
-                    ):
-                        raise IntegrityError(
-                            "recovery projection body identity mismatch",
-                        )
-                elif "turn_id" in ref:
-                    turn = snapshot["turns"][ref["turn_id"]]
-                    if (
-                        ref["block_name"]
-                        != "turn:" + _text(turn["question_msg_key"])
-                        or value.get("status") != turn["history_status"]
-                    ):
-                        raise IntegrityError(
-                            "cold Turn independent body identity differs",
-                        )
+                if extent.kind == "message_bodies":
+                    from ..message_bundle import decode_message_bodies
+
+                    value = decode_message_bodies(raw)
+                else:
+                    value = json.loads(raw)
+                payloads[ref_key(ref)] = _resolve_payload(
+                    value,
+                    ref,
+                    snapshot["turns"],
+                )
 
             actual = hydrate_state(
                 snapshot["envelope"],

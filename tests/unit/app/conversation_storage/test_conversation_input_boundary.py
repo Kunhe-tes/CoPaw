@@ -8,7 +8,6 @@ from uuid import uuid4
 
 import pytest
 
-from swe.app.conversation_storage.bundle import MAX_READ_BYTES
 from swe.app.conversation_storage.identity import WorkspaceScope
 from swe.app.conversation_storage.migration.inventory import (
     WorkspaceMapping,
@@ -66,11 +65,52 @@ def test_unrelated_large_attachment_and_code_are_never_enumerated(
         tmp_path.chmod(0o755)
 
 
-def test_real_conversation_file_still_obeys_reader_limit(tmp_path):
+def test_writable_workspace_directories_are_allowed_for_migration(tmp_path):
+    chats = tmp_path / "chats.json"
+    chats.write_text("{}")
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    session = sessions / "session.json"
+    session.write_text("{}")
+    dialog = tmp_path / "dialog"
+    dialog.mkdir()
+    archive = dialog / "chat" / "archive.json"
+    archive.parent.mkdir()
+    archive.write_text("{}")
+
+    for path in (chats, session, archive):
+        path.chmod(0o444)
+    for path in (tmp_path, sessions, dialog, archive.parent):
+        path.chmod(0o755)
+
+    assert set(
+        _source_files(
+            _mapping(tmp_path),
+            ["chats.json", "sessions", "dialog"],
+            chats_authoritative=True,
+        ),
+    ) == {chats, session, archive}
+
+
+def test_writable_conversation_files_are_allowed(tmp_path):
+    chats = tmp_path / "chats.json"
+    chats.write_text("{}")
+
+    assert _source_files(
+        _mapping(tmp_path),
+        ["chats.json"],
+        chats_authoritative=True,
+    ) == [chats]
+
+
+def test_preflight_keeps_legacy_reader_size_limit(tmp_path, monkeypatch):
+    from swe.app.conversation_storage.migration import inventory_parallel
+
+    monkeypatch.setattr(inventory_parallel, "MAX_READ_BYTES", 16)
     sessions = tmp_path / "sessions"
     sessions.mkdir()
     with (sessions / "large.json").open("wb") as stream:
-        stream.truncate(MAX_READ_BYTES + 1)
+        stream.truncate(17)
     with pytest.raises(MigrationCapacityError, match="bounded reader limit"):
         _preflight_workspace({"root": str(tmp_path)}, 512 * 1024 * 1024)
 
@@ -162,4 +202,4 @@ def test_selected_conversation_inputs_reject_unsafe_objects(tmp_path, kind):
             )
             (tmp_path / "chats.json").write_text("{}")
     with pytest.raises(ValueError, match="symlink|unsupported filesystem"):
-        _preflight_workspace({"root": str(tmp_path)}, 1024 * 1024)
+        safe_input_entries(tmp_path, ["sessions"])

@@ -42,7 +42,7 @@ async def _invoke(arguments):
     return result.exit_code, json.loads(result.stdout)
 
 
-async def _write_online_alice(db, runtime, workspace):
+async def _write_online_alice(db, runtime, workspace, source_id="SRC"):
     folder_a = workspace.parent.parent
     for path in [folder_a, *folder_a.rglob("*")]:
         path.chmod(0o755 if path.is_dir() else 0o644)
@@ -63,19 +63,19 @@ async def _write_online_alice(db, runtime, workspace):
             agent_id="new-agent",
             conversation_scope=WorkspaceScope(
                 "alice",
-                "SRC",
+                source_id,
                 "new-agent",
                 service_unit_id="svc",
             ),
         ),
     )
     await db.execute(
-        "UPDATE swe_conversation_chats SET title=%s WHERE tenant_key=%s",
-        ("online title", b"alice"),
+        "UPDATE swe_conversation_chats SET title=%s WHERE tenant_key=%s AND source_key=%s",
+        ("online title", b"alice", source_id.encode()),
     )
     existing = await db.fetch_one(
-        "SELECT * FROM swe_conversation_chats WHERE tenant_key=%s",
-        (b"alice",),
+        "SELECT * FROM swe_conversation_chats WHERE tenant_key=%s AND source_key=%s",
+        (b"alice", source_id.encode()),
     )
     new_chat = {key: value for key, value in existing.items() if key != "id"}
     new_chat.update(external_chat_key=b"online-chat", title="online new chat")
@@ -88,8 +88,8 @@ async def _write_online_alice(db, runtime, workspace):
         tuple(new_chat.values()),
     )
     online = await db.fetch_all(
-        "SELECT * FROM swe_conversation_chats WHERE tenant_key=%s ORDER BY id",
-        (b"alice",),
+        "SELECT * FROM swe_conversation_chats WHERE tenant_key=%s AND source_key=%s ORDER BY id",
+        (b"alice", source_id.encode()),
     )
     return config_a, current, online
 
@@ -111,22 +111,32 @@ async def _prepare_database(db, monkeypatch):
     )
 
 
-def _prepare_sources(tmp_path, failure_mode):
+def _prepare_sources(tmp_path, failure_mode, *, same_tenant=False):
     source, nas, work = (tmp_path / n for n in ("source", "nas", "work"))
     nas.mkdir()
     work.mkdir()
-    workspaces = {
-        name: _tenant(source, name) for name in ("alice", "bob", "charlie")
-    }
+    workspaces = (
+        {name: _tenant(source, "alice", name) for name in ("alice", "bob")}
+        if same_tenant
+        else {
+            name: _tenant(source, name) for name in ("alice", "bob", "charlie")
+        }
+    )
     config_b = workspaces["bob"].parent.parent / "config.json"
     original_b = config_b.read_bytes()
-    session_b = workspaces["bob"] / "sessions" / "bob_s.json"
+    session_b = (
+        workspaces["bob"]
+        / "sessions"
+        / ("alice_s.json" if same_tenant else "bob_s.json")
+    )
     if failure_mode == "config":
         config_b.write_text('{"agents":{"profiles":42}}')
     elif failure_mode == "running_turn":
         state = json.loads(session_b.read_text())
         state["turn_states"] = {"running-turn": {"status": "running"}}
         session_b.write_text(json.dumps(state))
+    elif failure_mode == "invalid_chats":
+        (workspaces["bob"] / "chats.json").write_text("invalid json")
     for path in source.rglob("*"):
         path.chmod(0o555 if path.is_dir() else 0o444)
     source.chmod(0o555)
@@ -193,17 +203,7 @@ def _prepare_sources(tmp_path, failure_mode):
     )
 
 
-def _observe_import_failure(monkeypatch, failure_mode, session_b):
-    if failure_mode == "changed_bytes":
-        before = session_b.stat()
-        state = json.loads(session_b.read_text())
-        state["revision"] = 2
-        session_b.chmod(0o644)
-        session_b.write_text(json.dumps(state))
-        session_b.chmod(0o444)
-        import os
-
-        os.utime(session_b, ns=(before.st_atime_ns, before.st_mtime_ns))
+def _observe_import_failure(monkeypatch):
     imported_failures = []
     from swe.app.conversation_storage.migration.tenant_errors import (
         TenantInputError,
@@ -231,9 +231,12 @@ async def _assert_failed_tenant_has_no_commits(
 ):
     if failure_mode == "running_turn":
         assert imported_failures == [
-            (("svc", "bob"), "unsettled legacy Turn blocks offline import"),
+            (
+                ("svc", "bob", "SRC"),
+                "unsettled legacy Turn blocks offline import",
+            ),
         ]
-    if failure_mode in ("running_turn", "changed_bytes"):
+    if failure_mode in ("running_turn", "invalid_chats"):
         bob_scope = ["svc", "bob", "SRC", "agent"]
         tickets = await db.fetch_all(
             "SELECT entry_kind,source_key,details_text FROM swe_conversation_migration_entries",
@@ -254,9 +257,9 @@ async def _assert_failed_tenant_has_no_commits(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure_mode",
-    ["config", "running_turn", "changed_bytes"],
+    ["config", "running_turn", "invalid_chats"],
 )
-async def test_prepare_migrate_repairs_failed_tenant_without_reading_online_sources(
+async def test_migrate_retry_keeps_failed_source_closed_and_skips_published_source(
     conversation_test_database,
     tmp_path,
     monkeypatch,
@@ -268,8 +271,8 @@ async def test_prepare_migrate_repairs_failed_tenant_without_reading_online_sour
         source,
         nas,
         workspaces,
-        config_b,
-        original_b,
+        _config_b,
+        _original_b,
         session_b,
         manifest,
         output,
@@ -297,23 +300,28 @@ async def test_prepare_migrate_repairs_failed_tenant_without_reading_online_sour
     assert code == (2 if failure_mode == "config" else 0)
     assert prepared["failed"] == int(failure_mode == "config")
     assert await db.fetch_all("SELECT * FROM swe_conversation_chats") == []
-    imported_failures = _observe_import_failure(
-        monkeypatch,
-        failure_mode,
-        session_b,
-    )
+    imported_failures = _observe_import_failure(monkeypatch)
     migrate_args = [
         "migrate",
         "--manifest",
         str(manifest),
-        "--output-dir",
-        str(output),
         "--apply",
         *resource_args,
     ]
     code, migrated = await _invoke(migrate_args)
     assert code == 2
     assert migrated["published"] == 2 and migrated["failed"] == 1
+    assert not output.exists()
+    assert migrated["verification_level"] == "fast"
+    receipts = await db.fetch_all(
+        "SELECT verification_text FROM swe_conversation_migration_sources "
+        "WHERE state='published'",
+    )
+    assert len(receipts) == 2
+    assert all(
+        json.loads(row["verification_text"])["verification_level"] == "fast"
+        for row in receipts
+    )
     await _assert_failed_tenant_has_no_commits(
         db,
         failure_mode,
@@ -330,37 +338,27 @@ async def test_prepare_migrate_repairs_failed_tenant_without_reading_online_sour
         b"cursor",
         service_unit_id="svc",
     )
-    await runtime.admit("alice")
+    await runtime.admit("alice", "SRC")
     with pytest.raises(TenantNotPublished):
-        await runtime.admit("bob")
+        await runtime.admit("bob", "SRC")
     config_a, current, online = await _write_online_alice(
         db,
         runtime,
         workspaces["alice"],
     )
-    if failure_mode == "config":
-        config_b.chmod(0o644)
-        config_b.write_bytes(original_b)
-        config_b.chmod(0o444)
-    elif failure_mode == "running_turn":
-        state = json.loads(session_b.read_text())
-        state.pop("turn_states")
-        session_b.chmod(0o644)
-        session_b.write_text(json.dumps(state))
-        session_b.chmod(0o444)
     parsed = []
     real_inventory = tenant_cli._inventory
 
     async def inventory(view, spool, resources):
         parsed.append(view.key[1])
-        assert view.key[1] == "bob", "published source was parsed again"
+        assert view.key[1] != "alice", "published source was parsed again"
         return await real_inventory(view, spool, resources)
 
     monkeypatch.setattr(tenant_cli, "_inventory", inventory)
     code, resumed = await _invoke(migrate_args)
-    assert code == 2 and resumed["pending_schema_finalize"] is True
-    assert resumed["published"] == 3 and resumed["failed"] == 0
-    assert parsed and set(parsed) == {"bob"}
+    assert code == 2 and resumed["pending_schema_finalize"] is False
+    assert resumed["published"] == 2 and resumed["failed"] == 1
+    assert "alice" not in parsed
     assert (
         await db.fetch_all(
             "SELECT * FROM swe_conversation_chats WHERE tenant_key=%s ORDER BY id",
@@ -369,4 +367,132 @@ async def test_prepare_migrate_repairs_failed_tenant_without_reading_online_sour
         == online
     )
     assert config_a.read_text() == json.dumps(current)
-    await runtime.admit("bob")
+    with pytest.raises(TenantNotPublished):
+        await runtime.admit("bob", "SRC")
+
+
+@pytest.mark.asyncio
+async def test_same_tenant_source_retry_preserves_published_sibling(
+    conversation_test_database,
+    tmp_path,
+    monkeypatch,
+):
+    """A tenant-wide admission or retry would corrupt this live sibling."""
+    db = conversation_test_database
+    await _prepare_database(db, monkeypatch)
+    (
+        _source,
+        nas,
+        workspaces,
+        _config,
+        _original,
+        session_b,
+        manifest,
+        output,
+        resources,
+        services,
+        boundary,
+        shares,
+    ) = _prepare_sources(tmp_path, "running_turn", same_tenant=True)
+    code, prepared = await _invoke(
+        [
+            "prepare",
+            "--services",
+            str(services),
+            "--boundary",
+            str(boundary),
+            "--manifest",
+            str(manifest),
+            "--shares-file",
+            str(shares),
+            "--tenant-isolation",
+            "--in-place",
+            *resources,
+        ],
+    )
+    assert code == 0 and prepared["failed"] == 0
+    arguments = [
+        "migrate",
+        "--manifest",
+        str(manifest),
+        "--apply",
+        *resources,
+    ]
+    code, first = await _invoke(arguments)
+    assert code == 2 and first["published"] == 1 and first["failed"] == 1
+    runtime = ConversationRuntime(
+        db,
+        {
+            "version": 3,
+            "service_unit_id": "svc",
+            "nas_root": str(nas),
+            "migration_id": first["migration_id"],
+        },
+        b"cursor",
+        service_unit_id="svc",
+    )
+    await runtime.admit("alice", "alice")
+    for source_id in (None, "bob", "unknown"):
+        with pytest.raises(TenantNotPublished):
+            await runtime.admit("alice", source_id)
+    assert (
+        await db.fetch_all(
+            "SELECT id FROM swe_conversation_chats WHERE tenant_key=%s AND source_key=%s",
+            (b"alice", b"bob"),
+        )
+        == []
+    )
+
+    workspace_a = workspaces["alice"]
+    config_a, current, online = await _write_online_alice(
+        db,
+        runtime,
+        workspace_a,
+        source_id="alice",
+    )
+    assert len(online) == 2
+    query = "SELECT * FROM swe_conversation_chats WHERE tenant_key=%s AND source_key=%s ORDER BY id"
+    # Poison the old live input: a re-read must fail instead of passing unnoticed.
+    old_session_a = workspace_a / "sessions" / "alice_s.json"
+    old_session_a.write_text(
+        "live input no longer is a frozen migration session",
+    )
+    state = json.loads(session_b.read_text())
+    state.pop("turn_states")
+    session_b.chmod(0o644)
+    session_b.write_text(json.dumps(state))
+    session_b.chmod(0o444)
+    parsed = []
+    real_inventory = tenant_cli._inventory
+
+    async def inventory(view, spool, settings):
+        parsed.append(view.key)
+        assert view.key == (
+            "svc",
+            "alice",
+            "bob",
+        ), "published sibling was parsed again"
+        return await real_inventory(view, spool, settings)
+
+    monkeypatch.setattr(tenant_cli, "_inventory", inventory)
+    code, resumed = await _invoke(arguments)
+    assert code == 2 and resumed["pending_schema_finalize"] is True
+    assert resumed["published"] == 2 and resumed["failed"] == 0
+    assert parsed and set(parsed) == {("svc", "alice", "bob")}
+    assert await db.fetch_all(query, (b"alice", b"alice")) == online
+    assert config_a.read_text() == json.dumps(current)
+    assert (
+        old_session_a.read_text()
+        == "live input no longer is a frozen migration session"
+    )
+    await runtime.admit("alice", "bob")
+    with pytest.raises(TenantNotPublished):
+        await runtime.admit("alice", "unknown")
+    await apply_sql_script(
+        db,
+        SQL_ROOT / "conversation_tenant_publication_finalize.sql",
+    )
+    code, finalized = await _invoke(arguments)
+    assert code == 0
+    assert finalized["state"] == "ready"
+    assert finalized["published"] == 2 and finalized["failed"] == 0

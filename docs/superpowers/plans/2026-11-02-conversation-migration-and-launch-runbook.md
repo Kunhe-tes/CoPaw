@@ -14,14 +14,14 @@
 
 ### 0.1 代码链路及一致性边界
 
-`discover → freeze → inventory/plan → preflight → import/resume → verify → DBA share finalize → finalize → mysql authority 启动`。
+对于当前 source 隔离作业，操作入口以 [租户迁移手册](2026-11-13-conversation-tenant-migration-operations.md) 的 `prepare → migrate --apply` 为准；之后由 DBA 完成适用的 schema 检查，再按本文部署和验收。本文保留的旧分阶段命令不应与新作业混合使用。
 
-- `discovery.py` 用配置和磁盘证据确定服务/租户/source/Agent/workspace，读取全库旧分享，异常阻断；不是仅扫描 chats.json。
+- `discovery.py` 用配置和磁盘证据确定服务/租户/source/Agent/workspace；历史分享不属于本次迁移输入，不连接分享表；不是仅扫描 chats.json。
 - `v3_manifest.py` 固定源、目标应用库及每服务正文根；`inventory_v3.py` 重新解析输入，并按已记录的租户同步起点做 mtime 变化检查。当前新 discovery 不持久化全源内容哈希，不能证明从 discovery 起字节始终不变；强冻结须由停写和存储措施保证。
 - `conversation_storage_v3_cmd.py` 连接配置指定的**原应用库**，校验 `DATABASE()` 与 `@@server_uuid`，取得逻辑名 `conversation-migration:<schema>` 对应的命名锁（连接层默认哈希为实际锁 key，不能直接把逻辑名用于 IS_USED_LOCK 排查）；`DMLDatabase` 限定迁移 SQL。无 staging、无 RENAME、无自动 DDL。
 - `journal.py` 两张控制表持久化 ID 分配、批次票据及来源/目标绑定；导入是多批提交，不是全库一个事务。中断使用同作业续跑。
 - `direct_import.py` / `importer.py` 为各服务向 NAS 发布 bundle 并提交 SQL 定位。不可变正文与 SQL 发布协议配合，不能单独删除 SQL 行或正文“重置进度”。
-- `verify.py` 做全量语义及引用核对；`finalize` 再验一次，SQL 作业置 ready，原子写出完成证明及每服务运行时文件。`verify` 本身不等于 ready。
+- `migrate --apply` 默认执行快速结构验证、最后源检查并按 source 发布。`verify` 默认快速验证；只有显式 `--full-audit` 才做正文级语义核对。`finalize` 的 SQL ready 和运行凭证仍是独立的全作业旧流程语义，不要将其与 tenant source 发布混为一谈。
 - `authority.py` 与运行时启动检查凭证、服务、路径、库身份及最终 schema；SQL ready 后文件输出失败可以在仍冻结且未试写时重跑 finalize。
 
 ### 0.2 首次迁移与已有 MySQL 部署升级
@@ -58,7 +58,7 @@ Chat 新增投影列 `external_session_key`、40 KiB 的九字段显示元数据
 - direct-v3 的 inventory/plan/inspect/import/resume/verify/preflight/finalize 已走磁盘 spool；discover/freeze 的语义解析也使用有界 spool。新增资源参数与容量门禁见第 4.1 节。
 - workspace、分享发布、正文校验采用有界 worker/IO；SQL 仍在原命名锁连接所属 owner task 中执行，不能理解为多连接并行提交，也不允许启动多个迁移 CLI 抢同一作业。等待 IO 时会检查原锁健康，失锁后须停止并按同作业对账续跑。
 - import/resume/finalize 不带 --apply 只做源清单解析预览，不连接目标数据库，不核对目标结构、锁或完成状态；finalize 预览仍要求 --output-dir。预览会使用临时盘，但不会登记同步起点或持久化源变化 blocker，不能代替 preflight 或正式执行。
-- verify/finalize 增加有界正文读取及辅助材料覆盖核对；性能优化没有将全量校验降为抽样，也没有消除结束前的源清单重读。停机时间须包含这些重复扫描。
+- 快速验证检查已提交元数据、发布归属、bundle 索引和 locator 范围，不读取所有正文；它不证明正文逐字节匹配源。完整正文级核对使用 `verify --full-audit`，不作为 routine source publication 门槛。最终源 freshness check 仍会执行。
 - 进度和失败报告见第 9.1 节；临时 spool 是可重建解析缓存，不是续跑权威。SQL 控制表、原 manifest 和已发布 NAS 正文仍须保留。
 
 ## 1. 先把结论讲清楚
@@ -89,7 +89,7 @@ Chat 新增投影列 `external_session_key`、40 KiB 的九字段显示元数据
 | 数据 | 迁移后的存放位置 |
 | --- | --- |
 | Session、Chat、轮次、消息索引、执行状态、正文位置、发布与保留关系 | MySQL 六张会话表 |
-| 历史分享 token、创建时间、访问计数等 | 保留原 `swe_chat_shares`，只回填新增的服务和正文定位字段 |
+| 历史分享记录 | 不属于本次会话迁移；不发现、不导入或验证，不回填行数据 |
 | 会话正文、工具内容、归档、恢复需要的完整内容 | 新 NAS bundle，不是把所有正文塞进 MySQL |
 | 迁移进度、原数据到新 ID 的映射、完成证明 | 两张迁移控制表，以及审计目录中的文件 |
 | Agent 配置、技能、附件等其他业务文件 | 继续使用原业务目录；本次不迁移整个应用配置体系 |
@@ -396,13 +396,7 @@ run_cs 01-discover discover --services "$AUDIT_DIR/services.json" \
 ```
 
 所有根必须事先存在、绝对且规范，不含软链接；应用 Pod 的最终原 workspace 也必须真实存在。
-`snapshot_root` 是**旧分享 JSON 的查找基目录**，不是必须创建的 NAS 快照。
-代码会找 `snapshot_root/<tenant_id>/chat_shares/<token>.json`，并校验原 `snapshot_key`。
-如果旧分享实际存放在另一处，填那个已经冻结的服务级根，不要为了凑路径把 token 内容重新复制到 workspace。
-
-`discover` 默认从数据库分页读取**全表**旧分享八字段，自动确定唯一服务归属；生产推荐不传 `--shares-file`。
-同一 token 在声明的各服务快照根必须恰好找到一份。已删除原 Chat 的分享也要迁移。
-`--shares-file` 只用于经过核对的完整导出或隔离演练，不能为了通过扫描传一个假的 `[]`。
+**本次会话迁移不包含历史分享记录。** `discover` / `prepare` 不读取分享表，也不扫描旧分享正文；报告标记 `excluded_scopes: ["historical_shares"]`。兼容的 `--shares-file` 只能为空，非空时拒绝执行。旧分享在切换后的运行时功能、分享表 schema 扩展和 DBA 收口要求不变，不表示这些记录已迁移或验证。
 
 特殊布局的服务级补充字段：
 
@@ -413,7 +407,7 @@ run_cs 01-discover discover --services "$AUDIT_DIR/services.json" \
 | profile 中 workspace_dir 是相对路径 | 填旧进程真实 `original_cwd`，不能按迁移进程当前目录解析 |
 | 孤立 workspace / Session 身份缺失 | 使用证据绑定的 `--overrides`；不能把所有孤立数据归到 default |
 
-必须检查 `discovery.json` 的 `ready=true`、`blockers=[]`，并由业务/运维核对服务、租户、来源、Agent、workspace 和分享覆盖。
+必须检查 `discovery.json` 的 `ready=true`、`blockers=[]`，并由业务/运维核对服务、租户、来源、Agent、workspace 覆盖。历史分享明确排除，不作为迁移覆盖项。
 自动发现不是自动证明输入清单包含了所有生产服务；服务清单需要与部署及存储资产清单核对。
 
 遇到 blocker 时，保留报告，处理原因后输出新文件名重新扫描，工具不会覆盖现有 discovery 文件：
@@ -483,7 +477,7 @@ run_cs 05-preflight preflight --manifest "$AUDIT_DIR/manifest.json"
 如果采用 reviewed discovery，上面 `--discovery` 指向那份最终文件。证据文件须真实存在且可审计，
 程序接受字符串引用不代表已经验证停写。`freeze` 不会替你停止进程或给 NAS 上锁。
 
-`inventory/plan` 是源数据预览；`preflight` 才连接数据库核对预建结构、原分享未变化、
+`inventory/plan` 是源数据预览；`preflight` 才连接数据库核对预建结构、
 六表为空或已有行归本作业所有、作业绑定及锁等条件。预检 `passed=true` 才能继续。
 
 ```bash
@@ -491,13 +485,18 @@ run_cs 05-preflight preflight --manifest "$AUDIT_DIR/manifest.json"
 run_cs 06-import-preview import --manifest "$AUDIT_DIR/manifest.json"
 # 正式导入：向预建应用表写数据，同时向各服务 nas_root 发布正文。
 run_cs 07-import import --manifest "$AUDIT_DIR/manifest.json" --apply
-# 只读的全量语义验证。
+# 只读快速结构验证；不会比较每个正文与冻结源。
 run_cs 08-verify verify --manifest "$AUDIT_DIR/manifest.json"
 ```
 
 每条命令退出 0 后检查报告。`import` 输出迁移 ID 和批次状态，不带 `passed=true`，不能按那个字段判断它。
-全量 `verify` 必须 `passed=true`、`blockers=[]`。它比较消息每次出现及顺序、Session、Chat、
-归档、事件、checkpoint、分享和引用等，不只是统计总行数或抽看几条会话。
+快速 `verify` 必须 `passed=true`、`blockers=[]`。它核对 committed publication、源归属、导入计划元数据、bundle 索引和 locator block 范围，不读取全部正文，不证明 NAS 正文与源逐字节相等。需要完整语义审计时显式运行：
+
+```bash
+run_cs 08-full-audit verify --manifest "$AUDIT_DIR/manifest.json" --full-audit
+```
+
+完整审计逐项比较会话正文及归档、事件、checkpoint 等语义内容，耗时高于快速验证，且不是 source 发布的必要条件。历史分享不在本次迁移范围。
 
 中断后保持停写和输入不变，复用**同一份 manifest、同一作业 ID、同一目标**：
 
@@ -529,16 +528,16 @@ direct-v3 命令 stdout 保持最终 JSON 报告；stderr 约每 5 秒和退出�
 
 ## 10. DBA 收紧分享归属，再生成上线凭证
 
-全量 verify 通过后，DBA 先检查分享定位缺失和服务错误必须为 0。当前 finalize SQL 含 DELETE，执行前额外核对 all-null 行数为 0，确保不会删除任何历史分享：
+会话迁移不填充历史分享定位。若部署要求收紧分享表 schema，先确认旧 `swe_chat_shares` 行数为 **0**；只要仍有旧行，就停止并由 DBA 单独决定分享表兼容方案，不得执行含 DELETE 的 finalize SQL：
 
 ```bash
-db_read -e "SELECT COUNT(*) AS must_be_zero FROM swe_chat_shares WHERE publication_id IS NULL AND byte_offset IS NULL AND byte_length IS NULL AND service_unit_key IS NULL;"
+db_read -e "SELECT COUNT(*) AS legacy_share_rows FROM swe_chat_shares;"
 ```
 
-上述结果不是 0 时立即停止，不执行下面的 SQL。保存导入前后分享行数和八个旧字段的完整受限导出，不能仅用总数证明 token/计数不变。
+上述结果不是 0 时立即停止，不执行下面的 SQL。此次迁移不会填充这些记录的 publication/locator 字段，也不会验证或删除它们。
 
 ```bash
-db_read -e "SELECT COUNT(*) AS invalid_shares FROM swe_chat_shares s LEFT JOIN swe_conversation_publications p ON p.id=s.publication_id WHERE s.service_unit_key IS NULL OR OCTET_LENGTH(s.service_unit_key)=0 OR p.id IS NULL OR s.service_unit_key<>p.service_unit_key OR s.byte_offset IS NULL OR s.byte_length IS NULL;"
+db_read -e "SELECT COUNT(*) AS rows_before_finalize FROM swe_chat_shares;"
 db_dba < scripts/sql/conversation_share_service_unit_finalize.sql \
   > "$AUDIT_DIR/ddl-share-finalize.log" 2>&1
 run_cs 09-finalize-preview finalize --manifest "$AUDIT_DIR/manifest.json" \
@@ -547,7 +546,7 @@ run_cs 10-finalize finalize --manifest "$AUDIT_DIR/manifest.json" \
   --output-dir "$AUDIT_DIR/runtime" --apply
 ```
 
-`finalize` 这个名字不代表程序 ALTER 表：它重新做最终结构检查和全量语义校验，写 SQL ready 状态并输出完成证明。
+`finalize` 这个名字不代表程序 ALTER 表：它重新做最终结构检查和快速结构验证，写 SQL ready 状态并输出完成证明；正文级完整语义审计仍需显式 `verify --full-audit`。
 第一个 finalize 没有 `--apply` 只是预览，不替代正式验收。
 
 成功后应有：

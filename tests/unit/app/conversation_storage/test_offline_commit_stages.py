@@ -32,6 +32,23 @@ from tests.unit.app.conversation_storage.test_offline_confirm_stages import (
 
 
 class Database(PublicationDatabase):
+    async def fetch_all(self, query, params=None):
+        if query.startswith("SELECT archive_chat_id,archive_order,"):
+            keys = (
+                "id",
+                "service_unit_key",
+                "session_id",
+                "publication_id",
+                "byte_offset",
+                "byte_length",
+            )
+            return [
+                dict(zip(keys, values))
+                for values in self.messages
+                if values[0] in params[1:] and values[1] == params[0]
+            ]
+        return await super().fetch_all(query, params)
+
     async def fetch_one(self, query, params=None):
         if "SELECT DATABASE()" in query:
             return {"schema_name": "test_conversation_evidence"}
@@ -86,20 +103,6 @@ async def prepared(tmp_path, kind="rows"):
         service_unit_id="schema-test-service",
     ).reserve(operation, plan)
     rows = []
-    if kind == "rows":
-        rows = [
-            {
-                "table": "messages",
-                "values": {
-                    "id": 100,
-                    "service_unit_key": "schema-test-service",
-                    "session_id": 1,
-                    "publication_id": {"publication": True},
-                    "byte_offset": {"block": "message", "part": "offset"},
-                    "byte_length": {"block": "message", "part": "length"},
-                },
-            },
-        ]
     updates = []
     if kind == "turn":
         updates = [
@@ -146,16 +149,8 @@ async def test_three_plans_separate_sql_and_nas(tmp_path, monkeypatch, kind):
     result = await store.commit_evidence(evidence)
     assert result["state"] == "committed"
     if kind == "rows":
-        assert database.messages == [
-            (
-                100,
-                b"schema-test-service",
-                1,
-                1,
-                evidence.index.blocks["message"].offset,
-                evidence.index.blocks["message"].length,
-            ),
-        ]
+        assert database.messages == []
+        assert "message" in evidence.index.blocks
     if kind == "share":
         installed.assert_awaited_once()
     if kind == "turn":
@@ -256,15 +251,16 @@ async def test_projection_recovery_is_rejected_instead_of_skipping_pins(
 
     store, operation, _ = await prepared(tmp_path, "turn")
     ticket = await store.prepare_commit(operation.operation_key)
-    original = store.bundles.read_extent
+    from swe.app.conversation_storage.bundle import BundleReader
 
-    def projected(path, offset, length, **kwargs):
-        index = store.bundles.inspect(path)
-        if offset == index.blocks["recovery"].offset:
-            return json.dumps({"format": FORMAT}).encode()
-        return original(path, offset, length, **kwargs)
+    original = BundleReader.read_extents
 
-    monkeypatch.setattr(store.bundles, "read_extent", projected)
+    def projected(reader, extents, **kwargs):
+        if extents[0] == reader.index.blocks["recovery"]:
+            return (json.dumps({"format": FORMAT}).encode(),)
+        return original(reader, extents, **kwargs)
+
+    monkeypatch.setattr(BundleReader, "read_extents", projected)
     async with MigrationIO(1) as io:
         with pytest.raises(
             IntegrityError,
@@ -318,7 +314,8 @@ async def test_raw_first_turn_stays_raw_without_frozen_terminal_refs(
         "recovery",
         b'{"turn_states":{"new":{"status":"completed"}}}',
     )
-    assert await prepare_recovery_blocks(store, row, plan, [block]) == [block]
+    projected = await prepare_recovery_blocks(store, row, plan, [block])
+    assert b"swe-recovery-projection" in projected[0].content
     ticket = await store.prepare_commit(operation.operation_key)
     async with MigrationIO(1) as io:
         evidence = await store.read_commit_evidence(ticket, io)

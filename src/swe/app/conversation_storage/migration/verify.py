@@ -3,6 +3,7 @@
 
 import asyncio
 
+from ..bundle import BlockExtent
 from ..chat_repository import MySQLChatRepository
 from ..chat_mutations import (
     load_metadata_json,
@@ -13,12 +14,11 @@ from ..identity import WorkspaceScope
 from ..session_adapter import MySQLSessionAdapter
 from .importer import bundle_stores, validate_inventory
 from .install_records import OfflineImportStore
-from ..shares import ShareStorage
 from ..errors import StorageError
 from mysql.connector.errors import Error as MySQLError
 from ..history import HistoryStore
 from ..archive_reader import ArchiveReader
-from .importer import archive_batches, message_body, task_projections
+from .importer import archive_batches, task_projections
 from .manifest import SourceBoundary
 from .readonly import ReadOnlyDatabase, ReadOnlyRetention, read_only_adapter
 from .verify_parallel import (
@@ -37,6 +37,125 @@ VERIFY_ERRORS = (
     StorageError,
     MySQLError,
 )
+
+
+async def _verify_fast_level(
+    database,
+    stores,
+    manifest,
+    inventory,
+    target,
+    report,
+    *,
+    io,
+    io_workers,
+    workers,
+    memory_bytes,
+):
+    from .verify_fast import verify_fast_publications
+
+    try:
+        expected_scopes = None
+        if manifest.data.get("tenant_isolation"):
+            expected_scopes = {
+                tuple(workspace["scope"])
+                for workspace in inventory["workspaces"]
+            }
+        if io is None:
+            from .parallel import MigrationIO
+
+            async with MigrationIO(io_workers) as fast_io:
+                summary = await verify_fast_publications(
+                    database,
+                    stores,
+                    manifest,
+                    target,
+                    io=fast_io,
+                    io_workers=io_workers,
+                    memory_bytes=memory_bytes // max(1, workers),
+                    expected_scopes=expected_scopes,
+                )
+        else:
+            summary = await verify_fast_publications(
+                database,
+                stores,
+                manifest,
+                target,
+                io=io,
+                io_workers=io_workers,
+                memory_bytes=memory_bytes // max(1, workers),
+                expected_scopes=expected_scopes,
+            )
+        report["checked"] = [
+            {"position": "publications", "count": summary["publications"]},
+        ]
+        report["fast_summary"] = summary
+    except VERIFY_ERRORS as error:
+        raise_shared_failure(error)
+        report["blockers"].append(
+            {"position": "source", "detail": str(error)},
+        )
+    report["passed"] = not report["blockers"]
+
+
+async def _verification_context(
+    database,
+    bundles,
+    manifest,
+    inventory,
+    target,
+):
+    validate_inventory(inventory)
+    if inventory.get("shares") or manifest.data.get("shares"):
+        raise ValueError(
+            "historical share records are excluded from migration",
+        )
+    from pathlib import Path
+
+    stores = bundle_stores(bundles, manifest)
+    binding = {
+        "schema": target.schema,
+        "nas_roots": {
+            key: str(store.root.resolve()) for key, store in stores.items()
+        },
+        "migration_id": manifest.migration_id,
+    }
+    if manifest.data.get("target") != binding or manifest.data[
+        "source_boundary"
+    ] != inventory.get("source_boundary"):
+        raise ValueError(
+            "verification target or source boundary differs from manifest",
+        )
+    expected = [
+        (
+            item["service_unit_id"],
+            item["tenant_id"],
+            item["source_id"],
+            item["agent_id"],
+            str(Path(item["root"]).resolve()),
+        )
+        for item in manifest.data["workspaces"]
+    ]
+    actual = [
+        (*item["scope"], item["root"]) for item in inventory["workspaces"]
+    ]
+    if expected != actual:
+        raise ValueError(
+            "verification workspace mapping differs from manifest",
+        )
+    await OfflineImportStore(
+        database,
+        next(iter(stores.values())),
+        target,
+        service_unit_id=next(iter(stores)),
+    ).validate_target()
+    return (
+        ReadOnlyDatabase(
+            database,
+            SourceBoundary(**manifest.data["source_boundary"]),
+        ),
+        stores,
+    )
 
 
 async def _payload(
@@ -108,24 +227,51 @@ async def _payloads(
     for row in rows:
         if row["service_unit_key"] != service:
             raise ValueError("referencing row service ownership differs")
-    result = []
-    for start in range(0, len(rows), io_workers):
-        pending = []
-        for row in rows[start : start + io_workers]:
-            publication = publications[row["publication_id"]]
-            pending.append(
-                io.call(
-                    bundles.read_extent,
-                    bundles.validate_publication_locator(publication),
-                    row[offset],
-                    row[length],
-                    expected_length=publication["byte_length"],
-                ),
-            )
-        result.extend(
-            load_metadata_json(value)
-            for value in await asyncio.gather(*pending)
+    grouped = {}
+    for position, row in enumerate(rows):
+        grouped.setdefault(row["publication_id"], []).append((position, row))
+
+    def read_group(publication_id):
+        publication = publications[publication_id]
+        path = bundles.validate_publication_locator(publication)
+        with bundles.open_reader(
+            path,
+            expected_length=publication["byte_length"],
+        ) as reader:
+            result = []
+            for position, row in grouped[publication_id]:
+                block = next(
+                    (
+                        block
+                        for block in reader.index.blocks.values()
+                        if block.offset <= row[offset]
+                        and row[offset] + row[length]
+                        <= block.offset + block.length
+                    ),
+                    None,
+                )
+                if block is None:
+                    raise ValueError(
+                        "message extent is outside publication payload",
+                    )
+
+                extent = BlockExtent(block.kind, row[offset], row[length])
+                raw = reader.read_extents((extent,))[0]
+                result.append((position, load_metadata_json(raw)))
+            return result
+
+    result = [None] * len(rows)
+    identifiers = list(grouped)
+    for start in range(0, len(identifiers), io_workers):
+        groups = await asyncio.gather(
+            *(
+                io.call(read_group, identity)
+                for identity in identifiers[start : start + io_workers]
+            ),
         )
+        for group in groups:
+            for position, value in group:
+                result[position] = value
     return result
 
 
@@ -142,63 +288,45 @@ async def verify_import(
     workers=1,
     memory_bytes=512 * 1024 * 1024,
     health_check=None,
+    verification_level="full",
 ):
+    if verification_level not in ("fast", "full"):
+        raise ValueError("verification level must be fast or full")
     report = {
         "version": 2,
         "migration_id": manifest.migration_id,
+        "excluded_scopes": ["historical_shares"],
+        "verification_level": verification_level,
         "checked": [],
         "blockers": [],
         "passed": False,
     }
     try:
-        validate_inventory(inventory)
-        from pathlib import Path
-
-        stores = bundle_stores(bundles, manifest)
-        binding = {
-            "schema": target.schema,
-            "nas_roots": {
-                key: str(store.root.resolve()) for key, store in stores.items()
-            },
-            "migration_id": manifest.migration_id,
-        }
-        if manifest.data.get("target") != binding or manifest.data[
-            "source_boundary"
-        ] != inventory.get("source_boundary"):
-            raise ValueError(
-                "verification target or source boundary differs from manifest",
-            )
-        expected = [
-            (
-                item["service_unit_id"],
-                item["tenant_id"],
-                item["source_id"],
-                item["agent_id"],
-                str(Path(item["root"]).resolve()),
-            )
-            for item in manifest.data["workspaces"]
-        ]
-        actual = [
-            (*item["scope"], item["root"]) for item in inventory["workspaces"]
-        ]
-        if expected != actual:
-            raise ValueError(
-                "verification workspace mapping differs from manifest",
-            )
-        await OfflineImportStore(
+        database, stores = await _verification_context(
             database,
-            next(iter(stores.values())),
+            bundles,
+            manifest,
+            inventory,
             target,
-            service_unit_id=next(iter(stores)),
-        ).validate_target()
-        database = ReadOnlyDatabase(
-            database,
-            SourceBoundary(**manifest.data["source_boundary"]),
         )
     except VERIFY_ERRORS as error:
         raise_shared_failure(error)
         report["blockers"].append(
             {"position": "migration", "detail": str(error)},
+        )
+        return report
+    if verification_level == "fast":
+        await _verify_fast_level(
+            database,
+            stores,
+            manifest,
+            inventory,
+            target,
+            report,
+            io=io,
+            io_workers=io_workers,
+            workers=workers,
+            memory_bytes=memory_bytes,
         )
         return report
     if io is not None:
@@ -245,7 +373,7 @@ async def verify_import(
                     session,
                     io=io,
                     io_workers=io_workers,
-                    messages_verified=io is not None,
+                    messages_verified=True,
                 ),
             )
         for chat in workspace["chats"]:
@@ -289,41 +417,6 @@ async def verify_import(
                 ),
             )
 
-    async def runtime_share(share, share_bundles):
-        local = {"checked": [], "blockers": []}
-        await _checked(
-            local,
-            share["position"],
-            _verify_share(
-                database,
-                share_bundles,
-                share,
-                io=io,
-                snapshot_verified=io is not None,
-            ),
-        )
-
-        return local
-
-    if io is not None:
-        from .runtime_prefetch import verify_prefetched_shares
-
-        await verify_prefetched_shares(
-            database,
-            stores,
-            inventory["shares"],
-            runtime_share,
-            io=io,
-            workers=workers,
-            allowance=memory_bytes // workers,
-            health_check=health_check,
-            merge_result=merge_runtime_result,
-        )
-    else:
-        for share in inventory["shares"]:
-            merge_runtime_result(
-                await runtime_share(share, stores[share["service_unit_id"]]),
-            )
     for item in (() if io is not None else inventory.get("files", [])):
         from .importer import artifact_is_reconstructed
 
@@ -399,7 +492,6 @@ async def _verify_artifact(
         "workspace": item["workspace"],
         "scope": workspace["scope"],
         "relative_path": item["path"],
-        "bytes": item["bytes"],
         "snapshot_id": inventory["source_boundary"]["snapshot_id"],
     }
     if io is None:
@@ -421,7 +513,9 @@ async def _verify_artifact(
         (meta, body),
         io=io,
     )
-    if load_metadata_json(metadata_raw) != expected:
+    metadata = load_metadata_json(metadata_raw)
+    expected["bytes"] = item.get("bytes", len(body_raw))
+    if metadata != expected or metadata.get("bytes") != len(body_raw):
         raise ValueError("retained legacy artifact source identity differs")
     source_path = Path(workspace["root"]) / item["path"]
     source = (
@@ -429,29 +523,26 @@ async def _verify_artifact(
         if io is None
         else await io.call(source_path.read_bytes)
     )
-    if len(source) != item["bytes"] or body_raw != source:
+    if (
+        "bytes" in item and len(source) != item["bytes"]
+    ) or body_raw != source:
         raise ValueError("retained native legacy artifact bytes differ")
 
 
 async def _read_extents(bundles, relative_path, extents, *, io):
-    if io is None:
-        return tuple(
-            bundles.read_extent(relative_path, item.offset, item.length)
-            for item in extents
-        )
-    return tuple(
-        await asyncio.gather(
-            *(
-                io.call(
-                    bundles.read_extent,
-                    relative_path,
-                    item.offset,
-                    item.length,
-                )
-                for item in extents
-            ),
-        ),
+    if len(extents) > 2:
+        raise ValueError("verification reads at most two extents")
+    arguments = (relative_path, extents)
+    # Verification reads at most an artifact body and its metadata together.
+    max_read_bytes = (
+        bundles.max_read_bytes
+        if hasattr(bundles, "max_read_bytes")
+        else bundles.original.max_read_bytes
     )
+    kwargs = {"max_bytes": 2 * max_read_bytes}
+    if io is None:
+        return bundles.read_extents(*arguments, **kwargs)
+    return await io.call(bundles.read_extents, *arguments, **kwargs)
 
 
 async def _checked(report, position, check):
@@ -506,6 +597,7 @@ async def _verify_session(
         await _verify_session_messages(
             database,
             bundles,
+            manifest,
             workspace,
             session,
             sid,
@@ -581,6 +673,7 @@ async def _verify_turns(adapter, identity, expected):
 async def _verify_session_messages(
     database,
     bundles,
+    manifest,
     workspace,
     session,
     sid,
@@ -590,10 +683,12 @@ async def _verify_session_messages(
 ):
     identity = session["identity"]
     expected = session["legacy"]["state"]
-    rows = await database.fetch_all(
-        "SELECT * FROM swe_conversation_messages WHERE session_id=%s AND layer<>%s ORDER BY session_order",
-        (sid, "archive"),
+    from ..message_bundle import (
+        decode_message_bodies,
+        decode_message_directory,
     )
+    from ..bundle import BundleStore
+
     from .importer import display_order_messages, extract_messages
 
     messages = extract_messages(
@@ -613,38 +708,74 @@ async def _verify_session_messages(
     ):
         task_projections(messages, expected)
     messages = display_order_messages(messages)
-    if len(rows) != len(messages):
-        raise ValueError("Session Message occurrence count differs")
-    if io is None:
-        bodies = [
-            await _payload(
-                database,
-                bundles,
-                row,
-                "byte_offset",
-                "byte_length",
-                service_unit_id=workspace["scope"][0],
-            )
-            for row in rows
-        ]
-    else:
-        bodies = await _payloads(
-            database,
-            bundles,
-            rows,
-            "byte_offset",
-            "byte_length",
-            service_unit_id=workspace["scope"][0],
-            io=io,
-            io_workers=io_workers,
+    assignments = manifest.data["assignments"].get("publication", {})
+    scope = WorkspaceScope.from_values(workspace["scope"])
+    prefix = session["position"] + "/messages:"
+    batches = [
+        (int(position[len(prefix) :]), assignment)
+        for position, assignment in assignments.items()
+        if position.startswith(prefix)
+    ]
+    batches.sort(key=lambda batch: batch[0])
+    seen = 0
+    for start, assignment in batches:
+        if start != seen:
+            raise ValueError("Session message batch order differs")
+        publication = await database.fetch_one(
+            "SELECT * FROM swe_conversation_publications WHERE id=%s AND state='committed' AND gc_state='live'",
+            (assignment["target_id"],),
         )
-    for row, message, body in zip(rows, messages, bodies):
+        if publication is None:
+            raise ValueError("Session message bundle publication is missing")
         if (
-            body != message_body(message)
-            or row["layer"] != message["layer"]
-            or row["source_occurrence_no"] != message["source_occurrence_no"]
+            WorkspaceScope.from_row(publication) != scope
+            or publication["session_id"] != sid
         ):
-            raise ValueError("Message role/body/order/occurrence differs")
+            raise ValueError(
+                "Session message bundle publication scope differs",
+            )
+        path = BundleStore.validate_publication_locator(publication)
+        index = bundles.inspect(
+            path,
+            expected_length=publication["byte_length"],
+        )
+        directory_raw, bodies_raw = await _read_extents(
+            bundles,
+            path,
+            (
+                index.blocks["message_directory"],
+                index.blocks["message_bodies"],
+            ),
+            io=io,
+        )
+        directory = decode_message_directory(directory_raw)
+        bodies = decode_message_bodies(bodies_raw)
+        if len(directory) != len(bodies) or seen + len(directory) > len(
+            messages,
+        ):
+            raise ValueError("Session message directory/body count differs")
+        for position, (entry, body) in enumerate(zip(directory, bodies)):
+            expected_message = messages[seen]
+            locator = {
+                "publication_id": "self",
+                "block_name": "message_bodies",
+                "position": position,
+            }
+            if entry["sequence"] != seen + 1 or entry["body"] != locator:
+                raise ValueError("Message directory order or locator differs")
+            if (
+                body != expected_message["payload"]
+                or entry["layer"] != expected_message["layer"]
+                or entry["raw_id"]
+                != (expected_message["source_msg_key"] or "")
+                or not entry["visible"]
+                or entry["source_occurrence"]
+                != expected_message["source_occurrence_no"]
+            ):
+                raise ValueError("Message directory/body/order differs")
+            seen += 1
+    if seen != len(messages):
+        raise ValueError("Session Message occurrence count differs")
 
 
 async def _verify_chat_projection(database, scope, spec):
@@ -683,6 +814,8 @@ async def _verify_chat(
     messages_verified=False,
 ):
     scope = WorkspaceScope.from_values(workspace["scope"])
+    from swe.app.runner.models import ChatSpec
+
     await _verify_chat_projection(database, scope, chat["spec"])
     actual = await read_only_adapter(
         MySQLChatRepository(database, scope, bundles),
@@ -693,7 +826,7 @@ async def _verify_chat(
         if actual is not None:
             raise ValueError("deleted Chat was resurrected")
     elif actual is None or actual.model_dump(mode="json") != {
-        **chat["spec"],
+        **ChatSpec.model_validate(chat["spec"]).model_dump(mode="json"),
         "status": "idle",
     }:
         raise ValueError("Chat metadata/binding/identity/time differs")
@@ -723,48 +856,110 @@ async def _verify_archive_rows(
     io=None,
     io_workers=4,
 ):
-    cid = manifest.data["assignments"]["chat"][chat["position"]]["target_id"]
-    rows = await database.fetch_all(
-        "SELECT * FROM swe_conversation_messages WHERE archive_chat_id=%s ORDER BY archive_order",
-        (cid,),
+    from ..message_bundle import (
+        decode_archive_manifest,
+        decode_message_bodies,
+        decode_message_directory,
     )
+    from ..bundle import BundleStore
+
+    cid = manifest.data["assignments"]["chat"][chat["position"]]["target_id"]
     expected = [
         message
         for batch in archive_batches(chat["archive"])
         for message in batch["messages"]
     ]
-    if len(rows) != len(expected):
-        raise ValueError("archive occurrence count differs")
-    if io is None:
-        bodies = [
-            await _payload(
-                database,
-                bundles,
-                row,
-                "byte_offset",
-                "byte_length",
-                service_unit_id=scope.service_unit_id,
-            )
-            for row in rows
-        ]
-    else:
-        bodies = await _payloads(
-            database,
-            bundles,
-            rows,
-            "byte_offset",
-            "byte_length",
-            service_unit_id=scope.service_unit_id,
-            io=io,
-            io_workers=io_workers,
+    assignments = manifest.data["assignments"].get("publication", {})
+    batches = archive_batches(chat["archive"])
+    seen = 0
+    for batch in batches:
+        position = chat["position"] + "/boundary:" + batch["boundary"]["id"]
+        assignment = assignments.get(position)
+        if assignment is None:
+            raise ValueError("archive boundary publication is missing")
+        publication = await database.fetch_one(
+            "SELECT * FROM swe_conversation_publications WHERE id=%s AND state='committed' AND gc_state='live'",
+            (assignment["target_id"],),
         )
-    for body, message in zip(bodies, expected):
-        if body != message:
-            raise ValueError("archive message order/body differs")
+        if (
+            publication is None
+            or WorkspaceScope.from_row(publication) != scope
+            or publication["chat_id"] != cid
+            or publication["epoch"] != batch["epoch"]
+        ):
+            raise ValueError("archive boundary publication scope differs")
+        path = BundleStore.validate_publication_locator(publication)
+        index = bundles.inspect(
+            path,
+            expected_length=publication["byte_length"],
+        )
+        extent = index.blocks["archive_manifest"]
+        archive_manifest = decode_archive_manifest(
+            bundles.read_extent(
+                path,
+                extent.offset,
+                extent.length,
+                expected_length=index.byte_length,
+            ),
+        )
+        for chunk in archive_manifest["chunks"]:
+            chunk_publication = await database.fetch_one(
+                "SELECT * FROM swe_conversation_publications WHERE id=%s AND state='committed' AND gc_state='live'",
+                (chunk["publication_id"],),
+            )
+            if (
+                chunk_publication is None
+                or WorkspaceScope.from_row(chunk_publication) != scope
+                or chunk_publication["chat_id"] != cid
+                or chunk_publication["session_id"] != publication["session_id"]
+                or chunk_publication["epoch"] != batch["epoch"]
+            ):
+                raise ValueError(
+                    "archive message chunk publication scope differs",
+                )
+            chunk_path = BundleStore.validate_publication_locator(
+                chunk_publication,
+            )
+            chunk_index = bundles.inspect(
+                chunk_path,
+                expected_length=chunk_publication["byte_length"],
+            )
+            directory_extent = chunk_index.blocks[chunk["directory_block"]]
+            directory = decode_message_directory(
+                bundles.read_extent(
+                    chunk_path,
+                    directory_extent.offset,
+                    directory_extent.length,
+                    expected_length=chunk_index.byte_length,
+                ),
+            )
+            body_extent = chunk_index.blocks["message_bodies"]
+            bodies = decode_message_bodies(
+                bundles.read_extent(
+                    chunk_path,
+                    body_extent.offset,
+                    body_extent.length,
+                    expected_length=chunk_index.byte_length,
+                ),
+            )
+            if len(directory) != len(bodies) or seen + len(bodies) > len(
+                expected,
+            ):
+                raise ValueError(
+                    "archive message directory/body count differs",
+                )
+            for entry, body in zip(directory, bodies):
+                if body != expected[seen] or entry["sequence"] != seen + 1:
+                    raise ValueError("archive message order/body differs")
+                seen += 1
+    if seen != len(expected):
+        raise ValueError("archive occurrence count differs")
 
 
 async def _verify_epochs(database, bundles, manifest, chat, scope, *, io=None):
     for epoch in chat["archive"]["epochs"]:
+        if epoch.get("deleted"):
+            continue
         position = chat["position"] + "/epoch:" + str(epoch["epoch"])
         assignment = manifest.data["assignments"]["publication"][position]
         publication = await database.fetch_one(
@@ -793,62 +988,16 @@ async def _verify_epochs(database, bundles, manifest, chat, scope, *, io=None):
             io=io,
         )
         actual_epoch = load_metadata_json(raw_epoch)
-        if actual_epoch != epoch:
+        if _normalized_epoch(actual_epoch) != _normalized_epoch(epoch):
             raise ValueError("full checkpoint/event/epoch semantics differ")
 
 
-async def _verify_share(
-    database,
-    bundles,
-    share,
-    *,
-    io=None,
-    snapshot_verified=False,
-):
-    actual = await database.fetch_one(
-        "SELECT * FROM swe_chat_shares WHERE token=%s",
-        (share["record"]["token"],),
-    )
-    if actual is None:
-        raise ValueError("permanent share token missing")
-    for key, value in share["record"].items():
-        if key == "service_unit_id":
-            if actual["service_unit_key"] != value.encode():
-                raise ValueError("share service ownership differs")
-            continue
-        if hasattr(actual[key], "isoformat"):
-            from ..chat_mutations import utc_datetime
-
-            if actual[key] != utc_datetime(value):
-                raise ValueError("share timestamp differs")
-        elif actual[key] != value:
-            raise ValueError("share token/ownership/counter differs")
-    if not snapshot_verified:
-        if (
-            await _payload(
-                database,
-                bundles,
-                actual,
-                "byte_offset",
-                "byte_length",
-                service_unit_id=share["service_unit_id"],
-                io=io,
-            )
-            != share["snapshot"]
-        ):
-            raise ValueError("complete share snapshot differs")
-    if (
-        await ShareStorage(
-            database,
-            bundles,
-            retention_factory=ReadOnlyRetention,
-            service_unit_id=share["service_unit_id"],
-        ).verify_snapshot(
-            share["record"]["token"],
-        )
-        != share["snapshot"]
-    ):
-        raise ValueError("runtime share snapshot differs")
+def _normalized_epoch(epoch):
+    return {
+        key: value
+        for key, value in epoch.items()
+        if key not in ("captured_at", "updated_at", "created_at")
+    }
 
 
 async def _verify_runtime_chat(database, bundles, scope, chat, workspace):

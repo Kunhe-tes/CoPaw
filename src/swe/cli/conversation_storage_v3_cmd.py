@@ -12,8 +12,7 @@ import tempfile
 
 import click
 
-from swe.app.conversation_storage.bundle import BundleStore
-from swe.app.conversation_storage.migration.discovery import SHARE_FIELDS
+from swe.app.conversation_storage.bundle import BundleStore, UNBOUNDED
 from swe.app.conversation_storage.migration.direct_import import (
     DirectImporter,
     DirectTarget,
@@ -99,50 +98,6 @@ def validate_output(output, data):
     return root
 
 
-def _stamp(value):
-    from datetime import datetime, timezone
-
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc).isoformat()
-    if isinstance(value, str):
-        try:
-            return _stamp(datetime.fromisoformat(value.replace("Z", "+00:00")))
-        except ValueError:
-            pass
-    return value
-
-
-async def compare_original_shares(database, data):
-    rows = await database.fetch_all(
-        "SELECT "
-        + ",".join(SHARE_FIELDS)
-        + " FROM swe_chat_shares ORDER BY token",
-    )
-
-    def normalized(row):
-        return {
-            key: (
-                _stamp(row.get(key))
-                if key in ("created_at", "last_access_at")
-                else row.get(key)
-            )
-            for key in SHARE_FIELDS
-        }
-
-    actual = {row["token"]: normalized(row) for row in rows}
-    expected = {row["token"]: normalized(row) for row in data["shares"]}
-    if (
-        len(actual) != len(rows)
-        or len(expected) != len(data["shares"])
-        or actual != expected
-    ):
-        raise ValueError(
-            "original share set, identity, timestamps or counters changed",
-        )
-
-
 def _write_json(path, value):
     raw = json.dumps(value, sort_keys=True, ensure_ascii=False).encode()
     if path.exists():
@@ -225,6 +180,7 @@ async def _execute(
     io_workers=4,
     source_recheck=None,
     memory_bytes=512 * 1024 * 1024,
+    verification_level="fast",
 ):
     from swe.app.conversation_storage.migration.progress import (
         current_progress,
@@ -246,7 +202,11 @@ async def _execute(
         raise ValueError("configured application schema differs from manifest")
     target = DirectTarget(schema, schema, manifest.migration_id)
     bundles = {
-        item["service_unit_id"]: BundleStore(item["nas_root"])
+        item["service_unit_id"]: (
+            BundleStore(item["nas_root"], unbounded=True)
+            if manifest.data.get("source_binding_storage") == "manifest-v1"
+            else BundleStore(item["nas_root"])
+        )
         for item in manifest.data["services"]
     }
     binding = {
@@ -298,12 +258,12 @@ async def _execute(
                 schema,
                 finalized=operation == "finalize",
             )
-            await compare_original_shares(db, manifest.data)
             job = await _inspect_job(db, journal)
             if operation == "preflight":
                 return {
                     "version": 3,
                     "migration_id": manifest.migration_id,
+                    "excluded_scopes": ["historical_shares"],
                     "passed": True,
                     "state": job["state"] if job else "planned",
                 }
@@ -321,6 +281,10 @@ async def _execute(
                     io_workers=io_workers,
                     health_check=guard.check,
                 )
+                result = {
+                    **result,
+                    "excluded_scopes": ["historical_shares"],
+                }
             else:
                 if job is None or job["state"] not in (
                     "imported",
@@ -352,13 +316,16 @@ async def _execute(
                         workers=workers,
                         memory_bytes=memory_bytes,
                         health_check=guard.check,
+                        verification_level=verification_level,
                     )
+                if operation == "verify":
+                    await journal.mark_state(job["state"], result)
                 if not result["passed"]:
                     raise ValueError(
                         "semantic verification failed: "
                         + json.dumps(result["blockers"]),
                     )
-            # Re-read the complete frozen source and old SQL shares before completion.
+            # Re-read the complete frozen source before completion.
             if source_recheck is None:
                 if inventory_v3(manifest) != inventory:
                     raise ValueError(
@@ -366,7 +333,6 @@ async def _execute(
                     )
             else:
                 await source_recheck()
-            await compare_original_shares(db, manifest.data)
             if (
                 await check_schema(
                     db,
@@ -421,6 +387,7 @@ async def _execute_spooled(
     memory_budget_mib,
     work_dir,
     apply=True,
+    verification_level="fast",
 ):
     protected = [
         service[key]
@@ -459,10 +426,12 @@ async def _execute_spooled(
             "work directory must be an existing canonical directory",
         )
     memory_bytes = memory_budget_mib * 1024 * 1024
-    record_limit = memory_bytes // workers
-    disk_limit = shutil.disk_usage(base).free * 3 // 4
-    if record_limit > disk_limit:
-        raise ValueError("work directory has insufficient free space")
+    disk_limit = (
+        UNBOUNDED
+        if manifest.data.get("source_binding_storage") == "manifest-v1"
+        else shutil.disk_usage(base).free * 3 // 4
+    )
+    record_limit = disk_limit
     with InventorySpool(
         base,
         max_bytes=disk_limit,
@@ -500,6 +469,7 @@ async def _execute_spooled(
                 "version": 3,
                 "operation": operation,
                 "migration_id": manifest.migration_id,
+                "excluded_scopes": ["historical_shares"],
                 "apply": False,
                 "ready": True,
             }
@@ -529,6 +499,7 @@ async def _execute_spooled(
             io_workers=io_workers,
             source_recheck=recheck_source,
             memory_bytes=memory_bytes,
+            verification_level=verification_level,
         )
 
 
@@ -587,6 +558,7 @@ def run_v3_command(
     work_dir=None,
     reviewed_discovery=None,
     rollback_inputs=None,
+    full_audit=False,
 ):
     if operation not in (
         "inventory",
@@ -606,11 +578,15 @@ def run_v3_command(
         raise ValueError("workers and io-workers must be between 1 and 32")
     if not 128 <= memory_budget_mib <= 65536:
         raise ValueError("memory budget must be between 128 and 65536 MiB")
+    if full_audit and operation != "verify":
+        raise ValueError("--full-audit is only valid with verify")
+    verification_level = "full" if full_audit else "fast"
     manifest = V3Manifest.load(manifest_path)
     output = None
-    if operation in ("finalize", "rollback-tenants", "migrate"):
-        if output_dir is None:
-            raise ValueError("finalize requires --output-dir")
+    needs_output = operation in ("finalize", "rollback-tenants")
+    if needs_output and output_dir is None:
+        raise ValueError(operation + " requires --output-dir")
+    if output_dir is not None:
         output = validate_output(output_dir, manifest.data)
     for service in manifest.data["services"]:
         nas = Path(service["nas_root"]).resolve()
@@ -638,6 +614,7 @@ def run_v3_command(
                 apply=apply,
                 reviewed_discovery=reviewed_discovery,
                 rollback_inputs=rollback_inputs,
+                verification_level=verification_level,
             ),
         )
     if operation in ("retry-review", "rollback-tenants", "migrate"):
@@ -654,6 +631,7 @@ def run_v3_command(
             memory_budget_mib=memory_budget_mib,
             work_dir=work_dir,
             apply=apply,
+            verification_level=verification_level,
         ),
     )
 
@@ -663,6 +641,7 @@ def _inventory_preview(operation, manifest, inventory):
         "version": 3,
         "operation": operation,
         "migration_id": manifest.migration_id,
+        "excluded_scopes": ["historical_shares"],
         "preview": True,
         "application_schema": manifest.data["offline"]["application_schema"],
         "source_boundary": inventory["source_boundary"],

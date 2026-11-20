@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import json
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -82,7 +83,10 @@ async def test_capture_includes_owned_legacy_retention_and_shared_guard():
     await journal.capture_retentions()
     assert [
         call.args[0]["id"] for call in journal.record_retention.call_args_list
-    ] == [1, 3]
+    ] == [
+        1,
+        3,
+    ]
     query, params = db.fetch_all.call_args.args
     assert "scope_kind='legacy_share'" in query
     assert params[:3] == (b"svc", b"alice", b"A")
@@ -109,7 +113,10 @@ async def test_unknown_legacy_retention_cannot_disappear_from_capture():
         await journal.capture_retentions()
 
 
-async def test_empty_source_review_ignores_other_source_legacy_rows_but_checks_guard():
+@pytest.mark.parametrize("indexed", [False, True])
+async def test_empty_source_review_ignores_other_source_legacy_rows_but_checks_guard(
+    indexed,
+):
     current_guard = guard()
     details = {
         key: value.decode() if isinstance(value, bytes) else value
@@ -151,7 +158,13 @@ async def test_empty_source_review_ignores_other_source_legacy_rows_but_checks_g
     )
     token = retry._SOURCE_MODE.set(True)
     try:
-        await retry._no_data(db, JOB, {("svc", "alice", "")}, shares=SHARES)
+        with retry._ticket_analysis() if indexed else nullcontext():
+            await retry._no_data(
+                db,
+                JOB,
+                {("svc", "alice", "")},
+                shares=SHARES,
+            )
         with pytest.raises(retry._TenantReviewHasData):
             await retry._no_data(
                 db,

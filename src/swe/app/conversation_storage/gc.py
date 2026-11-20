@@ -209,16 +209,6 @@ class GarbageCollector:
             reasons.append("retained_history")
         queries = (
             (
-                "message",
-                "SELECT m.id FROM swe_conversation_messages m LEFT JOIN swe_conversation_chats c ON c.id=m.archive_chat_id AND c.service_unit_key=m.service_unit_key WHERE m.publication_id=%s AND m.deleted_at IS NULL AND ((m.layer<>'archive' AND m.current_visible=1) OR (m.layer='archive' AND (c.id IS NULL OR c.deleted_at IS NULL))) LIMIT 1",
-                (identity,),
-            ),
-            (
-                "archive_boundary",
-                "SELECT m.id FROM swe_conversation_messages m LEFT JOIN swe_conversation_chats c ON c.id=m.archive_chat_id AND c.service_unit_key=m.service_unit_key WHERE m.archive_publication_id=%s AND m.layer='archive' AND m.deleted_at IS NULL AND (c.id IS NULL OR c.deleted_at IS NULL) LIMIT 1",
-                (identity,),
-            ),
-            (
                 "session_root",
                 "SELECT id FROM swe_conversation_sessions WHERE recovery_publication_id=%s LIMIT 1",
                 (identity,),
@@ -255,10 +245,9 @@ class GarbageCollector:
             ),
         )
         for reason, query, params in queries:
-            alias = "m." if "SELECT m.id" in query else ""
             query = query.replace(
                 " WHERE ",
-                " WHERE " + alias + "service_unit_key=%s AND ",
+                " WHERE service_unit_key=%s AND ",
                 1,
             )
             params = (self.scope.sql_values[0], *params)
@@ -308,10 +297,6 @@ class GarbageCollector:
             if table == "turns" and association["chat_id"] != row["chat_id"]:
                 return True
         queries = (
-            (
-                "SELECT m.id FROM swe_conversation_messages m LEFT JOIN swe_conversation_sessions s ON s.id=m.session_id AND s.service_unit_key=m.service_unit_key WHERE m.service_unit_key=%s AND (m.publication_id=%s OR m.archive_publication_id=%s) AND (s.id IS NULL OR s.service_unit_key<>%s OR s.tenant_key<>%s OR s.source_key<>%s OR s.agent_key<>%s OR NOT(m.session_id<=>%s)) LIMIT 1",
-                (values[0], row["id"], row["id"], *values, row["session_id"]),
-            ),
             (
                 "SELECT id FROM swe_conversation_retentions WHERE service_unit_key=%s AND publication_id=%s AND (scope_kind<>%s OR service_unit_key<>%s OR tenant_key<>%s OR source_key<>%s OR agent_key<>%s) LIMIT 1",
                 (values[0], row["id"], *self.retentions.scope_values),

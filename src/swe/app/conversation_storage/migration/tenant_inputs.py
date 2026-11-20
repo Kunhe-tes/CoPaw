@@ -107,11 +107,53 @@ def input_digest(data, key):
 
 
 def verify_input_digest(data, key):
+    if data.get("freshness_protocol") or data.get("source_binding_storage"):
+        return
     tenant = next(t for t in data["tenants"] if _key(t)[: len(key)] == key)
     expected = tenant.get("input_digest")
     # Existing manifests retain their original source freshness contract.
     if expected is not None and input_digest(data, key) != expected:
         raise SourceChanged("tenant input changed after preparation")
+
+
+def verify_chats_mtimes(data, key):
+    """Check only the frozen chats.json timestamp for a new source job."""
+    from .isolation import belongs
+
+    for workspace in data["workspaces"]:
+        if not belongs(workspace, key):
+            continue
+        verify_workspace_chats_mtime(
+            workspace,
+            allow_in_root_symlink=(
+                data.get("source_binding_storage") == "manifest-v1"
+            ),
+        )
+
+
+def verify_workspace_chats_mtime(workspace, *, allow_in_root_symlink=False):
+    registry = Path(workspace["root"]) / workspace.get(
+        "registry_path",
+        "chats.json",
+    )
+    if registry.is_symlink() and not allow_in_root_symlink:
+        raise SourceInputInvalid("chats.json cannot be a symlink")
+    try:
+        details = (
+            registry.stat() if allow_in_root_symlink else registry.lstat()
+        )
+    except FileNotFoundError:
+        raise SourceInputInvalid("chats.json is missing") from None
+    if not stat.S_ISREG(details.st_mode):
+        raise SourceInputInvalid("chats.json must be a regular file")
+    if allow_in_root_symlink and not registry.resolve(
+        strict=True,
+    ).is_relative_to(
+        Path(workspace["root"]).resolve(strict=True),
+    ):
+        raise SourceInputInvalid("chats.json symlink escapes workspace")
+    if details.st_mtime_ns != workspace.get("chats_mtime_ns"):
+        raise SourceChanged("chats.json changed after preparation")
 
 
 def _capture_digest(item):

@@ -77,6 +77,7 @@ class AdmissionResult:
     turn: dict
     publication: dict | None
     authority: ExecutionAuthority | None = None
+    plan: CommitPlan | None = None
 
 
 def _json_bytes(value):
@@ -309,6 +310,7 @@ class ExecutionStore:
             {**values, "id": turn_id},
             publication,
             authority,
+            plan,
         )
 
     async def publish_admission(self, admission, question, recovery):
@@ -330,6 +332,7 @@ class ExecutionStore:
                 BundleBlock("question", "anchor", _json_bytes(question)),
                 BundleBlock("recovery", "recovery", _json_bytes(recovery)),
             ],
+            plan=admission.plan,
         )
         return await self.publications.commit(operation)
 
@@ -380,17 +383,16 @@ class ExecutionStore:
                     base_history_revision=chat["history_revision"],
                     epoch=chat["epoch"],
                 )
-                await self.publications.reserve(
-                    request,
-                    CommitPlan(
-                        recovery_block="recovery",
-                        messages=tuple(messages),
-                        turn_install=turn_install,
-                    ),
+                plan = CommitPlan(
+                    recovery_block="recovery",
+                    messages=tuple(messages),
+                    turn_install=turn_install,
                 )
+                await self.publications.reserve(request, plan)
             await self.publications.write_bundle(
                 operation_key,
                 [BundleBlock("recovery", "recovery", recovery_bytes), *blocks],
+                plan=plan,
             )
             return await self.publications.commit(operation_key)
         except StorageError as error:

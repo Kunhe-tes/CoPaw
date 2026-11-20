@@ -7,6 +7,7 @@ from dataclasses import replace
 import pytest
 
 from swe.app.conversation_storage.bundle import BundleBlock, BundleStore
+from swe.app.conversation_storage.message_installs import MessageInstall
 from swe.app.conversation_storage.publications import (
     CommitPlan,
     PublicationStore,
@@ -17,8 +18,10 @@ from tests.unit.app.conversation_storage.test_publications import (
 )
 
 
-async def test_recovery_write_projects_message_bodies_into_delta_blocks(
+@pytest.mark.parametrize("already_installed", [False, True])
+async def test_recovery_write_projects_each_body_once(
     tmp_path,
+    already_installed,
 ):
     db = PublicationDatabase()
     db.session["recovery_publication_id"] = None
@@ -29,21 +32,41 @@ async def test_recovery_write_projects_message_bodies_into_delta_blocks(
         service_unit_id="schema-test-service",
     )
     operation = request()
-    await service.reserve(operation, CommitPlan(recovery_block="root"))
+    message = {"id": "q", "role": "user", "content": "large body"}
+    messages = (
+        (
+            MessageInstall(
+                "message",
+                "memory",
+                "user",
+                source_msg_key="q",
+                in_context=True,
+            ),
+        )
+        if already_installed
+        else ()
+    )
+    plan = CommitPlan(recovery_block="root", messages=messages)
+    await service.reserve(operation, plan)
     raw = {
         "revision": 1,
         "agent": {
             "memory": {
-                "content": [
-                    [{"id": "q", "role": "user", "content": "large body"}, []],
-                ],
+                "content": [[message, []]],
+                "messages": [message],
             },
         },
         "unknown": {"keep": True},
     }
+    blocks = [BundleBlock("root", "recovery", json.dumps(raw).encode())]
+    if already_installed:
+        blocks.append(
+            BundleBlock("message", "message", json.dumps(message).encode()),
+        )
     index = await service.write_bundle(
         operation.operation_key,
-        [BundleBlock("root", "recovery", json.dumps(raw).encode())],
+        blocks,
+        plan=plan,
     )
     extent = index.blocks["root"]
     root = json.loads(
@@ -59,9 +82,13 @@ async def test_recovery_write_projects_message_bodies_into_delta_blocks(
     assert root["identity"]["session_id"] == 1
     assert root["state"]["agent"]["memory"]["content"] == []
     assert root["state"]["unknown"] == {"keep": True}
-    assert root["installations"][0]["layer"] == "memory"
+    assert len(root["installations"]) == (0 if already_installed else 1)
+    assert [
+        (entry["raw_id"], entry["sequence"])
+        for entry in root["message_directory"]
+    ] == [("q", 1)]
     await service.commit(operation.operation_key)
-    assert len(db.messages) == 1
+    assert not db.messages
 
 
 @pytest.mark.parametrize(

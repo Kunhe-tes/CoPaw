@@ -94,33 +94,9 @@ async def test_real_app_auth_bootstrap_uses_existing_workspace_and_sql(
 
     nas_root = tmp_path / "nas"
     nas_root.mkdir()
-    manifest = tmp_path / "conversation-scopes.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "version": 2,
-                "service_unit_id": "schema-test-service",
-                "nas_root": str(nas_root),
-                "workspaces": [
-                    {
-                        "root": str(existing / "workspaces" / "default"),
-                        "scope": [
-                            "schema-test-service",
-                            "default",
-                            "RMASSIST",
-                            "default",
-                        ],
-                    },
-                ],
-            },
-        ),
-        encoding="utf-8",
-    )
-
     monkeypatch.setenv("CMB_CAAS_SERVICEUNITID", "schema-test-service")
     monkeypatch.setenv("SWE_AUTH_ENABLED", "true")
     monkeypatch.setenv("SWE_CONVERSATION_STORAGE_AUTHORITY", "mysql")
-    monkeypatch.setenv("SWE_CONVERSATION_SCOPE_MANIFEST", str(manifest))
     monkeypatch.setenv("SWE_CONVERSATION_ARCHIVE_CURSOR_SECRET", AUTH_SECRET)
     monkeypatch.setenv("SWE_DISABLED_CHANNELS", "zhaohu")
     monkeypatch.setenv("SWE_SERVICE_HEARTBEAT_ENABLED", "false")
@@ -147,6 +123,10 @@ async def test_real_app_auth_bootstrap_uses_existing_workspace_and_sql(
         db,
         SQL_ROOT / "conversation_share_service_unit_finalize.sql",
     )
+    await apply_sql_script(
+        db,
+        SQL_ROOT / "conversation_migration_control_tables.sql",
+    )
     session_id = await insert_session(
         db,
         tenant_key=b"default",
@@ -165,6 +145,66 @@ async def test_real_app_auth_bootstrap_uses_existing_workspace_and_sql(
         agent_key=b"default",
         user_key=b"alice",
         channel_key=b"console",
+    )
+
+    migration_id = "00000000-0000-4000-8000-000000000001"
+    identity = await db.fetch_one(
+        "SELECT @@server_uuid AS server_uuid,DATABASE() AS schema_name",
+    )
+    binding = {
+        "schema": identity["schema_name"],
+        "server_uuid": identity["server_uuid"],
+        "migration_id": migration_id,
+        "nas_roots": {"schema-test-service": str(nas_root)},
+    }
+    source_marker = {
+        "source_binding_storage": "manifest-v1",
+        "tenant_isolation": True,
+        "source_isolation": True,
+    }
+    receipt = {
+        "version": 1,
+        "migration_id": migration_id,
+        "services": {
+            "schema-test-service": {
+                "nas_root": str(nas_root),
+                "workspaces": [
+                    {
+                        "root": str(existing / "workspaces/default"),
+                        "scope": [
+                            "schema-test-service",
+                            "default",
+                            "RMASSIST",
+                            "default",
+                        ],
+                    },
+                ],
+            },
+        },
+    }
+    await db.execute(
+        "INSERT INTO swe_conversation_migration_jobs "
+        "(migration_id,manifest_version,state,target_binding_text,"
+        "source_binding_text,created_at,updated_at) "
+        "VALUES (%s,3,'ready',%s,%s,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",
+        (
+            migration_id.encode(),
+            json.dumps(binding),
+            json.dumps(source_marker),
+        ),
+    )
+    await db.execute(
+        "INSERT INTO swe_conversation_migration_sources "
+        "(migration_id,service_unit_key,tenant_key,source_key,state,"
+        "evidence_text,verification_text,attempts,updated_at,published_at) "
+        "VALUES (%s,%s,%s,%s,'published','{}',%s,1,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",
+        (
+            migration_id.encode(),
+            b"schema-test-service",
+            b"default",
+            b"RMASSIST",
+            json.dumps(receipt),
+        ),
     )
 
     token = auth.register_user("bootstrap-test", "not-a-real-account")

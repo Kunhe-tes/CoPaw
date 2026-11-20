@@ -113,57 +113,6 @@ async def test_v3_discovery_import_resume_verify_finalize(
     (source2 / "default_SRC" / "config.json").write_text(
         json.dumps({"agents": {"profiles": {"agent0": profile2}}}),
     )
-    snapshot = source / "default" / "chat_shares" / "share-token.json"
-    snapshot.parent.mkdir(parents=True)
-    snapshot.write_text(
-        json.dumps(
-            {
-                "chat_name": "shared",
-                "messages": [{"role": "user", "content": "shared question"}],
-            },
-        ),
-    )
-    orphan_snapshot = (
-        source / "retired-tenant" / "chat_shares" / "orphan-token.json"
-    )
-    orphan_snapshot.parent.mkdir(parents=True)
-    orphan_snapshot.write_text(
-        json.dumps(
-            {
-                "chat_name": "orphaned share",
-                "messages": [{"role": "user", "content": "orphan body"}],
-            },
-        ),
-    )
-    await db.execute(
-        "INSERT INTO swe_chat_shares (token,chat_id,creator_id,tenant_id,snapshot_key,created_at,access_count,last_access_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-        (
-            "share-token",
-            chat_ids[0],
-            "alice",
-            "default",
-            "default/chat_shares/share-token.json",
-            "2026-11-01 00:00:00",
-            17,
-            None,
-        ),
-    )
-    await db.execute(
-        "INSERT INTO swe_chat_shares (token,chat_id,creator_id,tenant_id,snapshot_key,created_at,access_count,last_access_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-        (
-            "orphan-token",
-            "deleted-chat",
-            "former-user",
-            "retired-tenant",
-            "retired-tenant/chat_shares/orphan-token.json",
-            "2026-10-01 12:30:00",
-            3,
-            "2026-11-01 08:15:00",
-        ),
-    )
-    shares = await db.fetch_all(
-        "SELECT token,chat_id,creator_id,tenant_id,snapshot_key,created_at,access_count,last_access_at FROM swe_chat_shares",
-    )
     for root in (source, source2):
         for path in root.rglob("*"):
             path.chmod(0o555 if path.is_dir() else 0o444)
@@ -183,7 +132,7 @@ async def test_v3_discovery_import_resume_verify_finalize(
         "original_root": str(nas2),
         "nas_root": str(nas2),
     }
-    report = discover_services([service, service2], shares=shares)
+    report = discover_services([service, service2])
     assert report["ready"], report["blockers"]
     boundary = SourceBoundary(
         "snapshot",
@@ -282,10 +231,4 @@ async def test_v3_discovery_import_resume_verify_finalize(
         (manifest.migration_id.encode(),),
     )
     assert state["state"] == "ready"
-    migrated_share = await db.fetch_one(
-        "SELECT * FROM swe_chat_shares WHERE token=%s",
-        ("share-token",),
-    )
-    assert migrated_share["access_count"] == 17
-    assert migrated_share["service_unit_key"] == b"TEST-SERVICE"
-    assert migrated_share["publication_id"] is not None
+    assert await db.fetch_all("SELECT token FROM swe_chat_shares") == []

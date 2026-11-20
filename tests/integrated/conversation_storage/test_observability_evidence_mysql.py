@@ -282,19 +282,16 @@ async def _append_duplicate_tool_occurrences(archive, attempt):
             span.end(status="succeeded")
         spans.append(span)
     chat = await archive.reader.chat("first")
-    rows = await archive.db.fetch_all(
-        "SELECT id,source_msg_key,source_occurrence_no,layer,archive_chat_id,"
-        "session_order,publication_id "
-        "FROM swe_conversation_messages WHERE source_msg_key=%s AND "
-        "((session_id=%s AND layer IN ('memory','task','error') "
-        "AND current_visible=1 AND deleted_at IS NULL) OR "
-        "(archive_chat_id=%s AND layer='archive' AND deleted_at IS NULL)) "
-        "ORDER BY source_occurrence_no",
-        (messages[0].id.encode(), chat["session_id"], chat["id"]),
+    rows = await archive.reader.session_messages(
+        chat["session_id"],
+        layers=("memory",),
     )
+    rows = [
+        row for row in rows if row["source_msg_key"] == messages[0].id.encode()
+    ]
     assert [row["source_occurrence_no"] for row in rows] == [0, 1], rows
     assert [row["layer"] for row in rows] == ["memory", "memory"]
-    assert all(row["archive_chat_id"] is None for row in rows)
+    assert all(row.get("archive_chat_id") is None for row in rows)
     return spans, messages
 
 
@@ -330,17 +327,20 @@ async def _assert_other_source_forbidden(client, url):
     assert response.status_code == 404
 
 
-async def _delete_archived_occurrence(database, chat_key, message_id):
+async def _remove_chat_bundles(database, bundles, chat_key):
     chat = await database.fetch_one(
         "SELECT id FROM swe_conversation_chats WHERE external_chat_key=%s",
         (chat_key.encode("utf-8"),),
     )
-    await database.execute(
-        "UPDATE swe_conversation_messages SET deleted_at=UTC_TIMESTAMP(6) "
-        "WHERE archive_chat_id=%s AND source_msg_key=%s "
-        "AND source_occurrence_no=0 AND layer='archive'",
-        (chat["id"], message_id.encode("utf-8")),
+    publications = await database.fetch_all(
+        "SELECT relative_path FROM swe_conversation_publications "
+        "WHERE chat_id=%s AND state='committed'",
+        (chat["id"],),
     )
+    for publication in publications:
+        path = Path(bundles.root) / publication["relative_path"]
+        if path.exists():
+            path.unlink()
 
 
 def _single_evidence_item(response):
@@ -762,10 +762,10 @@ async def test_archived_message_evidence_reads_exact_occurrence_through_api(
             content_type="assistant_answer",
         )
         await _assert_other_source_forbidden(client, url)
-        await _delete_archived_occurrence(
+        await _remove_chat_bundles(
             database,
+            archive.bundles,
             "first",
-            message.id,
         )
         deleted = await client.get(url, headers=response_headers)
     assert item["status"] == "available"

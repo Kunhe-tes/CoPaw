@@ -74,21 +74,23 @@ def test_native_inventory_ignores_nonconversation_tree(tmp_path):
     assert report["workspaces"][0]["source_paths"] == [str(root)]
 
 
-def test_coverage_prunes_known_workspace_but_finds_unknown_candidate(tmp_path):
+def test_coverage_ignores_unknown_candidate_without_source_identity(tmp_path):
     known = tmp_path / "known"
     (known / "tools/example/sessions").mkdir(parents=True)
     unknown = tmp_path / "unknown"
     (unknown / "sessions").mkdir(parents=True)
     report = {"blockers": []}
     _coverage(
-        {"source_root": str(tmp_path), "service_unit_id": "service"},
+        {
+            "source_root": str(tmp_path),
+            "config_root": str(tmp_path),
+            "service_unit_id": "service",
+        },
         {known},
         report,
         [],
     )
-    assert len(report["blockers"]) == 1
-    assert report["blockers"][0]["code"] == "unregistered_workspace"
-    assert "unknown" in report["blockers"][0]["position"]
+    assert report["blockers"] == []
 
 
 @pytest.mark.parametrize(

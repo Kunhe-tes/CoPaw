@@ -48,7 +48,6 @@ def snapshot():
         "sessions": [{"recovery_publication_id": 2}],
         "chats": [],
         "turns": [],
-        "messages": [],
         "shares": [],
         "retentions": [],
         "publications": [
@@ -69,8 +68,11 @@ def test_snapshot_preserves_binary_identity_timestamps_and_opaque_metadata():
 
 def test_snapshot_includes_all_live_publications_and_retained_deleted_rows():
     value = snapshot()
-    value["messages"] = [
-        {"publication_id": 1, "deleted_at": datetime(2026, 10, 30)},
+    value["chats"] = [
+        {
+            "content_meta_publication_id": 1,
+            "deleted_at": datetime(2026, 10, 30),
+        },
     ]
     assert snapshot_publication_ids(value) == [1, 2]
 
@@ -557,13 +559,8 @@ async def test_backup_settle_timeout_does_not_install_a_blocking_fence(
 
 
 @pytest.mark.parametrize("gc_state", ["deleting", "reclaimed"])
-@pytest.mark.parametrize(
-    "inactive_kind",
-    ["hidden", "message_deleted", "archive_chat_deleted", "chat_metadata"],
-)
 def test_snapshot_retains_inactive_locator_tombstones_without_requiring_body(
     gc_state,
-    inactive_kind,
 ):
     data = snapshot()
     data["publications"][0]["gc_state"] = gc_state
@@ -571,30 +568,9 @@ def test_snapshot_retains_inactive_locator_tombstones_without_requiring_body(
         {
             "id": 9,
             "deleted_at": datetime(2026, 10, 30),
-            "content_meta_publication_id": (
-                1 if inactive_kind == "chat_metadata" else None
-            ),
+            "content_meta_publication_id": 1,
         },
     ]
-    if inactive_kind != "chat_metadata":
-        data["messages"] = [
-            {
-                "publication_id": 1,
-                "archive_publication_id": None,
-                "deleted_at": (
-                    datetime(2026, 10, 30)
-                    if inactive_kind == "message_deleted"
-                    else None
-                ),
-                "layer": (
-                    "archive"
-                    if inactive_kind == "archive_chat_deleted"
-                    else "memory"
-                ),
-                "archive_chat_id": 9,
-                "current_visible": 0 if inactive_kind == "hidden" else 1,
-            },
-        ]
     assert snapshot_publication_ids(data) == [2]
     assert data["publications"][0]["gc_state"] == gc_state
 
@@ -602,8 +578,6 @@ def test_snapshot_retains_inactive_locator_tombstones_without_requiring_body(
 @pytest.mark.parametrize(
     "reference",
     [
-        "message",
-        "archive",
         "chat",
         "root",
         "turn",
@@ -615,19 +589,7 @@ def test_snapshot_retains_inactive_locator_tombstones_without_requiring_body(
 def test_snapshot_still_rejects_reclaimed_effective_references(reference):
     data = snapshot()
     data["publications"][0]["gc_state"] = "reclaimed"
-    if reference in ("message", "archive"):
-        data["chats"] = [{"id": 9, "deleted_at": None}]
-        data["messages"] = [
-            {
-                "publication_id": 1,
-                "archive_publication_id": None,
-                "deleted_at": None,
-                "layer": "archive" if reference == "archive" else "memory",
-                "archive_chat_id": 9,
-                "current_visible": 1,
-            },
-        ]
-    elif reference == "chat":
+    if reference == "chat":
         data["chats"] = [
             {"id": 9, "deleted_at": None, "content_meta_publication_id": 1},
         ]
@@ -648,8 +610,11 @@ def test_snapshot_still_rejects_reclaimed_effective_references(reference):
 @pytest.mark.parametrize("state", ["missing", "aborted"])
 def test_inactive_locator_still_rejects_missing_or_aborted_publication(state):
     data = snapshot()
-    data["messages"] = [
-        {"publication_id": 1, "deleted_at": datetime(2026, 10, 30)},
+    data["chats"] = [
+        {
+            "content_meta_publication_id": 1,
+            "deleted_at": datetime(2026, 10, 30),
+        },
     ]
     if state == "missing":
         data["publications"].pop(0)
@@ -677,23 +642,19 @@ def test_inactive_reclaimed_locator_still_rejects_cross_scope_association():
             "sessions",
             "chats",
             "turns",
-            "messages",
             "shares",
             "retentions",
             "publications",
         )
     }
     data["sessions"] = [{"id": 1, **identity, "recovery_publication_id": None}]
-    data["messages"] = [
+    data["chats"] = [
         {
+            **identity,
             "id": 2,
-            "service_unit_key": b"schema-test-service",
             "session_id": 1,
-            "publication_id": 3,
+            "content_meta_publication_id": 3,
             "deleted_at": datetime(2026, 10, 30),
-            "origin_chat_id": None,
-            "archive_chat_id": None,
-            "turn_id": None,
         },
     ]
     data["publications"] = [
@@ -717,8 +678,11 @@ def test_inactive_reclaimed_locator_still_rejects_cross_scope_association():
 
 def test_inactive_locator_rejects_unknown_gc_state():
     data = snapshot()
-    data["messages"] = [
-        {"publication_id": 1, "deleted_at": datetime(2026, 10, 30)},
+    data["chats"] = [
+        {
+            "content_meta_publication_id": 1,
+            "deleted_at": datetime(2026, 10, 30),
+        },
     ]
     data["publications"][0]["gc_state"] = "unknown"
     with pytest.raises(IntegrityError):

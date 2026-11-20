@@ -6,7 +6,7 @@ import json
 from uuid import UUID
 
 from .errors import IntegrityError, StorageUnavailable
-from .migration.authority import validate_receipt
+from .migration.authority import validate_source_verification
 
 
 class TenantNotPublished(StorageUnavailable):
@@ -33,8 +33,11 @@ class TenantAdmission:
             raise IntegrityError("invalid partial migration identity")
         self.db = database
         self.document = dict(document)
+        self._validated = False
 
     async def validate(self):
+        if self._validated:
+            return
         doc = self.document
         job = await self.db.fetch_one(
             "SELECT target_binding_text,source_binding_text FROM "
@@ -45,6 +48,11 @@ class TenantAdmission:
             raise IntegrityError("partial migration job is missing")
         binding = json.loads(job["target_binding_text"])
         source = json.loads(job["source_binding_text"])
+        if source.get("source_binding_storage") == "manifest-v1":
+            source = {
+                "tenant_isolation": True,
+                "source_isolation": source.get("source_isolation", True),
+            }
         self.source_binding = source
         identity = await self.db.fetch_one(
             "SELECT @@server_uuid AS server_uuid,DATABASE() AS schema_name",
@@ -58,19 +66,14 @@ class TenantAdmission:
             != doc["nas_root"]
         ):
             raise IntegrityError("partial migration authority binding differs")
+        self._validated = True
 
     async def require(self, tenant_id, source_id=None):
         await self.validate()
         doc = self.document
-        from .in_place_admission import tenant_write_boundaries
-
         source_mode = self.source_binding.get("source_isolation", False)
         if source_mode and source_id is None:
             raise TenantNotPublished()
-        key = (doc["service_unit_id"], tenant_id)
-        if source_mode:
-            key += (source_id,)
-        tenant_write_boundaries(self.source_binding, tenant=key)
         row = await self.db.fetch_one(
             "SELECT state,verification_text FROM "
             + (
@@ -89,7 +92,7 @@ class TenantAdmission:
         )
         if row is None or row["state"] != "published":
             raise TenantNotPublished()
-        proof = validate_receipt(json.loads(row["verification_text"]))
+        proof, _level = validate_source_verification(row["verification_text"])
         service = proof["services"].get(doc["service_unit_id"])
         if (
             proof["migration_id"] != doc["migration_id"]
@@ -156,7 +159,7 @@ class TenantDatabase:
 
 
 async def partial_jobs(database, service_unit_id=None):
-    """Detect opt-in jobs without requiring the new table on legacy installs."""
+    """Find opt-in migration jobs without requiring controls on legacy installs."""
     exists = await database.fetch_one(
         "SELECT COUNT(*) AS tenant_controls FROM information_schema.TABLES "
         "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN "

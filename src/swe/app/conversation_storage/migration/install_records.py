@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import asyncio
 import json
 import re
+from itertools import groupby
 
 from ..bundle import BundleBlock, BundleIndex, BundleStore
 from ..chat_mutations import load_metadata_json
@@ -20,6 +21,7 @@ from ..publications import (
 )
 from ..retention import RetentionStore
 from ..publication_associations import PublicationAssociations
+from ..reference_queries import ReferenceQuery, iter_reference_rows
 from .parallel import MigrationIO
 
 COLUMNS = {
@@ -95,31 +97,6 @@ COLUMNS = {
         "admitted_at",
         "terminal_at",
     },
-    "messages": {
-        "id",
-        "service_unit_key",
-        "session_id",
-        "origin_chat_id",
-        "archive_chat_id",
-        "layer",
-        "session_order",
-        "archive_order",
-        "turn_id",
-        "source_msg_key",
-        "source_occurrence_no",
-        "role_key",
-        "kind_key",
-        "task_run_key",
-        "publication_id",
-        "byte_offset",
-        "byte_length",
-        "archive_publication_id",
-        "context_epoch",
-        "in_context",
-        "current_visible",
-        "message_timestamp",
-        "deleted_at",
-    },
     "shares": {
         "service_unit_key",
         "token",
@@ -168,6 +145,12 @@ COLUMNS = {
 }
 TABLES = {key: "swe_conversation_" + key for key in COLUMNS}
 TABLES["shares"] = "swe_chat_shares"
+VERIFY_QUERIES = {
+    "sessions": ReferenceQuery.OFFLINE_SESSION,
+    "chats": ReferenceQuery.OFFLINE_CHAT,
+    "turns": ReferenceQuery.OFFLINE_TURN,
+    "publications": ReferenceQuery.OFFLINE_PUBLICATION,
+}
 BINARY = {
     key
     for columns in COLUMNS.values()
@@ -216,7 +199,6 @@ IMMUTABLE = {
         "context_epoch",
         "generation",
     },
-    "messages": COLUMNS["messages"],
     "publications": {
         "id",
         "session_id",
@@ -574,29 +556,56 @@ class OfflineImportStore(PublicationStore):
         await self._verify_records_sql(publication, plan, index)
 
     async def _verify_records_sql(self, publication, plan, index):
+        grouped = {}
         for item in [*plan["rows"], *plan["updates"]]:
             table = item["table"]
-            values = self._resolve(item["values"], publication, index)
-            actual = await self.db.fetch_one(
-                "SELECT * FROM " + _table(table) + " WHERE id=%s",
-                (values["id"],),
-            )
-            mismatch = (
-                []
-                if actual is None
-                else [
-                    key
-                    for key, value in values.items()
-                    if key in IMMUTABLE[table] and actual[key] != value
-                ]
-            )
-            if actual is None or mismatch:
+            if table not in VERIFY_QUERIES:
                 raise IntegrityError(
-                    "committed target mapping or immutable typed row differs: "
-                    + table
-                    + ":"
-                    + ",".join(mismatch),
+                    "offline plan references unsupported entity",
                 )
+            values = self._resolve(item["values"], publication, index)
+            expected = grouped.setdefault(table, {})
+            if values["id"] in expected:
+                raise IntegrityError(
+                    "duplicate offline target mapping identity",
+                )
+            expected[values["id"]] = values
+        for table, expected in grouped.items():
+            rows = iter_reference_rows(
+                self.db,
+                VERIFY_QUERIES[table],
+                expected,
+                publication["service_unit_key"],
+            )
+            try:
+                async for identities, actual in rows:
+                    for identity in identities:
+                        self._compare_record(
+                            table,
+                            expected[identity],
+                            actual.get(identity),
+                        )
+            finally:
+                await rows.aclose()
+
+    @staticmethod
+    def _compare_record(table, values, actual):
+        mismatch = (
+            []
+            if actual is None
+            else [
+                key
+                for key, value in values.items()
+                if key in IMMUTABLE[table] and actual[key] != value
+            ]
+        )
+        if actual is None or mismatch:
+            raise IntegrityError(
+                "committed target mapping or immutable typed row differs: "
+                + table
+                + ":"
+                + ",".join(mismatch),
+            )
 
     async def verify_blocks(self, row, blocks):
         operation = row["operation_key"].decode()
@@ -733,14 +742,25 @@ class OfflineImportStore(PublicationStore):
         if (
             not isinstance(plan, dict)
             or set(plan)
-            != {
-                "version",
-                "migration_id",
-                "schema",
-                "rows",
-                "updates",
-                "locks",
-            }
+            not in (
+                {
+                    "version",
+                    "migration_id",
+                    "schema",
+                    "rows",
+                    "updates",
+                    "locks",
+                },
+                {
+                    "version",
+                    "migration_id",
+                    "schema",
+                    "rows",
+                    "updates",
+                    "locks",
+                    "dependencies",
+                },
+            )
             or plan["version"] != 1
             or plan["migration_id"] != self.target.migration_id
             or plan["schema"] != self.target.schema
@@ -757,15 +777,32 @@ class OfflineImportStore(PublicationStore):
             or not isinstance(plan["updates"], list)
             or not isinstance(plan["locks"], dict)
             or set(plan["locks"]) - {"sessions", "chats", "turns"}
+            or not OfflineImportStore._valid_dependencies(
+                plan.get("dependencies", []),
+            )
         ):
             raise IntegrityError(
                 "offline installation collections are invalid",
             )
-        for identities in plan["locks"].values():
-            if not isinstance(identities, list) or any(
-                type(value) is not int or value <= 0 for value in identities
-            ):
-                raise IntegrityError("offline lock identity is invalid")
+        if any(
+            not OfflineImportStore._valid_lock_ids(identities)
+            for identities in plan["locks"].values()
+        ):
+            raise IntegrityError("offline lock identity is invalid")
+
+    @staticmethod
+    def _valid_lock_ids(identities):
+        return isinstance(identities, list) and all(
+            type(value) is int and value > 0 for value in identities
+        )
+
+    @staticmethod
+    def _valid_dependencies(dependencies):
+        return (
+            isinstance(dependencies, list)
+            and all(type(value) is int and value > 0 for value in dependencies)
+            and dependencies == sorted(set(dependencies))
+        )
 
     @staticmethod
     def _validate_typed_record(item):
@@ -781,6 +818,8 @@ class OfflineImportStore(PublicationStore):
             raise IntegrityError(
                 "offline installation uses an unknown typed field",
             )
+        if table == "messages":
+            raise IntegrityError("offline Message rows are not supported")
         if table == "shares":
             raise IntegrityError("offline shares require typed ShareInstall")
         if type(values.get("id")) is not int or values["id"] <= 0:
@@ -819,14 +858,43 @@ class OfflineImportStore(PublicationStore):
                 raise IntegrityError(
                     "offline request association is not declared in sorted lock set",
                 )
-        for table, identities in declared.items():
-            for identity in sorted(identities):
-                cached[table][identity] = await self.db.fetch_one(
-                    "SELECT * FROM "
-                    + _table(table)
-                    + " WHERE id=%s FOR UPDATE",
-                    (identity,),
+        async with self.db.acquire() as connection:
+            # IDs use at most 20 decimal bytes; reserve SQL/protocol overhead.
+            budget = min(
+                256 * 1024,
+                connection.max_allowed_packet - 1024,
+                connection.max_allowed_packet * 9 // 10,
+            )
+            limit = min(100, 65535, (budget - 256) // 24)
+            if limit <= 0:
+                raise ValueError(
+                    "association lock exceeds max_allowed_packet budget",
                 )
+            for table in ("sessions", "chats", "turns"):
+                identities = sorted(declared[table])
+                for start in range(0, len(identities), limit):
+                    chunk = identities[start : start + limit]
+                    rows = await self.db.fetch_all(
+                        "SELECT * FROM "
+                        + _table(table)
+                        + " WHERE id IN ("
+                        + ",".join("%s" for _ in chunk)
+                        + ") ORDER BY id FOR UPDATE",
+                        tuple(chunk),
+                    )
+                    cached[table].update(
+                        (identity, None) for identity in chunk
+                    )
+                    for row in rows:
+                        identity = row["id"]
+                        if (
+                            identity not in chunk
+                            or cached[table][identity] is not None
+                        ):
+                            raise IntegrityError(
+                                "offline lock result identity mismatch",
+                            )
+                        cached[table][identity] = row
         for table, values in cached.items():
             for row in values.values():
                 if row is not None:
@@ -874,11 +942,24 @@ class OfflineImportStore(PublicationStore):
     ):
         if plan.messages:
             raise IntegrityError(
-                "offline projection additions require explicit preassigned Message rows",
+                "offline projection additions are unsupported",
             )
         imported = _PLAN.get()
-        for item in imported["rows"]:
-            await self._apply_record(item, row, index, update=False)
+        if imported.get("dependencies"):
+            retention = RetentionStore(
+                self.db,
+                PublicationRequestFrom(row).scope,
+                scope_kind=row["scope_kind"],
+            )
+            targets = await retention._lock_publications(
+                imported["dependencies"],
+            )
+            await retention._install_locked_dependencies(row, targets)
+        for (table, _fields), records in groupby(
+            imported["rows"],
+            key=lambda item: (item["table"], frozenset(item["values"])),
+        ):
+            await self._install_records(table, records, row, index)
         for item in imported["updates"]:
             await self._apply_record(item, row, index, update=True)
         if plan.share is not None:
@@ -893,6 +974,15 @@ class OfflineImportStore(PublicationStore):
         from ..shares import install_share
 
         await install_share(self.db, request, plan, row, index)
+
+    async def _install_records(self, table, records, publication, index):
+        for item in records:
+            await self._apply_record(
+                item,
+                publication,
+                index,
+                update=False,
+            )
 
     def _resolve(self, values, publication, index):
         result = {}
@@ -936,12 +1026,12 @@ class OfflineImportStore(PublicationStore):
         ):
             raise IntegrityError("offline record scope mismatch")
         if (
-            table in ("turns", "messages")
+            table == "turns"
             and values.get("service_unit_key")
             != publication["service_unit_key"]
         ):
             raise IntegrityError("offline record service scope mismatch")
-        if table in ("chats", "turns", "messages"):
+        if table in ("chats", "turns"):
             self._validate_record_relations(values, publication)
         if table == "publications":
             if values["id"] != publication["id"]:
@@ -1053,7 +1143,7 @@ class OfflineImportStore(PublicationStore):
             )
 
 
-def plan_block(target, rows, updates=(), locks=None):
+def plan_block(target, rows, updates=(), locks=None, dependencies=()):
     value = {
         "version": 1,
         "migration_id": target.migration_id,
@@ -1061,6 +1151,7 @@ def plan_block(target, rows, updates=(), locks=None):
         "rows": list(rows),
         "updates": list(updates),
         "locks": locks or {},
+        "dependencies": list(dependencies),
     }
     return BundleBlock(
         "import_plan",

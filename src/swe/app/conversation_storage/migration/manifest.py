@@ -8,6 +8,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from uuid import UUID, uuid4
 
 import fcntl
@@ -21,7 +22,6 @@ KINDS = frozenset(
         "session",
         "chat",
         "turn",
-        "message",
         "publication",
         "retention",
         "share",
@@ -234,6 +234,11 @@ class MigrationManifest:
         self.data = current.data
 
     def _persist(self):
+        from .progress import current_progress
+
+        progress = current_progress()
+        started = time.perf_counter()
+        size, succeeded = 0, False
         temporary = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -247,6 +252,7 @@ class MigrationManifest:
 
                 write_json(self.data, handle)
                 handle.flush()
+                size = os.fstat(handle.fileno()).st_size
                 os.fsync(handle.fileno())
             os.replace(temporary, self.path)
             descriptor = os.open(
@@ -257,7 +263,15 @@ class MigrationManifest:
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
+            succeeded = True
         finally:
+            if progress is not None:
+                progress.record_persistence(
+                    "manifest",
+                    size,
+                    time.perf_counter() - started,
+                    succeeded=succeeded,
+                )
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
 

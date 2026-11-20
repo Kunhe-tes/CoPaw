@@ -123,7 +123,7 @@ def test_new_discovery_avoids_fingerprints_and_keeps_service_authority(
     assert manifest.data["source_change_blockers"] == [blocker]
 
 
-def test_unregistered_workspace_is_blocker(tmp_path):
+def test_unregistered_workspace_without_profile_is_ignored(tmp_path):
     from swe.app.conversation_storage.migration.discovery import (
         discover_services,
     )
@@ -138,10 +138,146 @@ def test_unregistered_workspace_is_blocker(tmp_path):
     extra.chmod(0o555)
     root.chmod(0o555)
     report = discover_services([service])
-    assert not report["ready"]
-    assert any(
+    assert report["ready"], report["blockers"]
+    assert not any(
         item["code"] == "unregistered_workspace" for item in report["blockers"]
     )
+
+
+def test_service_root_config_is_ignored(tmp_path):
+    from swe.app.conversation_storage.migration.discovery import (
+        discover_services,
+    )
+
+    service = fixture_service(tmp_path)
+    root = Path(service["source_root"])
+    root.chmod(0o755)
+    (root / "config.json").write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "profiles": {
+                        "missing": {
+                            "id": "missing",
+                            "workspace_dir": str(root / "missing"),
+                        },
+                    },
+                },
+            },
+        ),
+    )
+    (root / "config.json").chmod(0o444)
+    root.chmod(0o555)
+    report = discover_services([service])
+    assert report["ready"], report["blockers"]
+    assert len(report["workspaces"]) == 1
+
+
+def test_default_tenant_keeps_legacy_scope_directory_over_encoded_alias(
+    tmp_path,
+):
+    from swe.app.conversation_storage.migration.discovery import (
+        discover_services,
+    )
+    from swe.config.context import encode_scope_id
+
+    service = fixture_service(tmp_path)
+    source = Path(service["source_root"])
+    source.chmod(0o755)
+    encoded = encode_scope_id("default", "SRC")
+    encoded_workspace = source / encoded / "workspaces" / "agent"
+    encoded_workspace.mkdir(parents=True)
+    encoded_runtime = (
+        Path(service["original_root"]) / encoded / "workspaces" / "agent"
+    )
+    encoded_config = source / encoded / "config.json"
+    encoded_config.write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "profiles": {
+                        "agent": {
+                            "id": "agent",
+                            "workspace_dir": str(encoded_runtime),
+                        },
+                    },
+                },
+            },
+        ),
+    )
+    (encoded_workspace / "agent.json").write_text('{"id": "agent"}')
+    (encoded_workspace / "chats.json").write_text(
+        '{"version": 1, "chats": []}',
+    )
+    for path in source.rglob("*"):
+        path.chmod(0o555 if path.is_dir() else 0o444)
+    source.chmod(0o555)
+
+    report = discover_services(
+        [service],
+        tenant_isolation=True,
+        source_isolation=True,
+    )
+
+    assert report["ready"], report["blockers"]
+    assert len(report["workspaces"]) == 1
+    workspace = report["workspaces"][0]
+    assert workspace["root"] == str(
+        source / "default_SRC" / "workspaces" / "agent",
+    )
+    assert (workspace["tenant_id"], workspace["source_id"]) == (
+        "default",
+        "SRC",
+    )
+
+
+def test_default_scope_encoding_ignores_invalid_decoded_identity():
+    import base64
+
+    from swe.app.conversation_storage.migration.discovery import (
+        _is_default_scope_encoding,
+    )
+
+    invalid_tenant = base64.urlsafe_b64encode(b"..").decode().rstrip("=")
+    encoded_source = base64.urlsafe_b64encode(b"SRC").decode().rstrip("=")
+    assert not _is_default_scope_encoding(
+        invalid_tenant + "." + encoded_source,
+    )
+
+
+def test_unregistered_scoped_workspace_fails_only_its_source(tmp_path):
+    from swe.app.conversation_storage.migration.discovery import (
+        discover_services,
+    )
+
+    service = fixture_service(tmp_path)
+    root = Path(service["source_root"])
+    root.chmod(0o755)
+    extra = root / "default_ORPHAN" / "workspaces" / "default"
+    extra.mkdir(parents=True)
+    (extra / "chats.json").write_text('{"chats": []}')
+    (extra / "chats.json").chmod(0o444)
+    for path in (extra, extra.parent, root / "default_ORPHAN"):
+        path.chmod(0o555)
+    root.chmod(0o555)
+    report = discover_services(
+        [service],
+        tenant_isolation=True,
+        source_isolation=True,
+    )
+    orphan = next(
+        item
+        for item in report["tenants"]
+        if item["tenant_id"] == "default" and item["source_id"] == "ORPHAN"
+    )
+    assert orphan["state"] == "failed"
+    assert any(
+        item["code"] == "unregistered_workspace" for item in orphan["blockers"]
+    )
+    existing = next(
+        item for item in report["tenants"] if item["source_id"] == "SRC"
+    )
+    assert existing["state"] == "discovered"
 
 
 def test_service_without_workspaces_is_retained_for_share_only_job(tmp_path):
@@ -434,14 +570,10 @@ def test_discovery_rejects_registry_that_would_generate_chat_identity(
     )
 
 
-def test_share_only_service_snapshot_lives_outside_workspace(tmp_path):
-    from pathlib import Path
+def test_historical_share_snapshot_is_excluded_from_migration(tmp_path):
     from swe.app.conversation_storage.migration.discovery import (
         discover_services,
         freeze_discovery,
-    )
-    from swe.app.conversation_storage.migration.inventory_v3 import (
-        inventory_v3,
     )
 
     source = tmp_path / "frozen"
@@ -479,24 +611,16 @@ def test_share_only_service_snapshot_lives_outside_workspace(tmp_path):
         "old@sha256:" + "a" * 64,
         ("stop", "readonly"),
     )
-    manifest = freeze_discovery(
-        report,
-        tmp_path / "manifest.json",
-        boundary,
-        "business",
-    )
-    result = inventory_v3(manifest, begin_sync=True)
-    assert result["ready"], result["blockers"]
-    assert result["shares"][0]["scope_kind"] == "legacy_share"
-    assert result["shares"][0]["record"]["access_count"] == 4
-    cutoff = manifest.data["tenant_sync_started_at_ns"]["SERVICE\x00tenant"]
-    import os
-
-    os.utime(target, ns=(cutoff + 1, cutoff + 1))
-    result = inventory_v3(manifest)
-    assert not result["ready"]
-    assert result["blockers"][0]["scope"] == ["SERVICE", "tenant"]
-    assert result["blockers"][0]["path"] == str(target)
+    with pytest.raises(
+        ValueError,
+        match="historical share records are excluded",
+    ):
+        freeze_discovery(
+            report,
+            tmp_path / "manifest.json",
+            boundary,
+            "business",
+        )
 
 
 def test_relative_profile_requires_original_process_directory(tmp_path):

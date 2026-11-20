@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Parallel message evidence keeps SQL on the owner and NAS work bounded."""
+"""Verify NAS message batches and bound parallel auxiliary reads."""
 
 import asyncio
 import threading
@@ -14,7 +14,7 @@ from swe.app.conversation_storage.migration.verify_parallel import (
 )
 
 
-async def test_workspace_message_checks_overlap_without_worker_database(
+async def test_workspace_message_checks_overlap_with_bounded_nas_workers(
     monkeypatch,
 ):
     owner = asyncio.current_task()
@@ -26,14 +26,12 @@ async def test_workspace_message_checks_overlap_without_worker_database(
         assert asyncio.current_task() is owner
         health_checks.append(True)
 
-    class Database:
-        async def fetch_all(self, _query, _params):
-            assert asyncio.current_task() is owner
-            return []
+    database = object()
 
     async def session_check(
         evidence,
         _bundles,
+        _manifest,
         _workspace,
         session,
         sid,
@@ -42,15 +40,8 @@ async def test_workspace_message_checks_overlap_without_worker_database(
         io_workers,
     ):
         assert asyncio.current_task() is not owner
-        assert not hasattr(evidence, "transaction")
-        assert (
-            await evidence.fetch_all(
-                "SELECT * FROM swe_conversation_messages WHERE session_id=%s "
-                "AND layer<>%s ORDER BY session_order",
-                (sid, "archive"),
-            )
-            == []
-        )
+        assert evidence is database
+        assert sid in (1, 2)
         await io.call(barrier.wait, timeout=5)
         checked.append(session["position"])
 
@@ -78,7 +69,7 @@ async def test_workspace_message_checks_overlap_without_worker_database(
     report = {"blockers": []}
     async with MigrationIO(2) as io:
         await verify_workspace_messages(
-            Database(),
+            database,
             {"SERVICE": object()},
             manifest,
             inventory,
@@ -92,28 +83,85 @@ async def test_workspace_message_checks_overlap_without_worker_database(
     assert health_checks
 
 
-async def test_sql_evidence_budget_rejects_before_unbounded_rows():
-    import pytest
-    from swe.app.conversation_storage.migration.verify_parallel import (
-        collect_message_evidence,
+async def test_session_message_batch_offsets_are_numeric(tmp_path):
+    from agentscope.message import Msg
+    from swe.app.conversation_storage.bundle import BundleBlock, BundleStore
+    from swe.app.conversation_storage.identity import WorkspaceScope
+    from swe.app.conversation_storage.message_bundle import (
+        encode_message_bodies,
+        encode_message_directory,
     )
+
+    bundles = BundleStore(tmp_path)
+    scope = WorkspaceScope("tenant", "source", "agent", service_unit_id="svc")
+    assignments, rows, messages = {}, {}, []
+    for start in range(11):
+        body = Msg("assistant", f"occurrence {start}", "assistant").to_dict()
+        messages.append(body)
+        entry = {
+            "sequence": start + 1,
+            "raw_id": body["id"],
+            "layer": "memory",
+            "source_occurrence": start,
+            "visible": True,
+            "body": {
+                "publication_id": "self",
+                "block_name": "message_bodies",
+                "position": 0,
+            },
+        }
+        index = bundles.publish(
+            f"{start:064x}",
+            [
+                BundleBlock(
+                    "message_directory",
+                    "message_directory",
+                    encode_message_directory([entry]),
+                ),
+                BundleBlock(
+                    "message_bodies",
+                    "message_bodies",
+                    encode_message_bodies([body]),
+                ),
+            ],
+            scope=scope,
+        )
+        rows[start + 1] = {
+            **scope.fields,
+            "session_id": 1,
+            "relative_path": index.relative_path,
+            "byte_length": index.byte_length,
+        }
+        assignments[f"session/messages:{start}"] = {"target_id": start + 1}
 
     class Database:
-        async def fetch_all(self, query, params):
-            assert query.endswith("LIMIT %s")
-            assert params[-1] == 2
-            return [{"publication_id": 1}, {"publication_id": 2}]
+        async def fetch_one(self, _query, params):
+            return rows[params[0]]
 
     manifest = SimpleNamespace(
-        data={"assignments": {"session": {"s": {"target_id": 1}}}},
+        data={"assignments": {"publication": assignments}},
     )
-    with pytest.raises(ValueError, match="SQL evidence exceeds"):
-        await collect_message_evidence(
-            Database(),
-            manifest,
-            {"sessions": [{"position": "s"}], "chats": []},
-            memory_bytes=16384,
-        )
+    session = {
+        "position": "session",
+        "identity": [
+            "svc",
+            "tenant",
+            "source",
+            "agent",
+            "user",
+            "console",
+            "s",
+        ],
+        "legacy": {"state": {"agent": {"memory": {"content": messages}}}},
+    }
+    await verify._verify_session_messages(
+        Database(),
+        bundles,
+        manifest,
+        {"chats": [], "scope": list(scope.values)},
+        session,
+        1,
+    )
 
 
 async def test_auxiliary_epoch_reads_overlap_and_failure_is_reported(

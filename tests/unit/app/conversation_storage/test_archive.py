@@ -112,38 +112,6 @@ def test_archive_occurrences_require_boundary_even_without_other_operations():
         ).serialize()
 
 
-async def test_duplicate_prune_ids_use_matching_placeholders_and_parameters():
-    from swe.app.conversation_storage.archive import _prune
-
-    db = SimpleNamespace(
-        fetch_all=AsyncMock(
-            return_value=[
-                {
-                    "id": 1,
-                    "service_unit_key": b"schema-test-service",
-                    "session_id": 1,
-                    "layer": "memory",
-                },
-            ],
-        ),
-        execute=AsyncMock(),
-    )
-    from contextlib import asynccontextmanager
-
-    @asynccontextmanager
-    async def acquire():
-        yield db
-
-    db.acquire = acquire
-    db.max_allowed_packet = 1024 * 1024
-    db._in_transaction = True
-    from tests.unit.app.conversation_storage.test_publications import request
-
-    await _prune(db, request(), (1, 1))
-    for call in (*db.fetch_all.await_args_list, *db.execute.await_args_list):
-        assert call.args[0].count("%s") == len(call.args[1])
-
-
 async def test_compact_reservation_requires_replacement_root(tmp_path):
     from dataclasses import replace
     from swe.app.conversation_storage.bundle import BundleStore

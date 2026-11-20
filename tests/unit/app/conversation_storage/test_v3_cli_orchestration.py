@@ -51,13 +51,34 @@ def test_output_refuses_source_and_nas_overlap(tmp_path):
     assert validate_output(tmp_path / "audit", data) == tmp_path / "audit"
 
 
-async def test_original_shares_compared_as_complete_set():
-    from unittest.mock import AsyncMock
-    from swe.cli.conversation_storage_v3_cmd import compare_original_shares
+def test_v3_manifest_rejects_historical_share_records(tmp_path):
+    from dataclasses import asdict
+    from swe.app.conversation_storage.migration.manifest import SourceBoundary
+    from swe.app.conversation_storage.migration.v3_manifest import V3Manifest
 
-    db = SimpleNamespace(fetch_all=AsyncMock(return_value=[]))
-    with pytest.raises(ValueError, match="share"):
-        await compare_original_shares(db, {"shares": [{"token": "missing"}]})
+    data = {
+        "version": 3,
+        "workflow": "direct",
+        "migration_id": "b14c7a53-58c2-46ac-8cee-b7d4461c2020",
+        "source_boundary": asdict(
+            SourceBoundary(
+                "snapshot",
+                "2026-11-16T00:00:00Z",
+                "image@sha256:" + "a" * 64,
+                ("writers-stopped",),
+            ),
+        ),
+        "services": [{"service_unit_id": "svc"}],
+        "workspaces": [],
+        "shares": [{"token": "legacy-token"}],
+        "assignments": {},
+        "batches": {},
+    }
+    with pytest.raises(
+        ValueError,
+        match="historical share records are excluded",
+    ):
+        V3Manifest(tmp_path / "manifest.json", data)
 
 
 def test_output_names_support_long_valid_service_id(tmp_path):
@@ -285,7 +306,6 @@ async def test_execute_captures_exact_named_lock_and_passes_owner_health(
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(command, "check_schema", AsyncMock(return_value={}))
-    monkeypatch.setattr(command, "compare_original_shares", AsyncMock())
     monkeypatch.setattr(command, "_inspect_job", AsyncMock(return_value=None))
     monkeypatch.setattr(command, "DirectImporter", Importer)
     monkeypatch.setattr(MigrationLockGuard, "capture", capture)

@@ -163,8 +163,10 @@ class PublicationDouble:
             "state": "prepared",
         }
 
-    async def write_bundle(self, operation, blocks):
+    async def write_bundle(self, operation, blocks, *, plan=None):
         assert not self.db.in_transaction
+        if plan is not None:
+            assert plan == self.db.reserved[-1][1]
         self.blocks = blocks
 
     async def commit(self, operation):

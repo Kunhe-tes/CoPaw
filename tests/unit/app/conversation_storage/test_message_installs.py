@@ -64,7 +64,7 @@ def test_turn_install_requires_compatible_phase_and_status():
         TurnInstall("admission", execution_identity_text='{"prompt":"body"}')
 
 
-async def test_message_occurrences_allocate_stable_orders_without_deduplicating_source_id():
+async def test_message_watermark_counts_duplicate_source_ids():
     db = SimpleNamespace(
         insert=AsyncMock(return_value=1),
         execute=AsyncMock(return_value=1),
@@ -99,12 +99,6 @@ async def test_message_occurrences_allocate_stable_orders_without_deduplicating_
             source_occurrence_no=1,
         ),
     )
-    captured = []
-
-    async def prepared(template, rows):
-        captured.extend(rows)
-
-    db.insert_prepared = AsyncMock(side_effect=prepared)
     await install_messages(
         db,
         request,
@@ -114,9 +108,6 @@ async def test_message_occurrences_allocate_stable_orders_without_deduplicating_
         ({"history_high": 8}, {"history_high": 2}, None),
     )
     db.insert.assert_not_awaited()
-    db.insert_prepared.assert_awaited_once()
-    assert captured[0][5] == 9
-    assert captured[1][5] == 10
     assert db.execute.await_args_list[0].args[1] == (10, 1)
 
 
@@ -256,7 +247,7 @@ def test_admission_plan_requires_one_durable_user_anchor():
         ).serialize()
 
 
-async def test_archive_preserves_a_historical_turn_from_shared_session():
+async def test_archive_watermark_accepts_a_historical_turn():
     db = SimpleNamespace(insert=AsyncMock(return_value=1), execute=AsyncMock())
     message = MessageInstall(
         "m",
@@ -283,7 +274,9 @@ async def test_archive_preserves_a_historical_turn_from_shared_session():
         BundleIndex("bundle", 100, {}, {"m": BlockExtent("archive", 50, 10)}),
         ({"history_high": 1}, {"history_high": 0}, None),
     )
-    assert db.insert.await_args.args[1][7] == 7
+    db.insert.assert_not_awaited()
+    db.execute.assert_awaited_once()
+    assert db.execute.await_args.args[1] == (1, 2)
 
 
 async def test_online_occurrence_cannot_claim_another_turn():
@@ -315,7 +308,7 @@ async def test_online_occurrence_cannot_claim_another_turn():
     db.insert.assert_not_awaited()
 
 
-async def test_archived_occurrence_preserves_original_chat_of_historical_turn():
+async def test_archive_watermark_accepts_a_turn_originating_in_another_chat():
     db = SimpleNamespace(insert=AsyncMock(return_value=1), execute=AsyncMock())
     message = MessageInstall(
         "m",
@@ -343,4 +336,6 @@ async def test_archived_occurrence_preserves_original_chat_of_historical_turn():
         BundleIndex("bundle", 100, {}, {"m": BlockExtent("archive", 50, 10)}),
         ({"history_high": 1}, {"history_high": 0}, None),
     )
-    assert db.insert.await_args.args[1][2] == 5
+    db.insert.assert_not_awaited()
+    db.execute.assert_awaited_once()
+    assert db.execute.await_args.args[1] == (1, 2)

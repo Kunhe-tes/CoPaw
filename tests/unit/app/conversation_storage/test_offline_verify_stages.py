@@ -46,29 +46,6 @@ async def committed(tmp_path, kind="rows"):
     if kind == "share":
         store._install_share = AsyncMock()
     await store.commit(operation.operation_key)
-    fetch = store.db.fetch_one
-
-    async def fetch_one(query, params=None):
-        if "FROM swe_conversation_messages" in query:
-            keys = (
-                "id",
-                "service_unit_key",
-                "session_id",
-                "publication_id",
-                "byte_offset",
-                "byte_length",
-            )
-            return next(
-                (
-                    dict(zip(keys, values))
-                    for values in store.db.messages
-                    if values[0] == params[0]
-                ),
-                None,
-            )
-        return await fetch(query, params)
-
-    store.db.fetch_one = fetch_one
     return store, operation, plan, expected, blocks
 
 
@@ -139,8 +116,7 @@ async def test_nas_evidence_requires_exact_expected_contents(
     kind = "turn" if mutation == "recovery" else "rows"
     store, operation, plan, expected, blocks = await committed(tmp_path, kind)
     if mutation == "import_plan":
-        expected["updates"] = []
-        expected["rows"] = []
+        expected["locks"] = {"sessions": [999]}
     else:
         blocks[0] = replace(
             blocks[0],
@@ -162,7 +138,7 @@ async def test_nas_evidence_rejects_unexpected_bundle_blocks(tmp_path):
     store, operation, plan, expected, blocks = await committed(tmp_path)
     stages = OfflineVerifyStages(store)
     ticket = await issue(stages, operation, plan, expected, blocks)
-    inspect = store.bundles.inspect
+    inspect = store.bundles._inspect_source
 
     def inspect_with_extra_block(*args, **kwargs):
         index = inspect(*args, **kwargs)
@@ -174,7 +150,7 @@ async def test_nas_evidence_rejects_unexpected_bundle_blocks(tmp_path):
             },
         )
 
-    store.bundles.inspect = inspect_with_extra_block
+    store.bundles._inspect_source = inspect_with_extra_block
     async with MigrationIO(1) as io:
         with pytest.raises(IntegrityError, match="block set"):
             await stages.read(ticket, io)
@@ -194,12 +170,15 @@ async def test_borrowed_stream_expectations_are_not_admitted(tmp_path):
 
 
 async def test_sql_immutable_rows_are_rechecked(tmp_path):
-    store, operation, plan, expected, blocks = await committed(tmp_path)
+    store, operation, plan, expected, blocks = await committed(
+        tmp_path,
+        "turn",
+    )
     stages = OfflineVerifyStages(store)
     ticket = await issue(stages, operation, plan, expected, blocks)
     async with MigrationIO(1) as io:
         evidence = await stages.read(ticket, io)
-    store.db.messages.clear()
+    store.db.fetch_all = AsyncMock(return_value=[])
     with pytest.raises(IntegrityError, match="immutable typed row"):
         await stages.verify(evidence)
 
@@ -305,6 +284,9 @@ async def projection_fixture(tmp_path, monkeypatch, *, external=False):
     )
     from swe.app.conversation_storage.session_projection import project_state
     from swe.app.conversation_storage.retention import RetentionStore, PinBatch
+    from swe.app.conversation_storage.message_bundle import (
+        encode_message_bodies,
+    )
 
     store, operation, plan, expected, blocks = await committed(tmp_path)
     projected_root = tmp_path / "projected"
@@ -321,7 +303,12 @@ async def projection_fixture(tmp_path, monkeypatch, *, external=False):
     store.db.rows[operation.operation_key.encode()] = row
     row["id"] = 3
     message = {"id": "original"}
-    body = blocks[0]
+    body = BundleBlock(
+        "message_bodies",
+        "message_bodies",
+        encode_message_bodies([message]),
+    )
+    blocks[0] = body
     prior = store.bundles.publish(
         "f" * 64,
         [body],
@@ -332,14 +319,14 @@ async def projection_fixture(tmp_path, monkeypatch, *, external=False):
     reference = (
         {
             "publication_id": 1,
-            "message_id": 100,
-            "offset": extent.offset,
-            "length": extent.length,
+            "block_name": body.name,
+            "position": 0,
         }
         if external
         else {
             "operation_key": operation.operation_key,
             "block_name": body.name,
+            "position": 0,
         }
     )
     state = {"agent": {"memory": {"messages": [message]}}}
@@ -362,17 +349,6 @@ async def projection_fixture(tmp_path, monkeypatch, *, external=False):
         metadata={"operation_key": operation.operation_key},
     )
     row["byte_length"] = index.byte_length
-    current = index.blocks[body.name]
-    store.db.messages[:] = [
-        (
-            100,
-            operation.scope.sql_values[0],
-            1,
-            3,
-            current.offset,
-            current.length,
-        ),
-    ]
     prior_row = {
         **deepcopy(row),
         "id": 1,
@@ -380,29 +356,6 @@ async def projection_fixture(tmp_path, monkeypatch, *, external=False):
         "relative_path": prior.relative_path.encode(),
         "byte_length": prior.byte_length,
     }
-    locator = {
-        "id": 100,
-        "service_unit_key": operation.scope.sql_values[0],
-        "session_id": 1,
-        "publication_id": 1,
-        "byte_offset": extent.offset,
-        "byte_length": extent.length,
-        "deleted_at": None,
-        "source_msg_key": b"original",
-        "role_key": b"assistant",
-        "layer": "memory",
-        "context_epoch": 0,
-        "current_visible": 1,
-        "in_context": 1,
-    }
-    fetch = store.db.fetch_all
-
-    async def fetch_all(query, params=None):
-        if "FROM swe_conversation_messages" in query:
-            return [deepcopy(locator)]
-        return await fetch(query, params)
-
-    store.db.fetch_all = fetch_all
     calls = []
 
     async def pin(retentions, ids, *, kind):
@@ -422,7 +375,7 @@ async def projection_fixture(tmp_path, monkeypatch, *, external=False):
     blocks.append(
         BundleBlock("recovery", "recovery", json.dumps(state).encode()),
     )
-    return store, operation, plan, expected, blocks, calls, locator
+    return store, operation, plan, expected, blocks, calls, prior_row
 
 
 @pytest.mark.parametrize("external", [False, True])
@@ -495,7 +448,7 @@ async def test_projection_failure_and_capture_tampering_release_pins(
     assert not stages.recoveries
 
 
-async def test_projection_locator_is_revalidated_before_sql_acceptance(
+async def test_projection_dependency_session_is_validated(
     tmp_path,
     monkeypatch,
 ):
@@ -510,11 +463,11 @@ async def test_projection_locator_is_revalidated_before_sql_acceptance(
     ticket = await stages.prepare(op, 3, plan, expected, blocks)
     async with MigrationIO(1) as io:
         evidence = await stages.read(ticket, io)
+        locator["session_id"] += 1
         capture = await stages.capture_recovery(evidence)
-        await stages.compare_recovery(capture, io)
-    locator["byte_offset"] += 1
-    with pytest.raises(IntegrityError, match="locator changed"):
-        await stages.verify(evidence)
+        with pytest.raises(IntegrityError, match="Session differs"):
+            await stages.compare_recovery(capture, io)
+        await stages.close()
     assert [name for name, _ in calls] == ["pin", "release"]
 
 
@@ -645,6 +598,19 @@ async def test_cold_turn_projection_compares_and_revalidates_authority(
             return json.dumps(envelope).encode()
         return read(path, offset, length, **kwargs)
 
+    from swe.app.conversation_storage.bundle import BundleReader
+
+    read_many = BundleReader.read_extents
+
+    def read_extents(reader, extents, **kwargs):
+        if (
+            reader.index.relative_path == current.relative_path
+            and extents[0].offset == extent.offset
+        ):
+            return (json.dumps(envelope).encode(),)
+        return read_many(reader, extents, **kwargs)
+
+    monkeypatch.setattr(BundleReader, "read_extents", read_extents)
     store.bundles.read_extent = read_extent
     blocks[-1] = replace(
         blocks[-1],

@@ -36,7 +36,9 @@ def workspace_source_copy(value):
 class MigrationDomainRouter:
     """Fixed domain handlers execute in the coordinator's SQL-owner task."""
 
-    JOURNAL = frozenset({"allocate", "set_batch_state", "refresh_batch"})
+    JOURNAL = frozenset(
+        {"allocate", "allocate_many", "set_batch_state", "refresh_batch"},
+    )
     STORE = frozenset(
         {
             "reserve_batch",
@@ -141,6 +143,7 @@ class _NASStages:
         "_read_commit",
         "_publish_write",
         "_bundle_root",
+        "_bundles",
         "_read_verify",
         "_compare_recovery",
         "_read_write_recovery",
@@ -151,6 +154,7 @@ class _NASStages:
         self._read_commit = store.read_commit_evidence
         self._publish_write = store.publish_prepared_bundle
         self._bundle_root = store.bundles.root
+        self._bundles = store.bundles
         self._read_verify = store.read_verify_evidence
         self._compare_recovery = store.compare_verify_recovery
         self._read_write_recovery = store.read_write_recovery
@@ -168,6 +172,17 @@ class _NASStages:
         relative_path = BundleStore.validate_publication_locator(row)
         return await io.call(
             partial(Path.exists, self._bundle_root / relative_path),
+        )
+
+    async def retained_plan(self, row, expected, legacy, io):
+        from .plan_compatibility import retained_plan
+
+        return await io.call(
+            retained_plan,
+            self._bundles,
+            row,
+            expected,
+            legacy,
         )
 
     async def read_verify(self, ticket, io):
@@ -241,6 +256,9 @@ class ParallelWorkspaceContext:
     async def bundle_exists(self, row):
         return await self._nas.bundle_exists(row, self.io)
 
+    async def retained_plan(self, row, expected, legacy):
+        return await self._nas.retained_plan(row, expected, legacy, self.io)
+
     async def _verify(self, ticket):
         evidence = await self._nas.read_verify(ticket, self.io)
         capture = await self.store("capture_verify_recovery", evidence)
@@ -302,6 +320,7 @@ class ParallelImportPrototype:
                     "tenant_sync_started_at_ns",
                     "source_boundary",
                     "source_isolation",
+                    "source_binding_storage",
                 )
                 if key in manifest_data
             },
@@ -339,7 +358,9 @@ class ParallelImportPrototype:
                     else tenant_key(*scope[:2])
                 ),
             )
-            if type(cutoff) is not int or cutoff <= 0:
+            if not self._manifest_data.get("source_binding_storage") and (
+                type(cutoff) is not int or cutoff <= 0
+            ):
                 raise ValueError(
                     "tenant cutoff must be fixed before parallel import",
                 )
