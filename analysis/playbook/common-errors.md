@@ -938,10 +938,18 @@
 - 处理：`migration/verify.py` 的 `_read_extents()` 使用固定 16MiB 调用方总额，覆盖最多两个合法 extent；底层每 extent 8MiB 限制、共享 IO 并发、单次打开/索引及文件状态复查保持有效，不按输入长度生成无界总额。
 - 回归：`test_migration_verify_extents.py` 覆盖直接、共享 IO 和预取证据路径的 8MiB 正文加 metadata、超单块限制及超两块数量限制。
 
-## 会话迁移被无关附件触发容量限制
+## 会话迁移输入范围与容量限制
 
 - 输入范围采用明确包含规则：`chats.json`、`sessions/`、`dialog/`（或清单明确配置的对应入口），以及审核过的 `session_paths` 文件和对应 generation ledger。附件、代码、技能目录不递归枚举、不计入 `inventoried_source_bytes`；分享按记录指定路径读取。
-- 排查 `MigrationCapacityError` 时先看实际会话输入的单文件、累计字节和条目准入，不应只提高 workers 或内存参数。增加 workers 会缩小单 worker 额度；单文件 reader 硬上限不随总预算增加。
+- v3 扫描不再为每个 workspace 另设内存额度，也不再以 `memory allowance / 16` 预先拒绝大 workspace。`CS_RESOURCES` 仍提供全局解析与 IO 预算；单文件 reader 硬上限、文件类型、符号链接和越界检查保持不变。
+- 排查 `MigrationCapacityError` 时先看实际会话输入的单文件、累计字节、条目和 spool 限制，不应只提高 workers 或内存参数。单文件 reader 硬上限不随总预算增加。
 - 容量、文件清单、只读检查和源变化检查应使用同一范围；配置证据父目录仅浅检查。未映射的 Session/ledger/归档仍需阻断，不能通过删除数据或手改成功状态绕过。
-- 旧清单有非空 `fingerprints` 时保留原全源哈希契约，可能仍读取业务文件。不能手工清空；需审核后重新 discovery/freeze。
-- 入口：`migration/source_inputs.py`、`inventory_parallel._preflight_workspace`、`inventory._source_files`、`inventory_v3.inventory_discovery`；操作说明见[并行迁移补充](../../docs/superpowers/plans/2026-11-12-conversation-parallel-migration-operations.md)。
+- 正常 v3 迁移只解析 registered workspace 一次，不再生成或复核 whole-source fingerprint，也不在完成前重跑完整 inventory。已有 `freshness_protocol` 的 `chats.json` mtime 检查和明确 source 边界的正常解析校验仍保留。
+- 入口：`migration/source_inputs.py`、`inventory_parallel.spool_workspaces`、`inventory._source_files`、`inventory_v3.inventory_discovery`；操作说明见[并行迁移补充](../../docs/superpowers/plans/2026-11-12-conversation-parallel-migration-operations.md)。
+
+## MySQL 单次操作超过 30 秒会报错
+
+- `tests/integrated/conversation_storage/conftest.py` 把集成 fixture 的 `read_timeout`、`write_timeout` 设为 30 秒；这不是生产默认值。
+- 生产 `DatabaseConfig` 默认两者均为 600 秒，可分别用 `SWE_DB_READ_TIMEOUT`、`SWE_DB_WRITE_TIMEOUT` 调整。单次 database facade 操作超过期限会抛 `TimeoutError("Database operation timed out")`。
+- 写事务超时只说明当前等待被客户端终止，最终提交结果可能未知。保留原 `operation_key` 和 prepared publication，先对账再续跑，不能把超时直接重试成新写入。
+- 远端 MySQL 返回 `InterfaceError 2013` 或握手重置时属于连接中断，不等于 SQL timeout；先确认 `SELECT 1` 和连接池恢复，再评估是否在同一 manifest 重跑。
