@@ -225,6 +225,23 @@ class ExecutionWriter:
                 f"SELECT COUNT(*) AS count FROM {TABLE} WHERE {WHERE} AND status='running'",
                 key,
             )
+            if active["count"] and run["kind"] == "ordinary":
+                batch = await self.db.fetch_one(
+                    "SELECT 1 AS member FROM swe_cron_managed_batch_members "
+                    "WHERE source_id=%s AND current_execution_id=%s LIMIT 1",
+                    (run["source_id"], execution_id),
+                )
+                if batch is None:
+                    # 未开始的冲突触发只记执行事件，避免替换已有业务结果。
+                    await self._change(
+                        run,
+                        {
+                            "status": "skipped",
+                            "error_code": "cron_job_running",
+                            "finished_at": utc_now(),
+                        },
+                    )
+                    return None
             if active["count"] >= spec["runtime"]["max_concurrency"]:
                 return None
             now = utc_now()

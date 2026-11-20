@@ -440,6 +440,8 @@ async def test_mysql_legacy_snapshot_coexists_without_scheduler_takeover(
 
 async def _capacity_runs(db, caller, provider):
     """固定两个不同任务的模型池，避免同任务并发限制掩盖池内竞争。"""
+    from datetime import datetime, timezone
+
     from scheduler.app.services.cron.managed.executions import (
         ExecutionStore,
         ExecutionRequest,
@@ -460,7 +462,11 @@ async def _capacity_runs(db, caller, provider):
         row, _ = await ExecutionStore(db).enqueue(
             caller,
             created["job_id"],
-            ExecutionRequest("manual", f"claim-{index}"),
+            ExecutionRequest(
+                "batch",
+                f"claim-{index}",
+                datetime.now(timezone.utc),
+            ),
         )
         runs.append(row)
     return runs

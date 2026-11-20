@@ -182,7 +182,8 @@ async def test_worker_dispatches_only_registered_runs_and_never_scans_definition
         ExecutionRequest("manual", "click-1"),
     )
     result = await runtime.tick()
-    assert result["dispatched"] == 1
+    assert result["direct_dispatched"] == 1
+    assert result["dispatched"] == 0
     assert client.calls == [run["execution_id"]]
     db.conn.execute(
         "UPDATE swe_cron_execution_runs SET status='error', dispatch_lease_until=NULL",

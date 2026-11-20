@@ -115,6 +115,48 @@ def body(db, created, *, kind="ordinary", trigger="platform-log-1"):
 
 
 @pytest.mark.asyncio
+async def test_ordinary_http_callback_dispatches_after_registration(
+    callback_setup,
+):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from scheduler.app.routers import managed_callbacks
+    from scheduler.app.services.cron.managed.scheduling import (
+        ManagedSchedulingService,
+    )
+
+    db, *_ = callback_setup
+    created = await create_source(callback_setup)
+    service = ManagedSchedulingService(
+        db,
+        clock=lambda: datetime(2026, 10, 16, 1, tzinfo=timezone.utc),
+    )
+    app = FastAPI()
+    app.include_router(managed_callbacks.router)
+    app.dependency_overrides[managed_callbacks.scheduling_service] = (
+        lambda: service
+    )
+    dispatch = AsyncMock()
+    app.state.managed_cron_worker = SimpleNamespace(
+        dispatcher=SimpleNamespace(dispatch_registered=dispatch),
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/scheduler/cron/ordinary/callback",
+            json=body(db, created),
+            headers={"x-user-id": "alice", "x-source-id": "bank"},
+        )
+    assert response.status_code == 202
+    dispatch.assert_awaited_once_with(response.json()["execution_id"])
+
+
+@pytest.mark.asyncio
 async def test_normal_callback_is_independent_but_explicit_stale_time_is_rejected(
     callback_setup,
 ):

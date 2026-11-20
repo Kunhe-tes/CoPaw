@@ -33,6 +33,8 @@ SQL 为人工交付文件，应用不会读取执行。执行前由数据库负�
 
 Worker 调整按子任务采样前，在共库核对并补齐 [反馈统计列](../../scripts/sql/cron_worker_subtask_feedback.sql)，再部署 Scheduler、Monitor 和 Console。历史调整记录保留原合计，未保存的主任务和子任务明细显示为「—」。
 
+普通定时任务直接派发需部署 SWE、Scheduler 和 Monitor。先更新 SWE 的同任务启动保护，再更新 Scheduler 的派发与反馈口径及 Monitor 的占用明细。复用现有表结构。验证时填满一个批模型池，再触发该池的普通任务、普通任务整点补跑和单任务「立即执行」。核对三种入口都可以直接派发，执行及结果均从批 Worker 的当前占用和新增调整中排除。同一任务已有执行在跑时，普通自动触发记为 `skipped`，手动请求返回冲突。
+
 升级 Worker 反馈去重前，先在共库补齐 [反馈使用标记](../../scripts/sql/cron_worker_feedback_consumption.sql)，再切换所有 Scheduler 实例。升级前的容量记录只有汇总数量。首次使用新逻辑时，仍在反馈窗口内的旧结果可能被计入一次，随后按标记跳过。
 
 ## 表的分工

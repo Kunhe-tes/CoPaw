@@ -55,15 +55,17 @@ def configure_pool(db, now):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["ordinary", "manual"])
 async def test_shared_capacity_counts_new_and_old_occupants_under_same_scope_lock(
     execution_setup,
     monkeypatch,
+    kind,
 ):
     from scheduler.app.services.cron import capacity_claim
     from scheduler.app.services.cron.managed.operations import utc_now
 
     db, _, _ = execution_setup
-    row, _ = await enqueue(execution_setup)
+    row, _ = await enqueue(execution_setup, kind=kind)
     now = utc_now()
     configure_pool(db, now)
     monkeypatch.setattr(
@@ -89,6 +91,9 @@ async def test_shared_capacity_counts_new_and_old_occupants_under_same_scope_loc
         )
 
     assert await available() == 2
+    db.conn.execute("UPDATE swe_cron_execution_runs SET status='running'")
+    assert await available() == 2
+    db.conn.execute("UPDATE swe_cron_execution_runs SET kind='batch'")
     for status in ("dispatching", "accepted", "running"):
         db.conn.execute(
             "UPDATE swe_cron_execution_runs SET status=?",
