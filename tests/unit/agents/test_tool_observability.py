@@ -526,3 +526,149 @@ async def test_tool_span_is_bound_only_during_tool_execution(monkeypatch):
     assert evidence["occurrence_id"] == 0
     assert evidence["content_type"] == "tool_output"
     assert evidence["saved_state"] == "available"
+
+
+class _PolicyDeniedAgent(_ObservedToolAgent):
+    def __init__(self):
+        super().__init__({"content": "must not execute"})
+        self._tool_guard_lock = asyncio.Lock()
+        self._request_context = {}
+
+    def _ensure_tool_guard(self):
+        return None
+
+    async def _acting_shell_installation_denial(self, *_args):
+        return False
+
+    async def _acting_policy_denial(self, *_args, **_kwargs):
+        return True
+
+
+@pytest.mark.asyncio
+async def test_policy_short_circuit_records_guard_reason(monkeypatch):
+    """策略短路也要留下 Guard 事实与 reason_code。"""
+    from swe.observability import instrumentation
+
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(instrumentation, "default_emitter", lambda: emitter)
+    agent = _PolicyDeniedAgent()
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+    ).new_attempt()
+
+    with bind_context(context):
+        result = await agent._acting_impl(
+            {"id": "call-policy", "name": "read_file", "input": {}},
+        )
+    emitter.close()
+    events = _events(stream)
+
+    assert result is None
+    assert [event["event_name"] for event in events] == [
+        "span.started",
+        "span.ended",
+    ]
+    assert events[0]["span_type"] == "Guard"
+    assert events[1]["status"] == "rejected"
+    assert events[1]["reason_code"] == "policy_denied"
+
+
+@pytest.mark.asyncio
+async def test_subagent_needs_approval_records_rejected(monkeypatch):
+    """SubAgent 的 needs_approval 会被自动拒绝，Guard 不能记成等待审批。"""
+    from swe.observability import instrumentation
+
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(instrumentation, "default_emitter", lambda: emitter)
+
+    class _SubagentAgent(_ObservedToolAgent):
+        def __init__(self):
+            super().__init__({"content": "must not execute"})
+            self._tool_guard_lock = asyncio.Lock()
+            self._request_context = {"agent_role": "subagent"}
+
+        def _ensure_tool_guard(self):
+            return None
+
+        async def _acting_shell_installation_denial(self, *_args):
+            return False
+
+        async def _acting_policy_denial(self, *_args, **_kwargs):
+            return False
+
+        async def _apply_pre_tool_hook(
+            self,
+            tool_call,
+            tool_name,
+            tool_input,
+        ):
+            return tool_call, tool_input, False, None
+
+        async def _notify_skill_detector_tool_call(self, *_args):
+            return None
+
+        async def _decide_guard_action(self, tool_call):
+            return SimpleNamespace(
+                kind="needs_approval",
+                tool_name=tool_call["name"],
+                tool_input=tool_call["input"],
+                guard_result=None,
+            )
+
+        async def _execute_guard_action(self, _action, _tool_call):
+            return {"isError": True, "error_type": "tool_guard_denied"}
+
+        async def _emit_tool_trace_start(self, *_args):
+            return ""
+
+        async def _emit_tool_trace_end(self, *_args, **_kwargs):
+            return None
+
+    agent = _SubagentAgent()
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+    ).new_attempt()
+
+    with bind_context(context):
+        await agent._acting_impl(
+            {"id": "call-subagent", "name": "read_file", "input": {}},
+        )
+    emitter.close()
+    events = _events(stream)
+
+    assert events[0]["span_type"] == "Guard"
+    assert events[1]["status"] == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_unregistered_tool_is_marked_without_asset(monkeypatch):
+    """模型编造的工具名标为 unregistered，且不能声称已注册资产。"""
+    from swe.observability import instrumentation
+
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(instrumentation, "default_emitter", lambda: emitter)
+    agent = _ObservedToolAgent({"content": "ok"})
+    agent.toolkit = SimpleNamespace(tools={"read_file": object()})
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+    ).new_attempt()
+
+    with bind_context(context):
+        await agent._run_tool_call_with_hard_timeout_impl(
+            {"id": "call-ghost", "name": "ghost_tool", "input": {}},
+            "ghost_tool",
+            {},
+        )
+    emitter.close()
+    events = _events(stream)
+
+    assert events[0]["tool"]["executor_kind"] == "unregistered"
+    assert not [
+        event for event in events if event["event_name"] == "asset.used"
+    ]

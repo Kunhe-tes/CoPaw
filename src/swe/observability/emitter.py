@@ -76,7 +76,9 @@ _ENUM_FIELDS = {
     "kind": frozenset(
         {"CLIENT", "INTERNAL", "SERVER", "PRODUCER", "CONSUMER"},
     ),
-    "executor_kind": frozenset({"agent_tool", "mcp_tool"}),
+    "executor_kind": frozenset(
+        {"agent_tool", "mcp_tool", "unregistered"},
+    ),
     "event_kind": frozenset(
         {
             "model.retry_scheduled",
@@ -118,6 +120,9 @@ _REGISTERED_LABELS = {
     "tool",
     "timed_out",
     "model.request_attempt",
+    "shell_policy_denied",
+    "policy_denied",
+    "hook_denied",
 }
 
 

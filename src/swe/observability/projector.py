@@ -547,7 +547,11 @@ def _validate_tool_fields(event: dict[str, Any], tool: Any) -> None:
             raise ValueError("invalid_tool_identity") from exc
     elif "tool_execution_id" in tool:
         raise ValueError("guard_must_not_claim_tool_execution")
-    if tool.get("executor_kind") not in {"agent_tool", "mcp_tool"}:
+    if tool.get("executor_kind") not in {
+        "agent_tool",
+        "mcp_tool",
+        "unregistered",
+    }:
         raise ValueError("invalid_tool_executor")
     for key, minimum, maximum in (
         ("timeout_budget_ms", 1, 0xFFFFFFFF),
