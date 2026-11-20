@@ -43,9 +43,10 @@ venv/bin/python -m pytest tests/unit/app/conversation_storage \
   tests/unit/subagents -q
 # 2053 passed（含真实 worker stdout 转发测试）
 
-venv/bin/python -m pytest \
-  tests/integrated/observability/test_review_fixes_mysql.py -q
-# 5 skipped（未设置 SWE_AGENTOBS_TEST_DB_HOST）
+SWE_AGENTOBS_TEST_DB_HOST=... \
+SWE_AGENTOBS_TEST_DB_NAME=<disposable>_test \
+  venv/bin/python -m pytest tests/integrated/observability -q
+# 34 passed（MySQL 8.0.46 一次性测试库）
 
 pre-commit run --files <changed files>
 # ast / trailing-comma / mypy / black / flake8 / pylint 全部通过
@@ -55,7 +56,7 @@ pre-commit run --files <changed files>
 
 ## 未验证项
 
-- **MySQL / TDSQL 集成**：已连接 MySQL 8.0.46 的一次性 `_test` 库执行。新增的 `test_review_fixes_mysql.py` 5 passed；既有目录在补齐 `effective_tenant_id` 后重跑，结果以最终一轮为准。
+- **MySQL / TDSQL 集成**：已连接 MySQL 8.0.46 的一次性 `_test` 库执行。新增的 `test_review_fixes_mysql.py` 5 passed；完整 `tests/integrated/observability` 最终 **34 passed**（含真实 Runner 生命周期、审批终态、历史查询、工具/资产、技能资产与业务总体）。
 - **真实 worker 子进程链路**：已由 `test_worker_stdout_events_are_forwarded_by_supervisor` 覆盖——真实启动 `worker.run_worker`，父进程读线程转发 stdout，并断言收到 `span.ended`。
 - **多 Pod / 采集链路**：`observer.health` 仍无生产者，丢弃计数无法跨 Pod 汇总。
 - **网关 header 信任**：审批身份校验依赖 `X-User-Id`；网关是否保证注入与不可伪造尚未验证。
