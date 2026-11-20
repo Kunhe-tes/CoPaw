@@ -1852,7 +1852,7 @@ worker._OBSERVABILITY = Observability(
 )
 raise SystemExit(asyncio.run(worker.run_worker(Path(sys.argv[1]))))
 """
-    process = subprocess.Popen(
+    process = subprocess.Popen(  # pylint: disable=consider-using-with
         [
             sys.executable,
             "-c",
@@ -1892,3 +1892,122 @@ raise SystemExit(asyncio.run(worker.run_worker(Path(sys.argv[1]))))
     record = await PerRunSubAgentRunStore(run_store_dir).get(run_id)
     assert record is not None
     assert record.status == "running"
+
+
+class _ForwardRecorder:
+    def __init__(self):
+        self.lines: list[bytes] = []
+
+    def emit_raw(self, line: bytes) -> bool:
+        self.lines.append(bytes(line))
+        return True
+
+
+@pytest.mark.asyncio
+async def test_worker_stdout_events_are_forwarded_by_supervisor(
+    monkeypatch,
+    tmp_path,
+):
+    """真实 worker 子进程写 stdout 的 span.ended 必须被父进程转发。"""
+    from swe.app.subagents.supervisor import (
+        BackgroundSubAgentScope,
+        BackgroundSubAgentSupervisor,
+        _ActiveRun,
+    )
+    from swe.observability.config import EmitterConfig
+    from swe.observability.context import bind_context
+    from swe.observability.emitter import JsonlEmitter
+    from swe.observability.instrumentation import Observability
+    from swe.observability.models import ObservabilityContext, Scope
+
+    launch_path, run_id, _ = await _write_launch_spec(tmp_path)
+    root = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("swe", "default", "default", "default"),
+        business_ref={"session_id": "session-1"},
+    )
+    carrier_emitter = JsonlEmitter(EmitterConfig(), stream=io.StringIO())
+    observer = Observability(emitter=carrier_emitter)
+    with bind_context(root):
+        span = observer.span(
+            "SubAgent",
+            "agent.execute",
+            subagent={
+                "business_subagent_key": run_id,
+                "mode": "background",
+                "execution_agent_key": "plan-researcher",
+            },
+        )
+    assert span is not None
+    carrier = span.to_carrier()
+    launch = json.loads(launch_path.read_text(encoding="utf-8"))
+    launch["request_context"]["agent_observability_context"] = carrier
+    launch_path.write_text(json.dumps(launch), encoding="utf-8")
+    assert carrier_emitter.close(timeout=1) == 0
+
+    child_script = """
+import asyncio
+import sys
+from pathlib import Path
+from swe.app.subagents import AgentResult, worker
+
+class OkRuntime:
+    def __init__(self, store):
+        self.store = store
+
+    async def run(self, **kwargs):
+        return AgentResult(
+            task_id="task-1",
+            agent_run_id=kwargs["run"].run_id,
+            agent_name="plan-researcher",
+            status="completed",
+            summary="worker completed",
+        )
+
+worker.SubAgentRuntime = OkRuntime
+raise SystemExit(asyncio.run(worker.run_worker(Path(sys.argv[1]))))
+"""
+    process = subprocess.Popen(  # pylint: disable=consider-using-with
+        [sys.executable, "-c", child_script, str(launch_path)],
+        cwd=Path(__file__).resolve().parents[3],
+        env={**os.environ, "PYTHONPATH": str(Path.cwd() / "src")},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    recorder = _ForwardRecorder()
+
+    def emitter_factory():
+        return recorder
+
+    monkeypatch.setattr(
+        "swe.observability.emitter.default_emitter",
+        emitter_factory,
+    )
+    scope = BackgroundSubAgentScope(
+        tenant_id="tenant-1",
+        agent_id="parent-agent",
+        run_store_dir=tmp_path / "subagent_runs",
+    )
+    handle = _ActiveRun(
+        scope=scope,
+        process=process,
+        stderr_log_path=tmp_path / "worker.stderr.log",
+        observability_carrier=carrier,
+    )
+    supervisor = BackgroundSubAgentSupervisor()
+    supervisor._start_event_reader(handle, run_id)
+
+    assert process.wait(timeout=20) == 0
+    assert handle.event_thread is not None
+    handle.event_thread.join(5)
+
+    events = [json.loads(line) for line in recorder.lines]
+    ends = [
+        event
+        for event in events
+        if event.get("event_name") == "span.ended"
+        and event.get("obs_span_id") == carrier["obs_span_id"]
+    ]
+    assert ends
+    assert ends[-1]["status"] == "succeeded"
+    assert handle.saw_subagent_end is True

@@ -327,10 +327,16 @@ class IndexedQuery:
             self.approval_resolution_changed
             and self.approval_resolution_decision == "approved"
         ):
-            # 取消/中断的轮次不再等待审批，否则 Run 会永久停在
-            # waiting_approval 且永远等不到 run.ended。
-            waiting_for_approval = status == "completed" and bool(
-                isinstance(pending, dict) and pending.get("request_id"),
+            # 取消/中断的轮次不再等待审批；即使轮次正常结束，也只有
+            # 审批记录仍为 pending 时才进入等待，避免已被 supersede/GC
+            # 的请求让 Run 永久停在 waiting_approval。
+            request_id = (
+                pending.get("request_id")
+                if isinstance(pending, dict)
+                else None
+            )
+            waiting_for_approval = status == "completed" and (
+                await _approval_is_still_pending(request_id)
             )
             finish_query_run(
                 self.observability_context,
@@ -685,6 +691,28 @@ async def _repair_observed_approval_audit(query, messages):
             return
     except Exception:
         logger.warning("Observed approval audit repair failed", exc_info=True)
+
+
+async def _approval_is_still_pending(request_id: str | None) -> bool:
+    """判断审批是否仍处于 pending 状态。
+
+    审批可能已被 Stop/Goal/GC 终结，但 agent 上的 pending 标记尚未清理；
+    只有服务端记录仍为 pending 时，Run 才应停在等待审批。
+    """
+    if not request_id:
+        return False
+    try:
+        from ..approvals import get_approval_service
+
+        record = await get_approval_service().get_request(request_id)
+    except Exception:
+        logger.warning(
+            "Approval state lookup failed: request_id=%s",
+            request_id,
+            exc_info=True,
+        )
+        return False
+    return record is not None and record.status == "pending"
 
 
 async def _preflight(owner, request, query, execution):
