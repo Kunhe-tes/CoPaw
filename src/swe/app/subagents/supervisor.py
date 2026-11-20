@@ -973,6 +973,49 @@ class BackgroundSubAgentSupervisor:
         self._active_for_scope(scope).pop(run_id, None)
         return record
 
+    async def shutdown(self, *, grace_seconds: float = 2.0) -> int:
+        """取消所有活动后台 SubAgent，并排空事件读线程。"""
+        snapshot = [
+            (run_id, handle)
+            for runs in list(self._active.values())
+            for run_id, handle in list(runs.items())
+        ]
+        if not snapshot:
+            return 0
+        tasks = {
+            asyncio.create_task(
+                self._shutdown_one(run_id, handle),
+            ): run_id
+            for run_id, handle in snapshot
+        }
+        done, pending = await asyncio.wait(tasks, timeout=grace_seconds)
+        cancelled = 0
+        for task in done:
+            error = task.exception()
+            if error is not None:
+                logger.warning(
+                    "background_subagent_shutdown_failed run_id=%s",
+                    tasks[task],
+                    exc_info=error,
+                )
+            else:
+                cancelled += 1
+        for task in pending:
+            logger.warning(
+                "background_subagent_shutdown_timeout run_id=%s",
+                tasks[task],
+            )
+            task.cancel()
+        return cancelled
+
+    async def _shutdown_one(self, run_id: str, handle: _ActiveRun) -> None:
+        task = handle.cancel_task
+        if task is None or task.done():
+            task = asyncio.create_task(self._cancel_run(handle, run_id))
+            handle.cancel_task = task
+            task.add_done_callback(self._observe_cancel_result)
+        await asyncio.shield(task)
+
     @staticmethod
     def _scope_key(scope: BackgroundSubAgentScope) -> tuple[str, str, str]:
         """Use the same physical scope boundary as persisted run records."""

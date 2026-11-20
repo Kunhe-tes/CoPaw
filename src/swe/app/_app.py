@@ -907,6 +907,23 @@ async def _shutdown_lifespan_resources_impl(
     manager_stopped = await _stop_multi_agent_manager(app)
     pool_stopped = await _stop_tenant_workspace_pool(app)
     try:
+        from ..agents.tools.subagent_background import (
+            get_default_background_subagent_supervisor,
+        )
+
+        supervisor = get_default_background_subagent_supervisor()
+        cancelled = await supervisor.shutdown(grace_seconds=2.0)
+        if cancelled:
+            logger.info(
+                "Cancelled %s background SubAgent run(s) at shutdown",
+                cancelled,
+            )
+    except Exception as e:
+        logger.warning(
+            "Error stopping background SubAgent supervisor: %s",
+            e,
+        )
+    try:
         from ..observability.emitter import shutdown_default_emitter
 
         remaining = shutdown_default_emitter()

@@ -1408,3 +1408,57 @@ def test_worker_end_fallback_only_when_worker_did_not_end(
     handle.saw_subagent_end = True
     supervisor._emit_worker_end_fallback(handle, "run-1", status="failed")
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_all_active_runs(monkeypatch, tmp_path):
+    """停机必须取消所有活动 worker，并排空事件读线程。"""
+    from types import SimpleNamespace
+
+    supervisor = BackgroundSubAgentSupervisor()
+    scope = _scope(tmp_path)
+    handles = {}
+    for index in range(2):
+        handles[f"run-{index}"] = _ActiveRun(
+            scope=scope,
+            process=_FakeProcess(pid=7000 + index),
+            stderr_log_path=tmp_path / f"run-{index}.log",
+            observability_carrier={"obs_span_id": f"span-{index}"},
+        )
+    supervisor._active[supervisor._scope_key(scope)] = handles
+
+    terminated: list[int] = []
+    monkeypatch.setattr(
+        supervisor,
+        "_terminate_process_group",
+        lambda process: terminated.append(process.pid),
+    )
+
+    async def fake_cancel(_self, run_id):
+        return SimpleNamespace(run_id=run_id, status="cancelled")
+
+    monkeypatch.setattr(
+        "swe.app.subagents.supervisor.PerRunSubAgentRunStore.cancel",
+        fake_cancel,
+    )
+    fallbacks: list[tuple[str, str]] = []
+
+    class _FakeObservability:
+        def end_carried_span(self, carrier, *, status, **_attributes):
+            fallbacks.append((carrier.get("obs_span_id"), status))
+            return True
+
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.Observability",
+        _FakeObservability,
+    )
+
+    count = await supervisor.shutdown(grace_seconds=1)
+
+    assert count == 2
+    assert sorted(terminated) == [7000, 7001]
+    assert sorted(fallbacks) == [
+        ("span-0", "cancelled"),
+        ("span-1", "cancelled"),
+    ]
+    assert supervisor._active_for_scope(scope) == {}
