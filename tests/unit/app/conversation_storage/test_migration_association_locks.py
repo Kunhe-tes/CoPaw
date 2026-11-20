@@ -227,6 +227,11 @@ async def test_message_batches_lock_shared_session_associations():
     assert len(declarations) == 20
     expected = {"sessions": [1], "chats": [2, 3], "turns": list(range(10, 30))}
     assert all(item == expected for item in declarations)
+    assert importer.session_message_refs["session"]
+    assert all(
+        isinstance(body, bytes)
+        for _, body in importer.session_message_refs["session"]
+    )
 
 
 @pytest.mark.parametrize("packet,maximum", [(1024 * 1024, 100), (2048, 32)])

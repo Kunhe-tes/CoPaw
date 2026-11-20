@@ -846,8 +846,7 @@ class ConversationImporter:
     async def _session(self, session, workspace, scope):
         from ..bundle import BundleBlock
         from ..message_bundle import (
-            encode_message_bodies,
-            split_message_batches,
+            iter_message_batches,
         )
 
         sid = self.session_ids[session["position"]]
@@ -886,13 +885,13 @@ class ConversationImporter:
         ):
             task_projections(messages, state)
         messages = display_order_messages(messages)
-        body_groups = split_message_batches(
+        body_batches = iter_message_batches(
             [item["payload"] for item in messages],
             max_records=self.batch_size,
         )
         start = 0
-        for group in body_groups:
-            batch = messages[start : start + len(group)]
+        for body_batch in body_batches:
+            batch = messages[start : start + len(body_batch)]
             rows = []
             entries = []
             for index, item in enumerate(batch, start=start):
@@ -952,7 +951,7 @@ class ConversationImporter:
                 BundleBlock(
                     "message_bodies",
                     "message_bodies",
-                    encode_message_bodies(group),
+                    body_batch.payload,
                 ),
             ]
             publication = await self._publish(
@@ -991,7 +990,10 @@ class ConversationImporter:
                 [],
             )
             for index, item in enumerate(batch, start=start):
-                key = (item["layer"], _json(item["payload"]))
+                key = (
+                    item["layer"],
+                    body_batch.encoded_bodies[index - start],
+                )
                 locator = {
                     "publication_id": publication["id"],
                     "block_name": "message_bodies",
@@ -999,7 +1001,7 @@ class ConversationImporter:
                 }
                 refs.setdefault(key, []).append(locator)
                 directory.append({**entries[index - start], "body": locator})
-            start += len(group)
+            start += len(body_batch)
         await self._root_and_turns(session, scope, chats, len(messages))
 
     async def _turn_identities(self, session, scope, chats):
@@ -1228,13 +1230,14 @@ class ConversationImporter:
         return updates
 
     async def _recovery_projection(self, session, state, scope, sid):
+        from ..message_bundle import encode_message_body
         from ..session_projection import project_state
 
         occurrences = self.session_message_refs.get(session["position"], {})
         cursors = {key: 0 for key in occurrences}
 
         def resolve_message(layer, body):
-            key = (layer, _json(body))
+            key = (layer, encode_message_body(body))
             options = occurrences.get(key)
             if not options:
                 return None
@@ -1328,8 +1331,7 @@ class ConversationImporter:
         from ..message_bundle import (
             ARCHIVE_MANIFEST_FORMAT,
             encode_archive_manifest,
-            encode_message_bodies,
-            split_message_batches,
+            iter_message_batches,
         )
 
         if not chat["archive"]["epochs"]:
@@ -1342,16 +1344,15 @@ class ConversationImporter:
             boundary = batch["boundary"]
             first = archive_order + 1
             chunks = []
-            body_groups = split_message_batches(
+            body_batches = iter_message_batches(
                 batch["messages"],
                 max_records=self.batch_size,
             )
             offset = 0
-            for chunk_index, bodies in enumerate(body_groups):
+            for chunk_index, body_batch in enumerate(body_batches):
+                bodies = body_batch.messages
                 entries = []
-                for index, payload in enumerate(
-                    batch["messages"][offset : offset + len(bodies)],
-                ):
+                for index, payload in enumerate(bodies):
                     sequence = archive_order + 1
                     archive_order = sequence
                     entries.append(
@@ -1394,7 +1395,7 @@ class ConversationImporter:
                         BundleBlock(
                             "message_bodies",
                             "message_bodies",
-                            encode_message_bodies(bodies),
+                            body_batch.payload,
                         ),
                     ],
                     spec=ImportBatch(

@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Deterministic, bounded message directory and body bundle encoding."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass
 import json
 
 from .errors import IntegrityError
@@ -171,6 +172,25 @@ def _normalize_directory_entry(entry):
     return normalized
 
 
+def encode_message_body(message: dict) -> bytes:
+    """Encode one message with the canonical body-block representation."""
+    if not isinstance(message, dict):
+        raise ValueError("message body must be an object")
+    return _json_bytes(message)
+
+
+def _body_payload(encoded: Sequence[bytes]) -> bytes:
+    return b"[" + b",".join(encoded) + b"]"
+
+
+def _encoded_batch(messages, encoded):
+    return EncodedMessageBatch(
+        tuple(messages),
+        tuple(encoded),
+        _body_payload(encoded),
+    )
+
+
 def encode_message_bodies(messages: Sequence[dict]) -> bytes:
     """Encode one ordered body block. Array positions are the body locators."""
     if isinstance(messages, (str, bytes)) or not isinstance(
@@ -178,10 +198,9 @@ def encode_message_bodies(messages: Sequence[dict]) -> bytes:
         Sequence,
     ):
         raise ValueError("message bodies must be an ordered sequence")
-    bodies = list(messages)
-    for body in bodies:
-        _validate_body(body)
-    return _json_bytes(bodies)
+    return _body_payload(
+        tuple(encode_message_body(body) for body in messages),
+    )
 
 
 def decode_message_bodies(payload: bytes) -> tuple[dict, ...]:
@@ -231,13 +250,25 @@ def decode_message_directory(payload: bytes) -> tuple[dict, ...]:
         raise IntegrityError("message directory entry is invalid") from error
 
 
-def split_message_batches(
+@dataclass(frozen=True)
+class EncodedMessageBatch:
+    """One body block with its canonical per-message encodings."""
+
+    messages: tuple[dict, ...]
+    encoded_bodies: tuple[bytes, ...]
+    payload: bytes
+
+    def __len__(self):
+        return len(self.messages)
+
+
+def iter_message_batches(
     messages: Sequence[dict],
     *,
     max_bytes: int = DEFAULT_MESSAGE_BLOCK_BYTES,
     max_records: int = DEFAULT_MESSAGE_BLOCK_RECORDS,
-) -> tuple[tuple[dict, ...], ...]:
-    """Split ordered bodies by their encoded block size and record count."""
+) -> Iterator[EncodedMessageBatch]:
+    """Split ordered bodies and encode each message exactly once."""
     if (
         type(max_bytes) is not int
         or not 0 < max_bytes <= MAX_MESSAGE_BLOCK_BYTES
@@ -251,32 +282,67 @@ def split_message_batches(
     ):
         raise ValueError("message bodies must be an ordered sequence")
 
-    batches = []
     current = []
+    encoded = []
     current_size = 2
     for message in messages:
-        if not isinstance(message, dict):
-            raise ValueError("message body must be an object")
-        encoded_size = len(_json_bytes(message))
+        if current and len(current) >= max_records:
+            yield _encoded_batch(current, encoded)
+            current, encoded, current_size = [], [], 2
+        encoded_body = encode_message_body(message)
+        encoded_size = len(encoded_body)
         addition = encoded_size + (1 if current else 0)
-        if len(current) >= max_records or current_size + addition > max_bytes:
-            if not current:
-                raise ValueError(
-                    "one message exceeds the message block byte limit",
-                )
-            batches.append(tuple(current))
-            current = [message]
+        if current and current_size + addition > max_bytes:
+            yield _encoded_batch(current, encoded)
+            current, encoded, current_size = [], [], 2
+            addition = encoded_size
+        if not current:
             current_size = encoded_size + 2
             if current_size > max_bytes:
                 raise ValueError(
                     "one message exceeds the message block byte limit",
                 )
+            current = [message]
+            encoded = [encoded_body]
         else:
             current.append(message)
+            encoded.append(encoded_body)
             current_size += addition
     if current:
-        batches.append(tuple(current))
-    return tuple(batches)
+        yield _encoded_batch(current, encoded)
+
+
+def prepare_message_batches(
+    messages: Sequence[dict],
+    *,
+    max_bytes: int = DEFAULT_MESSAGE_BLOCK_BYTES,
+    max_records: int = DEFAULT_MESSAGE_BLOCK_RECORDS,
+) -> tuple[EncodedMessageBatch, ...]:
+    """Materialize prepared batches for callers that need the full sequence."""
+    return tuple(
+        iter_message_batches(
+            messages,
+            max_bytes=max_bytes,
+            max_records=max_records,
+        ),
+    )
+
+
+def split_message_batches(
+    messages: Sequence[dict],
+    *,
+    max_bytes: int = DEFAULT_MESSAGE_BLOCK_BYTES,
+    max_records: int = DEFAULT_MESSAGE_BLOCK_RECORDS,
+) -> tuple[tuple[dict, ...], ...]:
+    """Split ordered bodies by their encoded block size and record count."""
+    return tuple(
+        batch.messages
+        for batch in prepare_message_batches(
+            messages,
+            max_bytes=max_bytes,
+            max_records=max_records,
+        )
+    )
 
 
 def _normalize_archive_manifest(manifest):

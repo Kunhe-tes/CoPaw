@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+import json
+
 import pytest
 
 from swe.app.conversation_storage.errors import IntegrityError
@@ -9,6 +11,8 @@ from swe.app.conversation_storage.message_bundle import (
     encode_message_bodies,
     encode_message_directory,
     encode_archive_manifest,
+    iter_message_batches,
+    prepare_message_batches,
     select_archive_chunks,
     split_message_batches,
 )
@@ -37,6 +41,12 @@ def test_message_body_encoding_is_deterministic_and_positioned():
     encoded = encode_message_bodies(bodies)
 
     assert encoded == encode_message_bodies(bodies)
+    assert encoded == json.dumps(
+        bodies,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
     assert decode_message_bodies(encoded) == bodies
     assert (
         decode_message_directory(
@@ -79,6 +89,42 @@ def test_split_batches_obeys_encoded_bytes_and_record_count():
 
     assert tuple(len(batch) for batch in batches) == (2, 2, 1)
     assert all(len(encode_message_bodies(batch)) <= 100 for batch in batches)
+
+
+def test_prepared_batches_reuse_single_body_encodings(monkeypatch):
+    from swe.app.conversation_storage import message_bundle
+
+    messages = (
+        {"id": "first", "content": "one"},
+        {"content": "two", "id": "second"},
+        {"id": "third", "content": "three"},
+    )
+    expected = split_message_batches(messages, max_bytes=100, max_records=2)
+    original = message_bundle._json_bytes
+    encoded = []
+
+    def measured(value):
+        encoded.append(value)
+        return original(value)
+
+    monkeypatch.setattr(message_bundle, "_json_bytes", measured)
+    iterator = iter_message_batches(messages, max_bytes=100, max_records=2)
+    batches = [next(iterator)]
+    assert len(encoded) == 2
+    batches.append(next(iterator))
+
+    assert tuple(batch.messages for batch in batches) == expected
+    assert len(encoded) == len(messages)
+    assert tuple(batch.payload for batch in batches) == tuple(
+        encode_message_bodies(batch) for batch in expected
+    )
+    assert prepare_message_batches(
+        messages,
+        max_bytes=100,
+        max_records=2,
+    ) == tuple(
+        batches,
+    )
 
 
 def test_archive_manifest_selects_only_chunks_intersecting_requested_range():
