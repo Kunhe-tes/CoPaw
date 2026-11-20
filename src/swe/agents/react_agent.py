@@ -6,7 +6,7 @@ with integrated tools, skills, and memory management.
 """
 
 import asyncio
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from enum import Enum
 import logging
@@ -461,6 +461,21 @@ class ResearchPhaseResult:
     reply: Msg | None
     turns_used: int
     messages: tuple[Msg, ...] = ()
+
+
+def _agent_operation_span():
+    """主 Agent 调用边界的观测 Span；观测关闭时退化为 nullcontext。"""
+    try:
+        from ..observability.instrumentation import Observability
+
+        span = Observability().span(
+            "Agent",
+            "agent.execute",
+            name="agent.execute",
+        )
+    except Exception:
+        span = None
+    return span if span is not None else nullcontext()
 
 
 class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
@@ -2639,10 +2654,11 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 self._start_watchdog()
                 self._observability_step_index = 0
                 with self.agent_phase(AgentPhase.REASONING, reason="reply"):
-                    return await super().reply(
-                        msg=msg,
-                        structured_model=structured_model,
-                    )
+                    with _agent_operation_span():
+                        return await super().reply(
+                            msg=msg,
+                            structured_model=structured_model,
+                        )
             finally:
                 self._stop_watchdog()
                 self._observability_step_index = None
