@@ -11,6 +11,64 @@ from tests.unit.scheduler.test_managed_batch_retry import (
 )
 
 
+@pytest.mark.asyncio
+async def test_batch_detail_filters_by_subtask_settlement(callback_setup):
+    from monitor.app.services.cron.managed_board import ManagedBoardQuery
+
+    db = callback_setup[0]
+    await failed_batch(callback_setup)
+    db.conn.execute(
+        "UPDATE swe_cron_execution_runs SET status='success',settled_status=NULL",
+    )
+    service = ManagedBoardQuery(db)
+    batch = (await service.batches("bank"))["items"][0]["batch_id"]
+    waiting = await service.detail(
+        "bank",
+        batch,
+        BoardDetailQuery(subtask_status="waiting_subtasks"),
+    )
+    assert waiting["member_total"] == 1
+    assert waiting["members"][0]["member_role"] == "parent"
+    failed = BoardDetailQuery(subtask_status="error")
+    assert (await service.detail("bank", batch, failed))["member_total"] == 0
+    db.conn.execute(
+        "UPDATE swe_cron_execution_runs SET settled_status='error'",
+    )
+    assert (await service.detail("bank", batch, failed))["member_total"] == 1
+    assert (
+        await service.detail(
+            "bank",
+            batch,
+            BoardDetailQuery(subtask_status="error", member_role="child"),
+        )
+    )["member_total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_board_filters_by_child_status_not_parent(callback_setup):
+    from monitor.app.services.cron.managed_board import ManagedBoardQuery
+
+    db = callback_setup[0]
+    await failed_batch(callback_setup)
+    service = ManagedBoardQuery(db)
+    assert (await service.batches("bank", child_status="error"))["total"] == 0
+    assert (await service.failure_summary("bank", child_status="error"))[
+        "total"
+    ] == 0
+    db.conn.execute(
+        "UPDATE swe_cron_managed_batch_members SET member_role='child'",
+    )
+    result = await service.batches("bank", child_status="error")
+    assert result["total"] == 1
+    assert result["stats"]["failed_members"] == 1
+    assert (await service.failure_summary("bank", child_status="error"))[
+        "total"
+    ] == 1
+    assert (await service.batches("bank", child_status="running"))[
+        "total"
+    ] == 0
+
+
 @pytest.mark.parametrize("query", ["report", "model-in-one-member"])
 @pytest.mark.asyncio
 async def test_board_combines_time_status_and_global_keyword(

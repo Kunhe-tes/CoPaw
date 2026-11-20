@@ -151,6 +151,7 @@ class ManagedBoardQuery:
         end=None,
         status=None,
         query=None,
+        child_status=None,
     ):
         from .managed_board_failures import failure_summary
 
@@ -162,6 +163,7 @@ class ManagedBoardQuery:
             end,
             status,
             query,
+            child_status=child_status,
         )
 
     async def batches(
@@ -174,9 +176,16 @@ class ManagedBoardQuery:
         query=None,
         page=1,
         page_size=20,
+        child_status=None,
     ):
         await self._ready()
-        where, params = sql.batch_where(source, start, end, query)
+        where, params = sql.batch_where(
+            source,
+            start,
+            end,
+            query,
+            child_status=child_status,
+        )
         bound = (*params, status, status) if status else params
         rows = await self.db.fetch_all(
             sql.list_query(where, bool(status)),
@@ -215,14 +224,7 @@ class ManagedBoardQuery:
             row["receipt_id"],
             source,
         )
-        members, total = await self._members(
-            batch_id,
-            query.member_page,
-            query.member_limit,
-            query.member_status,
-            query.member_role,
-            query.member_query,
-        )
+        members, total = await self._members(source, batch_id, query)
         events, event_total = await self._events(
             source,
             batch_id,
@@ -263,17 +265,27 @@ class ManagedBoardQuery:
         )
         return skipped if isinstance(skipped, list) else None
 
-    async def _members(self, batch_id, page, limit, status, role, query):
-        clauses, params = ["m.batch_id=%s"], [batch_id]
-        for name, value in (("r.status", status), ("m.member_role", role)):
+    async def _members(self, source, batch_id, query: BoardDetailQuery):
+        clauses = ["m.batch_id=%s", "m.source_id COLLATE utf8mb4_bin=%s"]
+        params = [batch_id, source]
+        for name, value in (
+            ("r.status", query.member_status),
+            ("m.member_role", query.member_role),
+        ):
             if value:
                 clauses.append(f"{name}=%s")
                 params.append(value)
-        if query:
+        if query.subtask_status:
+            clauses.append(
+                "(CASE WHEN NULLIF(r.settled_status,'') IS NOT NULL THEN r.settled_status "
+                "WHEN r.status='success' THEN 'waiting_subtasks' ELSE 'unconfirmed' END)=%s",
+            )
+            params.append(query.subtask_status)
+        if query.member_query:
             clauses.append(
                 "(m.tenant_id LIKE %s ESCAPE '!' OR m.job_id LIKE %s ESCAPE '!' OR JSON_UNQUOTE(JSON_EXTRACT(r.spec_json,'$.name')) LIKE %s ESCAPE '!')",
             )
-            params.extend([sql.like_text(query)] * 3)
+            params.extend([sql.like_text(query.member_query)] * 3)
         where = " AND ".join(clauses)
         count = await self.db.fetch_one(
             f"SELECT COUNT(*) AS total {sql.MEMBER_FROM} WHERE {where}",
@@ -286,7 +298,11 @@ class ManagedBoardQuery:
             + f"LEFT JOIN {sql.RUNS} i ON m.initial_execution_id=i.execution_id AND {sql.identity_join('m', 'i')} "
             + "LEFT JOIN swe_cron_executions h ON h.id=r.history_execution_id AND h.tenant_id=r.tenant_id AND h.tenant_id COLLATE utf8mb4_bin=r.tenant_id AND h.job_id=r.job_id AND h.job_id COLLATE utf8mb4_bin=r.job_id "
             + f" WHERE {where} ORDER BY m.dispatch_order,m.member_id LIMIT %s OFFSET %s",
-            (*params, limit, (page - 1) * limit),
+            (
+                *params,
+                query.member_limit,
+                (query.member_page - 1) * query.member_limit,
+            ),
         )
         return [member_item(row) for row in rows], int(count["total"])
 

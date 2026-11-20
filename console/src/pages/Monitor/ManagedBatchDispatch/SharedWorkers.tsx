@@ -1,28 +1,29 @@
-import { useState, type ReactNode } from "react";
+import {
+  useRef,
+  useState,
+  type MouseEventHandler,
+  type ReactNode,
+} from "react";
 import { Alert, Empty, Pagination, Progress, Spin, Tag, Tooltip } from "antd";
-import { ChevronDown } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import type {
   CronDispatchWorkersResponse,
   CronDispatchCapacityItem,
 } from "../../../api/modules/monitor";
-import WorkerHistoryChart from "../CronBatchDispatch/WorkerHistoryChart";
 import styles from "../CronBatchDispatch/index.module.less";
 import WorkerAdjustmentDetails from "./WorkerAdjustmentDetails";
 import workerStyles from "./workers.module.less";
+import WorkerTrendDialog, { type WorkerTrendScope } from "./WorkerTrendDialog";
 
 const capacityKey = (item: CronDispatchCapacityItem) =>
   JSON.stringify([item.provider_id, item.model_id]);
 
 function CapacityRow({
   item,
-  history,
-  expanded,
-  onToggle,
+  onOpen,
 }: {
   item: CronDispatchCapacityItem;
-  history: CronDispatchCapacityItem[];
-  expanded: boolean;
-  onToggle: () => void;
+  onOpen: MouseEventHandler<HTMLButtonElement>;
 }) {
   return (
     <div>
@@ -30,8 +31,8 @@ function CapacityRow({
         type="button"
         className={styles.capacityRow}
         aria-label={`查看 ${item.provider_id} / ${item.model_id} 的 Worker 调整过程`}
-        aria-expanded={expanded}
-        onClick={onToggle}
+        aria-haspopup="dialog"
+        onClick={onOpen}
       >
         <span className={styles.capacityMeta}>
           <strong>{item.model_id}</strong>
@@ -51,22 +52,12 @@ function CapacityRow({
           <strong>{item.effective_workers}</strong>
           <span>{item.decision_reason || "未记录原因"}</span>
         </span>
-        <ChevronDown
+        <ChevronRight
           size={15}
           className={styles.capacityChevron}
           aria-hidden="true"
         />
       </button>
-      {expanded && (
-        <WorkerHistoryChart
-          showOccupancy
-          items={history.filter(
-            (row) =>
-              row.provider_id === item.provider_id &&
-              row.model_id === item.model_id,
-          )}
-        />
-      )}
     </div>
   );
 }
@@ -76,19 +67,19 @@ export default function SharedWorkers({
   loading,
   error,
   occupants,
+  scope,
 }: {
   value?: CronDispatchWorkersResponse | null;
   loading: boolean;
   error?: string;
   occupants?: ReactNode;
+  scope: WorkerTrendScope;
 }) {
   const [page, setPage] = useState(1);
-  const [expanded, setExpanded] = useState<string[]>([]);
+  const [pool, setPool] = useState<CronDispatchCapacityItem | null>(null);
+  const trigger = useRef<HTMLButtonElement | null>(null);
   const events = value?.capacity_events || [];
   const current = Math.min(page, Math.max(1, Math.ceil(events.length / 5)));
-  const hasExpandedChart = value?.current_capacity.some((item) =>
-    expanded.includes(capacityKey(item)),
-  );
   return (
     <section className={workerStyles.workerGrid}>
       <div className={workerStyles.leftColumn}>
@@ -167,11 +158,7 @@ export default function SharedWorkers({
           </Spin>
         </article>
       </div>
-      <article
-        className={`${styles.panel} ${workerStyles.rightPanel}${
-          hasExpandedChart ? ` ${workerStyles.rightExpanded}` : ""
-        }`}
-      >
+      <article className={`${styles.panel} ${workerStyles.rightPanel}`}>
         <div className={styles.panelHeader}>
           <div>
             <h2>Worker 变动</h2>
@@ -187,16 +174,10 @@ export default function SharedWorkers({
                 <CapacityRow
                   key={capacityKey(item)}
                   item={item}
-                  history={events}
-                  expanded={expanded.includes(capacityKey(item))}
-                  onToggle={() =>
-                    setExpanded((keys) => {
-                      const key = capacityKey(item);
-                      return keys.includes(key)
-                        ? keys.filter((value) => value !== key)
-                        : [...keys, key];
-                    })
-                  }
+                  onOpen={(event) => {
+                    trigger.current = event.currentTarget;
+                    setPool(item);
+                  }}
                 />
               ))}
             </div>
@@ -226,6 +207,17 @@ export default function SharedWorkers({
           </Spin>
         )}
       </article>
+      {pool && (
+        <WorkerTrendDialog
+          pool={pool}
+          scope={scope}
+          history={events}
+          onClose={() => {
+            setPool(null);
+            requestAnimationFrame(() => trigger.current?.focus());
+          }}
+        />
+      )}
     </section>
   );
 }

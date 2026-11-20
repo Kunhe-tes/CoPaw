@@ -218,6 +218,7 @@ export default function BatchDetail({
     member_page: 1,
     member_limit: 50,
     member_status: "",
+    subtask_status: "",
     member_role: "",
     member_query: "",
     event_page: 1,
@@ -394,6 +395,26 @@ export default function BatchDetail({
                       setFilters({
                         ...filters,
                         member_status: value,
+                        member_page: 1,
+                      })
+                    }
+                  />
+                  <Select
+                    aria-label="批次内子任务状态"
+                    value={filters.subtask_status}
+                    options={[
+                      { value: "", label: "全部子任务状态" },
+                      { value: "waiting_subtasks", label: "等待子任务完成" },
+                      { value: "success", label: "子任务成功" },
+                      { value: "error", label: "子任务失败" },
+                      { value: "skipped", label: "子任务已跳过" },
+                      { value: "cancelled", label: "子任务已取消" },
+                      { value: "unconfirmed", label: "子任务状态未确认" },
+                    ]}
+                    onChange={(value) =>
+                      setFilters({
+                        ...filters,
+                        subtask_status: value,
                         member_page: 1,
                       })
                     }

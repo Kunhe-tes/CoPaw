@@ -24,7 +24,7 @@ import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
 import { getUserId } from "../../../utils/identity";
 import { loadWorkerHistory } from "../CronBatchDispatch/workerHistory";
 import styles from "../CronBatchDispatch/index.module.less";
-import { statusTag, timeText } from "./format";
+import { labels, statusTag, timeText } from "./format";
 import { useBoardResource } from "./useBoardResource";
 import BatchDetail from "./BatchDetail";
 import SharedWorkers from "./SharedWorkers";
@@ -45,6 +45,7 @@ function Board({ source, actor }: { source: string; actor: string }) {
   const [shortcut, setShortcut] = useState("today");
   const [range, setRange] = useState<[Dayjs, Dayjs]>(() => buildRange("today"));
   const [status, setStatus] = useState("");
+  const [childStatus, setChildStatus] = useState("");
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState("");
@@ -64,11 +65,19 @@ function Board({ source, actor }: { source: string; actor: string }) {
       void refresh;
       return managedBatchBoard.batches(
         source,
-        { start_time: start, end_time: end, status, query, page, page_size: 4 },
+        {
+          start_time: start,
+          end_time: end,
+          status,
+          child_status: childStatus,
+          query,
+          page,
+          page_size: 4,
+        },
         signal,
       );
     },
-    [source, start, end, status, query, page, refresh],
+    [source, start, end, status, childStatus, query, page, refresh],
   );
   const batches = useBoardResource(loadBatches);
   const loadWorkers = useCallback(
@@ -171,14 +180,59 @@ function Board({ source, actor }: { source: string; actor: string }) {
             setPage(1);
           }}
         />
+        <Select
+          aria-label="子任务状态"
+          value={childStatus}
+          className={styles.statusSelect}
+          options={[
+            { value: "", label: "全部子任务状态" },
+            ...[
+              "queued",
+              "dispatching",
+              "accepted",
+              "running",
+              "waiting_subtasks",
+              "success",
+              "error",
+              "dispatch_failed",
+              "skipped",
+              "cancelled",
+            ].map((value) => ({
+              value,
+              label:
+                value === "success"
+                  ? "整轮成功"
+                  : value === "waiting_subtasks"
+                  ? "等待子任务"
+                  : labels[value],
+            })),
+          ]}
+          onChange={(value) => {
+            setChildStatus(value);
+            setPage(1);
+          }}
+        />
       </section>
       <section className={styles.summaryStrip} aria-label="新版批调度概览">
         {metrics.map(([title, value, hint]) => (
           <div className={styles.summaryMetric} key={title}>
             <span>{title}</span>
-            {title === "失败任务" ? <FailureSummary source={source}
-              filters={{ start_time: start, end_time: end, status, query }} refresh={refresh}
-              value={stats?.failed_members} /> : <strong>{value ?? "-"}</strong>}
+            {title === "失败任务" ? (
+              <FailureSummary
+                source={source}
+                filters={{
+                  start_time: start,
+                  end_time: end,
+                  status,
+                  child_status: childStatus,
+                  query,
+                }}
+                refresh={refresh}
+                value={stats?.failed_members}
+              />
+            ) : (
+              <strong>{value ?? "-"}</strong>
+            )}
             <em>{hint}</em>
           </div>
         ))}
@@ -337,6 +391,7 @@ function Board({ source, actor }: { source: string; actor: string }) {
         </article>
       </section>
       <SharedWorkers
+        scope={{ source, start, end, refresh }}
         value={workers.value}
         loading={workers.loading}
         error={workers.error}
