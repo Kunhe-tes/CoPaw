@@ -67,6 +67,7 @@ async def verify_workspace_messages(
                     scope,
                     io=io,
                     io_workers=io_workers,
+                    memory_bytes=memory_bytes,
                 ),
             )
         results[index] = local["blockers"]

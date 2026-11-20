@@ -114,6 +114,7 @@ async def test_offline_archive_rejects_foreign_service_before_nas(monkeypatch):
 
     scope = WorkspaceScope("t", "s", "a", service_unit_id="A")
     foreign = {
+        "id": 1,
         **scope.fields,
         "service_unit_key": b"B",
         "chat_id": 2,
@@ -126,7 +127,9 @@ async def test_offline_archive_rejects_foreign_service_before_nas(monkeypatch):
             {"boundary": {"id": "archive"}, "epoch": 1, "messages": []},
         ],
     )
-    database = SimpleNamespace(fetch_one=AsyncMock(return_value=foreign))
+    database = SimpleNamespace(
+        fetch_all=AsyncMock(return_value=[foreign]),
+    )
     bundles = SimpleNamespace(inspect=Mock())
     manifest = SimpleNamespace(
         data={
@@ -145,6 +148,135 @@ async def test_offline_archive_rejects_foreign_service_before_nas(monkeypatch):
             scope,
         )
     bundles.inspect.assert_not_called()
+
+
+async def test_offline_archive_batches_sql_and_nas_reads(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    from swe.app.conversation_storage.identity import WorkspaceScope
+    from swe.app.conversation_storage.migration import verify
+
+    scope = WorkspaceScope("t", "s", "a", service_unit_id="A")
+    identifiers = tuple(range(1000, 1130))
+    messages = [{"id": "message-" + str(index)} for index in identifiers]
+    chunks = [
+        {
+            "publication_id": identifier,
+            "directory_block": "message_directory",
+            "first_sequence": index + 1,
+            "last_sequence": index + 1,
+        }
+        for index, identifier in enumerate(identifiers)
+    ]
+    sql_batches = []
+
+    def publication(identifier, *, chat_id, session_id):
+        return {
+            "id": identifier,
+            "service_unit_key": b"A",
+            "tenant_key": b"t",
+            "source_key": b"s",
+            "agent_key": b"a",
+            "scope_kind": "workspace",
+            "chat_id": chat_id,
+            "session_id": session_id,
+            "epoch": 1,
+            "byte_length": 100,
+            "relative_path": "bundle-" + str(identifier),
+            "state": "committed",
+            "gc_state": "live",
+            "durable_at": True,
+        }
+
+    async def fetch_all(query, params):
+        assert "session_id,chat_id,epoch" in query
+        sql_batches.append(len(params))
+        if params == (1,):
+            return [publication(1, chat_id=2, session_id=5)]
+        return [
+            publication(identifier, chat_id=2, session_id=5)
+            for identifier in params
+        ]
+
+    class FakeIO:
+        active = 0
+        peak = 0
+
+        async def call(self, function, *args, **kwargs):
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            try:
+                await asyncio.sleep(0)
+                return function(*args, **kwargs)
+            finally:
+                self.active -= 1
+
+    monkeypatch.setattr(
+        verify,
+        "archive_batches",
+        lambda _archive: [
+            {
+                "boundary": {"id": "archive"},
+                "epoch": 1,
+                "messages": messages,
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        verify,
+        "read_archive_manifest",
+        lambda _bundles, _publication: {"chunks": chunks},
+    )
+
+    def read_chunk(
+        _bundles,
+        publication,
+        _directory_block,
+        *,
+        include_bodies,
+        allowance,
+    ):
+        assert include_bodies
+        assert allowance >= 2 * 8 * 1024 * 1024
+        index = publication["id"] - 1000
+        entry = {
+            "sequence": index + 1,
+            "raw_id": "message-" + str(publication["id"]),
+            "layer": "archive",
+            "visible": True,
+            "body": {
+                "publication_id": "self",
+                "block_name": "message_bodies",
+                "position": 0,
+            },
+        }
+        return (entry,), (messages[index],)
+
+    monkeypatch.setattr(verify, "read_archive_chunk", read_chunk)
+    manifest = SimpleNamespace(
+        data={
+            "assignments": {
+                "chat": {"chat": {"target_id": 2}},
+                "publication": {
+                    "chat/boundary:archive": {"target_id": 1},
+                },
+            },
+        },
+    )
+    io = FakeIO()
+    await verify._verify_archive_rows(
+        SimpleNamespace(fetch_all=fetch_all),
+        object(),
+        manifest,
+        {"position": "chat", "archive": {}},
+        scope,
+        io=io,
+        io_workers=4,
+        memory_bytes=256 * 1024 * 1024,
+    )
+    assert sql_batches == [1, 128, 2]
+    assert io.peak == 4
 
 
 from swe.app.conversation_storage.migration.manifest import (

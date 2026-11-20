@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """Fast verification proves committed structure without reading bodies."""
 
+import asyncio
 import json
 import io
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -13,9 +14,14 @@ from swe.app.conversation_storage.bundle import BundleBlock, BundleStore
 from swe.app.conversation_storage.identity import WorkspaceScope
 from swe.app.conversation_storage.errors import IntegrityError
 from swe.app.conversation_storage.migration.verify import verify_import
+from swe.app.conversation_storage.migration.archive_verification import (
+    read_archive_chunk,
+)
 from swe.app.conversation_storage.migration.verify_fast import (
     _read_publication_plan,
     _validate_message_blocks,
+    _verify_archive_chunks,
+    _verify_archive_dependencies_batch,
     _verify_chunk_directory,
     _verify_archive_dependencies,
     _validate_locator_pairs,
@@ -60,7 +66,10 @@ def test_fast_archive_chunk_checks_range_and_chat(tmp_path):
         "relative_path": index.relative_path,
         "operation_key": operation,
     }
-    row = {"byte_length": index.byte_length}
+    row = {
+        "byte_length": index.byte_length,
+        "relative_path": index.relative_path,
+    }
     chunk = {
         "directory_block": "message_directory",
         "first_sequence": 8,
@@ -87,6 +96,70 @@ def test_fast_archive_chunk_checks_range_and_chat(tmp_path):
         )
 
 
+def test_archive_chunk_read_opens_bundle_once(tmp_path, monkeypatch):
+    from swe.app.conversation_storage.message_bundle import (
+        encode_message_bodies,
+        encode_message_directory,
+    )
+
+    bundles = BundleStore(tmp_path)
+    operation = "c" * 64
+    scope = WorkspaceScope("tenant", "source", "agent", service_unit_id="svc")
+    body = {"id": "message"}
+    entry = {
+        "sequence": 1,
+        "raw_id": "message",
+        "layer": "archive",
+        "visible": True,
+        "body": {
+            "publication_id": "self",
+            "block_name": "message_bodies",
+            "position": 0,
+        },
+    }
+    index = bundles.publish(
+        operation,
+        [
+            BundleBlock(
+                "message_directory",
+                "message_directory",
+                encode_message_directory([entry]),
+            ),
+            BundleBlock(
+                "message_bodies",
+                "message_bodies",
+                encode_message_bodies([body]),
+            ),
+        ],
+        scope=scope,
+        metadata={"operation_key": operation},
+    )
+    opened = []
+    original = bundles.open_reader
+
+    @contextmanager
+    def counted(*args, **kwargs):
+        opened.append(args)
+        with original(*args, **kwargs) as reader:
+            yield reader
+
+    monkeypatch.setattr(bundles, "open_reader", counted)
+    directory, bodies = read_archive_chunk(
+        bundles,
+        {
+            "relative_path": index.relative_path,
+            "byte_length": index.byte_length,
+        },
+        "message_directory",
+        include_bodies=True,
+        allowance=64 * 1024 * 1024,
+    )
+    assert directory[0]["sequence"] == 1
+    assert directory[0]["category"] == "archive"
+    assert bodies == (body,)
+    assert len(opened) == 1
+
+
 async def test_fast_archive_dependency_requires_scoped_active_retention():
     from unittest.mock import AsyncMock
 
@@ -96,7 +169,14 @@ async def test_fast_archive_dependency_requires_scoped_active_retention():
     assignments = {4: scope.values}
     database = SimpleNamespace(
         fetch_all=AsyncMock(
-            return_value=[{"publication_id": 4, "member_key": 4}],
+            return_value=[
+                {
+                    "publication_id": 4,
+                    "member_key": 4,
+                    "retention_key": b"dep:5",
+                    **scope.fields,
+                },
+            ],
         ),
     )
     await _verify_archive_dependencies(
@@ -121,6 +201,114 @@ async def test_fast_archive_dependency_requires_scoped_active_retention():
             archive,
             assignments,
         )
+
+
+async def test_fast_archive_reads_are_batched_and_bounded(monkeypatch):
+    scope = WorkspaceScope("tenant", "source", "agent", service_unit_id="svc")
+    identifiers = tuple(range(1000, 1130))
+    assignments = {}
+    rows = {}
+    for identifier in identifiers:
+        operation = f"{identifier:064x}"
+        assignment = {
+            "target_id": identifier,
+            "scope_kind": "workspace",
+            "scope": scope.values,
+            "operation_key": operation,
+            "relative_path": BundleStore.path_for(operation, scope),
+        }
+        assignments[identifier] = assignment
+        rows[identifier] = {
+            "id": identifier,
+            "scope_kind": "workspace",
+            "operation_key": operation.encode(),
+            "relative_path": assignment["relative_path"],
+            "byte_length": 100,
+            "state": "committed",
+            "gc_state": "live",
+            "durable_at": True,
+            **scope.fields,
+        }
+
+    sql_batches = []
+
+    async def fetch_all(_query, params):
+        sql_batches.append(len(params))
+        return [rows[identifier] for identifier in params]
+
+    class FakeIO:
+        active = 0
+        peak = 0
+
+        async def call(self, function, *args, **kwargs):
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            try:
+                await asyncio.sleep(0)
+                return function(*args, **kwargs)
+            finally:
+                self.active -= 1
+
+    monkeypatch.setattr(
+        "swe.app.conversation_storage.migration.verify_fast."
+        "_verify_chunk_directory",
+        lambda *_args, **_kwargs: None,
+    )
+    archive = (
+        {
+            "epoch": 3,
+            "chunks": [
+                {"publication_id": identifier} for identifier in identifiers
+            ],
+        },
+        {"chat_id": 7, "archive_first_order": 1},
+    )
+    io = FakeIO()
+    await _verify_archive_chunks(
+        SimpleNamespace(fetch_all=fetch_all),
+        [(SimpleNamespace(bundles=object()), archive)],
+        assignments,
+        io,
+        64 * 1024 * 1024,
+        2,
+    )
+    assert sql_batches == [128, 2]
+    assert io.peak == 2
+
+
+async def test_fast_archive_dependencies_use_constant_sql_batches():
+    scope = WorkspaceScope("tenant", "source", "agent", service_unit_id="svc")
+    identifiers = tuple(range(1000, 1130))
+    assignments = {identifier: scope.values for identifier in identifiers}
+    archives = [
+        (
+            {"id": 3000 + index, **scope.fields},
+            ({"chunks": [{"publication_id": identifier}]}, {}),
+        )
+        for index, identifier in enumerate(identifiers)
+    ]
+    sql_batches = []
+
+    async def fetch_all(_query, params):
+        sql_batches.append(len(params))
+        return [
+            {
+                "publication_id": 1000
+                + int(key.decode().split(":")[1])
+                - 3000,
+                "member_key": 1000 + int(key.decode().split(":")[1]) - 3000,
+                "retention_key": key,
+                **scope.fields,
+            }
+            for key in params
+        ]
+
+    await _verify_archive_dependencies_batch(
+        SimpleNamespace(fetch_all=fetch_all),
+        archives,
+        assignments,
+    )
+    assert sql_batches == [128, 2]
 
 
 def test_fast_checks_directory_geometry_and_boundary_dependencies():

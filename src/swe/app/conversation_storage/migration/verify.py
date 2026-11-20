@@ -2,6 +2,7 @@
 """Full semantic comparisons from committed SQL locators and immutable bodies."""
 
 import asyncio
+from functools import partial
 
 from ..bundle import BlockExtent
 from ..chat_repository import MySQLChatRepository
@@ -21,6 +22,13 @@ from ..archive_reader import ArchiveReader
 from .importer import archive_batches, task_projections
 from .manifest import SourceBoundary
 from .readonly import ReadOnlyDatabase, ReadOnlyRetention, read_only_adapter
+from .archive_verification import (
+    archive_read_workers,
+    fetch_publications,
+    read_archive_chunk,
+    read_archive_manifest,
+    run_bounded_io,
+)
 from .verify_parallel import (
     verify_workspace_messages as _parallel_message_checks,
 )
@@ -388,6 +396,7 @@ async def verify_import(
                     chat,
                     io=io,
                     io_workers=io_workers,
+                    memory_bytes=memory_bytes // max(1, workers),
                     messages_verified=io is not None,
                 ),
             )
@@ -811,6 +820,7 @@ async def _verify_chat(
     *,
     io=None,
     io_workers=4,
+    memory_bytes=64 * 1024 * 1024,
     messages_verified=False,
 ):
     scope = WorkspaceScope.from_values(workspace["scope"])
@@ -839,6 +849,7 @@ async def _verify_chat(
             scope,
             io=io,
             io_workers=io_workers,
+            memory_bytes=memory_bytes,
         )
     if not messages_verified:
         await _verify_epochs(database, bundles, manifest, chat, scope, io=io)
@@ -855,32 +866,29 @@ async def _verify_archive_rows(
     *,
     io=None,
     io_workers=4,
+    memory_bytes=64 * 1024 * 1024,
 ):
-    from ..message_bundle import (
-        decode_archive_manifest,
-        decode_message_bodies,
-        decode_message_directory,
-    )
-    from ..bundle import BundleStore
-
     cid = manifest.data["assignments"]["chat"][chat["position"]]["target_id"]
-    expected = [
-        message
-        for batch in archive_batches(chat["archive"])
-        for message in batch["messages"]
-    ]
     assignments = manifest.data["assignments"].get("publication", {})
-    batches = archive_batches(chat["archive"])
-    seen = 0
+    batches = list(archive_batches(chat["archive"]))
+    expected_count = sum(len(batch["messages"]) for batch in batches)
+    boundary_entries = []
+    boundary_identifiers = []
     for batch in batches:
         position = chat["position"] + "/boundary:" + batch["boundary"]["id"]
         assignment = assignments.get(position)
         if assignment is None:
             raise ValueError("archive boundary publication is missing")
-        publication = await database.fetch_one(
-            "SELECT * FROM swe_conversation_publications WHERE id=%s AND state='committed' AND gc_state='live'",
-            (assignment["target_id"],),
-        )
+        boundary_entries.append((batch, assignment))
+        boundary_identifiers.append(assignment["target_id"])
+
+    boundary_rows = await fetch_publications(
+        database,
+        boundary_identifiers,
+        committed_live=True,
+    )
+    for batch, assignment in boundary_entries:
+        publication = boundary_rows.get(assignment["target_id"])
         if (
             publication is None
             or WorkspaceScope.from_row(publication) != scope
@@ -888,71 +896,84 @@ async def _verify_archive_rows(
             or publication["epoch"] != batch["epoch"]
         ):
             raise ValueError("archive boundary publication scope differs")
-        path = BundleStore.validate_publication_locator(publication)
-        index = bundles.inspect(
-            path,
-            expected_length=publication["byte_length"],
-        )
-        extent = index.blocks["archive_manifest"]
-        archive_manifest = decode_archive_manifest(
-            bundles.read_extent(
-                path,
-                extent.offset,
-                extent.length,
-                expected_length=index.byte_length,
-            ),
-        )
+
+    workers = (
+        1 if io is None else archive_read_workers(io_workers, memory_bytes)
+    )
+    allowance = max(1, memory_bytes // workers)
+    manifests = await run_bounded_io(
+        io,
+        [
+            partial(
+                read_archive_manifest,
+                bundles,
+                boundary_rows[assignment["target_id"]],
+            )
+            for _batch, assignment in boundary_entries
+        ],
+        workers,
+    )
+
+    chunk_entries = []
+    chunk_identifiers = []
+    for (batch, assignment), archive_manifest in zip(
+        boundary_entries,
+        manifests,
+    ):
+        publication = boundary_rows[assignment["target_id"]]
         for chunk in archive_manifest["chunks"]:
-            chunk_publication = await database.fetch_one(
-                "SELECT * FROM swe_conversation_publications WHERE id=%s AND state='committed' AND gc_state='live'",
-                (chunk["publication_id"],),
+            chunk_entries.append((chunk, publication, batch["epoch"]))
+            chunk_identifiers.append(chunk["publication_id"])
+    chunk_rows = await fetch_publications(
+        database,
+        chunk_identifiers,
+        committed_live=True,
+    )
+    for chunk, boundary_publication, epoch in chunk_entries:
+        chunk_publication = chunk_rows.get(chunk["publication_id"])
+        if (
+            chunk_publication is None
+            or WorkspaceScope.from_row(chunk_publication) != scope
+            or chunk_publication["chat_id"] != cid
+            or chunk_publication["session_id"]
+            != boundary_publication["session_id"]
+            or chunk_publication["epoch"] != epoch
+        ):
+            raise ValueError(
+                "archive message chunk publication scope differs",
             )
-            if (
-                chunk_publication is None
-                or WorkspaceScope.from_row(chunk_publication) != scope
-                or chunk_publication["chat_id"] != cid
-                or chunk_publication["session_id"] != publication["session_id"]
-                or chunk_publication["epoch"] != batch["epoch"]
-            ):
+    expected = (message for batch in batches for message in batch["messages"])
+    seen = 0
+    calls = [
+        partial(
+            read_archive_chunk,
+            bundles,
+            chunk_rows[chunk["publication_id"]],
+            chunk["directory_block"],
+            include_bodies=True,
+            allowance=allowance,
+        )
+        for chunk, _publication, _epoch in chunk_entries
+    ]
+    for start in range(0, len(calls), workers):
+        for directory, bodies in await run_bounded_io(
+            io,
+            calls[start : start + workers],
+            workers,
+        ):
+            if bodies is None or len(directory) != len(bodies):
                 raise ValueError(
-                    "archive message chunk publication scope differs",
+                    "archive message directory/body count differs",
                 )
-            chunk_path = BundleStore.validate_publication_locator(
-                chunk_publication,
-            )
-            chunk_index = bundles.inspect(
-                chunk_path,
-                expected_length=chunk_publication["byte_length"],
-            )
-            directory_extent = chunk_index.blocks[chunk["directory_block"]]
-            directory = decode_message_directory(
-                bundles.read_extent(
-                    chunk_path,
-                    directory_extent.offset,
-                    directory_extent.length,
-                    expected_length=chunk_index.byte_length,
-                ),
-            )
-            body_extent = chunk_index.blocks["message_bodies"]
-            bodies = decode_message_bodies(
-                bundles.read_extent(
-                    chunk_path,
-                    body_extent.offset,
-                    body_extent.length,
-                    expected_length=chunk_index.byte_length,
-                ),
-            )
-            if len(directory) != len(bodies) or seen + len(bodies) > len(
-                expected,
-            ):
+            if seen + len(bodies) > expected_count:
                 raise ValueError(
                     "archive message directory/body count differs",
                 )
             for entry, body in zip(directory, bodies):
-                if body != expected[seen] or entry["sequence"] != seen + 1:
+                if body != next(expected) or entry["sequence"] != seen + 1:
                     raise ValueError("archive message order/body differs")
                 seen += 1
-    if seen != len(expected):
+    if seen != expected_count:
         raise ValueError("archive occurrence count differs")
 
 

@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+from functools import partial
 from itertools import islice
 
 from ..bundle import MAX_READ_BYTES, BundleStore
@@ -15,15 +16,16 @@ from ..message_bundle import (
     decode_message_directory,
 )
 from ..reference_queries import iter_reference_rows
+from .archive_verification import (
+    PUBLICATION_FIELDS,
+    fetch_publications,
+    read_archive_chunk,
+    run_bounded_io,
+)
 from .install_records import (
     IMMUTABLE,
     VERIFY_QUERIES,
     OfflineImportStore,
-)
-
-PUBLICATION_FIELDS = (
-    "id,scope_kind,service_unit_key,tenant_key,source_key,agent_key,"
-    "operation_key,relative_path,byte_length,state,gc_state,durable_at"
 )
 
 
@@ -443,30 +445,32 @@ async def verify_fast_publications(
                 ),
             )
             expected_by_table = {}
+            archive_checks = []
             for check, result in zip(batch, results):
                 service_unit_key = check[2]["service_unit_key"]
                 expected, rows_count, updates_count, archive = result
                 checked_rows += rows_count
                 checked_updates += updates_count
                 if archive is not None:
-                    await _verify_archive_dependencies(
-                        database,
-                        check[2],
-                        archive,
-                        assignment_scopes_by_id,
-                    )
-                    await _verify_archive_chunks(
-                        database,
-                        check[1],
-                        archive,
-                        assignments_by_id,
-                        io,
-                        allowance,
-                    )
+                    archive_checks.append((check, archive))
                 _merge_expected_rows(
                     expected_by_table,
                     service_unit_key,
                     expected,
+                )
+            if archive_checks:
+                await _verify_archive_dependencies_batch(
+                    database,
+                    ((check[2], archive) for check, archive in archive_checks),
+                    assignment_scopes_by_id,
+                )
+                await _verify_archive_chunks(
+                    database,
+                    ((check[1], archive) for check, archive in archive_checks),
+                    assignments_by_id,
+                    io,
+                    allowance,
+                    verify_workers,
                 )
             batch_records = 0
             for (
@@ -509,67 +513,123 @@ async def _verify_archive_dependencies(
     archive,
     assignments,
 ):
-    archive, _ = archive
-    expected = {
-        chunk["publication_id"]
-        for chunk in archive["chunks"]
+    await _verify_archive_dependencies_batch(
+        database,
+        ((publication, archive),),
+        assignments,
+    )
+
+
+async def _verify_archive_dependencies_batch(
+    database,
+    entries,
+    assignments,
+):
+    expected_by_key = {}
+    for publication, archive in entries:
+        manifest, _ = archive
+        expected = {
+            chunk["publication_id"]
+            for chunk in manifest["chunks"]
+            if chunk["publication_id"] != "self"
+        }
+        scope = WorkspaceScope.from_row(publication)
+        if any(
+            WorkspaceScope.from_values(assignments.get(identity, ())) != scope
+            for identity in expected
+            if identity in assignments
+        ) or any(identity not in assignments for identity in expected):
+            raise IntegrityError("archive chunk source ownership differs")
+        key = f"dep:{publication['id']}".encode("ascii")
+        expected_by_key[key] = (publication, scope, expected)
+
+    keys = tuple(expected_by_key)
+    rows_by_key = {key: [] for key in keys}
+    for start in range(0, len(keys), 128):
+        batch = keys[start : start + 128]
+        found = await database.fetch_all(
+            "SELECT publication_id,member_key,service_unit_key,tenant_key,"
+            "source_key,agent_key,retention_key "
+            "FROM swe_conversation_retentions "
+            "WHERE retention_key IN ("
+            + ",".join(["%s"] * len(batch))
+            + ") AND kind='dependency' AND state='active'",
+            batch,
+        )
+        for row in found:
+            key = row["retention_key"]
+            if isinstance(key, str):
+                key = key.encode()
+            rows_by_key.setdefault(key, []).append(row)
+
+    for key in keys:
+        publication, scope, expected = expected_by_key[key]
+        rows = rows_by_key.get(key, ())
+        if WorkspaceScope.from_row(publication) != scope:
+            raise IntegrityError("archive boundary source ownership differs")
+        if any(WorkspaceScope.from_row(row) != scope for row in rows):
+            raise IntegrityError("archive retention source ownership differs")
+        if {row["publication_id"] for row in rows} != expected or any(
+            row["member_key"] != row["publication_id"] for row in rows
+        ):
+            raise IntegrityError("archive retention dependencies differ")
+
+
+def _archive_chunk_plan(manifest, values):
+    return {
+        chunk["publication_id"]: (
+            chunk,
+            values["chat_id"],
+            manifest["epoch"],
+        )
+        for chunk in manifest["chunks"]
         if chunk["publication_id"] != "self"
     }
-    scope = WorkspaceScope.from_row(publication).values
-    if any(assignments.get(identity) != scope for identity in expected):
-        raise IntegrityError("archive chunk source ownership differs")
-    rows = await database.fetch_all(
-        "SELECT publication_id,member_key FROM swe_conversation_retentions "
-        "WHERE service_unit_key=%s AND tenant_key=%s AND source_key=%s "
-        "AND agent_key=%s AND retention_key=%s AND kind='dependency' "
-        "AND state='active'",
-        (
-            publication["service_unit_key"],
-            publication["tenant_key"],
-            publication["source_key"],
-            publication["agent_key"],
-            f"dep:{publication['id']}".encode("ascii"),
-        ),
-    )
-    if {row["publication_id"] for row in rows} != expected or any(
-        row["member_key"] != row["publication_id"] for row in rows
-    ):
-        raise IntegrityError("archive retention dependencies differ")
 
 
 async def _verify_archive_chunks(
     database,
-    store,
-    archive,
+    checks,
     assignments,
     io,
     allowance,
+    workers,
 ):
-    manifest, values = archive
-    for chunk in manifest["chunks"]:
-        identity = chunk["publication_id"]
-        assignment = assignments.get(identity)
-        if assignment is None:
-            raise IntegrityError("archive chunk publication is missing")
-        rows = await database.fetch_all(
-            "SELECT "
-            + PUBLICATION_FIELDS
-            + " FROM swe_conversation_publications WHERE id IN (%s)",
-            (identity,),
-        )
-        if len(rows) != 1:
-            raise IntegrityError("archive chunk publication is missing")
-        _publication_identity(rows[0], assignment)
-        await io.call(
-            _verify_chunk_directory,
-            store,
-            rows[0],
-            assignment,
+    plans = []
+    identifiers = []
+    for store, archive in checks:
+        manifest, values = archive
+        plan = _archive_chunk_plan(manifest, values)
+        plans.append((store, plan))
+        identifiers.extend(plan)
+    rows = await fetch_publications(database, identifiers)
+    calls = []
+    for store, plan in plans:
+        for identifier, (
             chunk,
-            values["chat_id"],
-            manifest["epoch"],
-            allowance,
-        )
+            chat_id,
+            epoch,
+        ) in plan.items():
+            assignment = assignments.get(identifier)
+            row = rows.get(identifier)
+            if assignment is None or row is None:
+                raise IntegrityError(
+                    "archive chunk publication is missing",
+                )
+            _publication_identity(row, assignment)
+            calls.append(
+                partial(
+                    _verify_chunk_directory,
+                    store,
+                    row,
+                    assignment,
+                    chunk,
+                    chat_id,
+                    epoch,
+                    allowance,
+                ),
+            )
+    await run_bounded_io(io, calls, workers)
 
 
 def _verify_chunk_directory(
@@ -581,22 +641,19 @@ def _verify_chunk_directory(
     epoch,
     allowance,
 ):
-    with store.bundles.open_reader(
-        assignment["relative_path"],
-        expected_length=publication["byte_length"],
+    entries, _ = read_archive_chunk(
+        store.bundles,
+        publication,
+        chunk["directory_block"],
+        include_bodies=False,
+        allowance=allowance,
         expected_operation_key=assignment["operation_key"],
-    ) as reader:
-        extent = reader.index.blocks.get(chunk["directory_block"])
-        if extent is None or extent.kind != "message_directory":
-            raise IntegrityError("archive chunk directory is missing")
-        entries = decode_message_directory(
-            _read_checked(reader, extent, allowance),
-        )
-        first, last = chunk["first_sequence"], chunk["last_sequence"]
-        if len(entries) != last - first + 1 or any(
-            entry["sequence"] != first + position
-            or entry.get("chat_id") != chat_id
-            or entry.get("epoch") != epoch
-            for position, entry in enumerate(entries)
-        ):
-            raise IntegrityError("archive chunk range or association differs")
+    )
+    first, last = chunk["first_sequence"], chunk["last_sequence"]
+    if len(entries) != last - first + 1 or any(
+        entry["sequence"] != first + position
+        or entry.get("chat_id") != chat_id
+        or entry.get("epoch") != epoch
+        for position, entry in enumerate(entries)
+    ):
+        raise IntegrityError("archive chunk range or association differs")
