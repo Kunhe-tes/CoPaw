@@ -1449,3 +1449,24 @@ def test_run_state_events_get_distinct_slots(monkeypatch):
     events = [json.loads(line) for line in stream.getvalue().splitlines()]
     assert [event["local_seq"] for event in events] == [1, 2]
     assert all(event["phase_key"] == "state:running" for event in events)
+
+
+def test_events_example_matches_ingest_contract():
+    """样例事件必须能通过当前投影校验，避免契约与实现再次漂移。"""
+    from pathlib import Path
+
+    from swe.observability.projector import _validate_payload
+
+    path = (
+        Path(__file__).resolve().parents[3]
+        / ".scratch"
+        / "agent-observability"
+        / "events.example.jsonl"
+    )
+    if not path.exists():
+        pytest.skip("events example not present")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert lines
+    for line in lines:
+        if line.strip():
+            _validate_payload(line)

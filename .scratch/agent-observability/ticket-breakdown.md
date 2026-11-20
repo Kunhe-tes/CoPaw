@@ -2,8 +2,8 @@
 
 Status: open
 Type: task
-日期：2026-11-15
-阶段：用户已确认，15张P0任务票已发布；全部尚未领取，未开始功能实施。
+日期：2026-11-15（2026-11-20 更新）
+阶段：后端内核、投影、查询、审批、SubAgent 与 Agent Span 已实施并通过纯单测；Console/浏览器验收与 MySQL 集成复证仍暂停。修复索引见 [post-fix-verification.md](post-fix-verification.md)。
 
 ## 共同边界
 

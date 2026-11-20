@@ -25,3 +25,12 @@ Each acceptance run used a disposable schema ending in `_test`; schemas were rem
 - Console UI and browser acceptance, including Chromium 108/360 and `hideMenu=true`, remain paused by the user instruction.
 - Real external channel, Router authorization, tool side effects, deployment collector, and process-restart audit recovery remain outside the verified scope.
 - The production code has no Tool automatic retry/recovery state machine, so no fabricated Tool retry facts were added.
+
+## 2026-11-20 复核后修复状态
+
+独立复核发现的 5 个 P0 与主要 P1 已修复并提交，详见
+[post-fix-verification.md](post-fix-verification.md)。
+
+- 新增回归测试覆盖：子代理变量初始化、inbox 逐行隔离、审批跨用户拒绝、worker 事件转发、Agent Span、Guard 短路事实、service unit / tenant / quality / 聚合列 / 槽位语义。
+- `events.example.jsonl` 已由真实 emitter 重新生成，并通过 `_validate_payload`；新增契约测试防止再次漂移。
+- 本轮验证仍限于纯单测；MySQL 集成、真实 worker 子进程、多 Pod 与采集链路未复证，原文 "12/6/8 passed" 的环境前提（`SWE_AGENTOBS_TEST_DB_HOST`）保持不变。
