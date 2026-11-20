@@ -79,7 +79,7 @@ async def _project_and_query_run(connection, store, records, run_id):
     @api.middleware("http")
     async def bind_source(request, call_next):
         request.state.source_id = "agentobs-integration"
-        request.state.effective_tenant_id = "default"
+        request.state.effective_tenant_id = records[0]["scope"]["tenant_id"]
         return await call_next(request)
 
     api.include_router(observability_router)

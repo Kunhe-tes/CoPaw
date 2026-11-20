@@ -555,7 +555,7 @@ async def _assert_approval_run_api(store, run_id, approval_ids):
     @api.middleware("http")
     async def bind_source(request, call_next):
         request.state.source_id = "agentobs-integration"
-        request.state.effective_tenant_id = "integration-user"
+        request.state.effective_tenant_id = "user-a"
         return await call_next(request)
 
     api.include_router(observability_router)
@@ -2910,7 +2910,7 @@ async def test_mysql_performance_counts_logical_calls_separately_from_attempts(
         @api.middleware("http")
         async def bind_test_source(request: Request, call_next):
             request.state.source_id = "agentobs-integration"
-            request.state.effective_tenant_id = "integration-user"
+            request.state.effective_tenant_id = "tenant-a"
             return await call_next(request)
 
         api.include_router(observability_router)
