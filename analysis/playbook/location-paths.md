@@ -530,6 +530,14 @@ document.body.appendChild(frame);
 - 回归：`tests/unit/routers/test_tracing_chat_history_parity.py` 固定存档对比两个入口的普通/任务/失败/v3 分轮消息和连续归档页；前端 `ReadOnlySessionChat.test.tsx` 覆盖归档、重试、去重和切换隔离。
 
 
+## 财富规划场景来源分组
+
+- 入口为 `console/src/pages/WealthWorkbench/Create/index.tsx` 的第一步，场景来源取 `api.ts` 将接口 `skillBbkLabel` 映射出的 `Scene.source`。
+- 先展示“分行自建”，再展示“总部预置”（兼容“总行预置”标签），各组保留接口顺序。空来源与未识别标签放入“其他来源”，避免旧数据被丢弃。
+- 产品大类筛选继续使用原接口的 `category` 参数，分组数量按当前筛选结果计算，空分组隐藏。切换分类保留已选场景，第二步沿用原配置逻辑。
+- 卡片网格按容器可用宽度自动换列，使用 `auto-fill + minmax(min(100%, 360px), 1fr)`，少量卡片保留空列，避免拉伸成整行宽卡。
+- 分组回归入口为 `console/src/pages/WealthWorkbench/Create/index.test.tsx`。
+
 ## 财富工作台运维模式
 
 ### 入口与配置
