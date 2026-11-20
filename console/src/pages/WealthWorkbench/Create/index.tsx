@@ -14,10 +14,7 @@ import styles from "../index.module.less";
 import { useIframeStore } from "../../../stores/iframeStore";
 import { Icon } from "../components/Icon";
 import { TargetPicker } from "../components/TargetPicker";
-import {
-  ExcelRosterSummary,
-  ExcelTargetPicker,
-} from "../components/ExcelTargetPicker";
+import { ExcelTargetPicker } from "../components/ExcelTargetPicker";
 import excelStyles from "../components/ExcelTargetPicker.module.less";
 import { canUseExcelDistribution } from "../distribution/excelAccess";
 import { TimeField } from "../components/TimeField";
@@ -47,6 +44,31 @@ import { defaultMonitoring, type SceneMonitoring } from "../monitoring";
 
 const PUSH_TIME_LABEL = "名单推送时间";
 const MONITORING_PUSH_TIME_LABEL = "督办推送时间";
+
+const BRANCH_SCENE_SOURCE = "分行自建";
+const HEAD_OFFICE_SCENE_SOURCE = "总行预置";
+const OTHER_SCENE_SOURCE = "其他来源";
+
+function groupScenesBySource(scenes: Scene[]) {
+  const groups = new Map<string, Scene[]>([
+    [BRANCH_SCENE_SOURCE, []],
+    [HEAD_OFFICE_SCENE_SOURCE, []],
+    [OTHER_SCENE_SOURCE, []],
+  ]);
+  for (const scene of scenes) {
+    const source = scene.source.trim();
+    const label =
+      source === BRANCH_SCENE_SOURCE
+        ? BRANCH_SCENE_SOURCE
+        : source === HEAD_OFFICE_SCENE_SOURCE || source === "总行预置"
+        ? HEAD_OFFICE_SCENE_SOURCE
+        : OTHER_SCENE_SOURCE;
+    groups.get(label)!.push(scene);
+  }
+  return Array.from(groups, ([label, items]) => ({ label, items })).filter(
+    (group) => group.items.length > 0,
+  );
+}
 
 const STEP_DEFS = [
   {
@@ -112,15 +134,22 @@ const WEEKDAYS: { value: string; label: string }[] = [
  * 溢出判定用隐藏孪生节点测量真实高度——line-clamp 下 scrollHeight
  * 也会被截断，不能直接用来判断是否溢出。
  */
-function TargetNamesSummary({ sapIds }: { sapIds: string[] }) {
+function TargetNamesSummary({
+  sapIds,
+  people,
+}: {
+  sapIds: string[];
+  people?: DistributeTarget[];
+}) {
   const targets = useWealthStore((s) => s.targets);
+  const namesById = new Map(
+    (people ?? targets).map((person) => [person.sapId, person.name]),
+  );
   const [expanded, setExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
   const ref = useRef<HTMLParagraphElement>(null);
   const measureRef = useRef<HTMLParagraphElement>(null);
-  const names = sapIds
-    .map((id) => targets.find((t) => t.sapId === id)?.name ?? id)
-    .join("、");
+  const names = sapIds.map((id) => namesById.get(id) ?? id).join("、");
 
   useEffect(() => {
     const el = ref.current;
@@ -735,15 +764,6 @@ interface TargetMethodState {
   visitedInstitution: boolean;
   excelTargets: DistributeTarget[];
   excelPending: boolean;
-  originalSapIds: string[];
-}
-
-function formatTargetChanges(original: string[], current: string[]) {
-  const oldIds = new Set(original);
-  const newIds = new Set(current);
-  const added = current.filter((id) => !oldIds.has(id)).length;
-  const removed = original.filter((id) => !newIds.has(id)).length;
-  return `新增 ${added} 人 · 移除 ${removed} 人 · 最终 ${current.length} 人`;
 }
 
 export default function Create() {
@@ -801,7 +821,6 @@ export default function Create() {
     excelTargets:
       excelAllowed && editingId ? useWealthStore.getState().targets : [],
     excelPending: false,
-    originalSapIds: editingId ? manualSapIds : [],
   });
   const [selection, setSelection] = useState(initialSelection);
   if (selection.key !== formKey) setSelection(initialSelection());
@@ -905,18 +924,11 @@ export default function Create() {
               <strong>{draft.items.length} 个</strong>
             </div>
           </div>
-          {useExcel ? (
-            <>
-              <strong>分发方式 · 上传 Excel 名单</strong>
-              {editingId && (
-                <p>
-                  {formatTargetChanges(selection.originalSapIds, targetSapIds)}
-                </p>
-              )}
-              <ExcelRosterSummary people={excelTargets} />
-            </>
-          ) : (
-            needsTargets && <TargetNamesSummary sapIds={targetSapIds} />
+          {needsTargets && (
+            <TargetNamesSummary
+              sapIds={targetSapIds}
+              people={useExcel ? excelTargets : undefined}
+            />
           )}
           {draft.items.map((x, i) => (
             <div className={styles.recommendation} key={x.id}>
@@ -968,6 +980,7 @@ export default function Create() {
   };
 
   const visibleScenes = scenesByCategory[filterCode] ?? [];
+  const sceneGroups = groupScenesBySource(visibleScenes);
   const allScenes = Object.values(scenesByCategory).flat();
   const publishLabel = plansLoaded
     ? editingId
@@ -1059,55 +1072,65 @@ export default function Create() {
                 ))}
               </div>
             </div>
-            <div className={styles.scenes}>
+            <div className={styles.sceneGroups}>
               {scenesLoading && !(filterCode in scenesByCategory) ? (
-                <div className={styles.empty} style={{ gridColumn: "1/-1" }}>
-                  场景加载中…
-                </div>
+                <div className={styles.empty}>场景加载中…</div>
               ) : visibleScenes.length ? (
-                visibleScenes.map((s, i) => {
-                  const chosen = draft.items.some((x) => x.id === s.id);
-                  return (
-                    <button
-                      key={s.id}
-                      className={cx(
-                        styles.scene,
-                        i < 3 && filterCategory === "全部" && styles.featured,
-                        chosen && styles.selected,
-                      )}
-                      aria-pressed={chosen}
-                      onClick={() => toggleScene(s.id)}
-                    >
-                      <span className={styles.sceneCheck}>
-                        {chosen ? "✓" : ""}
-                      </span>
-                      <div className={styles.bubble}>
-                        <Icon name={s.icon} />
-                      </div>
-                      <div>
-                        <div className={styles.sceneTitle}>
-                          {s.name}
-                          <span className={styles.tag}>{s.category}</span>
-                        </div>
-                        <SceneDescription description={s.desc} />
-                        <span className={styles.status}>
-                          <i className={styles.dot}></i>
-                          AI能力已就绪
-                          <span
-                            className={styles.muted}
-                            style={{ marginLeft: 6 }}
+                sceneGroups.map((group) => (
+                  <section
+                    key={group.label}
+                    aria-label={group.label}
+                    className={styles.sceneGroup}
+                  >
+                    <div className={styles.sceneGroupHeading}>
+                      <h4>{group.label}</h4>
+                      <span>{group.items.length} 个场景</span>
+                    </div>
+                    <div className={styles.scenes}>
+                      {group.items.map((s) => {
+                        const chosen = draft.items.some((x) => x.id === s.id);
+                        return (
+                          <button
+                            key={s.id}
+                            className={cx(
+                              styles.scene,
+                              chosen && styles.selected,
+                            )}
+                            aria-pressed={chosen}
+                            onClick={() => toggleScene(s.id)}
                           >
-                            · {s.source}
-                          </span>
-                        </span>
-                      </div>
-                    </button>
-                  );
-                })
+                            <span className={styles.sceneCheck}>
+                              {chosen ? "✓" : ""}
+                            </span>
+                            <div className={styles.bubble}>
+                              <Icon name={s.icon} />
+                            </div>
+                            <div className={styles.sceneContent}>
+                              <div className={styles.sceneTitle}>
+                                {s.name}
+                                <span className={styles.tag}>{s.category}</span>
+                              </div>
+                              <SceneDescription description={s.desc} />
+                              <span className={styles.status}>
+                                <i className={styles.dot}></i>
+                                AI能力已就绪
+                                {group.label === OTHER_SCENE_SOURCE &&
+                                  s.source && (
+                                    <span className={styles.muted}>
+                                      {" "}
+                                      · {s.source}
+                                    </span>
+                                  )}
+                              </span>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </section>
+                ))
               ) : (
-                <div className={styles.empty} style={{ gridColumn: "1/-1" }}>
-                  该产品大类暂无可用经营场景
-                </div>
+                <div className={styles.empty}>该产品大类暂无可用经营场景</div>
               )}
             </div>
           </section>
@@ -1290,8 +1313,17 @@ export default function Create() {
               </h3>
               {excelAllowed ? (
                 <>
-                  <fieldset className={excelStyles.methods}>
-                    <legend>分发方式</legend>
+                  <div
+                    className={excelStyles.methods}
+                    role="radiogroup"
+                    aria-labelledby="wealth-distribution-label"
+                  >
+                    <span
+                      id="wealth-distribution-label"
+                      className={excelStyles.methodLabel}
+                    >
+                      分发方式
+                    </span>
                     <label>
                       <input
                         type="radio"
@@ -1321,7 +1353,7 @@ export default function Create() {
                       />
                       {editingId ? "Excel 名单管理" : "上传 Excel 名单"}
                     </label>
-                  </fieldset>
+                  </div>
                   {selection.visitedInstitution && (
                     <div hidden={useExcel}>
                       <TargetPicker key={planFormVersion} />

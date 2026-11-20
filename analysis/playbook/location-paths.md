@@ -403,7 +403,7 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 ### Excel 名单分发
 
 - 独立前端白名单 `wealthExcelDistributionUsers` 默认关闭，匹配真实登录 SAP 用户 ID。排查入口缺失时检查白名单和当前角色的选人权限，运维白名单不授予 Excel 分发权限。
-- `distribution/api.ts::importExcelPeople` 通过统一请求上传原始 Excel，外部智拓服务解析并返回人员及异常行。前端校验 5 MB 文件上限、映射人员信息并按 ID 处理追加去重。联调时核对路径、上传字段、响应和授权规则。
+- `distribution/api.ts::importExcelPeople` 通过统一请求上传原始 Excel，外部智拓服务解析并返回人员及异常行。前端校验 5 MB 文件上限、映射人员信息并按 ID 处理追加去重。接口为 `POST /agent/workspace/claw-customer-list/parse`，`file` 上传文件，`data.successList` 返回人员。发布分行取 `frsBbkOrgId`，机构按 `brnOrgId → cprhBrnOrgId → bbkOrgId → frsBbkOrgId` 取首个有效编码和对应名称。模板 ID 和姓名均为必填，后端通过 `failedRows` 数字行号数组返回错误行，前端提示对应行核对 ID 和姓名。联调时核对授权规则。
 - `Create/index.tsx` 隔离 Excel 和机构选人，发布时只取当前方式。外部服务的白名单授权和跨分行下发需要实测后启用。回归入口为 `Create/draftLifecycle.test.tsx` 和 `distribution/api.test.ts`。
 
 ## 财富任务列表后台刷新显示
@@ -529,6 +529,14 @@ document.body.appendChild(frame);
 - “有会话卡片但无正文”先核对 Monitor 的 session_id 是否存在对应 ChatSpec，再核对目标 source/user/Agent 工作区和共享存储。映射缺失、详情失败和正常空内容使用不同反馈；归档失败保留当前消息和游标，可重试。Kubernetes 各实例必须访问同一持久化会话与 dialog 存档；已清理的文件不能通过本接口恢复。
 - 回归：`tests/unit/routers/test_tracing_chat_history_parity.py` 固定存档对比两个入口的普通/任务/失败/v3 分轮消息和连续归档页；前端 `ReadOnlySessionChat.test.tsx` 覆盖归档、重试、去重和切换隔离。
 
+
+## 财富规划场景来源分组
+
+- 入口为 `console/src/pages/WealthWorkbench/Create/index.tsx` 的第一步，场景来源取 `api.ts` 将接口 `skillBbkLabel` 映射出的 `Scene.source`。
+- 先展示“分行自建”，再展示“总部预置”（兼容“总行预置”标签），各组保留接口顺序。空来源与未识别标签放入“其他来源”，避免旧数据被丢弃。
+- 产品大类筛选继续使用原接口的 `category` 参数，分组数量按当前筛选结果计算，空分组隐藏。切换分类保留已选场景，第二步沿用原配置逻辑。
+- 卡片网格按容器可用宽度自动换列，使用 `auto-fill + minmax(min(100%, 360px), 1fr)`，少量卡片保留空列，避免拉伸成整行宽卡。
+- 分组回归入口为 `console/src/pages/WealthWorkbench/Create/index.test.tsx`。
 
 ## 财富工作台运维模式
 

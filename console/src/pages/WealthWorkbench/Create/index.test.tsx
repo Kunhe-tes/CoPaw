@@ -4,12 +4,14 @@ import {
   render,
   screen,
   within,
+  waitFor,
 } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useIframeStore } from "../../../stores/iframeStore";
 import styles from "../index.module.less";
 import { useWealthStore } from "../store";
+import * as api from "../api";
 import type { Plan, PlanItem, Scene } from "../types";
 import { cycleRange } from "../utils";
 import Create, {
@@ -23,7 +25,10 @@ vi.mock("../../../api/request", () => ({
   request: vi.fn().mockResolvedValue({ items: [] }),
 }));
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe("SceneDescription", () => {
   it("用两行截断样式展示描述，并保留完整文本供悬停查看", () => {
@@ -182,7 +187,7 @@ describe("TaskSchedule", () => {
         categoryCode: "finance",
         icon: "bank",
         desc: "",
-        source: "总部预置",
+        source: "总行预置",
         mcpRelations: [],
       };
       const untouched = { ...item, id: "untouched" };
@@ -231,7 +236,7 @@ describe("TaskSchedule", () => {
       categoryCode: "insurance",
       icon: "shield",
       desc: "挖掘高潜保险客户",
-      source: "总部预置",
+      source: "总行预置",
       mcpRelations: [],
     };
 
@@ -245,6 +250,96 @@ describe("TaskSchedule", () => {
 });
 
 describe("Create", () => {
+  it("按来源排列场景并保留未知来源，筛选后更新分组数量且保留选择", async () => {
+    const base: Scene = {
+      id: "head-office",
+      name: "总部存款场景",
+      category: "存款",
+      categoryCode: "deposit",
+      icon: "safe",
+      desc: "跟进到期存款客户",
+      source: "总行预置",
+      mcpRelations: [],
+    };
+    const scenes: Scene[] = [
+      base,
+      { ...base, id: "branch-a", name: "分行场景甲", source: "分行自建" },
+      { ...base, id: "missing", name: "旧场景", source: "" },
+      { ...base, id: "branch-b", name: "分行场景乙", source: "分行自建" },
+      {
+        ...base,
+        id: "legacy-head",
+        name: "总行旧标签场景",
+        source: "总行预置",
+      },
+      { ...base, id: "custom", name: "自定义来源场景", source: "新来源" },
+    ];
+    vi.spyOn(api, "fetchScenesByCategory").mockImplementation(async (code) =>
+      code === "insurance" ? [base] : scenes,
+    );
+    useIframeStore.setState({ positionId: "RB0101", userId: "rm-1" });
+    useWealthStore.setState({
+      accountId: "rm",
+      plansLoaded: true,
+      plans: [],
+      draft: { name: "", items: [] },
+      scenesByCategory: {},
+      scenesLoading: false,
+      editingId: null,
+      dialog: null,
+      acting: false,
+    });
+    render(
+      <MemoryRouter>
+        <Create />
+      </MemoryRouter>,
+    );
+    const branch = await screen.findByRole("region", { name: "分行自建" });
+    expect(
+      screen
+        .getAllByRole("region")
+        .map((region) => region.getAttribute("aria-label")),
+    ).toEqual(["分行自建", "总行预置", "其他来源"]);
+    expect(within(branch).getByText("2 个场景")).toBeInTheDocument();
+    expect(
+      within(branch)
+        .getAllByRole("button")
+        .map((button) => button.textContent),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("分行场景甲"),
+        expect.stringContaining("分行场景乙"),
+      ]),
+    );
+    expect(
+      within(screen.getByRole("region", { name: "其他来源" })).getByText(
+        /新来源/,
+      ),
+    ).toBeInTheDocument();
+    const chosen = within(branch).getByRole("button", { name: /分行场景甲/ });
+    fireEvent.click(chosen);
+    expect(chosen).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "保险" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("region", { name: "分行自建" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      within(screen.getByRole("region", { name: "总行预置" })).getByText(
+        "1 个场景",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      useWealthStore.getState().draft.items.map((item) => item.id),
+    ).toEqual(["branch-a"]);
+    fireEvent.click(screen.getByRole("button", { name: "全部" }));
+    const restored = await screen.findByRole("region", { name: "分行自建" });
+    expect(
+      within(restored).getByRole("button", { name: /分行场景甲/ }),
+    ).toHaveAttribute("aria-pressed", "true");
+  });
+
   it("推送客户数支持输入、清除、非法值提示并在发布确认展示", () => {
     const item: PlanItem = {
       id: "scene-limit",
