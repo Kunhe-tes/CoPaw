@@ -62,6 +62,12 @@ pre-commit run --files <changed files>
 - **网关 header 信任**：审批身份校验依赖 `X-User-Id`；网关是否保证注入与不可伪造尚未验证。
 - **Console / Chromium 108 / 360 / `hideMenu=true`**：未验证，维持原有暂停状态。
 
+## P2 处理结果
+
+- **停机停止进程级 supervisor**（`2a69112f4`）：`BackgroundSubAgentSupervisor.shutdown()` 取消所有活动 worker、join 事件读线程并补发 `cancelled` 终态；`_app.py` 在关闭 emitter 之前调用。新增两个活动 run 的回归测试。
+- **复杂度**（`f80c29f11`）：`_acting_impl` 17→13，`_resolve_pending_approval` 26→10，`_run_conversation_command` 17→13；复杂度预算测试通过。
+- 最终复证：`tests/integrated/observability` **34 passed / 0 failed**（13:26）。
+
 ## 已知未完成 / 有意保留
 
 - **service unit 历史数据**：该观测功能尚未投产，库中没有 `service_unit_key='swe'` 的历史数据，因此不需要双读或回填；后续投产前若已有数据，再补迁移脚本。
