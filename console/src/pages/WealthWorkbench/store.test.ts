@@ -176,7 +176,7 @@ const SCENE_FIXTURES = [
     senceDesc: "挖掘高潜保险客户",
     cronExample: "每日生成高潜保险客户名单",
     mcpRelationList: ["mcp-customer", "mcp-insurance"],
-    skillBbkLabel: "总部预置",
+    skillBbkLabel: "总行预置",
   },
   {
     skillId: INSURANCE_2,
@@ -185,7 +185,7 @@ const SCENE_FIXTURES = [
     category: "insurance",
     senceDesc: "识别客户保障缺口",
     mcpRelationList: ["mcp-customer", "mcp-insurance"],
-    skillBbkLabel: "总部预置",
+    skillBbkLabel: "总行预置",
   },
   {
     skillId: FINANCE,
@@ -194,7 +194,7 @@ const SCENE_FIXTURES = [
     category: "finance",
     senceDesc: "优先承接近期到期资金",
     mcpRelationList: ["mcp-wealth"],
-    skillBbkLabel: "总部预置",
+    skillBbkLabel: "总行预置",
   },
   {
     skillId: LOAN,
@@ -203,7 +203,7 @@ const SCENE_FIXTURES = [
     category: "loan",
     senceDesc: "识别潜在信贷客户",
     mcpRelationList: ["mcp-loan"],
-    skillBbkLabel: "总部预置",
+    skillBbkLabel: "总行预置",
   },
 ];
 

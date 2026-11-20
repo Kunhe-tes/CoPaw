@@ -33,7 +33,7 @@ export interface Scene {
   categoryCode: string;
   icon: string;
   desc: string;
-  /** 来源标签：总部预置 / 分行自建 */
+  /** 来源标签：总行预置 / 分行自建 */
   source: string;
   cronExample?: string | null;
   mcpRelations: string[];
