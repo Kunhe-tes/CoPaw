@@ -303,7 +303,9 @@ async def test_representative_prepare_migrate_metrics(
         *resources,
     ]
     result, first = await _measured_invoke(arguments)
-    assert result["published"] == (2 if failure_mode != "none" else 3)
+    assert result.get("published") == (2 if failure_mode != "none" else 3), (
+        first["exception_traceback"] or first["failure_report"] or result
+    )
     if failure_mode == "running_turn":
         state = json.loads(session_b.read_text())
         state.pop("turn_states")

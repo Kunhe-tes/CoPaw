@@ -9,6 +9,11 @@ from ..bundle import MAX_READ_BYTES, BundleStore
 from ..chat_mutations import load_metadata_json
 from ..errors import IntegrityError
 from ..identity import WorkspaceScope
+from ..message_bundle import (
+    decode_archive_manifest,
+    decode_message_bodies,
+    decode_message_directory,
+)
 from ..reference_queries import iter_reference_rows
 from .install_records import (
     IMMUTABLE,
@@ -107,6 +112,7 @@ def _read_publication_plan(
             for value in values.values():
                 if isinstance(value, dict) and set(value) == {"block", "part"}:
                     required_blocks.add(value["block"])
+        archive = _validate_message_blocks(reader, plan, row, memory_allowance)
         if not required_blocks.issubset(reader.index.blocks):
             raise IntegrityError(
                 "committed publication block set is incomplete",
@@ -117,7 +123,86 @@ def _read_publication_plan(
                 raise ValueError(
                     "fast verification SQL evidence exceeds memory allowance",
                 )
-        return expected, len(plan["rows"]), len(plan["updates"])
+        return expected, len(plan["rows"]), len(plan["updates"]), archive
+
+
+def _validate_message_blocks(reader, plan, publication, allowance):
+    blocks = reader.index.blocks
+    directory = blocks.get("message_directory")
+    bodies = blocks.get("message_bodies")
+    if (directory is None) != (bodies is None):
+        raise IntegrityError(
+            "message directory and body blocks must be paired",
+        )
+    if directory is not None:
+        if (
+            directory.kind != "message_directory"
+            or bodies.kind != "message_bodies"
+        ):
+            raise IntegrityError("message block kind differs")
+        entries = decode_message_directory(
+            _read_checked(reader, directory, allowance),
+        )
+        messages = decode_message_bodies(
+            _read_checked(reader, bodies, allowance),
+        )
+        if len(entries) != len(messages):
+            raise IntegrityError("message directory and body counts differ")
+        for position, entry in enumerate(entries):
+            if entry["body"] != {
+                "publication_id": "self",
+                "block_name": "message_bodies",
+                "position": position,
+            }:
+                raise IntegrityError("message directory body locator differs")
+        if entries and [e["sequence"] for e in entries] != list(
+            range(
+                entries[0]["sequence"],
+                entries[0]["sequence"] + len(entries),
+            ),
+        ):
+            raise IntegrityError("message directory sequence has gaps")
+    extent = blocks.get("archive_manifest")
+    if extent is None:
+        return None
+    if extent.kind != "archive_manifest":
+        raise IntegrityError("archive manifest block kind differs")
+    manifest = decode_archive_manifest(
+        _read_checked(reader, extent, allowance),
+    )
+    updates = [
+        item["values"]
+        for item in (*plan["rows"], *plan["updates"])
+        if item["table"] == "publications"
+        and item["values"].get("id") == publication["id"]
+        and "archive_first_order" in item["values"]
+    ]
+    if len(updates) != 1:
+        raise IntegrityError("archive manifest publication plan is missing")
+    values = updates[0]
+    if (
+        manifest["first_sequence"] != values["archive_first_order"]
+        or manifest["last_sequence"] != values["archive_last_order"]
+        or manifest["last_sequence"] - manifest["first_sequence"] + 1
+        != values["archive_source_count"]
+    ):
+        raise IntegrityError("archive manifest publication range differs")
+    dependencies = sorted(
+        chunk["publication_id"]
+        for chunk in manifest["chunks"]
+        if chunk["publication_id"] != "self"
+    )
+    if dependencies != plan.get("dependencies", []):
+        raise IntegrityError("archive manifest dependencies differ")
+    return manifest, values
+
+
+def _read_checked(reader, extent, allowance):
+    if extent.length * 8 > allowance:
+        raise ValueError(
+            "fast verification message block exceeds memory allowance",
+        )
+    return reader.read_extents((extent,), max_bytes=allowance)[0]
 
 
 def _validate_locator_pairs(values, resolved, publication, index):
@@ -280,7 +365,21 @@ async def verify_fast_publications(
     checked_updates = 0
     checked_records = 0
     seen_paths = set()
-    allowance = max(1, memory_bytes // max(1, io_workers))
+    # A valid message body block can be 8 MiB and decoded JSON needs headroom.
+    # Limit concurrent decoders rather than rejecting valid importer output.
+    verify_workers = max(
+        1,
+        min(io_workers, memory_bytes // (64 * 1024 * 1024)),
+    )
+    allowance = max(1, memory_bytes // verify_workers)
+    assignment_scopes_by_id = {
+        assignment["target_id"]: tuple(assignment.get("scope", ()))
+        for assignment in all_publication_assignments.values()
+    }
+    assignments_by_id = {
+        assignment["target_id"]: assignment
+        for assignment in all_publication_assignments.values()
+    }
     while chunk := list(islice(assignments, 128)):
         for _position, assignment in chunk:
             path = assignment.get("relative_path")
@@ -327,8 +426,8 @@ async def verify_fast_publications(
                 stores_by_service[scope.service_unit_id] = store
             checks.append((position, store, row, assignment))
 
-        for start in range(0, len(checks), max(1, io_workers)):
-            batch = checks[start : start + max(1, io_workers)]
+        for start in range(0, len(checks), verify_workers):
+            batch = checks[start : start + verify_workers]
             results = await asyncio.gather(
                 *(
                     io.call(
@@ -346,9 +445,24 @@ async def verify_fast_publications(
             expected_by_table = {}
             for check, result in zip(batch, results):
                 service_unit_key = check[2]["service_unit_key"]
-                expected, rows_count, updates_count = result
+                expected, rows_count, updates_count, archive = result
                 checked_rows += rows_count
                 checked_updates += updates_count
+                if archive is not None:
+                    await _verify_archive_dependencies(
+                        database,
+                        check[2],
+                        archive,
+                        assignment_scopes_by_id,
+                    )
+                    await _verify_archive_chunks(
+                        database,
+                        check[1],
+                        archive,
+                        assignments_by_id,
+                        io,
+                        allowance,
+                    )
                 _merge_expected_rows(
                     expected_by_table,
                     service_unit_key,
@@ -387,3 +501,102 @@ async def verify_fast_publications(
         "planned_updates": checked_updates,
         "checked_records": checked_records,
     }
+
+
+async def _verify_archive_dependencies(
+    database,
+    publication,
+    archive,
+    assignments,
+):
+    archive, _ = archive
+    expected = {
+        chunk["publication_id"]
+        for chunk in archive["chunks"]
+        if chunk["publication_id"] != "self"
+    }
+    scope = WorkspaceScope.from_row(publication).values
+    if any(assignments.get(identity) != scope for identity in expected):
+        raise IntegrityError("archive chunk source ownership differs")
+    rows = await database.fetch_all(
+        "SELECT publication_id,member_key FROM swe_conversation_retentions "
+        "WHERE service_unit_key=%s AND tenant_key=%s AND source_key=%s "
+        "AND agent_key=%s AND retention_key=%s AND kind='dependency' "
+        "AND state='active'",
+        (
+            publication["service_unit_key"],
+            publication["tenant_key"],
+            publication["source_key"],
+            publication["agent_key"],
+            f"dep:{publication['id']}".encode("ascii"),
+        ),
+    )
+    if {row["publication_id"] for row in rows} != expected or any(
+        row["member_key"] != row["publication_id"] for row in rows
+    ):
+        raise IntegrityError("archive retention dependencies differ")
+
+
+async def _verify_archive_chunks(
+    database,
+    store,
+    archive,
+    assignments,
+    io,
+    allowance,
+):
+    manifest, values = archive
+    for chunk in manifest["chunks"]:
+        identity = chunk["publication_id"]
+        assignment = assignments.get(identity)
+        if assignment is None:
+            raise IntegrityError("archive chunk publication is missing")
+        rows = await database.fetch_all(
+            "SELECT "
+            + PUBLICATION_FIELDS
+            + " FROM swe_conversation_publications WHERE id IN (%s)",
+            (identity,),
+        )
+        if len(rows) != 1:
+            raise IntegrityError("archive chunk publication is missing")
+        _publication_identity(rows[0], assignment)
+        await io.call(
+            _verify_chunk_directory,
+            store,
+            rows[0],
+            assignment,
+            chunk,
+            values["chat_id"],
+            manifest["epoch"],
+            allowance,
+        )
+
+
+def _verify_chunk_directory(
+    store,
+    publication,
+    assignment,
+    chunk,
+    chat_id,
+    epoch,
+    allowance,
+):
+    with store.bundles.open_reader(
+        assignment["relative_path"],
+        expected_length=publication["byte_length"],
+        expected_operation_key=assignment["operation_key"],
+    ) as reader:
+        extent = reader.index.blocks.get(chunk["directory_block"])
+        if extent is None or extent.kind != "message_directory":
+            raise IntegrityError("archive chunk directory is missing")
+        entries = decode_message_directory(
+            _read_checked(reader, extent, allowance),
+        )
+        first, last = chunk["first_sequence"], chunk["last_sequence"]
+        if len(entries) != last - first + 1 or any(
+            entry["sequence"] != first + position
+            or entry.get("chat_id") != chat_id
+            or entry.get("epoch") != epoch
+            for position, entry in enumerate(entries)
+        ):
+            raise IntegrityError("archive chunk range or association differs")

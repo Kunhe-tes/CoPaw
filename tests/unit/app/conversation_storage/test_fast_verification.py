@@ -15,9 +15,187 @@ from swe.app.conversation_storage.errors import IntegrityError
 from swe.app.conversation_storage.migration.verify import verify_import
 from swe.app.conversation_storage.migration.verify_fast import (
     _read_publication_plan,
+    _validate_message_blocks,
+    _verify_chunk_directory,
+    _verify_archive_dependencies,
     _validate_locator_pairs,
     verify_fast_publications,
 )
+
+
+def test_fast_archive_chunk_checks_range_and_chat(tmp_path):
+    from swe.app.conversation_storage.message_bundle import (
+        encode_message_directory,
+    )
+
+    bundles = BundleStore(tmp_path)
+    operation = "b" * 64
+    scope = WorkspaceScope("tenant", "source", "agent", service_unit_id="svc")
+    entry = {
+        "sequence": 8,
+        "raw_id": "m",
+        "layer": "archive",
+        "visible": True,
+        "chat_id": 3,
+        "epoch": 1,
+        "body": {
+            "publication_id": "self",
+            "block_name": "message_bodies",
+            "position": 0,
+        },
+    }
+    index = bundles.publish(
+        operation,
+        [
+            BundleBlock(
+                "message_directory",
+                "message_directory",
+                encode_message_directory([entry]),
+            ),
+        ],
+        scope=scope,
+        metadata={"operation_key": operation},
+    )
+    assignment = {
+        "relative_path": index.relative_path,
+        "operation_key": operation,
+    }
+    row = {"byte_length": index.byte_length}
+    chunk = {
+        "directory_block": "message_directory",
+        "first_sequence": 8,
+        "last_sequence": 8,
+    }
+    _verify_chunk_directory(
+        SimpleNamespace(bundles=bundles),
+        row,
+        assignment,
+        chunk,
+        3,
+        1,
+        100000,
+    )
+    with pytest.raises(IntegrityError, match="association"):
+        _verify_chunk_directory(
+            SimpleNamespace(bundles=bundles),
+            row,
+            assignment,
+            chunk,
+            4,
+            1,
+            100000,
+        )
+
+
+async def test_fast_archive_dependency_requires_scoped_active_retention():
+    from unittest.mock import AsyncMock
+
+    scope = WorkspaceScope("tenant", "source", "agent", service_unit_id="svc")
+    publication = {"id": 5, **scope.fields}
+    archive = ({"chunks": [{"publication_id": 4}]}, {})
+    assignments = {4: scope.values}
+    database = SimpleNamespace(
+        fetch_all=AsyncMock(
+            return_value=[{"publication_id": 4, "member_key": 4}],
+        ),
+    )
+    await _verify_archive_dependencies(
+        database,
+        publication,
+        archive,
+        assignments,
+    )
+    database.fetch_all.return_value = []
+    with pytest.raises(IntegrityError, match="retention"):
+        await _verify_archive_dependencies(
+            database,
+            publication,
+            archive,
+            assignments,
+        )
+    assignments[4] = ("svc", "other", "source", "agent")
+    with pytest.raises(IntegrityError, match="ownership"):
+        await _verify_archive_dependencies(
+            database,
+            publication,
+            archive,
+            assignments,
+        )
+
+
+def test_fast_checks_directory_geometry_and_boundary_dependencies():
+    from swe.app.conversation_storage.message_bundle import (
+        encode_archive_manifest,
+        encode_message_bodies,
+        encode_message_directory,
+    )
+
+    body = {
+        "publication_id": "self",
+        "block_name": "message_bodies",
+        "position": 0,
+    }
+    entry = {
+        "sequence": 1,
+        "raw_id": "m",
+        "layer": "archive",
+        "visible": True,
+        "body": body,
+    }
+    manifest = {
+        "format": "swe.archive-manifest.v1",
+        "chat_id": "chat",
+        "epoch": 1,
+        "first_sequence": 1,
+        "last_sequence": 1,
+        "chunks": [
+            {
+                "publication_id": 4,
+                "first_sequence": 1,
+                "last_sequence": 1,
+                "directory_block": "message_directory",
+            },
+        ],
+    }
+    payloads = {
+        "message_directory": encode_message_directory([entry]),
+        "message_bodies": encode_message_bodies([{"id": "m"}]),
+        "archive_manifest": encode_archive_manifest(manifest),
+    }
+    blocks = {
+        name: SimpleNamespace(kind=name, length=len(payload), name=name)
+        for name, payload in payloads.items()
+    }
+    reader = SimpleNamespace(
+        index=SimpleNamespace(blocks=blocks),
+        read_extents=lambda extents, **_: (payloads[extents[0].name],),
+    )
+    plan = {
+        "rows": [],
+        "updates": [
+            {
+                "table": "publications",
+                "values": {
+                    "id": 5,
+                    "archive_first_order": 1,
+                    "archive_last_order": 1,
+                    "archive_source_count": 1,
+                },
+            },
+        ],
+        "dependencies": [4],
+    }
+    _validate_message_blocks(reader, plan, {"id": 5}, 100000)
+    plan["dependencies"] = []
+    with pytest.raises(IntegrityError, match="dependencies"):
+        _validate_message_blocks(reader, plan, {"id": 5}, 100000)
+    plan["dependencies"] = [4]
+    body["position"] = 1
+    payloads["message_directory"] = encode_message_directory([entry])
+    with pytest.raises(IntegrityError, match="locator"):
+        _validate_message_blocks(reader, plan, {"id": 5}, 100000)
+
+
 from swe.app.conversation_storage.migration.parallel import MigrationIO
 from swe.app.conversation_storage.migration.progress import MigrationProgress
 
