@@ -270,7 +270,7 @@ async def test_daily_success_still_obeys_unread_auto_pause(
     monkeypatch.setattr(
         managed_results,
         "resolve_cron_unread_auto_pause_config",
-        lambda _: SimpleNamespace(enabled=True, threshold=1),
+        lambda *_: SimpleNamespace(enabled=True, threshold=1),
     )
     await scenario.finish(row, status="success")
     state = await scenario.db.fetch_one("SELECT * FROM swe_cron_job_states")

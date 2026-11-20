@@ -214,7 +214,7 @@ async def test_inflight_success_preserves_manual_pause_reason(
     monkeypatch.setattr(
         managed_results,
         "resolve_cron_unread_auto_pause_config",
-        lambda _: SimpleNamespace(enabled=True, threshold=1),
+        lambda *_: SimpleNamespace(enabled=True, threshold=1),
     )
     await writer.complete(
         row["execution_id"],
