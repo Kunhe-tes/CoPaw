@@ -179,6 +179,7 @@ def _run_where_clause(
     start_at,
     end_at,
     filters: dict[str, Any],
+    tenant_id: str | None = None,
 ) -> tuple[str, list[Any]]:
     placeholders = ",".join(["%s"] * len(source_ids))
     query = "WHERE service_unit_key=%s " f"AND source_key IN ({placeholders})"
@@ -186,6 +187,9 @@ def _run_where_clause(
         service_unit_id.encode(),
         *[s.encode() for s in source_ids],
     ]
+    if tenant_id is not None:
+        query += " AND tenant_key=%s"
+        params.append(tenant_id.encode())
     if filters.get("run_id") is not None:
         query += " AND run_id=%s"
         params.append(filters["run_id"])
@@ -297,6 +301,7 @@ class ObservabilityStore:
         status: str | None = None,
         min_duration_us: int | None = None,
         sort_by: str = "started_at",
+        tenant_id: str | None = None,
     ) -> list[dict[str, Any]]:
         if not source_ids:
             return []
@@ -315,6 +320,7 @@ class ObservabilityStore:
             start_at,
             end_at,
             filters,
+            tenant_id,
         )
         query = (
             "SELECT /*+ MAX_EXECUTION_TIME(5000) */ run_id, service_unit_key, "
@@ -355,6 +361,7 @@ class ObservabilityStore:
         min_duration_us: int | None = None,
         sort_by: str = "started_at",
         max_candidates: int = 50_000,
+        tenant_id: str | None = None,
     ) -> int:
         if not source_ids:
             return 0
@@ -373,6 +380,7 @@ class ObservabilityStore:
             start_at,
             end_at,
             filters,
+            tenant_id,
         )
         query = (
             "SELECT /*+ MAX_EXECUTION_TIME(5000) */ COUNT(*) AS candidate_count "
@@ -393,6 +401,7 @@ class ObservabilityStore:
         service_unit_id: str,
         run_id: str,
         source_ids: list[str],
+        tenant_id: str | None = None,
     ) -> dict[str, Any] | None:
         if not source_ids:
             return None
@@ -411,6 +420,9 @@ class ObservabilityStore:
             run_id,
             *[item.encode() for item in source_ids],
         ]
+        if tenant_id is not None:
+            query += " AND tenant_key=%s"
+            params.append(tenant_id.encode())
         async with self.connection.acquire() as session:
             return await session.fetch_one(query, tuple(params))
 

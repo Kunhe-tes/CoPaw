@@ -20,7 +20,20 @@ from pydantic import BaseModel
 from ..config.context import is_valid_identity_value
 from .config import EmitterConfig, capture_enabled
 from .emitter import default_emitter
+from .identity import service_unit_id
 from .store import ObservabilityStore
+
+
+def _request_tenant_id(request: Request) -> str | None:
+    """读取中间件解析出的有效租户，用于观测数据隔离。"""
+    state = getattr(request, "state", None)
+    value = getattr(state, "effective_tenant_id", None) or getattr(
+        state,
+        "tenant_id",
+        None,
+    )
+    return str(value) if value else None
+
 
 router = APIRouter(prefix="/agent-observability", tags=["agent-observability"])
 _MAX_PAGE_SIZE = 200
@@ -977,8 +990,9 @@ async def list_runs(
         )
     try:
         candidate_count = await store.count_run_candidates(
-            service_unit_id=os.environ.get("SWE_SERVICE_UNIT_ID", "swe"),
+            service_unit_id=service_unit_id(),
             source_ids=sources,
+            tenant_id=_request_tenant_id(request),
             start_at=(
                 start
                 if exact_identity and start is not None
@@ -1008,8 +1022,9 @@ async def list_runs(
                 detail="range_too_large",
             )
         rows = await store.list_runs(
-            service_unit_id=os.environ.get("SWE_SERVICE_UNIT_ID", "swe"),
+            service_unit_id=service_unit_id(),
             source_ids=sources,
+            tenant_id=_request_tenant_id(request),
             limit=limit + 1,
             before=before,
             start_at=(
@@ -1213,9 +1228,10 @@ async def run_detail(
         )
     try:
         row = await store.get_run(
-            service_unit_id=os.environ.get("SWE_SERVICE_UNIT_ID", "swe"),
+            service_unit_id=service_unit_id(),
             run_id=run_id,
             source_ids=sources,
+            tenant_id=_request_tenant_id(request),
         )
         if row is None:
             raise HTTPException(status_code=404, detail="Run not found")
@@ -1300,9 +1316,10 @@ async def search_run_spans(
         )
     try:
         row = await store.get_run(
-            service_unit_id=os.environ.get("SWE_SERVICE_UNIT_ID", "swe"),
+            service_unit_id=service_unit_id(),
             run_id=run_id,
             source_ids=sources,
+            tenant_id=_request_tenant_id(request),
         )
         if row is None:
             raise HTTPException(status_code=404, detail="Run not found")
@@ -1398,9 +1415,10 @@ async def run_events(
         )
     try:
         run = await store.get_run(
-            service_unit_id=os.environ.get("SWE_SERVICE_UNIT_ID", "swe"),
+            service_unit_id=service_unit_id(),
             run_id=run_id,
             source_ids=sources,
+            tenant_id=_request_tenant_id(request),
         )
         if run is None:
             raise HTTPException(status_code=404, detail="Run not found")
@@ -1511,11 +1529,22 @@ def _performance_sample_bounds(
     return (min(starts) if starts else None, max(ends) if ends else None)
 
 
+_QUALITY_ALIASES = {
+    "complete": "complete",
+    "observed": "complete",
+    "partial": "partial",
+}
+
+
 def _performance_sample_quality(rows: list[dict[str, Any]]) -> dict[str, Any]:
     counts = {"complete": 0, "partial": 0, "unknown": 0}
     for row in rows:
         quality = row.get("quality")
-        key = quality if quality in {"complete", "partial"} else "unknown"
+        key = (
+            _QUALITY_ALIASES.get(quality, "unknown")
+            if isinstance(quality, str)
+            else "unknown"
+        )
         counts[key] += 1
     if not rows:
         status = "empty"
@@ -1761,9 +1790,10 @@ async def span_evidence(
         )
     try:
         run = await store.get_run(
-            service_unit_id=os.environ.get("SWE_SERVICE_UNIT_ID", "swe"),
+            service_unit_id=service_unit_id(),
             run_id=run_id,
             source_ids=sources,
+            tenant_id=_request_tenant_id(request),
         )
         if run is None:
             raise HTTPException(status_code=404, detail="Run not found")
@@ -1877,9 +1907,10 @@ async def run_assets(
         )
     try:
         run = await store.get_run(
-            service_unit_id=os.environ.get("SWE_SERVICE_UNIT_ID", "swe"),
+            service_unit_id=service_unit_id(),
             run_id=run_id,
             source_ids=sources,
+            tenant_id=_request_tenant_id(request),
         )
         if run is None:
             raise HTTPException(status_code=404, detail="Run not found")
@@ -1941,9 +1972,10 @@ async def span_ancestors(
         )
     try:
         run = await store.get_run(
-            service_unit_id=os.environ.get("SWE_SERVICE_UNIT_ID", "swe"),
+            service_unit_id=service_unit_id(),
             run_id=run_id,
             source_ids=sources,
+            tenant_id=_request_tenant_id(request),
         )
         if run is None:
             raise HTTPException(status_code=404, detail="Run not found")
@@ -2002,7 +2034,7 @@ async def _load_performance_samples(
 ) -> list[dict[str, Any]]:
     try:
         candidate_count = await store.count_performance_candidates(
-            service_unit_id=os.environ.get("SWE_SERVICE_UNIT_ID", "swe"),
+            service_unit_id=service_unit_id(),
             source_ids=sources,
             start_at=window_start,
             end_at=window_end,
@@ -2015,7 +2047,7 @@ async def _load_performance_samples(
         if candidate_count > _MAX_RUN_CANDIDATES:
             raise HTTPException(status_code=422, detail="range_too_large")
         rows = await store.performance_samples(
-            service_unit_id=os.environ.get("SWE_SERVICE_UNIT_ID", "swe"),
+            service_unit_id=service_unit_id(),
             source_ids=sources,
             start_at=window_start,
             end_at=window_end,

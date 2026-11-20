@@ -14,6 +14,7 @@ from ..config.context import (
     resolve_runtime_tenant_id,
 )
 from .config import capture_enabled
+from .identity import service_unit_id
 from .context import bind_context, current_context
 from .instrumentation import Observability
 from .models import ObservabilityContext, Scope
@@ -29,6 +30,7 @@ _TERMINAL_RUN_STATUS = {
     "cancelled": "cancelled",
     "timed_out": "timed_out",
     "rejected": "rejected",
+    "interrupted": "cancelled",
 }
 
 
@@ -105,7 +107,7 @@ def prepare_query_run(
     try:
         return _OBSERVABILITY.prepare_run(
             scope=Scope(
-                service_unit_id="swe",
+                service_unit_id=service_unit_id(),
                 source_id=str(source_id),
                 tenant_id=str(tenant_id or "default"),
                 agent_id=str(
@@ -281,7 +283,11 @@ def record_approval_resolved(
         return None
 
 
-def record_approval_superseded(pending: Any) -> None:
+def record_approval_superseded(
+    pending: Any,
+    *,
+    decision: str = "superseded",
+) -> None:
     extra = getattr(pending, "extra", None)
     carrier = (
         extra.get("agent_observability_context")
@@ -323,7 +329,7 @@ def record_approval_superseded(pending: Any) -> None:
         _OBSERVABILITY.approval_resolved(
             context,
             str(pending.request_id),
-            decision="superseded",
+            decision=decision,
             started_at=started,
         )
     except Exception:

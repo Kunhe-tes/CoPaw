@@ -2135,3 +2135,158 @@ async def test_project_one_reraises_infrastructure_error():
         )
 
     assert _inbox_updates(session) == []
+
+
+def test_performance_quality_treats_observed_as_complete():
+    """投影写入的 observed 必须按完整观测计入统计。"""
+    from swe.observability.query import _performance_sample_quality
+
+    mixed = _performance_sample_quality(
+        [
+            {"quality": "observed"},
+            {"quality": "partial"},
+            {"quality": "unexpected"},
+        ],
+    )
+    assert mixed["span_quality_counts"] == {
+        "complete": 1,
+        "partial": 1,
+        "unknown": 1,
+    }
+    assert mixed["status"] == "partial"
+
+    complete = _performance_sample_quality([{"quality": "observed"}])
+    assert complete["span_quality_counts"] == {
+        "complete": 1,
+        "partial": 0,
+        "unknown": 0,
+    }
+    assert complete["status"] == "complete"
+
+
+class _ScriptedSession(_RecordingSession):
+    def __init__(self, responses):
+        super().__init__()
+        self.responses = list(responses)
+
+    async def fetch_one(self, *_args, **_kwargs):
+        return self.responses.pop(0)
+
+
+def _span_event(context) -> dict:
+    return {
+        "schema_version": 1,
+        "event_name": "span.ended",
+        "occurred_at": context.run_started_at,
+        "run_started_at": context.run_started_at,
+        "obs_run_id": context.obs_run_id,
+        "obs_attempt_id": context.obs_attempt_id,
+        "obs_span_id": str(uuid4()),
+        "span_type": "Tool",
+        "operation": "execute",
+        "name": "registered.tool",
+        "started_at": context.run_started_at,
+        "ended_at": context.run_started_at,
+        "status": "succeeded",
+        "metrics": {},
+        "quality": {"start_observed": True, "end_observed": True},
+        "scope": context.scope.to_dict(),
+        "capture_enabled": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_span_end_updates_run_aggregate_columns():
+    """span 结束后回填 span_count / error_span_count / tool_calls。"""
+    projector = InboxProjector(SimpleNamespace(connection=SimpleNamespace()))
+    session = _RecordingSession()
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("svc", "source", "tenant", "agent"),
+    ).new_attempt()
+
+    await projector._project_entity(session, _span_event(context), "{}")
+
+    aggregate_sql = [
+        sql
+        for sql, _ in session.calls
+        if "span_count=" in sql and "tool_calls=" in sql
+    ]
+    assert len(aggregate_sql) == 1
+    assert "error_span_count=" in aggregate_sql[0]
+
+
+@pytest.mark.asyncio
+async def test_store_event_rejects_reused_attempt_index():
+    """新 Attempt 复用 (run_id, attempt_index) 时必须判冲突而非静默覆盖。"""
+    projector = InboxProjector(SimpleNamespace(connection=SimpleNamespace()))
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("svc", "source", "tenant", "agent"),
+    ).new_attempt()
+    event = {
+        "schema_version": 1,
+        "event_id": str(uuid4()),
+        "event_name": "attempt.started",
+        "occurred_at": context.run_started_at,
+        "run_started_at": context.run_started_at,
+        "obs_run_id": context.obs_run_id,
+        "obs_attempt_id": context.obs_attempt_id,
+        "attempt_index": 2,
+        "started_at": context.run_started_at,
+        "scope": context.scope.to_dict(),
+        "capture_enabled": True,
+        "entity_kind": "attempt",
+        "entity_id": context.obs_attempt_id,
+        "phase_key": "started",
+        "local_seq": 0,
+    }
+    stored = {
+        "service_unit_key": b"svc",
+        "source_key": b"source",
+        "tenant_key": b"tenant",
+        "agent_key": b"agent",
+        "chat_key": b"",
+        "root_question_key": b"",
+        "session_key": None,
+        "capture_enabled": 1,
+        "ended_at": None,
+        "status": None,
+    }
+    session = _ScriptedSession(
+        [
+            None,
+            None,
+            stored,
+            {"run_id": context.obs_run_id},
+            {"attempt_id": "different-attempt"},
+        ],
+    )
+
+    assert await projector._store_event(session, event, 1) == 3
+
+
+def test_run_where_clause_binds_tenant_when_provided():
+    """提供 tenant 时必须在 SQL 层绑定，不能只靠 source 隔离。"""
+    from swe.observability.store import _run_where_clause
+
+    where, params = _run_where_clause(
+        "svc",
+        ["source-a"],
+        None,
+        None,
+        {},
+        tenant_id="tenant-a",
+    )
+    assert "tenant_key=%s" in where
+    assert params[-1] == b"tenant-a"
+
+    unfiltered, unfiltered_params = _run_where_clause(
+        "svc",
+        ["source-a"],
+        None,
+        None,
+        {},
+    )
+    assert "tenant_key" not in unfiltered
+    assert unfiltered_params == [b"svc", b"source-a"]

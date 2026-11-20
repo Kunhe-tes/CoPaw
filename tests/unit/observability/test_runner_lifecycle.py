@@ -270,6 +270,14 @@ def test_approval_facts_share_run_and_restore_only_matching_scope(monkeypatch):
     assert superseded["decision"] == "superseded"
     assert superseded["obs_attempt_id"] == attempt.obs_attempt_id
 
+    runner_lifecycle.record_approval_superseded(
+        pending,
+        decision="timed_out",
+    )
+    timed_out = emitter.events[-1]
+    assert timed_out["event_name"] == "approval.resolved"
+    assert timed_out["decision"] == "timed_out"
+
 
 @pytest.mark.asyncio
 async def test_approval_command_resumes_same_run_with_predecessor_attempt(
@@ -538,11 +546,27 @@ def test_unknown_business_status_leaves_run_unresolved(monkeypatch):
     )
     attempt = runner_lifecycle.start_query_attempt(context)
 
-    runner_lifecycle.finish_query_run(context, attempt, "interrupted")
+    runner_lifecycle.finish_query_run(context, attempt, "mystery")
 
     assert not any(
         event["event_name"] == "run.ended" for event in emitter.events
     )
+
+
+def test_interrupted_business_status_is_terminal(monkeypatch):
+    """取消路径可能上报 interrupted，必须映射为可终结的 Run 状态。"""
+    emitter = _setup(monkeypatch)
+    context = runner_lifecycle.admit_query_run(
+        SimpleNamespace(agent_id="agent-a"),
+        _request(),
+        [_message()],
+    )
+    attempt = runner_lifecycle.start_query_attempt(context)
+
+    runner_lifecycle.finish_query_run(context, attempt, "interrupted")
+
+    assert emitter.events[-1]["event_name"] == "run.ended"
+    assert emitter.events[-1]["status"] == "cancelled"
 
 
 def test_default_tenant_is_emittable_without_tenant_context(monkeypatch):

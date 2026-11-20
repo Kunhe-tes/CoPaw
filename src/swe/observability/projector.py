@@ -757,6 +757,18 @@ class InboxProjector:
             )
             if existing_attempt and existing_attempt["run_id"] != run_id:
                 return 3
+            if run_id:
+                attempt_index = event.get("attempt_index") or 1
+                index_row = await session.fetch_one(
+                    "SELECT attempt_id FROM swe_agentobs_attempts "
+                    "WHERE run_id=%s AND attempt_index=%s FOR UPDATE",
+                    (run_id, attempt_index),
+                )
+                if (
+                    index_row is not None
+                    and index_row["attempt_id"] != event["obs_attempt_id"]
+                ):
+                    return 3
         if event.get("obs_span_id"):
             existing_span = await session.fetch_one(
                 "SELECT run_id,attempt_id,parent_span_id FROM swe_agentobs_spans WHERE span_id=%s FOR UPDATE",
@@ -1071,6 +1083,20 @@ class InboxProjector:
                     metadata,
                 ),
             )
+            if is_end:
+                await session.execute(
+                    "UPDATE swe_agentobs_runs SET "
+                    "span_count=(SELECT COUNT(*) FROM swe_agentobs_spans "
+                    "WHERE run_id=%s), "
+                    "error_span_count=(SELECT COUNT(*) FROM swe_agentobs_spans "
+                    "WHERE run_id=%s AND (has_error=1 OR "
+                    "technical_status='ERROR')), "
+                    "tool_calls=(SELECT COUNT(*) FROM swe_agentobs_spans "
+                    "WHERE run_id=%s AND span_type='Tool' "
+                    "AND ended_at IS NOT NULL) "
+                    "WHERE run_id=%s",
+                    (run_id, run_id, run_id, run_id),
+                )
             if (
                 is_end
                 and event.get("span_type") == "LLM"

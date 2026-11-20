@@ -383,6 +383,22 @@ class ApprovalService:
             )
         return pending, True
 
+    @staticmethod
+    def _record_terminal_approval(pending: Any, *, decision: str) -> None:
+        """为不经过决议路径的终态审批补发观测事实。"""
+        try:
+            from ...observability.runner_lifecycle import (
+                record_approval_superseded,
+            )
+
+            record_approval_superseded(pending, decision=decision)
+        except Exception:
+            logger.warning(
+                "Approval terminal observation failed: request_id=%s",
+                getattr(pending, "request_id", None),
+                exc_info=True,
+            )
+
     def _user_mismatch(self, record: Any, user_id: str | None) -> bool:
         """判断记录归属是否与调用方用户冲突。
 
@@ -599,6 +615,7 @@ class ApprovalService:
                 session_id[:8],
             )
         for record in cancelled_records:
+            self._record_terminal_approval(record, decision="superseded")
             await self._persist_request(record)
             await self.record_event(
                 record,
@@ -637,6 +654,7 @@ class ApprovalService:
                 superseded.append(pending)
             self._gc_completed_locked()
         for pending in superseded:
+            self._record_terminal_approval(pending, decision="superseded")
             await self._persist_request(pending)
             await self.record_event(
                 pending,
@@ -891,6 +909,7 @@ class ApprovalService:
             pending.status = "timeout"
             pending.resolved_at = now
             self._completed[k] = pending
+            self._record_terminal_approval(pending, decision="timed_out")
         if expired:
             inventory = self._request_id_inventory_locked()
             logger.info(

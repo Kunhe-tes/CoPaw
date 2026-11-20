@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -415,6 +416,26 @@ def emit_assistant_answer_evidence(
         )
     except Exception:
         return False
+
+
+_RUN_TERMINAL_STATUSES = frozenset(
+    {"succeeded", "failed", "cancelled", "timed_out", "rejected"},
+)
+_run_state_sequences: dict[str, int] = {}
+_run_state_sequence_lock = threading.Lock()
+
+
+def _next_run_state_sequence(run_id: str) -> int:
+    """为同一 Run 的状态事件分配单调槽位，避免重复状态被判冲突丢弃。"""
+    with _run_state_sequence_lock:
+        sequence = _run_state_sequences.get(run_id, 0) + 1
+        _run_state_sequences[run_id] = sequence
+        return sequence
+
+
+def _clear_run_state_sequence(run_id: str) -> None:
+    with _run_state_sequence_lock:
+        _run_state_sequences.pop(run_id, None)
 
 
 _current_agent_step_index: ContextVar[int | None] = ContextVar(
@@ -1109,6 +1130,9 @@ class Observability:
         emitter = self._emitter_for(context)
         if emitter is None:
             return False
+        sequence = _next_run_state_sequence(context.obs_run_id)
+        if status in _RUN_TERMINAL_STATUSES:
+            _clear_run_state_sequence(context.obs_run_id)
         return emitter.emit(
             MetadataEvent(
                 event_name="run.state",
@@ -1116,7 +1140,7 @@ class Observability:
                 entity_kind="run",
                 entity_id=context.obs_run_id,
                 phase_key=f"state:{status}",
-                local_seq=0,
+                local_seq=sequence,
                 attributes={"status": status},
             ),
         )

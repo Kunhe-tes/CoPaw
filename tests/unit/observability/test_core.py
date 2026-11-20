@@ -1411,3 +1411,41 @@ def test_emit_raw_forwards_child_lines_and_rejects_bad_payloads():
 
     assert stream.getvalue() == line.decode("utf-8")
     assert emitter.dropped_count == 3
+
+
+def test_service_unit_prefers_business_env_then_legacy(monkeypatch):
+    """写入与查询共用同一 service unit 来源。"""
+    from swe.observability import identity
+
+    monkeypatch.setenv("CMB_CAAS_SERVICEUNITID", "business-unit")
+    monkeypatch.setenv("SWE_SERVICE_UNIT_ID", "legacy-unit")
+    assert identity.service_unit_id() == "business-unit"
+
+    monkeypatch.delenv("CMB_CAAS_SERVICEUNITID")
+    assert identity.service_unit_id() == "legacy-unit"
+
+    monkeypatch.delenv("SWE_SERVICE_UNIT_ID")
+    assert identity.service_unit_id() == "swe"
+
+
+def test_run_state_events_get_distinct_slots(monkeypatch):
+    """同一 Run 重复上报同一状态时不能命中同一槽位。"""
+    from swe.observability import instrumentation
+    from swe.observability.models import ObservabilityContext, Scope
+
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(instrumentation, "default_emitter", lambda: emitter)
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("svc", "source", "tenant", "agent"),
+    )
+    observability = instrumentation.Observability()
+
+    assert observability.run_state(context, status="running")
+    assert observability.run_state(context, status="running")
+    emitter.close()
+
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    assert [event["local_seq"] for event in events] == [1, 2]
+    assert all(event["phase_key"] == "state:running" for event in events)

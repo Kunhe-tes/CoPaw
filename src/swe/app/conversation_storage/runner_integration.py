@@ -327,13 +327,16 @@ class IndexedQuery:
             self.approval_resolution_changed
             and self.approval_resolution_decision == "approved"
         ):
+            # 取消/中断的轮次不再等待审批，否则 Run 会永久停在
+            # waiting_approval 且永远等不到 run.ended。
+            waiting_for_approval = status == "completed" and bool(
+                isinstance(pending, dict) and pending.get("request_id"),
+            )
             finish_query_run(
                 self.observability_context,
                 self.observability_attempt_ref["value"],
                 status,
-                waiting_for_approval=bool(
-                    isinstance(pending, dict) and pending.get("request_id"),
-                ),
+                waiting_for_approval=waiting_for_approval,
             )
 
     async def _confirm_pending_terminal(self, operation_key):
