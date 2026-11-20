@@ -384,14 +384,23 @@ class ApprovalService:
         return pending, True
 
     @staticmethod
-    def _record_terminal_approval(pending: Any, *, decision: str) -> None:
+    def _record_terminal_approval(
+        pending: Any,
+        *,
+        decision: str,
+        finish_run: bool = False,
+    ) -> None:
         """为不经过决议路径的终态审批补发观测事实。"""
         try:
             from ...observability.runner_lifecycle import (
                 record_approval_superseded,
             )
 
-            record_approval_superseded(pending, decision=decision)
+            record_approval_superseded(
+                pending,
+                decision=decision,
+                finish_run=finish_run,
+            )
         except Exception:
             logger.warning(
                 "Approval terminal observation failed: request_id=%s",
@@ -654,7 +663,11 @@ class ApprovalService:
                 superseded.append(pending)
             self._gc_completed_locked()
         for pending in superseded:
-            self._record_terminal_approval(pending, decision="superseded")
+            self._record_terminal_approval(
+                pending,
+                decision="superseded",
+                finish_run=True,
+            )
             await self._persist_request(pending)
             await self.record_event(
                 pending,
@@ -704,7 +717,7 @@ class ApprovalService:
                     record_approval_superseded,
                 )
 
-                record_approval_superseded(pending)
+                record_approval_superseded(pending, finish_run=True)
             except Exception:
                 pass
         return len(superseded)
@@ -909,7 +922,11 @@ class ApprovalService:
             pending.status = "timeout"
             pending.resolved_at = now
             self._completed[k] = pending
-            self._record_terminal_approval(pending, decision="timed_out")
+            self._record_terminal_approval(
+                pending,
+                decision="timed_out",
+                finish_run=True,
+            )
         if expired:
             inventory = self._request_id_inventory_locked()
             logger.info(

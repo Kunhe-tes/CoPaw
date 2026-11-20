@@ -10,6 +10,7 @@ from typing import Any, Callable, Iterator
 
 from ..config.context import (
     get_current_effective_tenant_id,
+    get_current_scope_id,
     get_current_source_id,
     resolve_runtime_tenant_id,
 )
@@ -287,6 +288,7 @@ def record_approval_superseded(
     pending: Any,
     *,
     decision: str = "superseded",
+    finish_run: bool = False,
 ) -> None:
     extra = getattr(pending, "extra", None)
     carrier = (
@@ -332,6 +334,11 @@ def record_approval_superseded(
             decision=decision,
             started_at=started,
         )
+        if finish_run:
+            # Stop/Goal 取消后不会再有轮次收尾，必须由这里终结等待中的 Run。
+            # 不重复结束 Attempt：轮次自身的 finish 或 deferred settlement
+            # 已经写过终态，重复上报会因槽位冲突被投影丢弃。
+            _OBSERVABILITY.end_run(context, status="cancelled")
     except Exception:
         return
 
@@ -407,7 +414,7 @@ def finish_query_run(
     if context is None or business_status is None:
         return
     try:
-        if waiting_for_approval:
+        if waiting_for_approval and business_status == "completed":
             _OBSERVABILITY.run_state(context, status="waiting_approval")
             if attempt is not None:
                 _OBSERVABILITY.end_attempt(attempt, status="waiting_approval")
@@ -493,11 +500,12 @@ def finish_deferred_query_run(
     )
 
 
-def query_waiting_for_approval(
+def _pending_approval_info(
     owner: Any,
     request: Any,
     execution: Any,
-) -> bool:
+) -> dict[str, Any] | None:
+    """读取 runtime 或 expert-main lease 上记录的待审批信息。"""
     runtime = getattr(execution, "runtime", None)
     if runtime is None:
         identity_getter = getattr(owner, "_answer_turn_identity", None)
@@ -507,10 +515,13 @@ def query_waiting_for_approval(
         entries = getattr(owner, "_answer_turn_runtimes", {})
         entry = entries.get(identity) if identity is not None else None
         runtime = entry[0] if isinstance(entry, tuple) and entry else None
-    agent = getattr(runtime, "agent", None)
-    pending = getattr(agent, "_tool_guard_pending_info", None)
+    pending = getattr(
+        getattr(runtime, "agent", None),
+        "_tool_guard_pending_info",
+        None,
+    )
     if isinstance(pending, dict) and pending.get("request_id"):
-        return True
+        return pending
     lease_getter = getattr(owner, "_get_expert_main_execution", None)
     lease = lease_getter(request) if callable(lease_getter) else None
     pending = getattr(
@@ -518,4 +529,27 @@ def query_waiting_for_approval(
         "_tool_guard_pending_info",
         None,
     )
-    return bool(isinstance(pending, dict) and pending.get("request_id"))
+    return pending if isinstance(pending, dict) else None
+
+
+async def query_waiting_for_approval(
+    owner: Any,
+    request: Any,
+    execution: Any,
+) -> bool:
+    """以审批服务的真实状态为准，避免陈旧 pending 标记拖住 Run。"""
+    pending = _pending_approval_info(owner, request, execution)
+    request_id = pending.get("request_id") if pending else None
+    if not request_id:
+        return False
+    if get_current_scope_id() is None:
+        # 缺少 scope 时无法判定审批归属，保守保持等待。
+        return True
+    try:
+        from ..app.approvals import get_approval_service
+
+        record = await get_approval_service().get_request(str(request_id))
+    except Exception:
+        # 查询失败时保守地保持等待，避免错误终结仍在等待的 Run。
+        return True
+    return record is not None and record.status == "pending"

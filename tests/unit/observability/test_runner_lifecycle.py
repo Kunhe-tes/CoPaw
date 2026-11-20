@@ -802,3 +802,73 @@ def test_approval_identity_ignores_missing_observability_carrier(monkeypatch):
         channel_meta={},
     )
     assert runner_lifecycle.approval_identity_matches(owner, request, pending)
+
+
+def test_cancelled_business_status_ends_waiting_run(monkeypatch):
+    """非 completed 的业务状态不能被 waiting 分支拦下。"""
+    emitter = _setup(monkeypatch)
+    context = runner_lifecycle.admit_query_run(
+        SimpleNamespace(agent_id="agent-a"),
+        _request(),
+        [_message()],
+    )
+    attempt = runner_lifecycle.start_query_attempt(context)
+
+    runner_lifecycle.finish_query_run(
+        context,
+        attempt,
+        "cancelled",
+        waiting_for_approval=True,
+    )
+
+    assert emitter.events[-1]["event_name"] == "run.ended"
+    assert emitter.events[-1]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_query_waiting_for_approval_uses_service_status(monkeypatch):
+    """陈旧 pending 标记不能覆盖审批服务的真实终态。"""
+    monkeypatch.setattr(
+        runner_lifecycle,
+        "get_current_scope_id",
+        lambda: "scope-a",
+    )
+    agent = SimpleNamespace(
+        _tool_guard_pending_info={"request_id": "approval-1"},
+    )
+    execution = SimpleNamespace(
+        runtime=SimpleNamespace(agent=agent),
+    )
+
+    class _Service:
+        def __init__(self, status):
+            self.status = status
+
+        async def get_request(self, _request_id):
+            return SimpleNamespace(status=self.status)
+
+    monkeypatch.setattr(
+        "swe.app.approvals.get_approval_service",
+        lambda: _Service("pending"),
+    )
+    assert (
+        await runner_lifecycle.query_waiting_for_approval(
+            None,
+            None,
+            execution,
+        )
+        is True
+    )
+
+    monkeypatch.setattr(
+        "swe.app.approvals.get_approval_service",
+        lambda: _Service("superseded"),
+    )
+    assert (
+        await runner_lifecycle.query_waiting_for_approval(
+            None,
+            None,
+            execution,
+        )
+        is False
+    )

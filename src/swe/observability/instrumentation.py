@@ -1098,6 +1098,7 @@ class Observability:
         emitter = self._emitter_for(context)
         if emitter is None:
             return False
+        _clear_run_state_sequence(context.obs_run_id)
         metrics = {}
         if (
             context.run_started_monotonic_ns is not None

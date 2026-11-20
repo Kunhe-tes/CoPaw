@@ -145,7 +145,7 @@ async def stream_admission(
                     async for item in stream:
                         yield item
                 finally:
-                    waiting_for_approval = query_waiting_for_approval(
+                    waiting_for_approval = await query_waiting_for_approval(
                         owner,
                         request,
                         session_execution,

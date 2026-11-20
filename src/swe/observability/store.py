@@ -992,6 +992,7 @@ class ObservabilityStore:
         span_type: str | None = None,
         operation: str | None = None,
         max_samples: int = 50_000,
+        tenant_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Fetch a bounded ended-Span sample for reproducible aggregates."""
         if not source_ids:
@@ -1016,6 +1017,9 @@ class ObservabilityStore:
             start_at.astimezone(timezone.utc).replace(tzinfo=None),
             end_at.astimezone(timezone.utc).replace(tzinfo=None),
         ]
+        if tenant_id is not None:
+            query += " AND r.tenant_key=%s"
+            params.append(tenant_id.encode())
         if status:
             query += " AND s.status=%s"
             params.append(status)
@@ -1045,6 +1049,7 @@ class ObservabilityStore:
         span_type: str | None = None,
         operation: str | None = None,
         max_candidates: int = 50_000,
+        tenant_id: str | None = None,
     ) -> int:
         """Count matching spans up to a hard ceiling before aggregation."""
         if not source_ids:
@@ -1065,6 +1070,9 @@ class ObservabilityStore:
             start_at.astimezone(timezone.utc).replace(tzinfo=None),
             end_at.astimezone(timezone.utc).replace(tzinfo=None),
         ]
+        if tenant_id is not None:
+            query += " AND r.tenant_key=%s"
+            params.append(tenant_id.encode())
         for clause, value in (
             ("s.status", status),
             ("r.status", run_status),

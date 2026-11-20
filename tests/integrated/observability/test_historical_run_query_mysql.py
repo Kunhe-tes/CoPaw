@@ -209,6 +209,7 @@ async def test_exact_run_and_attempt_queries_include_historical_records(
         @api.middleware("http")
         async def bind_test_source(request: Request, call_next):
             request.state.source_id = request.headers.get("X-Source-Id")
+            request.state.effective_tenant_id = "integration-user"
             return await call_next(request)
 
         api.include_router(observability_router)

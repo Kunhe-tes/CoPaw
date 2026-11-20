@@ -555,6 +555,7 @@ async def _assert_approval_run_api(store, run_id, approval_ids):
     @api.middleware("http")
     async def bind_source(request, call_next):
         request.state.source_id = "agentobs-integration"
+        request.state.effective_tenant_id = "integration-user"
         return await call_next(request)
 
     api.include_router(observability_router)
@@ -1263,6 +1264,7 @@ async def test_manual_inbox_to_mysql_projection_and_authorized_run_list(
         @api.middleware("http")
         async def bind_test_source(request: Request, call_next):
             request.state.source_id = request.headers.get("X-Source-Id")
+            request.state.effective_tenant_id = "integration-user"
             return await call_next(request)
 
         api.include_router(observability_router)
@@ -1473,6 +1475,7 @@ async def test_source_tool_snapshot_asset_reaches_authorized_mysql_api(
         @api.middleware("http")
         async def bind_test_source(request: Request, call_next):
             request.state.source_id = request.headers.get("X-Source-Id")
+            request.state.effective_tenant_id = "integration-user"
             return await call_next(request)
 
         api.include_router(observability_router)
@@ -1635,6 +1638,7 @@ async def test_mcp_tool_and_server_snapshot_assets_reach_authorized_mysql_api(
         @api.middleware("http")
         async def bind_test_source(request: Request, call_next):
             request.state.source_id = request.headers.get("X-Source-Id")
+            request.state.effective_tenant_id = "integration-user"
             return await call_next(request)
 
         api.include_router(observability_router)
@@ -1960,6 +1964,7 @@ async def test_mysql_event_api_pages_more_than_one_event_array(monkeypatch):
         @api.middleware("http")
         async def bind_source(request: Request, call_next):
             request.state.source_id = request.headers.get("X-Source-Id")
+            request.state.effective_tenant_id = "integration-user"
             return await call_next(request)
 
         api.include_router(observability_router)
@@ -2178,6 +2183,7 @@ async def _ingest_population_event(connection, event):
 
 
 @pytest.mark.asyncio
+# pylint: disable-next=too-many-statements
 async def test_mysql_business_population_excludes_unmatched_runs_from_success_rate(
     monkeypatch,
     tmp_path,
@@ -2299,6 +2305,7 @@ async def test_mysql_business_population_excludes_unmatched_runs_from_success_ra
         @api.middleware("http")
         async def bind_test_source(request: Request, call_next):
             request.state.source_id = request.headers.get("X-Source-Id")
+            request.state.effective_tenant_id = "integration-user"
             return await call_next(request)
 
         api.include_router(observability_router)
@@ -2711,6 +2718,7 @@ async def test_mysql_span_ancestor_pagination_and_source_authorization():
         @api.middleware("http")
         async def bind_test_source(request: Request, call_next):
             request.state.source_id = request.headers.get("X-Source-Id")
+            request.state.effective_tenant_id = "integration-user"
             return await call_next(request)
 
         api.include_router(observability_router)
@@ -2902,6 +2910,7 @@ async def test_mysql_performance_counts_logical_calls_separately_from_attempts(
         @api.middleware("http")
         async def bind_test_source(request: Request, call_next):
             request.state.source_id = "agentobs-integration"
+            request.state.effective_tenant_id = "integration-user"
             return await call_next(request)
 
         api.include_router(observability_router)
@@ -3130,6 +3139,7 @@ async def _assert_late_subagent_detail_api(
     @api.middleware("http")
     async def bind_test_source(request: Request, call_next):
         request.state.source_id = request.headers.get("X-Source-Id")
+        request.state.effective_tenant_id = "integration-user"
         return await call_next(request)
 
     api.include_router(observability_router)

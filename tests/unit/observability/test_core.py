@@ -1451,6 +1451,27 @@ def test_run_state_events_get_distinct_slots(monkeypatch):
     assert all(event["phase_key"] == "state:running" for event in events)
 
 
+def test_end_run_clears_state_sequence(monkeypatch):
+    """Run 终结后必须释放进程内的状态槽位计数。"""
+    from swe.observability import instrumentation
+    from swe.observability.models import ObservabilityContext, Scope
+
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(instrumentation, "default_emitter", lambda: emitter)
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("svc", "source", "tenant", "agent"),
+    )
+    observability = instrumentation.Observability()
+
+    assert observability.run_state(context, status="running")
+    assert context.obs_run_id in instrumentation._run_state_sequences
+    assert observability.end_run(context, status="succeeded")
+    assert context.obs_run_id not in instrumentation._run_state_sequences
+    emitter.close()
+
+
 def test_events_example_matches_ingest_contract():
     """样例事件必须能通过当前投影校验，避免契约与实现再次漂移。"""
     from pathlib import Path

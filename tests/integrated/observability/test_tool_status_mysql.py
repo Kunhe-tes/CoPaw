@@ -75,6 +75,7 @@ async def _assert_authorized_tool_api(
     @api.middleware("http")
     async def bind_source(request, call_next):
         request.state.source_id = request.headers.get("X-Source-Id")
+        request.state.effective_tenant_id = "user-a"
         return await call_next(request)
 
     api.include_router(observability_router)

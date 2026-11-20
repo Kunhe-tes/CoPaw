@@ -24,15 +24,20 @@ from .identity import service_unit_id
 from .store import ObservabilityStore
 
 
-def _request_tenant_id(request: Request) -> str | None:
-    """读取中间件解析出的有效租户，用于观测数据隔离。"""
+def _request_tenant_id(request: Request) -> str:
+    """读取中间件解析出的有效租户；缺失时拒绝访问，避免跨租户读取。"""
     state = getattr(request, "state", None)
     value = getattr(state, "effective_tenant_id", None) or getattr(
         state,
         "tenant_id",
         None,
     )
-    return str(value) if value else None
+    if not value:
+        raise HTTPException(
+            status_code=403,
+            detail="tenant identity required",
+        )
+    return str(value)
 
 
 router = APIRouter(prefix="/agent-observability", tags=["agent-observability"])
@@ -2031,6 +2036,7 @@ async def _load_performance_samples(
     run_status: str | None,
     span_type: str | None,
     operation: str | None,
+    tenant_id: str | None,
 ) -> list[dict[str, Any]]:
     try:
         candidate_count = await store.count_performance_candidates(
@@ -2043,6 +2049,7 @@ async def _load_performance_samples(
             span_type=span_type,
             operation=operation,
             max_candidates=_MAX_RUN_CANDIDATES,
+            tenant_id=tenant_id,
         )
         if candidate_count > _MAX_RUN_CANDIDATES:
             raise HTTPException(status_code=422, detail="range_too_large")
@@ -2056,6 +2063,7 @@ async def _load_performance_samples(
             span_type=span_type,
             operation=operation,
             max_samples=_MAX_RUN_CANDIDATES,
+            tenant_id=tenant_id,
         )
     except HTTPException:
         raise
@@ -2108,6 +2116,7 @@ async def performance_overview(
         run_status=run_status,
         span_type=span_type,
         operation=operation,
+        tenant_id=_request_tenant_id(request),
     )
     durations = [
         row["duration_us"]

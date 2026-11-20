@@ -227,7 +227,10 @@ async def test_business_population_api_returns_cross_store_coverage(
     )
     request = SimpleNamespace(
         headers={"X-User-Role": "manager"},
-        state=SimpleNamespace(source_id="source-a"),
+        state=SimpleNamespace(
+            source_id="source-a",
+            effective_tenant_id="tenant-a",
+        ),
         app=SimpleNamespace(
             state=SimpleNamespace(agent_observability_store=store),
         ),
@@ -284,7 +287,10 @@ async def test_business_population_rejects_workspace_source_mismatch(
     )
     request = SimpleNamespace(
         headers={"X-User-Role": "manager"},
-        state=SimpleNamespace(source_id="source-a"),
+        state=SimpleNamespace(
+            source_id="source-a",
+            effective_tenant_id="tenant-a",
+        ),
         app=SimpleNamespace(
             state=SimpleNamespace(agent_observability_store=None),
         ),
@@ -372,7 +378,10 @@ def test_observability_database_does_not_fallback_to_application_database(
 def test_manager_cannot_expand_source_scope_and_admin_can_be_explicit():
     manager = SimpleNamespace(
         headers={"X-User-Role": "manager"},
-        state=SimpleNamespace(source_id="source-a"),
+        state=SimpleNamespace(
+            source_id="source-a",
+            effective_tenant_id="tenant-a",
+        ),
     )
     assert _authorized_sources(manager, None) == ["source-a"]
     with pytest.raises(HTTPException) as error:
@@ -381,7 +390,10 @@ def test_manager_cannot_expand_source_scope_and_admin_can_be_explicit():
 
     admin = SimpleNamespace(
         headers={"X-User-Role": "admin"},
-        state=SimpleNamespace(source_id="source-a"),
+        state=SimpleNamespace(
+            source_id="source-a",
+            effective_tenant_id="tenant-a",
+        ),
     )
     assert _authorized_sources(admin, ["source-b", "source-a"]) == [
         "source-b",
@@ -429,7 +441,10 @@ async def test_capabilities_are_scoped_and_do_not_expose_database_secrets(
     )
     request = SimpleNamespace(
         headers={"X-User-Role": "manager"},
-        state=SimpleNamespace(source_id="source-a"),
+        state=SimpleNamespace(
+            source_id="source-a",
+            effective_tenant_id="tenant-a",
+        ),
         app=app,
     )
     result = await capabilities(request)
@@ -454,7 +469,10 @@ async def test_global_health_is_admin_only(monkeypatch):
     )
     manager = SimpleNamespace(
         headers={"X-User-Role": "manager"},
-        state=SimpleNamespace(source_id="source-a"),
+        state=SimpleNamespace(
+            source_id="source-a",
+            effective_tenant_id="tenant-a",
+        ),
         app=app,
     )
     with pytest.raises(HTTPException) as error:
@@ -902,7 +920,10 @@ async def test_span_evidence_reads_only_authorized_saved_occurrence(
     )
     request = SimpleNamespace(
         headers={"X-User-Role": "manager"},
-        state=SimpleNamespace(source_id="source-a"),
+        state=SimpleNamespace(
+            source_id="source-a",
+            effective_tenant_id="tenant-a",
+        ),
         app=SimpleNamespace(
             state=SimpleNamespace(agent_observability_store=store),
         ),
@@ -963,7 +984,10 @@ async def test_span_evidence_keeps_nonavailable_states_distinct(monkeypatch):
     )
     request = SimpleNamespace(
         headers={"X-User-Role": "manager"},
-        state=SimpleNamespace(source_id="source-a"),
+        state=SimpleNamespace(
+            source_id="source-a",
+            effective_tenant_id="tenant-a",
+        ),
         app=SimpleNamespace(
             state=SimpleNamespace(agent_observability_store=store),
         ),
@@ -1004,7 +1028,10 @@ async def test_span_evidence_rejects_cross_chat_reference(monkeypatch):
     )
     request = SimpleNamespace(
         headers={"X-User-Role": "manager"},
-        state=SimpleNamespace(source_id="source-a"),
+        state=SimpleNamespace(
+            source_id="source-a",
+            effective_tenant_id="tenant-a",
+        ),
         app=SimpleNamespace(
             state=SimpleNamespace(agent_observability_store=store),
         ),
@@ -1049,7 +1076,10 @@ async def test_span_evidence_marks_oversize_saved_body_as_truncated(
     )
     request = SimpleNamespace(
         headers={"X-User-Role": "manager"},
-        state=SimpleNamespace(source_id="source-a"),
+        state=SimpleNamespace(
+            source_id="source-a",
+            effective_tenant_id="tenant-a",
+        ),
         app=SimpleNamespace(
             state=SimpleNamespace(agent_observability_store=store),
         ),
@@ -1110,7 +1140,10 @@ async def test_span_evidence_continues_redacted_message_chunks(
     )
     request = SimpleNamespace(
         headers={"X-User-Role": "manager"},
-        state=SimpleNamespace(source_id="source-a"),
+        state=SimpleNamespace(
+            source_id="source-a",
+            effective_tenant_id="tenant-a",
+        ),
         app=SimpleNamespace(
             state=SimpleNamespace(agent_observability_store=store),
         ),
@@ -1165,7 +1198,10 @@ async def test_span_evidence_continues_redacted_message_chunks(
 
     changed_source = SimpleNamespace(
         headers=request.headers,
-        state=SimpleNamespace(source_id="source-b"),
+        state=SimpleNamespace(
+            source_id="source-b",
+            effective_tenant_id="tenant-a",
+        ),
         app=request.app,
     )
     with pytest.raises(HTTPException) as changed_scope:
@@ -1249,7 +1285,10 @@ async def test_many_long_evidence_items_keep_continuation_cursors(monkeypatch):
     )
     request = SimpleNamespace(
         headers={"X-User-Role": "manager"},
-        state=SimpleNamespace(source_id="source-a"),
+        state=SimpleNamespace(
+            source_id="source-a",
+            effective_tenant_id="tenant-a",
+        ),
         app=SimpleNamespace(
             state=SimpleNamespace(agent_observability_store=store),
         ),
@@ -1552,7 +1591,10 @@ async def test_run_assets_cursor_is_signed_and_bound_to_scope(monkeypatch):
     )
     request = SimpleNamespace(
         headers={"X-User-Role": "manager"},
-        state=SimpleNamespace(source_id="source-a"),
+        state=SimpleNamespace(
+            source_id="source-a",
+            effective_tenant_id="tenant-a",
+        ),
         app=SimpleNamespace(
             state=SimpleNamespace(agent_observability_store=store),
         ),
@@ -1680,7 +1722,10 @@ async def test_span_ancestors_api_enforces_run_source_and_continues_cursor(
     store.list_span_ancestors = AsyncMock()
     request = SimpleNamespace(
         headers={"X-User-Role": "manager"},
-        state=SimpleNamespace(source_id="source-a"),
+        state=SimpleNamespace(
+            source_id="source-a",
+            effective_tenant_id="tenant-a",
+        ),
         app=SimpleNamespace(
             state=SimpleNamespace(agent_observability_store=store),
         ),
@@ -1816,7 +1861,10 @@ async def test_performance_overview_uses_nearest_rank_and_explicit_coverage():
     )
     request = SimpleNamespace(
         headers={"X-User-Role": "manager"},
-        state=SimpleNamespace(source_id="source-a"),
+        state=SimpleNamespace(
+            source_id="source-a",
+            effective_tenant_id="tenant-a",
+        ),
         app=SimpleNamespace(
             state=SimpleNamespace(agent_observability_store=store),
         ),
@@ -1878,7 +1926,10 @@ async def test_performance_overview_rejects_over_limit_before_fetching_samples()
     store.performance_samples = AsyncMock()
     request = SimpleNamespace(
         headers={"X-User-Role": "manager"},
-        state=SimpleNamespace(source_id="source-a"),
+        state=SimpleNamespace(
+            source_id="source-a",
+            effective_tenant_id="tenant-a",
+        ),
         app=SimpleNamespace(
             state=SimpleNamespace(agent_observability_store=store),
         ),

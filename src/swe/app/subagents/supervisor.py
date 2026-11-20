@@ -842,12 +842,17 @@ class BackgroundSubAgentSupervisor:
     ) -> BackgroundSubAgentRunRecord:
         """Keep ownership while blocking process cleanup runs off the loop."""
         await asyncio.to_thread(self._terminate_process_group, handle.process)
-        await asyncio.to_thread(self._join_event_reader, handle, run_id)
-        self._emit_worker_end_fallback(
+        drained = await asyncio.to_thread(
+            self._join_event_reader,
             handle,
             run_id,
-            status="cancelled",
         )
+        if drained:
+            self._emit_worker_end_fallback(
+                handle,
+                run_id,
+                status="cancelled",
+            )
         scope = handle.scope
         _remove_private_launch_snapshot(
             str(scope.run_store_dir / f".{run_id}.mcp.json"),
@@ -923,12 +928,18 @@ class BackgroundSubAgentSupervisor:
     ) -> BackgroundSubAgentRunRecord | None:
         if handle.cancel_task is not None or handle.process.poll() is None:
             return None
-        await asyncio.to_thread(self._join_event_reader, handle, run_id)
-        if handle.process.returncode != 0:
+        drained = await asyncio.to_thread(
+            self._join_event_reader,
+            handle,
+            run_id,
+        )
+        if drained and not handle.saw_subagent_end:
             self._emit_worker_end_fallback(
                 handle,
                 run_id,
-                status="failed",
+                status=(
+                    "failed" if handle.process.returncode != 0 else "succeeded"
+                ),
             )
         _remove_private_launch_snapshot(
             str(scope.run_store_dir / f".{run_id}.mcp.json"),
@@ -1010,13 +1021,13 @@ class BackgroundSubAgentSupervisor:
                 for line in iter(stream.readline, b""):
                     if not line:
                         break
-                    self._record_worker_event(handle, line, span_id)
+                    forwarded = False
                     try:
                         from ...observability.emitter import (
                             default_emitter,
                         )
 
-                        default_emitter().emit_raw(line)
+                        forwarded = default_emitter().emit_raw(line)
                     except Exception:
                         logger.warning(
                             "background_subagent_event_forward_failed "
@@ -1024,6 +1035,8 @@ class BackgroundSubAgentSupervisor:
                             run_id,
                             exc_info=True,
                         )
+                    if forwarded:
+                        self._record_worker_event(handle, line, span_id)
             except Exception:
                 logger.warning(
                     "background_subagent_event_reader_failed run_id=%s",
@@ -1069,18 +1082,20 @@ class BackgroundSubAgentSupervisor:
         handle.saw_subagent_end = True
 
     @staticmethod
-    def _join_event_reader(handle: _ActiveRun, run_id: str) -> None:
-        """等待读线程读到 EOF；超时只告警，不阻塞进程回收。"""
+    def _join_event_reader(handle: _ActiveRun, run_id: str) -> bool:
+        """等待读线程读到 EOF；返回是否确认已排空。"""
         thread = handle.event_thread
         if thread is None:
-            return
+            return True
         thread.join(timeout=2.0)
         if thread.is_alive():
             logger.warning(
                 "background_subagent_event_reader_still_running run_id=%s",
                 run_id,
             )
+            return False
         handle.event_thread = None
+        return True
 
     @staticmethod
     def _emit_worker_end_fallback(

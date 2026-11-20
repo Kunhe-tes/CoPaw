@@ -182,6 +182,9 @@ async def _assert_projected_run_available(
     @api.middleware("http")
     async def bind_source(http_request: Request, call_next):
         http_request.state.source_id = "runner-integration"
+        http_request.state.effective_tenant_id = records[0]["scope"][
+            "tenant_id"
+        ]
         return await call_next(http_request)
 
     api.include_router(observability_router)
@@ -870,6 +873,9 @@ async def test_model_failure_projects_through_mysql_and_authorized_api(
         @api.middleware("http")
         async def bind_source(request: Request, call_next):
             request.state.source_id = "runner-integration"
+            request.state.effective_tenant_id = records[0]["scope"][
+                "tenant_id"
+            ]
             return await call_next(request)
 
         api.include_router(observability_router)

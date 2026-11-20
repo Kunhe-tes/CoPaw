@@ -1853,6 +1853,7 @@ class ToolGuardMixin:
             tool_name,
             tool_input,
         ):
+            self._hook_short_circuit_reason = "shell_policy_denied"
             return tool_call, tool_input, True, None
         if pre_hook_result.decision in {
             HookDecision.BLOCK,
@@ -1863,6 +1864,7 @@ class ToolGuardMixin:
                 tool_name,
                 pre_hook_result.reason,
             )
+            self._hook_short_circuit_reason = "hook_denied"
             return tool_call, tool_input, True, result
         if (
             pre_hook_result.decision == HookDecision.ASK
@@ -1879,6 +1881,7 @@ class ToolGuardMixin:
                     tool_name,
                     "Background SubAgent calls cannot await interactive approval.",
                 )
+                self._hook_short_circuit_reason = "hook_denied"
                 return tool_call, tool_input, True, result
             result = await self._acting_with_approval(
                 tool_call,
@@ -1893,6 +1896,7 @@ class ToolGuardMixin:
                     pre_hook_result,
                 ),
             )
+            self._hook_short_circuit_reason = "hook_waiting_approval"
             return tool_call, tool_input, True, result
         if pre_hook_result.decision == HookDecision.ASK:
             await self._record_tool_hook_result(
@@ -1967,6 +1971,7 @@ class ToolGuardMixin:
             )
             return None
 
+        self._hook_short_circuit_reason = "hook_denied"
         (
             tool_call,
             tool_input,
@@ -1974,10 +1979,19 @@ class ToolGuardMixin:
             hook_result,
         ) = await self._apply_pre_tool_hook(tool_call, tool_name, tool_input)
         if hook_handled:
+            hook_reason = getattr(
+                self,
+                "_hook_short_circuit_reason",
+                "hook_denied",
+            )
             self._observe_guard_decision(
                 tool_call,
-                "rejected",
-                reason_code="hook_denied",
+                (
+                    "waiting_approval"
+                    if hook_reason == "hook_waiting_approval"
+                    else "rejected"
+                ),
+                reason_code=hook_reason,
             )
             return hook_result
         if await self._acting_policy_denial(
@@ -2080,17 +2094,18 @@ class ToolGuardMixin:
                 },
             )
             if span is not None:
-                attributes = {
-                    "status": status,
-                    "technical_status": (
-                        "ERROR" if status == "failed" else "OK"
-                    ),
-                    "has_error": status == "failed",
-                    "phase": "tool_guard",
-                }
-                if reason_code is not None:
-                    attributes["reason_code"] = reason_code
-                span.end(**attributes)
+                extra = (
+                    {"reason_code": reason_code}
+                    if reason_code is not None
+                    else {}
+                )
+                span.end(
+                    status=status,
+                    technical_status=("ERROR" if status == "failed" else "OK"),
+                    has_error=status == "failed",
+                    phase="tool_guard",
+                    **extra,
+                )
         except Exception:
             return
 

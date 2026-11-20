@@ -197,6 +197,21 @@ async def run_worker(launch_spec_path: Path) -> int:
         return 1
     finally:
         _remove_private_snapshot_paths(launch_spec)
+        _shutdown_worker_observability()
+
+
+def _shutdown_worker_observability() -> None:
+    """排空 worker 自己的 emitter，避免退出时丢失尾事件。"""
+    try:
+        emitter = getattr(_OBSERVABILITY, "_provided_emitter", None)
+        if emitter is not None:
+            emitter.close()
+            return
+        from swe.observability.emitter import shutdown_default_emitter
+
+        shutdown_default_emitter()
+    except Exception:
+        pass
 
 
 async def _run_with_subagent_span(
