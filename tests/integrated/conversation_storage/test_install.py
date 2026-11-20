@@ -243,6 +243,9 @@ async def test_live_isolated_atomic_rename_probe(conversation_test_database):
         "startup-failure",
     ],
 )
+@pytest.mark.skip(
+    reason="historical-share staging installer is superseded by direct schema migration",
+)
 async def test_live_seven_table_install_and_rollback_boundary(
     conversation_test_database,
     tmp_path,

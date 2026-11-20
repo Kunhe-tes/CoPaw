@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CLI verification preserves complete SQL rows and manifest on both outcomes."""
+"""CLI verification preserves data and records audit evidence."""
 
 import asyncio
 import json
@@ -31,9 +31,9 @@ from tests.integrated.conversation_storage.test_migration_lock_loss_mysql import
 SNAPSHOT_TABLES = (
     *TABLES,
     "swe_chat_shares",
-    "swe_conversation_migration_jobs",
     "swe_conversation_migration_entries",
 )
+JOB_MUTABLE_COLUMNS = ("verification_text", "updated_at")
 
 
 async def _snapshot(database):
@@ -45,6 +45,20 @@ async def _snapshot(database):
             key=lambda row: repr(sorted(row.items())),
         )
         for table in SNAPSHOT_TABLES
+    }
+
+
+async def _migration_job(database):
+    return await database.fetch_one(
+        "SELECT * FROM swe_conversation_migration_jobs",
+    )
+
+
+def _without_mutable_job_fields(row):
+    return {
+        key: value
+        for key, value in row.items()
+        if key not in JOB_MUTABLE_COLUMNS
     }
 
 
@@ -61,17 +75,6 @@ async def _import_fixture(database, tmp_path):
         source, nas = _source(tmp_path / str(index))
         sources.append(source)
         token = "readonly-share-" + str(index)
-        snapshot = source / "default/chat_shares" / (token + ".json")
-        source.chmod(0o755)
-        snapshot.parent.mkdir(parents=True)
-        snapshot.write_text(
-            json.dumps(
-                {
-                    "chat_name": "readonly share",
-                    "messages": [{"role": "user", "content": "share body"}],
-                },
-            ),
-        )
         for path in source.rglob("*"):
             path.chmod(0o555 if path.is_dir() else 0o444)
         source.chmod(0o555)
@@ -125,7 +128,7 @@ async def _import_fixture(database, tmp_path):
         + ",".join(SHARE_FIELDS)
         + " FROM swe_chat_shares ORDER BY token",
     )
-    report = discover_services(services, shares=original_shares)
+    report = discover_services(services)
     assert report["ready"], report["blockers"]
     manifest = freeze_discovery(
         report,
@@ -154,7 +157,7 @@ async def _import_fixture(database, tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("late_source_change", [False, True])
-async def test_cli_verify_preserves_all_rows_shares_and_manifest(
+async def test_cli_verify_preserves_data_and_records_audit_evidence(
     conversation_test_database,
     tmp_path,
     monkeypatch,
@@ -171,6 +174,8 @@ async def test_cli_verify_preserves_all_rows_shares_and_manifest(
     )
     before = await _snapshot(database)
     assert all(before[table] for table in SNAPSHOT_TABLES)
+    before_job = await _migration_job(database)
+    assert before_job is not None
     manifest_bytes = Path(manifest_path).read_bytes()
     manifest_data = json.loads(manifest_bytes)
     assert not manifest_data.get("source_change_blockers")
@@ -218,6 +223,16 @@ async def test_cli_verify_preserves_all_rows_shares_and_manifest(
             assert result.exit_code == 0, result.output
             assert json.loads(result.stdout)["passed"] is True
         assert await _snapshot(database) == before
+        after_job = await _migration_job(database)
+        assert after_job is not None
+        assert _without_mutable_job_fields(
+            after_job,
+        ) == _without_mutable_job_fields(
+            before_job,
+        )
+        evidence = json.loads(after_job["verification_text"])
+        assert evidence["verification_level"] == "fast"
+        assert evidence["verification_results"]["fast"]["passed"] is True
         assert Path(manifest_path).read_bytes() == manifest_bytes
         assert json.loads(Path(manifest_path).read_bytes()) == manifest_data
         current_shares = await database.fetch_all(

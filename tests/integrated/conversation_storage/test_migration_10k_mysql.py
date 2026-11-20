@@ -152,16 +152,6 @@ def _make_dataset(root, count):
         (workspace / "chats.json").write_text(
             json.dumps({"chats": chats}),
         )
-    snapshot = source / "default" / "chat_shares" / (root.name + "-token.json")
-    snapshot.parent.mkdir(parents=True)
-    snapshot.write_text(
-        json.dumps(
-            {
-                "chat_name": "benchmark shared",
-                "messages": [{"role": "user", "content": "shared content"}],
-            },
-        ),
-    )
     config_path = source_service / "config.json"
     config_path.write_text(json.dumps({"agents": {"profiles": profiles}}))
     for path in source.rglob("*"):
@@ -528,25 +518,7 @@ async def _prepare_benchmark(database, tmp_path, workers):
         }
         for index, (source, nas) in enumerate(datasets)
     ]
-    for index in range(2):
-        token = "service" + str(index) + "-token"
-        await database.execute(
-            "INSERT INTO swe_chat_shares (token,chat_id,creator_id,tenant_id,snapshot_key,created_at,access_count,last_access_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-            (
-                token,
-                str(uuid5(NAMESPACE_URL, "migration-benchmark/0")),
-                "alice",
-                "default",
-                "default/chat_shares/" + token + ".json",
-                "2026-11-01 00:00:00",
-                7,
-                None,
-            ),
-        )
-    shares = await database.fetch_all(
-        "SELECT token,chat_id,creator_id,tenant_id,snapshot_key,created_at,access_count,last_access_at FROM swe_chat_shares",
-    )
-    return datasets, services, shares
+    return datasets, services, []
 
 
 def _progress(stage, workers):
@@ -632,7 +604,7 @@ def _dataset_metrics(datasets):
             _content_digest(source, nas) for source, nas in datasets
         ],
         "services": len(datasets),
-        "shares": len(datasets),
+        "shares": 0,
         "long_tail_sessions": len(datasets),
         "archived_messages": 32 * len(datasets),
         "independent_sessions": len(datasets),
