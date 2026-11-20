@@ -89,3 +89,37 @@ async def test_daemon_approve_filters_by_user(monkeypatch) -> None:
         )
     assert "没有待审批请求" in message
     assert pending.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_daemon_approve_empty_identity_never_approves_owned(
+    monkeypatch,
+) -> None:
+    """空身份必须严格匹配空 owner，不能批准有归属人的审批。"""
+    service = ApprovalService()
+    monkeypatch.setattr(
+        "swe.app.approvals.service._approval_service",
+        service,
+    )
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="victim",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+        )
+        by_id = await daemon_commands.run_daemon_approve(
+            daemon_commands.DaemonContext(),
+            session_id="session-1",
+            request_id=pending.request_id,
+            user_id="",
+        )
+        fifo = await daemon_commands.run_daemon_approve(
+            daemon_commands.DaemonContext(),
+            session_id="session-1",
+            user_id="",
+        )
+    assert pending.status == "pending"
+    assert "审批请求不存在" in by_id
+    assert "没有待审批请求" in fifo

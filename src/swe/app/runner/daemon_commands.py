@@ -162,7 +162,8 @@ async def run_daemon_approve(
         from ...security.tool_guard.approval import ApprovalDecision
 
         svc = get_approval_service()
-        owner_filter = user_id or None
+        # 空身份必须按严格空值匹配，不能退化为“不过滤用户”。
+        owner_filter = str(user_id or "")
         if request_id:
             pending = await svc.get_request(
                 request_id,
