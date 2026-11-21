@@ -211,6 +211,25 @@ async def test_batch_tickets_read_packet_limit_from_pinned_lease():
     assert result["a"]["target_id"] == 90
 
 
+async def test_batch_tickets_reuse_pinned_packet_limit():
+    class CountedDatabase(TicketDatabase):
+        def __init__(self):
+            super().__init__()
+            self.acquires = 0
+
+        @asynccontextmanager
+        async def acquire(self):
+            self.acquires += 1
+            yield self
+
+    db = CountedDatabase()
+    journal = MigrationJournal(db, manifest())
+    await journal.allocate_many("chat", ["a"])
+    await journal.allocate_many("chat", ["b"])
+
+    assert db.acquires == 1
+
+
 @pytest.mark.parametrize("kind", ["session", "chat", "turn"])
 async def test_entity_batches_resume_actual_ids_with_bounded_transactions(
     kind,

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Compare real domain batch generation through both publication paths."""
 
+import asyncio
 from copy import deepcopy
 from hashlib import sha256
 from types import SimpleNamespace
@@ -433,6 +434,78 @@ async def test_workspace_batches_identity_and_publication_tickets(tmp_path):
         for kind, positions in record.batch_allocations
         if kind == "publication"
     )
+
+
+async def test_single_workspace_publication_group_is_bounded():
+    target = SimpleNamespace(
+        schema="test_conversation_fixture",
+        migration_id="migration",
+    )
+    importer = ParallelWorkspaceImporter(
+        SimpleNamespace(manifest_data={}),
+        target,
+        batch_size=2,
+    )
+    active = peak = 0
+
+    async def publish(position, *_args, **_kwargs):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return position
+
+    importer._publish = publish
+    scope = WorkspaceScope.from_values(["svc", "tenant", "source", "agent"])
+    results = await importer._publish_many(
+        [
+            ("first", [], [], None),
+            ("second", [], [], None),
+            ("third", [], [], None),
+        ],
+        scope,
+    )
+
+    assert results == ["first", "second", "third"]
+    assert peak == 2
+
+
+async def test_single_workspace_publication_failure_cancels_peers():
+    target = SimpleNamespace(
+        schema="test_conversation_fixture",
+        migration_id="migration",
+    )
+    importer = ParallelWorkspaceImporter(
+        SimpleNamespace(manifest_data={}),
+        target,
+        batch_size=2,
+    )
+    started, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def publish(position, *_args, **_kwargs):
+        if position == "failed":
+            await started.wait()
+            raise RuntimeError("publication failed")
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    importer._publish = publish
+    scope = WorkspaceScope.from_values(["svc", "tenant", "source", "agent"])
+    with pytest.raises(RuntimeError, match="publication failed"):
+        await importer._publish_many(
+            [
+                ("running", [], [], None),
+                ("failed", [], [], None),
+            ],
+            scope,
+        )
+
+    assert cancelled.is_set()
 
 
 async def test_multiple_session_chat_batches_preserve_associations_and_retry():

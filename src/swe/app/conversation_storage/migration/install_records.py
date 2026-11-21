@@ -631,26 +631,27 @@ class OfflineImportStore(PublicationStore):
 
     async def verify_blocks(self, row, blocks):
         operation = row["operation_key"].decode()
-        index = await self._nas_io(
-            operation,
-            self.bundles.inspect,
-            BundleStore.validate_publication_locator(row),
-            expected_length=row["byte_length"],
-        )
-        for block in blocks:
-            extent = index.blocks.get(block.name)
-            if extent is None or extent.kind != block.kind:
-                raise IntegrityError(
-                    "original migration bundle block identity differs",
+        relative_path = BundleStore.validate_publication_locator(row)
+
+        def read_blocks():
+            with self.bundles.open_reader(
+                relative_path,
+                expected_length=row["byte_length"],
+            ) as reader:
+                extents = []
+                for block in blocks:
+                    extent = reader.index.blocks.get(block.name)
+                    if extent is None or extent.kind != block.kind:
+                        raise IntegrityError(
+                            "original migration bundle block identity differs",
+                        )
+                    extents.append(extent)
+                return reader.index, tuple(
+                    reader.read_extents((extent,))[0] for extent in extents
                 )
-            raw = await self._nas_io(
-                operation,
-                self.bundles.read_extent,
-                index.relative_path,
-                extent.offset,
-                extent.length,
-                expected_length=index.byte_length,
-            )
+
+        index, bodies = await self._nas_io(operation, read_blocks)
+        for block, raw in zip(blocks, bodies):
             if raw != block.content:
                 if block.kind != "recovery" or not await self._same_recovery(
                     row,

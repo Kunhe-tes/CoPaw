@@ -88,6 +88,7 @@ class MigrationJournal:
         self._known_scopes = None
         self.active_tenant = None
         self._allocation_owner = None
+        self._packet_limit = None
         self.frozen_bindings_data = None
         self.recovery = recovery
 
@@ -393,11 +394,12 @@ class MigrationJournal:
         if not keys:
             return {}
         # packet 限额来自命名锁固定的物理租约，连接门面本身无此属性。
-        async with self.db.acquire() as session:
-            packet_limit = session.max_allowed_packet
+        if self._packet_limit is None:
+            async with self.db.acquire() as session:
+                self._packet_limit = session.max_allowed_packet
         result = {}
         extra = len(_json(list(scope.values)).encode()) + 1024 if scope else 0
-        for chunk in chunks(packet_limit, keys, extra_bytes=extra):
+        for chunk in chunks(self._packet_limit, keys, extra_bytes=extra):
             assignments = await allocate_chunk(
                 self,
                 kind,

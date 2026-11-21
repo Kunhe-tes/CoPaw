@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Offline semantic extraction and bounded immutable migration batches."""
 
+import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -414,6 +415,21 @@ class ConversationImporter:
     async def _prepare_publications(self, positions, scope):
         """旧 manifest 维持首次使用时分配 publication 的行为。"""
 
+    async def _publish_many(self, publications, scope):
+        return [
+            await self._publish(position, scope, rows, blocks, spec=spec)
+            for position, rows, blocks, spec in publications
+        ]
+
+    async def _publish_prepared(self, publications, scope):
+        if not publications:
+            return []
+        await self._prepare_publications(
+            [publication[0] for publication in publications],
+            scope,
+        )
+        return await self._publish_many(publications, scope)
+
     async def _set_batch_state(self, position, state):
         self.manifest.set_batch_state(position, state)
 
@@ -757,10 +773,13 @@ class ConversationImporter:
         from ..chat_mutations import split_metadata, validate_light_metadata
         from swe.app.runner.models import ChatSpec
         from swe.app.runner.expert_binding import read_expert_binding
+        from .parallel import SQL_BATCH_LIMIT
         import json
 
         sessions = workspace["sessions"]
         identity_batch_size = self._identity_batch_size()
+        publish_batch_size = min(identity_batch_size, SQL_BATCH_LIMIT)
+        publications = []
         for session_index, session in enumerate(sessions):
             if session_index % identity_batch_size == 0:
                 assigned_sessions = await self._allocate_identities(
@@ -852,7 +871,18 @@ class ConversationImporter:
                 }
                 rows.append({"table": "chats", "values": row})
                 blocks.append(_block(block, "content_meta", content))
-            await self._publish(position + "/identities", scope, rows, blocks)
+            publications.append(
+                (
+                    position + "/identities",
+                    rows,
+                    blocks,
+                    None,
+                ),
+            )
+            if len(publications) >= publish_batch_size:
+                await self._publish_prepared(publications, scope)
+                publications.clear()
+        await self._publish_prepared(publications, scope)
 
     async def _session(self, session, workspace, scope):
         from ..bundle import BundleBlock
@@ -1062,32 +1092,28 @@ class ConversationImporter:
                     },
                 },
             )
-        for index, row in enumerate(rows):
-            if index % self.batch_size == 0:
-                await self._prepare_publications(
-                    [
+        for start in range(0, len(rows), self.batch_size):
+            batch = rows[start : start + self.batch_size]
+            await self._publish_prepared(
+                [
+                    (
                         session["position"]
                         + "/turn-identity:"
-                        + str(item["values"]["id"])
-                        for item in rows[index : index + self.batch_size]
-                    ],
-                    scope,
-                )
-            await self._publish(
-                session["position"]
-                + "/turn-identity:"
-                + str(row["values"]["id"]),
+                        + str(row["values"]["id"]),
+                        [row],
+                        [],
+                        ImportBatch(
+                            locks={
+                                "sessions": [sid],
+                                "chats": [row["values"]["chat_id"]],
+                            },
+                            session_id=sid,
+                            chat_id=row["values"]["chat_id"],
+                        ),
+                    )
+                    for row in batch
+                ],
                 scope,
-                [row],
-                [],
-                spec=ImportBatch(
-                    locks={
-                        "sessions": [sid],
-                        "chats": [row["values"]["chat_id"]],
-                    },
-                    session_id=sid,
-                    chat_id=row["values"]["chat_id"],
-                ),
             )
 
     async def _import_turn_recovery_records(
@@ -1148,50 +1174,54 @@ class ConversationImporter:
                     _block(block, "recovery", {"turn_states": {key: value}}),
                 )
             if rows:
-                await self._prepare_publications(
+                records = list(
+                    zip(
+                        [
+                            (key, value)
+                            for key, value in turns[
+                                start : start + self.batch_size
+                            ]
+                            if chats.get(value.get("chat_id")) is not None
+                        ],
+                        rows,
+                        blocks,
+                    ),
+                )
+                # Keep one point-lookup publication per Turn while batching
+                # independent commit paths.
+                await self._publish_prepared(
                     [
-                        session["position"]
-                        + "/turn-record:"
-                        + str(row["values"]["id"])
-                        for row in rows
+                        (
+                            session["position"]
+                            + "/turn-record:"
+                            + str(row["values"]["id"]),
+                            [],
+                            [
+                                type(block)(
+                                    "recovery",
+                                    "recovery",
+                                    block.content,
+                                ),
+                            ],
+                            ImportBatch(
+                                updates=[row],
+                                locks={
+                                    "sessions": [sid],
+                                    "chats": [chats[value["chat_id"]]],
+                                    "turns": [row["values"]["id"]],
+                                },
+                                session_id=sid,
+                                chat_id=chats[value["chat_id"]],
+                                turn_id=row["values"]["id"],
+                                commit_plan=CommitPlan(
+                                    recovery_block="recovery",
+                                ),
+                            ),
+                        )
+                        for (_key, value), row, block in records
                     ],
                     scope,
                 )
-                # Current Session adapter looks for the recovery block; one Turn
-                # per publication preserves bounded point lookup and original ID.
-                for (key, value), row, block in zip(
-                    [
-                        (key, value)
-                        for key, value in turns[
-                            start : start + self.batch_size
-                        ]
-                        if chats.get(value.get("chat_id")) is not None
-                    ],
-                    rows,
-                    blocks,
-                ):
-                    chat = chats[value["chat_id"]]
-                    block = type(block)("recovery", "recovery", block.content)
-                    await self._publish(
-                        session["position"]
-                        + "/turn-record:"
-                        + str(row["values"]["id"]),
-                        scope,
-                        [],
-                        [block],
-                        spec=ImportBatch(
-                            updates=[row],
-                            locks={
-                                "sessions": [sid],
-                                "chats": [chat],
-                                "turns": [row["values"]["id"]],
-                            },
-                            session_id=sid,
-                            chat_id=chat,
-                            turn_id=row["values"]["id"],
-                            commit_plan=CommitPlan(recovery_block="recovery"),
-                        ),
-                    )
 
     def _session_recovery_updates(
         self,
@@ -1285,7 +1315,8 @@ class ConversationImporter:
 
     async def _root_and_turns(self, session, scope, chats, history_high):
         sid = self.session_ids[session["position"]]
-        state = deepcopy(session["legacy"]["state"])
+        # project_state copies before replacing history with references.
+        state = session["legacy"]["state"]
         await self._import_turn_recovery_records(
             session,
             scope,
@@ -1689,6 +1720,37 @@ class ParallelWorkspaceImporter(ConversationImporter):
 
     def _identity_batch_size(self):
         return self.batch_size
+
+    async def _publish_many(self, publications, scope):
+        from .parallel import SQL_BATCH_LIMIT
+
+        if len(publications) <= 1:
+            return await super()._publish_many(publications, scope)
+        width = min(self.batch_size, SQL_BATCH_LIMIT)
+        slots = asyncio.Semaphore(width)
+
+        async def publish(publication):
+            position, rows, blocks, spec = publication
+            async with slots:
+                return await self._publish(
+                    position,
+                    scope,
+                    rows,
+                    blocks,
+                    spec=spec,
+                )
+
+        tasks = [
+            asyncio.create_task(publish(publication))
+            for publication in publications
+        ]
+        try:
+            return await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
     async def _allocate_identities(self, kind, positions):
         assignments = await self.context.journal(

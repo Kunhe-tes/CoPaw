@@ -161,6 +161,36 @@ async def test_resume_retains_exact_legacy_plan_bytes(tmp_path, committed):
         retained_plan(store.bundles, row, narrow, changed)
 
 
+async def test_verify_blocks_uses_one_safe_reader(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from swe.app.conversation_storage.migration.install_records import (
+        plan_block,
+    )
+
+    store, operation, _ = await prepared(tmp_path)
+    row = await store.get(operation.operation_key)
+    stored = await store._load_plan(row)
+    block = plan_block(
+        store.target,
+        stored["rows"],
+        stored["updates"],
+        stored["locks"],
+    )
+    original = store.bundles.open_reader
+    calls = []
+
+    @contextmanager
+    def counted(*args, **kwargs):
+        calls.append((args, kwargs))
+        with original(*args, **kwargs) as reader:
+            yield reader
+
+    monkeypatch.setattr(store.bundles, "open_reader", counted)
+    await store.verify_blocks(row, [block])
+
+    assert len(calls) == 1
+
+
 async def test_message_batches_lock_shared_session_associations():
     from agentscope.message import Msg
 
