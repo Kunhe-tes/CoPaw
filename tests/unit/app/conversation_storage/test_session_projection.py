@@ -234,6 +234,42 @@ def test_projection_rejects_unknown_paths_and_duplicate_inline_turn_state():
         hydrate_state(value, lambda ref: {})
 
 
+def test_hydration_rejects_occurrences_before_resolving_references():
+    from swe.app.conversation_storage.errors import IntegrityError
+
+    resolved = []
+    value = {
+        "format": "swe-recovery-projection",
+        "version": 1,
+        "state": {"agent": {"memory": {"content": []}}},
+        "lists": [
+            {
+                "path": ["agent", "memory", "content"],
+                "entries": [
+                    {
+                        "ref": {"publication_id": 1},
+                        "shape": "dict",
+                        "marks": None,
+                    },
+                ],
+            },
+        ],
+        "turns": [],
+        "message_directory": [
+            {
+                "sequence": 1,
+                "session_order": 1,
+                "layer": "memory",
+                "source_occurrence_no": 1,
+            },
+        ],
+    }
+
+    with pytest.raises(IntegrityError, match="occurrence"):
+        hydrate_state(value, lambda ref: resolved.append(ref) or {})
+    assert resolved == []
+
+
 def test_request_projection_cache_is_revision_scoped_and_detached():
     from swe.app.conversation_storage.projection_cache import (
         cache_scope,

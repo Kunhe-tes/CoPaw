@@ -116,11 +116,12 @@ async def test_archive_route_uses_injected_indexed_reader(tmp_path):
     )
 
 
-async def test_archive_page_missing_occurrence_is_integrity_error(
+async def test_archive_page_missing_occurrence_is_storage_error(
     tmp_path,
     monkeypatch,
 ):
     from contextlib import asynccontextmanager
+    from fastapi import HTTPException
     from swe.app.conversation_storage import archive_bundle_reader
 
     store = history(tmp_path)
@@ -166,8 +167,11 @@ async def test_archive_page_missing_occurrence_is_integrity_error(
         read_archive_bundle,
     )
 
-    with pytest.raises(IntegrityError, match="occurrence"):
-        await store.archive_page("chat", limit=1)
+    with pytest.raises(HTTPException) as error:
+        await api._indexed_history_call(store.archive_page, "chat", limit=1)
+
+    assert error.value.status_code == 503
+    assert error.value.detail == "Conversation storage unavailable"
 
 
 async def test_task_projection_envelope_preserves_exact_run_index(tmp_path):

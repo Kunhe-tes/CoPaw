@@ -29,6 +29,8 @@ from .install_records import (
     OfflineImportStore,
 )
 
+MESSAGE_BATCH_MARKER = "/messages:"
+
 
 def _publication_identity(row, assignment):
     actual = (
@@ -66,6 +68,8 @@ def _read_publication_plan(
     migration_id,
     schema,
     memory_allowance,
+    *,
+    position=None,
 ):
     path = BundleStore.validate_publication_locator(row)
     if path != assignment["relative_path"]:
@@ -115,7 +119,13 @@ def _read_publication_plan(
             for value in values.values():
                 if isinstance(value, dict) and set(value) == {"block", "part"}:
                     required_blocks.add(value["block"])
-        archive = _validate_message_blocks(reader, plan, row, memory_allowance)
+        archive, message_span = _validate_message_blocks(
+            reader,
+            plan,
+            row,
+            memory_allowance,
+            position=position,
+        )
         if not required_blocks.issubset(reader.index.blocks):
             raise IntegrityError(
                 "committed publication block set is incomplete",
@@ -126,13 +136,30 @@ def _read_publication_plan(
                 raise ValueError(
                     "fast verification SQL evidence exceeds memory allowance",
                 )
-        return expected, len(plan["rows"]), len(plan["updates"]), archive
+        return (
+            expected,
+            len(plan["rows"]),
+            len(plan["updates"]),
+            archive,
+            message_span,
+        )
 
 
-def _validate_message_blocks(reader, plan, publication, allowance):
+def _validate_message_blocks(
+    reader,
+    plan,
+    publication,
+    allowance,
+    *,
+    position=None,
+):
     blocks = reader.index.blocks
     directory = blocks.get("message_directory")
     bodies = blocks.get("message_bodies")
+    batch = _message_batch(position)
+    if batch is not None and (directory is None or bodies is None):
+        raise IntegrityError("session message batch blocks are missing")
+    message_span = None
     if (directory is None) != (bodies is None):
         raise IntegrityError(
             "message directory and body blocks must be paired",
@@ -152,11 +179,18 @@ def _validate_message_blocks(reader, plan, publication, allowance):
         if len(entries) != len(messages):
             raise IntegrityError("message directory and body counts differ")
         validate_runtime_occurrences(entries)
-        for position, entry in enumerate(entries):
+        if batch is not None:
+            prefix, start = batch
+            if not entries or entries[0]["sequence"] != start + 1:
+                raise IntegrityError(
+                    "session message batch occurrence start differs",
+                )
+            message_span = (prefix, start, len(entries))
+        for offset, entry in enumerate(entries):
             if entry["body"] != {
                 "publication_id": "self",
                 "block_name": "message_bodies",
-                "position": position,
+                "position": offset,
             }:
                 raise IntegrityError("message directory body locator differs")
             source_occurrence = entry.get("source_occurrence_no")
@@ -176,7 +210,7 @@ def _validate_message_blocks(reader, plan, publication, allowance):
             raise IntegrityError("message directory sequence has gaps")
     extent = blocks.get("archive_manifest")
     if extent is None:
-        return None
+        return None, message_span
     if extent.kind != "archive_manifest":
         raise IntegrityError("archive manifest block kind differs")
     manifest = decode_archive_manifest(
@@ -206,7 +240,7 @@ def _validate_message_blocks(reader, plan, publication, allowance):
     )
     if dependencies != plan.get("dependencies", []):
         raise IntegrityError("archive manifest dependencies differ")
-    return manifest, values
+    return (manifest, values), message_span
 
 
 def _read_checked(reader, extent, allowance):
@@ -302,6 +336,33 @@ def _batch_scope(position, assignment_scopes):
     raise IntegrityError("migration batch position is invalid")
 
 
+def _message_batch(position):
+    if not isinstance(position, str):
+        return None
+    marker = position.rfind(MESSAGE_BATCH_MARKER)
+    if marker < 0:
+        return None
+    prefix = position[:marker]
+    start_text = position[marker + len(MESSAGE_BATCH_MARKER) :]
+    if (
+        not prefix
+        or not start_text.isascii()
+        or not start_text.isdigit()
+        or str(int(start_text)) != start_text
+    ):
+        raise IntegrityError("session message batch position is invalid")
+    return prefix, int(start_text)
+
+
+def _validate_message_batch_spans(spans):
+    for values in spans.values():
+        expected = 0
+        for start, count in sorted(values):
+            if start != expected:
+                raise IntegrityError("session message batch order differs")
+            expected += count
+
+
 def _merge_expected_rows(expected_by_table, service_unit_key, expected):
     for table, rows in expected.items():
         grouped = expected_by_table.setdefault((service_unit_key, table), {})
@@ -377,6 +438,7 @@ async def verify_fast_publications(
     checked_updates = 0
     checked_records = 0
     seen_paths = set()
+    message_spans = {}
     # A valid message body block can be 8 MiB and decoded JSON needs headroom.
     # Limit concurrent decoders rather than rejecting valid importer output.
     verify_workers = max(
@@ -450,17 +512,23 @@ async def verify_fast_publications(
                         manifest.migration_id,
                         target.schema,
                         allowance,
+                        position=position,
                     )
-                    for _position, store, row, assignment in batch
+                    for position, store, row, assignment in batch
                 ),
             )
             expected_by_table = {}
             archive_checks = []
             for check, result in zip(batch, results):
                 service_unit_key = check[2]["service_unit_key"]
-                expected, rows_count, updates_count, archive = result
+                expected, rows_count, updates_count, archive, message_span = (
+                    result
+                )
                 checked_rows += rows_count
                 checked_updates += updates_count
+                if message_span is not None:
+                    prefix, start, count = message_span
+                    message_spans.setdefault(prefix, []).append((start, count))
                 if archive is not None:
                     archive_checks.append((check, archive))
                 _merge_expected_rows(
@@ -509,6 +577,7 @@ async def verify_fast_publications(
                 checked_records += len(expected)
                 batch_records += len(expected)
         verified_publications += len(chunk)
+    _validate_message_batch_spans(message_spans)
     return {
         "publications": verified_publications,
         "planned_rows": checked_rows,

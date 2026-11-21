@@ -452,6 +452,26 @@ def test_fast_session_directory_validates_runtime_occurrence_identity(change):
         )
 
 
+def test_fast_session_batch_requires_message_blocks():
+    blocks = {
+        "import_plan": SimpleNamespace(
+            kind="import_plan",
+            length=1,
+            name="import_plan",
+        ),
+    }
+    reader = SimpleNamespace(index=SimpleNamespace(blocks=blocks))
+
+    with pytest.raises(IntegrityError, match="blocks are missing"):
+        _validate_message_blocks(
+            reader,
+            {"rows": [], "updates": []},
+            {"id": 5},
+            1,
+            position="session/messages:0",
+        )
+
+
 from swe.app.conversation_storage.migration.parallel import MigrationIO
 from swe.app.conversation_storage.migration.progress import MigrationProgress
 
@@ -996,6 +1016,199 @@ async def test_fast_publication_reads_are_batched_and_bundle_checks_concurrent(
 
     assert database.calls == [128, 1]
     assert result["publications"] == 129
+
+
+def _message_batch_inputs(tmp_path, batches):
+    from swe.app.conversation_storage.message_bundle import (
+        encode_message_bodies,
+        encode_message_directory,
+    )
+
+    migration_id = str(uuid4())
+    bundles = BundleStore(tmp_path / "nas")
+    bundles.root.mkdir()
+    scope = WorkspaceScope("tenant", "source", "agent", service_unit_id="svc")
+    assignments, rows, states = {}, {}, {}
+    for identity, (position, entries) in enumerate(batches.items(), start=1):
+        operation_key = f"{identity:064x}"
+        import_plan = {
+            "version": 1,
+            "migration_id": migration_id,
+            "schema": "test_fast_verify",
+            "rows": [],
+            "updates": [],
+            "locks": {},
+        }
+        bodies = [
+            {
+                "id": "message-" + str(entry["sequence"]),
+                "role": "user",
+                "content": str(entry["sequence"]),
+            }
+            for entry in entries
+        ]
+        directory = [
+            {
+                **entry,
+                "raw_id": body["id"],
+                "layer": "memory",
+                "visible": True,
+                "body": {
+                    "publication_id": "self",
+                    "block_name": "message_bodies",
+                    "position": offset,
+                },
+            }
+            for offset, (entry, body) in enumerate(zip(entries, bodies))
+        ]
+        index = bundles.publish(
+            operation_key,
+            [
+                BundleBlock(
+                    "import_plan",
+                    "import_plan",
+                    json.dumps(import_plan, separators=(",", ":")).encode(),
+                ),
+                BundleBlock(
+                    "message_directory",
+                    "message_directory",
+                    encode_message_directory(directory),
+                ),
+                BundleBlock(
+                    "message_bodies",
+                    "message_bodies",
+                    encode_message_bodies(bodies),
+                ),
+            ],
+            scope=scope,
+            metadata={"operation_key": operation_key},
+        )
+        assignments[position] = {
+            "target_id": identity,
+            "operation_key": operation_key,
+            "relative_path": index.relative_path,
+            "scope": list(scope.values),
+            "scope_kind": "workspace",
+        }
+        rows[identity] = {
+            "id": identity,
+            "scope_kind": "workspace",
+            "service_unit_key": b"svc",
+            "tenant_key": b"tenant",
+            "source_key": b"source",
+            "agent_key": b"agent",
+            "operation_key": operation_key.encode(),
+            "relative_path": index.relative_path,
+            "byte_length": index.byte_length,
+            "state": "committed",
+            "gc_state": "live",
+            "durable_at": "durable",
+        }
+        states[position] = "committed"
+
+    class Database:
+        async def fetch_all(self, _query, params):
+            return [rows[identity] for identity in params]
+
+    manifest = SimpleNamespace(
+        migration_id=migration_id,
+        data={
+            "assignments": {"publication": assignments},
+            "batches": states,
+            "target": {"schema": "test_fast_verify"},
+        },
+    )
+    return Database(), bundles, manifest
+
+
+async def _run_fast_message_batches(database, bundles, manifest):
+    async with MigrationIO(2) as io:
+        return await verify_fast_publications(
+            database,
+            {"svc": bundles},
+            manifest,
+            SimpleNamespace(
+                schema="test_fast_verify",
+                migration_id=manifest.migration_id,
+            ),
+            io=io,
+            io_workers=2,
+            memory_bytes=16 * 1024 * 1024,
+        )
+
+
+async def test_fast_session_message_batches_accept_global_occurrences(
+    tmp_path,
+):
+    batches = {
+        "session/messages:0": [
+            {
+                "sequence": 1,
+                "session_order": 1,
+                "source_occurrence": 0,
+                "source_occurrence_no": 0,
+            },
+            {
+                "sequence": 2,
+                "session_order": 2,
+                "source_occurrence": 1,
+                "source_occurrence_no": 1,
+            },
+        ],
+        "session/messages:2": [
+            {
+                "sequence": 3,
+                "session_order": 3,
+                "source_occurrence": 2,
+                "source_occurrence_no": 2,
+            },
+        ],
+    }
+    database, bundles, manifest = _message_batch_inputs(tmp_path, batches)
+
+    result = await _run_fast_message_batches(database, bundles, manifest)
+
+    assert result["publications"] == 2
+
+
+@pytest.mark.parametrize(
+    "batches",
+    [
+        {
+            "session/messages:1": [
+                {"sequence": 2, "session_order": 2},
+            ],
+        },
+        {
+            "session/messages:0": [
+                {"sequence": 1, "session_order": 1},
+            ],
+            "session/messages:1": [
+                {"sequence": 1, "session_order": 1},
+            ],
+        },
+        {
+            "session/messages:0": [
+                {"sequence": 1, "session_order": 1},
+            ],
+            "session/messages:2": [
+                {"sequence": 3, "session_order": 3},
+            ],
+        },
+    ],
+)
+async def test_fast_session_message_batches_require_global_occurrences(
+    tmp_path,
+    batches,
+):
+    for entries in batches.values():
+        for entry in entries:
+            entry["source_occurrence"] = entry["sequence"] - 1
+            entry["source_occurrence_no"] = entry["sequence"] - 1
+    _database, bundles, manifest = _message_batch_inputs(tmp_path, batches)
+
+    with pytest.raises(IntegrityError, match="occurrence|order"):
+        await _run_fast_message_batches(_database, bundles, manifest)
 
 
 async def _empty_rows():
