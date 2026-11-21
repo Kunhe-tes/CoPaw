@@ -7,6 +7,7 @@ import json
 
 from .bundle import BundleBlock
 from .errors import IntegrityError
+from .message_bundle import validate_runtime_occurrences
 
 FORMAT = "swe-recovery-projection"
 VERSION = 1
@@ -156,6 +157,7 @@ def hydrate_state(value, resolve):
         or not isinstance(value["state"], dict)
     ):
         raise IntegrityError("unsupported recovery projection envelope")
+    validate_runtime_occurrences(value.get("message_directory", []))
     result = deepcopy(value["state"])
     allowed = {path for path, _, _ in LISTS}
     seen = set()

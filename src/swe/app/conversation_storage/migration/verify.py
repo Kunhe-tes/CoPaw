@@ -695,6 +695,7 @@ async def _verify_session_messages(
     from ..message_bundle import (
         decode_message_bodies,
         decode_message_directory,
+        validate_runtime_occurrences,
     )
     from ..bundle import BundleStore
 
@@ -752,6 +753,7 @@ async def _verify_session_messages(
             io=io,
         )
         directory = decode_message_directory(directory_raw)
+        validate_runtime_occurrences(directory)
         bodies = decode_message_bodies(bodies_raw)
         if len(directory) != len(bodies) or seen + len(directory) > len(
             messages,
@@ -973,6 +975,7 @@ async def _verify_archive_rows(
                     body != next(expected)
                     or entry["sequence"] != seen + 1
                     or entry["source_occurrence_no"] != seen
+                    or entry["source_occurrence"] != seen
                 ):
                     raise ValueError("archive message order/body differs")
                 seen += 1

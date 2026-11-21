@@ -14,6 +14,7 @@ from ..message_bundle import (
     decode_archive_manifest,
     decode_message_bodies,
     decode_message_directory,
+    validate_runtime_occurrences,
 )
 from ..reference_queries import iter_reference_rows
 from .archive_verification import (
@@ -150,6 +151,7 @@ def _validate_message_blocks(reader, plan, publication, allowance):
         )
         if len(entries) != len(messages):
             raise IntegrityError("message directory and body counts differ")
+        validate_runtime_occurrences(entries)
         for position, entry in enumerate(entries):
             if entry["body"] != {
                 "publication_id": "self",
@@ -157,7 +159,11 @@ def _validate_message_blocks(reader, plan, publication, allowance):
                 "position": position,
             }:
                 raise IntegrityError("message directory body locator differs")
-            if entry.get("source_occurrence_no") != entry["sequence"] - 1:
+            source_occurrence = entry.get("source_occurrence_no")
+            if (
+                source_occurrence != entry["sequence"] - 1
+                or entry.get("source_occurrence") != source_occurrence
+            ):
                 raise IntegrityError(
                     "message directory occurrence numbering differs",
                 )
@@ -657,6 +663,7 @@ def _verify_chunk_directory(
     if len(entries) != last - first + 1 or any(
         entry["sequence"] != first + position
         or entry.get("source_occurrence_no") != first + position - 1
+        or entry.get("source_occurrence") != entry.get("source_occurrence_no")
         or entry.get("chat_id") != chat_id
         or entry.get("epoch") != epoch
         for position, entry in enumerate(entries)

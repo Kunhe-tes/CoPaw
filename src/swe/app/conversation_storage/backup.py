@@ -535,6 +535,7 @@ def _recovery_payload(
     offset=None,
     length=None,
 ):
+    from .message_bundle import validate_runtime_occurrences
     from .projection_references import references
     from .session_projection import hydrate_state, is_projection
 
@@ -626,6 +627,7 @@ def _recovery_payload(
         return payload
 
     if is_projection(value):
+        validate_runtime_occurrences(value.get("message_directory", []))
         for ref in references(value):
             resolve(ref)
     return hydrate_state(value, resolve)

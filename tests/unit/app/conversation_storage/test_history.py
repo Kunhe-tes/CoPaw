@@ -116,6 +116,60 @@ async def test_archive_route_uses_injected_indexed_reader(tmp_path):
     )
 
 
+async def test_archive_page_missing_occurrence_is_integrity_error(
+    tmp_path,
+    monkeypatch,
+):
+    from contextlib import asynccontextmanager
+    from swe.app.conversation_storage import archive_bundle_reader
+
+    store = history(tmp_path)
+    store._chat = AsyncMock(
+        return_value={
+            "id": 2,
+            "session_id": 1,
+            "history_high": 1,
+            "epoch": 0,
+        },
+    )
+    boundary = {
+        "id": 3,
+        "archive_first_order": 1,
+        "archive_last_order": 1,
+    }
+
+    @asynccontextmanager
+    async def transaction():
+        yield
+
+    store.db = SimpleNamespace(
+        transaction=transaction,
+        fetch_all=AsyncMock(return_value=[boundary]),
+    )
+
+    async def read_archive_bundle(*_args, **_kwargs):
+        return SimpleNamespace(
+            entries=(
+                {
+                    "sequence": 1,
+                    "raw_id": "message",
+                    "role": "user",
+                    "message": {"id": "message", "role": "user"},
+                },
+            ),
+            pins=SimpleNamespace(finish=AsyncMock()),
+        )
+
+    monkeypatch.setattr(
+        archive_bundle_reader,
+        "read_archive_bundle",
+        read_archive_bundle,
+    )
+
+    with pytest.raises(IntegrityError, match="occurrence"):
+        await store.archive_page("chat", limit=1)
+
+
 async def test_task_projection_envelope_preserves_exact_run_index(tmp_path):
     store = history(tmp_path)
     msg = Msg("assistant", "answer", "assistant")

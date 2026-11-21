@@ -41,6 +41,7 @@ def test_fast_archive_chunk_checks_range_and_chat(tmp_path):
         "sequence": 8,
         "raw_id": "m",
         "layer": "archive",
+        "source_occurrence": 7,
         "source_occurrence_no": 7,
         "visible": True,
         "chat_id": 3,
@@ -111,6 +112,7 @@ def test_archive_chunk_read_opens_bundle_once(tmp_path, monkeypatch):
         "sequence": 1,
         "raw_id": "message",
         "layer": "archive",
+        "source_occurrence": 0,
         "source_occurrence_no": 0,
         "visible": True,
         "body": {
@@ -329,6 +331,7 @@ def test_fast_checks_directory_geometry_and_boundary_dependencies():
         "sequence": 1,
         "raw_id": "m",
         "layer": "archive",
+        "source_occurrence": 0,
         "source_occurrence_no": 0,
         "visible": True,
         "body": body,
@@ -392,6 +395,61 @@ def test_fast_checks_directory_geometry_and_boundary_dependencies():
     payloads["message_directory"] = encode_message_directory([entry])
     with pytest.raises(IntegrityError, match="locator"):
         _validate_message_blocks(reader, plan, {"id": 5}, allowance)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"session_order": 2},
+        {"source_occurrence": 1},
+        {"source_occurrence_missing": True},
+    ],
+)
+def test_fast_session_directory_validates_runtime_occurrence_identity(change):
+    from swe.app.conversation_storage.message_bundle import (
+        encode_message_bodies,
+        encode_message_directory,
+    )
+
+    entry = {
+        "sequence": 1,
+        "session_order": 1,
+        "raw_id": "m",
+        "layer": "memory",
+        "source_occurrence": 0,
+        "source_occurrence_no": 0,
+        "visible": True,
+        "body": {
+            "publication_id": "self",
+            "block_name": "message_bodies",
+            "position": 0,
+        },
+    }
+    if change.get("source_occurrence_missing"):
+        entry.pop("source_occurrence")
+    else:
+        entry.update(change)
+    payloads = {
+        "message_directory": encode_message_directory([entry]),
+        "message_bodies": encode_message_bodies([{"id": "m"}]),
+    }
+    blocks = {
+        name: SimpleNamespace(kind=name, length=len(payload), name=name)
+        for name, payload in payloads.items()
+    }
+    reader = SimpleNamespace(
+        index=SimpleNamespace(blocks=blocks),
+        read_extents=lambda extents, **_: (payloads[extents[0].name],),
+    )
+    allowance = max(block.length for block in blocks.values())
+
+    with pytest.raises(IntegrityError, match="occurrence"):
+        _validate_message_blocks(
+            reader,
+            {"rows": [], "updates": []},
+            {"id": 5},
+            allowance,
+        )
 
 
 from swe.app.conversation_storage.migration.parallel import MigrationIO

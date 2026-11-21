@@ -243,10 +243,12 @@ class ConversationExporter:
             self.artifacts["state:" + path.name] = read_session(path)["state"]
 
     def recovery(self, publication_id, value):
+        from ..message_bundle import validate_runtime_occurrences
         from ..session_projection import hydrate_state, is_projection
 
         if not is_projection(value):
             return value
+        validate_runtime_occurrences(value.get("message_directory", []))
         current = self.publications[publication_id]
 
         def resolve(ref):

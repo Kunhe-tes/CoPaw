@@ -448,6 +448,51 @@ async def test_projection_failure_and_capture_tampering_release_pins(
     assert not stages.recoveries
 
 
+def test_recovery_comparison_rejects_invalid_occurrences_before_nas():
+    from swe.app.conversation_storage.migration.offline_verify import (
+        OfflineVerifyStages,
+    )
+
+    stages = object.__new__(OfflineVerifyStages)
+    stages.store = SimpleNamespace(bundles=object())
+    capture = SimpleNamespace(
+        evidence=SimpleNamespace(
+            ticket=SimpleNamespace(
+                blocks=(),
+                request=SimpleNamespace(operation_key="operation"),
+            ),
+        ),
+        snapshots=(
+            {
+                "name": "recovery",
+                "envelope": {
+                    "format": "swe-recovery-projection",
+                    "version": 1,
+                    "state": {},
+                    "lists": [],
+                    "turns": [],
+                    "message_directory": [
+                        {
+                            "sequence": 1,
+                            "session_order": 1,
+                            "layer": "memory",
+                            "source_occurrence_no": 1,
+                            "body": {
+                                "publication_id": "self",
+                                "block_name": "message",
+                                "position": 0,
+                            },
+                        },
+                    ],
+                },
+            },
+        ),
+    )
+
+    with pytest.raises(IntegrityError, match="occurrence"):
+        stages._compare_recovery(capture)
+
+
 async def test_projection_dependency_session_is_validated(
     tmp_path,
     monkeypatch,

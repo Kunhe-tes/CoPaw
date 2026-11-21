@@ -150,6 +150,64 @@ def test_session_recovery_uses_exact_locator_instead_of_a_block_name(tmp_path):
     ) == {"future": True}
 
 
+def test_restore_recovery_rejects_invalid_occurrences(tmp_path):
+    from swe.app.conversation_storage.backup import _recovery_payload
+    from swe.app.conversation_storage.bundle import (
+        BundleBlock,
+        BundleStore,
+        new_operation_key,
+    )
+
+    operation = new_operation_key()
+    bundles = BundleStore(tmp_path)
+    projection = {
+        "format": "swe-recovery-projection",
+        "version": 1,
+        "state": {},
+        "lists": [],
+        "turns": [],
+        "message_directory": [
+            {
+                "sequence": 1,
+                "session_order": 1,
+                "layer": "memory",
+                "source_occurrence_no": 1,
+                "body": {
+                    "publication_id": "self",
+                    "block_name": "message",
+                    "position": 0,
+                },
+            },
+        ],
+    }
+    index = bundles.publish(
+        operation,
+        [
+            BundleBlock(
+                "recovery",
+                "recovery",
+                encode_metadata(projection).encode(),
+            ),
+        ],
+        metadata={"operation_key": operation},
+    )
+    data = {
+        "publications": [
+            {
+                "id": 1,
+                "session_id": 2,
+                "relative_path": index.relative_path.encode(),
+                "byte_length": index.byte_length,
+                "operation_key": operation.encode(),
+            },
+        ],
+        "messages": [],
+    }
+
+    with pytest.raises(IntegrityError, match="occurrence"):
+        _recovery_payload(data, bundles, 1)
+
+
 def test_restore_fences_active_owners_without_dropping_original_turn_or_pins():
     from swe.app.conversation_storage.backup import _restored_rows
 

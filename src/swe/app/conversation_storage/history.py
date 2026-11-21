@@ -42,6 +42,13 @@ class HistorySnapshot:
     recovery_publication_id: int | None = None
 
 
+def _archive_source_occurrence(entry):
+    value = entry.get("source_occurrence_no")
+    if type(value) is not int or value < 0:
+        raise IntegrityError("archive source occurrence identity is invalid")
+    return value
+
+
 class HistoryStore:
     """One trusted workspace; callers authorize the current Chat."""
 
@@ -568,7 +575,9 @@ class HistoryStore:
                         "archive_chat_id": chat["id"],
                         "archive_order": entry["sequence"],
                         "source_msg_key": entry["raw_id"].encode(),
-                        "source_occurrence_no": entry["source_occurrence_no"],
+                        "source_occurrence_no": _archive_source_occurrence(
+                            entry,
+                        ),
                         "role_key": (
                             entry.get("role")
                             or entry["message"].get("role")

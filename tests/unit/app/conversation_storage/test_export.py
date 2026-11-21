@@ -382,6 +382,39 @@ def test_export_uses_canonical_legacy_root_for_v3_session_baseline(
     assert exporter.artifacts["state:alice_session.json"] == original
 
 
+def test_export_recovery_rejects_invalid_occurrences():
+    from swe.app.conversation_storage.errors import IntegrityError
+    from swe.app.conversation_storage.migration.exporter import (
+        ConversationExporter,
+    )
+
+    exporter = object.__new__(ConversationExporter)
+    exporter.publications = {1: {"session_id": 2}}
+    value = {
+        "format": "swe-recovery-projection",
+        "version": 1,
+        "state": {},
+        "lists": [],
+        "turns": [],
+        "message_directory": [
+            {
+                "sequence": 1,
+                "session_order": 1,
+                "layer": "memory",
+                "source_occurrence_no": 1,
+                "body": {
+                    "publication_id": "self",
+                    "block_name": "message",
+                    "position": 0,
+                },
+            },
+        ],
+    }
+
+    with pytest.raises(IntegrityError, match="occurrence"):
+        exporter.recovery(1, value)
+
+
 def test_reclaimed_deleted_chat_metadata_alone_does_not_discard_archive_history():
     from swe.app.conversation_storage.migration.exporter import (
         ConversationExporter,

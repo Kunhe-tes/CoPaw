@@ -15,6 +15,7 @@ import json
 from ..bundle import BundleBlock, BundleIndex, BundleStore
 from ..chat_mutations import load_metadata_json
 from ..errors import ConflictError, IntegrityError, StorageError, UnknownCommit
+from ..message_bundle import validate_runtime_occurrences
 from ..publications import PublicationRequest, _request
 from ..projection_references import (
     ProjectionReferences,
@@ -382,6 +383,9 @@ class OfflineVerifyStages:
         ticket, bundles = evidence.ticket, self.store.bundles
         expected = {block.name: block.content for block in ticket.blocks}
         for snapshot in capture.snapshots:
+            validate_runtime_occurrences(
+                snapshot["envelope"].get("message_directory", []),
+            )
             payloads = {}
             for ref in references(snapshot["envelope"]):
                 _validate_ref_shape(ref)
