@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Deterministic, bounded message directory and body bundle encoding."""
+"""Deterministic message directory and body bundle encoding."""
 
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -8,7 +8,6 @@ import json
 from .errors import IntegrityError
 
 DEFAULT_MESSAGE_BLOCK_BYTES = 8 * 1024 * 1024
-MAX_MESSAGE_BLOCK_BYTES = 8 * 1024 * 1024
 DEFAULT_MESSAGE_BLOCK_RECORDS = 1000
 ARCHIVE_MANIFEST_FORMAT = "swe.archive-manifest.v1"
 
@@ -269,10 +268,7 @@ def iter_message_batches(
     max_records: int = DEFAULT_MESSAGE_BLOCK_RECORDS,
 ) -> Iterator[EncodedMessageBatch]:
     """Split ordered bodies and encode each message exactly once."""
-    if (
-        type(max_bytes) is not int
-        or not 0 < max_bytes <= MAX_MESSAGE_BLOCK_BYTES
-    ):
+    if type(max_bytes) is not int or max_bytes <= 0:
         raise ValueError("message block byte limit is invalid")
     if type(max_records) is not int or max_records <= 0:
         raise ValueError("message block record limit is invalid")
@@ -298,10 +294,6 @@ def iter_message_batches(
             addition = encoded_size
         if not current:
             current_size = encoded_size + 2
-            if current_size > max_bytes:
-                raise ValueError(
-                    "one message exceeds the message block byte limit",
-                )
             current = [message]
             encoded = [encoded_body]
         else:

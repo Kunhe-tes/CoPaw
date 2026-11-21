@@ -12,6 +12,7 @@ from .freshness import changed_source, tenant_key
 from .inventory import WorkspaceMapping, _workspace
 from .source_inputs import (
     SourceInputInvalid,
+    conversation_artifact_limit,
     safe_input_entries,
     workspace_entries,
 )
@@ -223,7 +224,13 @@ def _inventory_native_files(mapping, report, index, position, files):
             {"workspace": index, "path": relative, "bytes": size},
         )
         if (
-            size > MAX_READ_BYTES
+            size
+            > conversation_artifact_limit(
+                path,
+                mapping.root,
+                sessions_dir=mapping.sessions_dir,
+                dialog_dir=mapping.dialog_dir,
+            )
             and report.get("source_binding_storage") != "manifest-v1"
         ):
             report["blockers"].append(

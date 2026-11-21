@@ -246,7 +246,7 @@ class BundleStore:
         self.max_index_bytes = UNBOUNDED if unbounded else MAX_INDEX_BYTES
         self.max_blocks = UNBOUNDED if unbounded else MAX_BLOCKS
         self.max_bundle_bytes = UNBOUNDED if unbounded else MAX_BUNDLE_BYTES
-        self.max_read_bytes = UNBOUNDED if unbounded else MAX_READ_BYTES
+        self.max_read_bytes = UNBOUNDED if unbounded else MAX_BUNDLE_BYTES
 
     @staticmethod
     def path_for(

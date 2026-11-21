@@ -20,6 +20,7 @@ from .legacy import read_archive, read_session
 from .manifest import SourceBoundary
 from .source_inputs import (
     SourceInputInvalid,
+    conversation_artifact_limit,
     safe_input_entries,
     workspace_entries,
 )
@@ -311,7 +312,12 @@ def _workspace(mapping, report, index, *, chats_authoritative=False):
         )
         oversized = False
         for path in files:
-            if path.stat().st_size > MAX_READ_BYTES:
+            if path.stat().st_size > conversation_artifact_limit(
+                path,
+                mapping.root,
+                sessions_dir=mapping.sessions_dir,
+                dialog_dir=mapping.dialog_dir,
+            ):
                 oversized = True
                 _block(
                     report,

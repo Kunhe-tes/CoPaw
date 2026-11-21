@@ -200,11 +200,11 @@ def _validate_message_blocks(reader, plan, publication, allowance):
 
 
 def _read_checked(reader, extent, allowance):
-    if extent.length * 8 > allowance:
+    if extent.length > allowance:
         raise ValueError(
             "fast verification message block exceeds memory allowance",
         )
-    return reader.read_extents((extent,), max_bytes=allowance)[0]
+    return reader.read_extents((extent,), max_bytes=extent.length)[0]
 
 
 def _validate_locator_pairs(values, resolved, publication, index):

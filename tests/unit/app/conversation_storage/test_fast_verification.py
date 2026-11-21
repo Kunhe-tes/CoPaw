@@ -373,15 +373,16 @@ def test_fast_checks_directory_geometry_and_boundary_dependencies():
         ],
         "dependencies": [4],
     }
-    _validate_message_blocks(reader, plan, {"id": 5}, 100000)
+    allowance = max(block.length for block in blocks.values())
+    _validate_message_blocks(reader, plan, {"id": 5}, allowance)
     plan["dependencies"] = []
     with pytest.raises(IntegrityError, match="dependencies"):
-        _validate_message_blocks(reader, plan, {"id": 5}, 100000)
+        _validate_message_blocks(reader, plan, {"id": 5}, allowance)
     plan["dependencies"] = [4]
     body["position"] = 1
     payloads["message_directory"] = encode_message_directory([entry])
     with pytest.raises(IntegrityError, match="locator"):
-        _validate_message_blocks(reader, plan, {"id": 5}, 100000)
+        _validate_message_blocks(reader, plan, {"id": 5}, allowance)
 
 
 from swe.app.conversation_storage.migration.parallel import MigrationIO

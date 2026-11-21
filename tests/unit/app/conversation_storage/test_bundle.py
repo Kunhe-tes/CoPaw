@@ -55,7 +55,7 @@ def test_bundle_roundtrip_has_byte_extents_and_no_body_in_index(tmp_path):
     assert store.inspect(result.relative_path) == result
 
 
-def test_unbounded_limits_are_scoped_to_migration_store(tmp_path):
+def test_online_store_reads_a_large_single_message_block(tmp_path):
     body = b"x" * (8 * 1024 * 1024 + 1)
     operation = new_operation_key()
     (tmp_path / "online").mkdir()
@@ -67,12 +67,14 @@ def test_unbounded_limits_are_scoped_to_migration_store(tmp_path):
         operation,
         [BundleBlock("body", "message", body)],
     )
-    with pytest.raises(IntegrityError):
+    assert (
         online.read_extent(
             online_result.relative_path,
             online_result.blocks["body"].offset,
             len(body),
         )
+        == body
+    )
 
     migration_result = migration.publish(
         operation,

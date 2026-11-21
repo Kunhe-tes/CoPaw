@@ -91,6 +91,16 @@ def test_split_batches_obeys_encoded_bytes_and_record_count():
     assert all(len(encode_message_bodies(batch)) <= 100 for batch in batches)
 
 
+def test_single_message_larger_than_target_is_kept_as_a_singleton():
+    message = {"id": "large", "content": "x" * (9 * 1024 * 1024)}
+
+    batches = split_message_batches((message,), max_bytes=100)
+
+    assert len(batches) == 1
+    assert batches[0] == (message,)
+    assert len(encode_message_bodies(batches[0])) > 8 * 1024 * 1024
+
+
 def test_prepared_batches_reuse_single_body_encodings(monkeypatch):
     from swe.app.conversation_storage import message_bundle
 

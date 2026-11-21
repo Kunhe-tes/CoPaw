@@ -49,21 +49,20 @@ def make_readonly(root):
     root.chmod(0o555)
 
 
-@pytest.mark.parametrize(
-    "artifact",
-    ["chats.json", "sessions/large.json"],
-)
-def test_inventory_blocks_oversized_native_artifact_before_import(
+def test_inventory_blocks_oversized_registry_before_import(
     tmp_path,
     monkeypatch,
-    artifact,
 ):
     import importlib
 
     module = importlib.import_module(
         "swe.app.conversation_storage.migration.inventory",
     )
+    source_inputs = importlib.import_module(
+        "swe.app.conversation_storage.migration.source_inputs",
+    )
     monkeypatch.setattr(module, "MAX_READ_BYTES", 16)
+    monkeypatch.setattr(source_inputs, "MAX_READ_BYTES", 16)
 
     def unexpected_read(*args, **kwargs):
         pytest.fail("oversized workspace must not enter metadata readers")
@@ -71,6 +70,7 @@ def test_inventory_blocks_oversized_native_artifact_before_import(
     for name in ("load_metadata_json", "read_session", "read_archive"):
         monkeypatch.setattr(module, name, unexpected_read)
     root, _ = source(tmp_path)
+    artifact = "chats.json"
     with (root / artifact).open("wb") as stream:
         stream.truncate(17)
     make_readonly(root)
@@ -99,6 +99,30 @@ def test_inventory_blocks_oversized_native_artifact_before_import(
     assert any(item["path"] == artifact for item in report["files"])
 
 
+def test_message_sources_use_the_bundle_size_limit(tmp_path):
+    from swe.app.conversation_storage.bundle import (
+        MAX_BUNDLE_BYTES,
+        MAX_READ_BYTES,
+    )
+    from swe.app.conversation_storage.migration.source_inputs import (
+        conversation_artifact_limit,
+    )
+
+    root, _ = source(tmp_path)
+    session_limit = conversation_artifact_limit(
+        root / "sessions" / "large.json",
+        root,
+    )
+    archive_limit = conversation_artifact_limit(
+        root / "dialog" / "chat" / "batch.json",
+        root,
+    )
+    registry_limit = conversation_artifact_limit(root / "chats.json", root)
+
+    assert session_limit == archive_limit == MAX_BUNDLE_BYTES
+    assert registry_limit == MAX_READ_BYTES
+
+
 def test_v3_oversized_registry_is_rejected_before_metadata_read(
     tmp_path,
     monkeypatch,
@@ -107,9 +131,11 @@ def test_v3_oversized_registry_is_rejected_before_metadata_read(
         inventory as inventory_module,
     )
     from swe.app.conversation_storage.migration import inventory_v3
+    from swe.app.conversation_storage.migration import source_inputs
 
     monkeypatch.setattr(inventory_v3, "MAX_READ_BYTES", 16)
     monkeypatch.setattr(inventory_module, "MAX_READ_BYTES", 16)
+    monkeypatch.setattr(source_inputs, "MAX_READ_BYTES", 16)
     root, _ = source(tmp_path)
     with (root / "chats.json").open("wb") as stream:
         stream.truncate(17)

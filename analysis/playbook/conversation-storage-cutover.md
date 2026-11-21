@@ -38,6 +38,8 @@ DBA 使用当前分支的 SQL 脚本准备空目标库，服务和 CLI 使用同
 
 本次 10k 样本只包含 64 条归档消息。单 Chat 100k 消息、100 个以上 chunk 或数 GB 归档的 parser/spool RSS、临时磁盘、bundle open/read、分页和回收耗时仍需独立容量样本验证。
 
+另用一个 9MiB 单条 Session 消息跑了完整 V3 远端 MySQL 回归，覆盖 discovery、首个提交后中断、同 manifest resume、fast verify 和 finalize；当前规则把 8MiB 作为常规消息块目标，超限单消息独占一个块，消息文件上限对齐 bundle 的 256MiB 容器上限。
+
 ## 历史流程与故障记录
 
 下文保留旧版 staging 安装、回退和故障排查记录。旧版的表数、分享导入及安装命令适用于对应历史版本。

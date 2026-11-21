@@ -71,14 +71,13 @@ async def test_v3_discovery_import_resume_verify_finalize(
         (workspace / "chats.json").write_text(
             ChatsFile(chats=chats).model_dump_json(),
         )
-        content = [
-            Msg(
-                "user" if message_index % 2 == 0 else "assistant",
-                f"question {index} message {message_index}: " + "x" * 256,
-                "user" if message_index % 2 == 0 else "assistant",
-            ).to_dict()
-            for message_index in range(8 if index == 0 else 1)
-        ]
+        content = []
+        for message_index in range(8 if index == 0 else 1):
+            role = "user" if message_index % 2 == 0 else "assistant"
+            text = f"question {index} message {message_index}: " + "x" * 256
+            if index == 0 and message_index == 0:
+                text = "large migration message: " + "x" * (9 * 1024 * 1024)
+            content.append(Msg(role, text, role).to_dict())
         state = {
             "schema_version": 2,
             "revision": 1,

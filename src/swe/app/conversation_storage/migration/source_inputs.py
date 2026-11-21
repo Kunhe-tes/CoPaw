@@ -6,13 +6,30 @@ import os
 import stat
 import uuid
 
-from ..bundle import MAX_READ_BYTES
+from ..bundle import MAX_BUNDLE_BYTES, MAX_READ_BYTES
 from ..chat_mutations import load_metadata_json
 from .spool import MigrationCapacityError
 
 
 class SourceInputInvalid(ValueError):
     """Unsafe or malformed tenant source input, distinct from shared failures."""
+
+
+def conversation_artifact_limit(
+    path,
+    root,
+    *,
+    sessions_dir="sessions",
+    dialog_dir="dialog",
+):
+    """Use the bundle size limit for message-bearing legacy files."""
+    relative = Path(path).relative_to(Path(root))
+    if any(
+        relative == Path(directory) or relative.is_relative_to(Path(directory))
+        for directory in (sessions_dir, dialog_dir)
+    ):
+        return MAX_BUNDLE_BYTES
+    return MAX_READ_BYTES
 
 
 def _relative(value):
