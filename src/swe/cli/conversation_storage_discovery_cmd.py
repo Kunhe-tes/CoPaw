@@ -206,6 +206,7 @@ def register_discovery_commands(group):
     @click.option(
         "--shares-file",
         type=click.Path(exists=True, dir_okay=False),
+        help="Deprecated; historical share records are skipped.",
     )
     @click.option("--overrides", type=click.Path(exists=True, dir_okay=False))
     @click.option(
@@ -230,17 +231,12 @@ def register_discovery_commands(group):
         try:
             declared = _list(_read(services), "services")
             destination = _output(output, declared)
-            shares = _list(_read(shares_file), "shares") if shares_file else []
-            if shares:
-                raise ValueError(
-                    "historical share records are excluded from migration",
-                )
             exceptions = (
                 _list(_read(overrides), "overrides") if overrides else []
             )
             report = discover_services(
                 declared,
-                shares=shares,
+                shares=(),
                 overrides=exceptions,
                 semantic_validator=_semantic_validator(**resources),
                 tenant_isolation=tenant_isolation,

@@ -315,7 +315,7 @@ def test_prepare_freeze_refusal_never_starts_preflight(inputs, monkeypatch):
     assert not inputs["manifest"].exists()
 
 
-def test_prepare_excludes_historical_shares_without_database_access(
+def test_prepare_skips_historical_shares_without_database_access(
     inputs,
     monkeypatch,
 ):
@@ -338,10 +338,8 @@ def test_prepare_excludes_historical_shares_without_database_access(
             return_value={"status": "success", "passed": True},
         ),
     )
-    args = prepare_args(inputs)
-    index = args.index("--shares-file")
-    del args[index : index + 2]
-    result = CliRunner().invoke(command(), args)
+    inputs["shares"].write_text("not valid JSON")
+    result = CliRunner().invoke(command(), prepare_args(inputs))
     assert result.exit_code == 0, result.output
     assert observed[0]["shares"] == []
     assert observed[0]["source_shares"] == []

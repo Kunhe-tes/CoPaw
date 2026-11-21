@@ -48,14 +48,9 @@ def prepare_workflow(
     schema = application_schema or configured_schema
     if schema != configured_schema:
         raise ValueError("configured application schema differs from prepare")
-    shares = _list(_read(shares_file), "shares") if shares_file else []
-    if shares:
-        raise ValueError(
-            "historical share records are excluded from migration",
-        )
     report = discover_services(
         declared,
-        shares=shares,
+        shares=(),
         overrides=_list(_read(overrides), "overrides") if overrides else [],
         tenant_isolation=True,
         source_isolation=True,
@@ -115,6 +110,7 @@ def register_workflow_commands(group):
     @click.option(
         "--shares-file",
         type=click.Path(exists=True, dir_okay=False),
+        help="Deprecated; historical share records are skipped.",
     )
     @click.option("--overrides", type=click.Path(exists=True, dir_okay=False))
     @click.option("--tenant-isolation", is_flag=True)

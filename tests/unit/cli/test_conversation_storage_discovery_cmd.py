@@ -165,10 +165,10 @@ def test_discovery_excludes_historical_shares_without_database_access(
     assert report["excluded_scopes"] == ["historical_shares"]
 
 
-def test_discovery_rejects_nonempty_historical_share_input(tmp_path):
+def test_discovery_skips_historical_share_input(tmp_path):
     services, _, _ = inputs(tmp_path)
     shares = tmp_path / "shares.json"
-    shares.write_text('[{"token":"legacy-token"}]')
+    shares.write_text("not valid JSON")
     result = CliRunner().invoke(
         command(),
         [
@@ -181,6 +181,7 @@ def test_discovery_rejects_nonempty_historical_share_input(tmp_path):
             str(tmp_path / "report.json"),
         ],
     )
-    assert result.exit_code != 0
-    assert "historical share records are excluded" in result.output
-    assert not (tmp_path / "report.json").exists()
+    assert result.exit_code == 0, result.output
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert report["shares"] == []
+    assert report["excluded_scopes"] == ["historical_shares"]
