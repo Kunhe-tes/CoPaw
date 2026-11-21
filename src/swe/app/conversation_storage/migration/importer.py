@@ -773,13 +773,10 @@ class ConversationImporter:
         from ..chat_mutations import split_metadata, validate_light_metadata
         from swe.app.runner.models import ChatSpec
         from swe.app.runner.expert_binding import read_expert_binding
-        from .parallel import SQL_BATCH_LIMIT
         import json
 
         sessions = workspace["sessions"]
         identity_batch_size = self._identity_batch_size()
-        publish_batch_size = min(identity_batch_size, SQL_BATCH_LIMIT)
-        publications = []
         for session_index, session in enumerate(sessions):
             if session_index % identity_batch_size == 0:
                 assigned_sessions = await self._allocate_identities(
@@ -871,18 +868,7 @@ class ConversationImporter:
                 }
                 rows.append({"table": "chats", "values": row})
                 blocks.append(_block(block, "content_meta", content))
-            publications.append(
-                (
-                    position + "/identities",
-                    rows,
-                    blocks,
-                    None,
-                ),
-            )
-            if len(publications) >= publish_batch_size:
-                await self._publish_prepared(publications, scope)
-                publications.clear()
-        await self._publish_prepared(publications, scope)
+            await self._publish(position + "/identities", scope, rows, blocks)
 
     async def _session(self, session, workspace, scope):
         from ..bundle import BundleBlock
@@ -1722,7 +1708,7 @@ class ParallelWorkspaceImporter(ConversationImporter):
         return self.batch_size
 
     async def _publish_many(self, publications, scope):
-        from .parallel import SQL_BATCH_LIMIT
+        from .parallel import SQL_BATCH_LIMIT, _drain
 
         if len(publications) <= 1:
             return await super()._publish_many(publications, scope)
@@ -1749,7 +1735,10 @@ class ParallelWorkspaceImporter(ConversationImporter):
         except BaseException:
             for task in tasks:
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            cleanup = asyncio.ensure_future(
+                asyncio.gather(*tasks, return_exceptions=True),
+            )
+            await _drain(cleanup, propagate_cancel=True)
             raise
 
     async def _allocate_identities(self, kind, positions):

@@ -178,17 +178,30 @@ async def test_verify_blocks_uses_one_safe_reader(tmp_path, monkeypatch):
     )
     original = store.bundles.open_reader
     calls = []
+    reads = []
+
+    class CountedReader:
+        def __init__(self, reader):
+            self.index = reader.index
+            self._reader = reader
+
+        def read_extents(self, extents, **kwargs):
+            extents = tuple(extents)
+            reads.append(extents)
+            return self._reader.read_extents(extents, **kwargs)
 
     @contextmanager
     def counted(*args, **kwargs):
         calls.append((args, kwargs))
         with original(*args, **kwargs) as reader:
-            yield reader
+            yield CountedReader(reader)
 
     monkeypatch.setattr(store.bundles, "open_reader", counted)
-    await store.verify_blocks(row, [block])
+    await store.verify_blocks(row, (item for item in (block, block)))
 
     assert len(calls) == 1
+    assert len(reads) == 1
+    assert len(reads[0]) == 2
 
 
 async def test_message_batches_lock_shared_session_associations():

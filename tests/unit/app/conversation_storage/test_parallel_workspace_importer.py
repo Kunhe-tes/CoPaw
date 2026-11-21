@@ -508,6 +508,54 @@ async def test_single_workspace_publication_failure_cancels_peers():
     assert cancelled.is_set()
 
 
+async def test_single_workspace_publication_cancel_drains_peers():
+    target = SimpleNamespace(
+        schema="test_conversation_fixture",
+        migration_id="migration",
+    )
+    importer = ParallelWorkspaceImporter(
+        SimpleNamespace(manifest_data={}),
+        target,
+        batch_size=2,
+    )
+    started = 0
+    both_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def publish(*_args, **_kwargs):
+        nonlocal started
+        started += 1
+        if started == 2:
+            both_started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            await release.wait()
+            raise
+
+    importer._publish = publish
+    scope = WorkspaceScope.from_values(["svc", "tenant", "source", "agent"])
+    task = asyncio.create_task(
+        importer._publish_many(
+            [
+                ("first", [], [], None),
+                ("second", [], [], None),
+            ],
+            scope,
+        ),
+    )
+    await both_started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
 async def test_multiple_session_chat_batches_preserve_associations_and_retry():
     source = workspace()
     for number in range(1, 4):

@@ -632,6 +632,7 @@ class OfflineImportStore(PublicationStore):
     async def verify_blocks(self, row, blocks):
         operation = row["operation_key"].decode()
         relative_path = BundleStore.validate_publication_locator(row)
+        blocks = tuple(blocks)
 
         def read_blocks():
             with self.bundles.open_reader(
@@ -646,9 +647,7 @@ class OfflineImportStore(PublicationStore):
                             "original migration bundle block identity differs",
                         )
                     extents.append(extent)
-                return reader.index, tuple(
-                    reader.read_extents((extent,))[0] for extent in extents
-                )
+                return reader.index, reader.read_extents(extents)
 
         index, bodies = await self._nas_io(operation, read_blocks)
         for block, raw in zip(blocks, bodies):
