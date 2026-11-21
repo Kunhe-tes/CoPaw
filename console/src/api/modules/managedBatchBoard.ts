@@ -154,6 +154,7 @@ export interface ManagedFailurePreview {
   items: FailureMember[];
   matched_count: number;
   has_more: boolean;
+  offset?: number;
 }
 export interface ManagedRetryBody {
   request_id: string;
@@ -260,18 +261,23 @@ export const managedBatchBoard = {
       filters,
       signal,
     ),
-  failures: (
+  failures: async (
     source: string,
     batch: string,
     types: string[],
     signal?: AbortSignal,
+    offset = 0,
   ) => {
     const params = new URLSearchParams();
     types.forEach((type) => params.append("types", type));
-    return request<ManagedFailurePreview>(
+    if (offset > 0) params.set("offset", String(offset));
+    const result = await request<ManagedFailurePreview>(
       `${SCHEDULER}/${idPath(batch)}/failures?${params}`,
       { headers: { "X-Source-Id": source }, signal },
     );
+    if (offset > 0 && result.offset !== offset)
+      throw new Error("接口未返回请求的失败成员范围，请刷新后重试。");
+    return result;
   },
   retry: (source: string, batch: string, body: ManagedRetryBody) =>
     request<ManagedRetryResult>(`${SCHEDULER}/${idPath(batch)}/retry`, {

@@ -67,4 +67,16 @@ describe("新版看板独立契约", () => {
       },
     ]);
   });
+  it("后续组带偏移量并拒绝未按偏移量返回的旧响应", async () => {
+    const signal = new AbortController().signal;
+    mocked.mockResolvedValueOnce({ offset: 200, items: [] });
+    await managedBatchBoard.failures("bank", "batch", ["other"], signal, 200);
+    expect(mocked).toHaveBeenCalledWith(
+      "/scheduler/cron/managed-dispatch/batches/batch/failures?types=other&offset=200",
+      expect.objectContaining({ signal }),
+    );
+    await expect(
+      managedBatchBoard.failures("bank", "batch", ["other"], signal, 200),
+    ).rejects.toThrow("接口未返回请求的失败成员范围");
+  });
 });

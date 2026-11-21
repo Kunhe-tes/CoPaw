@@ -10,6 +10,7 @@ from .batch_members import (
     BatchRelationUnavailable,
     _manifest,
 )
+from .batch_retry_contract import MAX_RETRY_CANDIDATES
 from .dispatch_events import failure_type, _safe_detail
 from .repository import IDENTITY_FIELDS
 
@@ -227,7 +228,7 @@ async def display_error_messages(db, rows):
         row["error_type"] = history.get("error_type") if history else None
 
 
-async def failure_preview(db, caller, batch_id, types=()):
+async def failure_preview(db, caller, batch_id, types=(), *, offset=0):
     invalid = set(types) - LABELS.keys()
     if invalid:
         raise ValueError("invalid_cron_failure_type")
@@ -235,7 +236,9 @@ async def failure_preview(db, caller, batch_id, types=()):
     rows = [row for row in await member_rows(db, receipt) if is_failure(row)]
     counts = Counter(failure_type(row) for row in rows)
     selected = [row for row in rows if not types or failure_type(row) in types]
-    await display_error_messages(db, selected[:200])
+    end = offset + MAX_RETRY_CANDIDATES
+    page = selected[offset:end]
+    await display_error_messages(db, page)
     return {
         "batch_id": batch_id,
         "counts": [
@@ -243,7 +246,8 @@ async def failure_preview(db, caller, batch_id, types=()):
             for kind, label in LABELS.items()
             if counts[kind]
         ],
-        "items": [preview_item(row) for row in selected[:200]],
+        "items": [preview_item(row) for row in page],
         "matched_count": len(selected),
-        "has_more": len(selected) > 200,
+        "has_more": len(selected) > end,
+        "offset": offset,
     }

@@ -81,8 +81,14 @@ class BatchRetryService:
     def __init__(self, db):
         self.db = db
 
-    async def preview(self, caller, batch_id, types=()):
-        return await failure_preview(self.db, caller, batch_id, types)
+    async def preview(self, caller, batch_id, types=(), *, offset=0):
+        return await failure_preview(
+            self.db,
+            caller,
+            batch_id,
+            types,
+            offset=offset,
+        )
 
     async def retry(self, caller, batch_id, command: ManagedBatchRetryRequest):
         receipt = await read_batch(self.db, caller, batch_id)
