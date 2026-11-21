@@ -448,6 +448,8 @@ async def prepare_recovery_blocks(
                         if anchor.get(key) is not None
                     },
                 )
+            if previous is None:
+                entry["source_occurrence_no"] = sequence - 1
             retained_refs.add(canonical(entry["body"]))
             if plan.reset is not None:
                 entry.update(
@@ -496,7 +498,7 @@ async def prepare_recovery_blocks(
                 "turn_id": install.turn_id,
                 "origin_chat_id": install.origin_chat_id,
                 "source_msg_key": install.source_msg_key,
-                "source_occurrence_no": install.source_occurrence_no,
+                "source_occurrence_no": sequence - 1,
                 "context_epoch": install.context_epoch,
                 "kind": install.kind,
                 "task": install.task_run_key,

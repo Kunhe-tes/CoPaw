@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 import json
 
+from agentscope.message import Msg
+
 from ...agents.memory.chat_checkpoint import (
     CheckpointEvent,
     CheckpointRecord,
@@ -284,6 +286,7 @@ class MySQLArchiveStore:
                     "memory",
                     message.role,
                     source_msg_key=message.id,
+                    source_occurrence_no=session["history_high"],
                     origin_chat_id=chat["id"],
                     turn_id=authority.turn_id if authority else None,
                     context_epoch=session["context_epoch"],
@@ -306,7 +309,23 @@ class MySQLArchiveStore:
             ],
         )
 
-    async def _source_rows(self, session, messages):
+    @staticmethod
+    def _matches_source(row, message):
+        try:
+            indexed = Msg.from_dict(row["message"]).to_dict()
+        except (AssertionError, KeyError, TypeError, ValueError) as error:
+            raise IntegrityError(
+                "compact source message body is invalid",
+            ) from error
+        return indexed == message.to_dict()
+
+    async def _source_rows(
+        self,
+        session,
+        messages,
+        *,
+        source_positions=None,
+    ):
         if len(messages) > 4096:
             raise ValueError(
                 "compact source batch exceeds bounded record limit",
@@ -315,20 +334,50 @@ class MySQLArchiveStore:
             session["id"],
             layers=("memory",),
         )
-        rows = rows[: len(messages)]
         if len(messages) > len(rows):
             raise ConflictError("compact source prefix is not indexed")
-        for row, message in zip(rows, messages):
-            indexed = row["message"]
-            expected = message.to_dict()
-            if (
-                indexed.get("id") != expected.get("id")
-                or indexed.get("role") != expected.get("role")
-                or indexed.get("content") != expected.get("content")
+        if source_positions is None:
+            available = list(range(len(rows)))
+            selected = []
+            for message in messages:
+                matches = [
+                    index
+                    for index in available
+                    if self._matches_source(rows[index], message)
+                ]
+                if len(matches) != 1:
+                    raise ConflictError(
+                        "compact source occurrence is ambiguous or absent",
+                    )
+                index = matches[0]
+                available.remove(index)
+                selected.append(index)
+            if selected != list(range(len(messages))):
+                raise ConflictError(
+                    "compact source prefix is not contiguous",
+                )
+            rows = [rows[index] for index in selected]
+        else:
+            positions = tuple(source_positions)
+            if positions != tuple(range(len(messages))) or any(
+                type(index) is not int for index in positions
             ):
+                raise ConflictError(
+                    "compact source positions must be the contiguous prefix",
+                )
+            rows = rows[: len(messages)]
+        for row, message in zip(rows, messages):
+            if not self._matches_source(row, message):
                 raise ConflictError(
                     "compact requires exact indexed source prefix",
                 )
+        occurrences = [row["source_occurrence_no"] for row in rows]
+        if any(
+            type(value) is not int or value < 0 for value in occurrences
+        ) or occurrences != sorted(set(occurrences)):
+            raise ConflictError(
+                "compact source occurrence sequence is invalid",
+            )
         return rows
 
     async def compact(
@@ -339,13 +388,18 @@ class MySQLArchiveStore:
         recovery_state,
         authority,
         candidate_id=None,
+        source_positions=None,
     ):
         from ..runner.utils import agentscope_msg_to_message
 
         if not messages:
             raise ValueError("compact requires nonempty source occurrences")
         session, chat = await self._context(chat_id, recovery_state, authority)
-        sources = await self._source_rows(session, messages)
+        sources = await self._source_rows(
+            session,
+            messages,
+            source_positions=source_positions,
+        )
         active = await self.read_checkpoint_prefix(chat_id, len(messages))
         if (
             active.snapshot.epoch,

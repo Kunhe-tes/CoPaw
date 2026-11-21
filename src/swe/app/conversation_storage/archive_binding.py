@@ -39,6 +39,7 @@ class ArchiveBinding:
     def _retained(self, messages):
         entries = list(self.memory.content)
         selected = set()
+        positions = []
         for message in messages:
             matches = [
                 i
@@ -57,10 +58,14 @@ class ArchiveBinding:
                     "compact source occurrence is ambiguous or absent",
                 )
             selected.add(matches[0])
-        return [entry for i, entry in enumerate(entries) if i not in selected]
+            positions.append(matches[0])
+        return (
+            [entry for i, entry in enumerate(entries) if i not in selected],
+            tuple(positions),
+        )
 
     async def compact(self, messages, *, summary=None, candidate_id=None):
-        retained = self._retained(messages)
+        retained, source_positions = self._retained(messages)
         if candidate_id is not None:
             candidate = await self.store.read_candidate(
                 self.chat_id,
@@ -79,6 +84,7 @@ class ArchiveBinding:
             recovery_state=root,
             authority=self.authority,
             candidate_id=candidate_id,
+            source_positions=source_positions,
         )
         self.memory.content = retained
         self.memory._compressed_summary = summary

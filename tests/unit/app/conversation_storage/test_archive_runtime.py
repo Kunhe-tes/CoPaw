@@ -118,6 +118,7 @@ async def test_request_binding_prunes_memory_only_after_confirmed_publication(
     assert facade.compact.await_args.kwargs["recovery_state"][
         "unknown_module"
     ] == {"keep": True}
+    assert facade.compact.await_args.kwargs["source_positions"] == (0,)
 
 
 async def test_reset_binding_publishes_clear_root_before_memory_changes(
@@ -215,6 +216,187 @@ def test_compaction_cursor_only_advances_exact_message_event_prefix():
         )
         == 0
     )
+
+
+async def test_append_allocates_session_monotonic_source_occurrence():
+    from swe.app.conversation_storage.archive_runtime import MySQLArchiveStore
+
+    session = {
+        "history_high": 7,
+        "context_epoch": 2,
+    }
+    chat = {"id": 3, "epoch": 1, "event_high": 4}
+    captured = []
+
+    async def context(*_args, **_kwargs):
+        return session, chat
+
+    async def publish(*args):
+        captured.append(args[5])
+        return SimpleNamespace()
+
+    store = object.__new__(MySQLArchiveStore)
+    store._context = context
+    store._publish = publish
+    message = Msg("user", "next", "user")
+    message.id = "q"
+
+    await store.append_message(
+        "chat",
+        message,
+        recovery_state={},
+        authority=None,
+    )
+
+    assert captured[0].messages[0].source_occurrence_no == 7
+
+
+async def test_compact_source_matching_uses_positions_and_full_body():
+    from swe.app.conversation_storage.archive_runtime import MySQLArchiveStore
+    from swe.app.conversation_storage.errors import ConflictError
+
+    first = Msg("user", "same", "user", timestamp="2026-10-30T00:00:01Z")
+    first.id = "q"
+    first.metadata = {"origin": "first"}
+    second = Msg("user", "same", "user", timestamp="2026-10-30T00:00:01Z")
+    second.id = "q"
+    second.metadata = {"origin": "second"}
+    rows = [
+        {"message": first.to_dict(), "source_occurrence_no": 0},
+        {"message": second.to_dict(), "source_occurrence_no": 1},
+    ]
+
+    async def session_messages(*_args, **_kwargs):
+        return rows
+
+    store = object.__new__(MySQLArchiveStore)
+    store.reader = SimpleNamespace(session_messages=session_messages)
+
+    assert (
+        await store._source_rows(
+            {"id": "session"},
+            [first, second],
+            source_positions=(0, 1),
+        )
+        == rows
+    )
+    with pytest.raises(ConflictError, match="contiguous prefix"):
+        await store._source_rows(
+            {"id": "session"},
+            [second, first],
+            source_positions=(1, 0),
+        )
+    with pytest.raises(ConflictError, match="exact indexed source"):
+        await store._source_rows(
+            {"id": "session"},
+            [first, first],
+            source_positions=(0, 1),
+        )
+
+
+async def test_compact_rejects_ambiguous_or_reused_source_occurrence():
+    from swe.app.conversation_storage.archive_runtime import MySQLArchiveStore
+    from swe.app.conversation_storage.errors import ConflictError
+
+    message = Msg("user", "same", "user")
+    message.id = "q"
+    rows = [
+        {"message": message.to_dict(), "source_occurrence_no": 0},
+        {"message": message.to_dict(), "source_occurrence_no": 0},
+    ]
+
+    async def session_messages(*_args, **_kwargs):
+        return rows
+
+    store = object.__new__(MySQLArchiveStore)
+    store.reader = SimpleNamespace(session_messages=session_messages)
+
+    with pytest.raises(ConflictError, match="ambiguous or absent"):
+        await store._source_rows(
+            {"id": "session"},
+            [message],
+        )
+    with pytest.raises(ConflictError, match="occurrence sequence"):
+        await store._source_rows(
+            {"id": "session"},
+            [message, message],
+            source_positions=(0, 1),
+        )
+
+
+async def test_projection_allocates_session_monotonic_source_occurrence():
+    from contextlib import asynccontextmanager
+    import json
+
+    from swe.app.conversation_storage.bundle import BundleBlock
+    from swe.app.conversation_storage.commit_plan import CommitPlan
+    from swe.app.conversation_storage.message_installs import MessageInstall
+    from swe.app.conversation_storage.projection_publication import (
+        prepare_recovery_blocks,
+    )
+
+    message = Msg("user", "next", "user")
+    message.id = "q"
+    plan = CommitPlan(
+        recovery_block="recovery",
+        messages=(
+            MessageInstall(
+                "message",
+                "memory",
+                "user",
+                source_msg_key="q",
+            ),
+        ),
+    )
+    blocks = [
+        BundleBlock(
+            "recovery",
+            "recovery",
+            json.dumps({"agent": {"memory": {"content": []}}}).encode(),
+        ),
+        BundleBlock(
+            "message",
+            "message",
+            json.dumps(message.to_dict()).encode(),
+        ),
+    ]
+
+    @asynccontextmanager
+    async def transaction():
+        yield
+
+    async def fetch_one(sql, _params):
+        if "recovery_publication_id" in sql:
+            return {"recovery_publication_id": None}
+        return {"context_epoch": 0, "history_high": 7}
+
+    service = SimpleNamespace(
+        db=SimpleNamespace(
+            fetch_one=fetch_one,
+            transaction=transaction,
+        ),
+    )
+    row = {
+        "operation_key": "a" * 64,
+        "scope_kind": b"workspace",
+        "session_id": 1,
+        "service_unit_key": b"service",
+        "tenant_key": b"tenant",
+        "source_key": b"source",
+        "agent_key": b"agent",
+        "chat_id": 2,
+        "turn_id": None,
+        "base_state_revision": 1,
+        "base_history_revision": 0,
+        "epoch": 1,
+    }
+
+    result = await prepare_recovery_blocks(service, row, plan, blocks)
+    envelope = json.loads(result[0].content)
+    entry = envelope["message_directory"][0]
+
+    assert entry["session_order"] == 8
+    assert entry["source_occurrence_no"] == 7
 
 
 def test_cloned_memory_discards_request_binding_and_candidate():

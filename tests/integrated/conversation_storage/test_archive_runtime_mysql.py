@@ -155,6 +155,45 @@ async def test_runtime_compact_reuses_original_body_extent_and_dependency_pins(
     )["n"] == 1
 
 
+async def test_runtime_occurrence_stays_monotonic_across_compact(
+    conversation_test_database,
+    tmp_path,
+):
+    db = conversation_test_database
+    _, _, _, store = await setup(db, tmp_path)
+    first, second = source("q", "one"), source("q", "two")
+    state = {"revision": 0}
+    for message in (first, second):
+        state = (
+            await store.append_message(
+                "first",
+                message,
+                recovery_state=state,
+                authority=None,
+            )
+        ).recovery_state
+
+    compacted = await store.compact(
+        "first",
+        [first],
+        recovery_state=state,
+        authority=None,
+    )
+    third = source("q", "three")
+    await store.append_message(
+        "first",
+        third,
+        recovery_state=compacted.recovery_state,
+        authority=None,
+    )
+
+    current = await store.reader.session_messages(
+        "session",
+        layers=("memory",),
+    )
+    assert [row["source_occurrence_no"] for row in current] == [1, 2]
+
+
 async def test_runtime_binding_updates_complete_root_only_after_compact_confirmation(
     conversation_test_database,
     tmp_path,
