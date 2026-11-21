@@ -568,10 +568,7 @@ class HistoryStore:
                         "archive_chat_id": chat["id"],
                         "archive_order": entry["sequence"],
                         "source_msg_key": entry["raw_id"].encode(),
-                        "source_occurrence_no": entry.get(
-                            "source_occurrence_no",
-                            0,
-                        ),
+                        "source_occurrence_no": entry["source_occurrence_no"],
                         "role_key": (
                             entry.get("role")
                             or entry["message"].get("role")

@@ -174,6 +174,50 @@ async def test_canonical_archive_payloads_reject_mismatched_declared_metadata(
     assert not any(query.startswith("UPDATE ") for query in db.queries)
 
 
+def test_archive_payload_rejects_reused_runtime_occurrence():
+    from agentscope.message import Msg
+    from swe.app.conversation_storage.archive_payloads import _archive
+
+    message = Msg(
+        "user",
+        "archived",
+        "user",
+        timestamp="2026-10-30T00:00:00Z",
+    )
+    message.id = "archived"
+    item = SimpleNamespace(
+        layer="archive",
+        source_msg_key="archived",
+        role="user",
+        message_timestamp="2026-10-30T00:00:00Z",
+        turn_id=None,
+        origin_chat_id=2,
+        archive_chat_id=2,
+        source_message_id=None,
+        source_occurrence_no=0,
+        block_name="body",
+    )
+    plan = SimpleNamespace(
+        messages=[item],
+        archive=SimpleNamespace(
+            display_count=1,
+            first_timestamp="2026-10-30T00:00:00Z",
+            last_timestamp="2026-10-30T00:00:00Z",
+        ),
+    )
+    entry = {
+        "raw_id": "archived",
+        "turn_id": None,
+        "origin_chat_id": 2,
+        "archive_chat_id": 2,
+        "source_occurrence_no": 1,
+        "message": message.to_dict(),
+    }
+
+    with pytest.raises(ValueError, match="occurrence"):
+        _archive([entry], plan, SimpleNamespace(payloads={}))
+
+
 async def test_event_payload_must_contain_the_claimed_contiguous_range(
     tmp_path,
 ):

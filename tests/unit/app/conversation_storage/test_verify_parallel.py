@@ -103,6 +103,7 @@ async def test_session_message_batch_offsets_are_numeric(tmp_path):
             "raw_id": body["id"],
             "layer": "memory",
             "source_occurrence": start,
+            "source_occurrence_no": start,
             "visible": True,
             "body": {
                 "publication_id": "self",

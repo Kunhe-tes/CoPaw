@@ -704,6 +704,7 @@ async def effective_recovery_plan(
     )
     if not is_projection(envelope):
         return plan, None
+    validate_runtime_occurrences(envelope.get("message_directory", []))
     if envelope.get("identity") != identity(row):
         raise IntegrityError(
             "recovery projection publication identity mismatch",

@@ -234,13 +234,17 @@ def _archive(entries, plan, sources):
             entry["turn_id"],
             entry["origin_chat_id"],
             entry["archive_chat_id"],
+            entry.get("source_occurrence_no"),
         ) != (
             item.source_msg_key,
             item.turn_id,
             item.origin_chat_id,
             item.archive_chat_id,
+            item.source_occurrence_no,
         ):
-            raise ValueError("archive directory associations differ")
+            raise ValueError(
+                "archive directory associations or occurrence differ",
+            )
         if item.source_message_id is not None and (
             sources.payloads[item.block_name] != raw
         ):

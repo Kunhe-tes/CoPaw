@@ -307,6 +307,13 @@ def task_projections(messages, state):
             }
 
 
+def prepare_session_messages(state, *, context_epoch, task_projection):
+    messages = extract_messages(state, context_epoch=context_epoch)
+    if task_projection:
+        task_projections(messages, state)
+    return display_order_messages(messages)
+
+
 @dataclass(frozen=True)
 class ImportBatch:
     updates: tuple = ()
@@ -881,14 +888,15 @@ class ConversationImporter:
                     session["position"] + "/turn:" + key
                 ]
         await self._turn_identities(session, scope, chats)
-        messages = extract_messages(state, context_epoch=epoch)
-        messages = display_order_messages(messages)
-        if any(
-            item["spec"]["meta"].get("session_kind") == "task"
-            for item in workspace["chats"]
-            if item["spec"]["id"] in chats
-        ):
-            task_projections(messages, state)
+        messages = prepare_session_messages(
+            state,
+            context_epoch=epoch,
+            task_projection=any(
+                item["spec"]["meta"].get("session_kind") == "task"
+                for item in workspace["chats"]
+                if item["spec"]["id"] in chats
+            ),
+        )
         body_batches = iter_message_batches(
             [item["payload"] for item in messages],
             max_records=self.batch_size,
@@ -1369,6 +1377,7 @@ class ConversationImporter:
                             "role": payload.get("role") or "assistant",
                             "kind": payload.get("type") or "message",
                             "source_occurrence": sequence - 1,
+                            "source_occurrence_no": sequence - 1,
                             "timestamp": _timestamp(payload.get("timestamp")),
                             "epoch": batch["epoch"],
                             "body": {

@@ -244,6 +244,7 @@ async def test_offline_archive_batches_sql_and_nas_reads(monkeypatch):
             "sequence": index + 1,
             "raw_id": "message-" + str(publication["id"]),
             "layer": "archive",
+            "source_occurrence_no": index,
             "visible": True,
             "body": {
                 "publication_id": "self",

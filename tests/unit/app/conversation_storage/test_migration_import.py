@@ -4,6 +4,7 @@ import pytest
 from swe.app.conversation_storage.migration.importer import (
     display_order_messages,
     extract_messages,
+    prepare_session_messages,
     validate_inventory,
 )
 from swe.app.conversation_storage.identity import WorkspaceScope
@@ -320,6 +321,57 @@ def test_task_projection_preserves_raw_payload_and_final_section():
         "task_run_index": 0,
         "task_run_section": "final",
     }
+
+
+def test_task_projection_uses_raw_memory_indices_before_display_order():
+    from agentscope.message import Msg
+
+    question = Msg(
+        "user",
+        "task question",
+        "user",
+        timestamp="2026-10-30T00:00:03Z",
+    )
+    question.id = "question"
+    unrelated = Msg(
+        "user",
+        "unrelated",
+        "user",
+        timestamp="2026-10-30T00:00:01Z",
+    )
+    unrelated.id = "unrelated"
+    answer = Msg(
+        "assistant",
+        "answer",
+        "assistant",
+        timestamp="2026-10-30T00:00:02Z",
+    )
+    answer.id = "answer"
+    state = {
+        "agent": {
+            "memory": {
+                "content": [
+                    question.to_dict(),
+                    unrelated.to_dict(),
+                    answer.to_dict(),
+                ],
+            },
+        },
+        "task_runs": [{"run_id": "run-1", "memory_start": 1, "memory_end": 3}],
+    }
+
+    messages = prepare_session_messages(
+        state,
+        context_epoch=0,
+        task_projection=True,
+    )
+
+    by_id = {item["payload"]["id"]: item for item in messages}
+    assert "history_projection" not in by_id["question"]
+    assert (
+        by_id["unrelated"]["history_projection"]["task_run_section"] == "step"
+    )
+    assert by_id["answer"]["history_projection"]["task_run_section"] == "final"
 
 
 def test_archive_union_retains_old_epoch_only_batches():

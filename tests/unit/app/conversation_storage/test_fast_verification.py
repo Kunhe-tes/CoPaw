@@ -41,6 +41,7 @@ def test_fast_archive_chunk_checks_range_and_chat(tmp_path):
         "sequence": 8,
         "raw_id": "m",
         "layer": "archive",
+        "source_occurrence_no": 7,
         "visible": True,
         "chat_id": 3,
         "epoch": 1,
@@ -110,6 +111,7 @@ def test_archive_chunk_read_opens_bundle_once(tmp_path, monkeypatch):
         "sequence": 1,
         "raw_id": "message",
         "layer": "archive",
+        "source_occurrence_no": 0,
         "visible": True,
         "body": {
             "publication_id": "self",
@@ -327,6 +329,7 @@ def test_fast_checks_directory_geometry_and_boundary_dependencies():
         "sequence": 1,
         "raw_id": "m",
         "layer": "archive",
+        "source_occurrence_no": 0,
         "visible": True,
         "body": body,
     }
@@ -375,6 +378,12 @@ def test_fast_checks_directory_geometry_and_boundary_dependencies():
     }
     allowance = max(block.length for block in blocks.values())
     _validate_message_blocks(reader, plan, {"id": 5}, allowance)
+    entry["source_occurrence_no"] = 1
+    payloads["message_directory"] = encode_message_directory([entry])
+    with pytest.raises(IntegrityError, match="occurrence"):
+        _validate_message_blocks(reader, plan, {"id": 5}, allowance)
+    entry["source_occurrence_no"] = 0
+    payloads["message_directory"] = encode_message_directory([entry])
     plan["dependencies"] = []
     with pytest.raises(IntegrityError, match="dependencies"):
         _validate_message_blocks(reader, plan, {"id": 5}, allowance)

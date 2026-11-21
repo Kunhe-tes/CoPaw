@@ -157,6 +157,10 @@ def _validate_message_blocks(reader, plan, publication, allowance):
                 "position": position,
             }:
                 raise IntegrityError("message directory body locator differs")
+            if entry.get("source_occurrence_no") != entry["sequence"] - 1:
+                raise IntegrityError(
+                    "message directory occurrence numbering differs",
+                )
         if entries and [e["sequence"] for e in entries] != list(
             range(
                 entries[0]["sequence"],
@@ -652,6 +656,7 @@ def _verify_chunk_directory(
     first, last = chunk["first_sequence"], chunk["last_sequence"]
     if len(entries) != last - first + 1 or any(
         entry["sequence"] != first + position
+        or entry.get("source_occurrence_no") != first + position - 1
         or entry.get("chat_id") != chat_id
         or entry.get("epoch") != epoch
         for position, entry in enumerate(entries)

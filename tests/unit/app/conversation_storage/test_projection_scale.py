@@ -77,8 +77,17 @@ def history(count):
         },
     ).envelope
     envelope["message_directory"] = [
-        {"layer": "task", "body": item["ref"]}
-        for item in envelope["lists"][0]["entries"]
+        {
+            "sequence": position,
+            "session_order": position,
+            "layer": "task",
+            "source_occurrence_no": position - 1,
+            "body": item["ref"],
+        }
+        for position, item in enumerate(
+            envelope["lists"][0]["entries"],
+            start=1,
+        )
     ]
     root_id = count + 1
     db.objects[root_id] = {
@@ -124,6 +133,75 @@ def history(count):
         session_id=1,
     )
     return db, service, row, request, state, envelope
+
+
+async def test_hydrate_projection_rejects_invalid_runtime_occurrences():
+    from swe.app.conversation_storage.errors import IntegrityError
+    from swe.app.conversation_storage.projection_references import (
+        hydrate_projection,
+    )
+
+    envelope = {
+        "format": "swe-recovery-projection",
+        "version": 1,
+        "state": {},
+        "lists": [],
+        "turns": [],
+        "message_directory": [
+            {
+                "sequence": 1,
+                "session_order": 1,
+                "layer": "memory",
+                "source_occurrence_no": 1,
+                "body": {
+                    "publication_id": "self",
+                    "block_name": "message",
+                    "position": 0,
+                },
+            },
+        ],
+    }
+
+    with pytest.raises(IntegrityError, match="occurrence"):
+        await hydrate_projection(None, envelope, {}, {}, None)
+
+
+async def test_projection_cache_rejects_invalid_runtime_occurrences():
+    from types import SimpleNamespace
+    from swe.app.conversation_storage.errors import IntegrityError
+    from swe.app.conversation_storage.projection_cache import cache_scope
+    from swe.app.conversation_storage.projection_references import (
+        refresh_projection_cache,
+    )
+
+    envelope = {
+        "message_directory": [
+            {
+                "sequence": 1,
+                "session_order": 1,
+                "layer": "memory",
+                "source_occurrence_no": 1,
+                "body": {
+                    "publication_id": "self",
+                    "block_name": "message",
+                    "position": 0,
+                },
+            },
+        ],
+    }
+    row = {
+        "operation_key": b"operation",
+        "id": 2,
+        "base_state_revision": 0,
+    }
+
+    with cache_scope(), pytest.raises(IntegrityError, match="occurrence"):
+        await refresh_projection_cache(
+            None,
+            row,
+            envelope,
+            SimpleNamespace(payloads={}),
+        )
 
 
 @pytest.mark.parametrize("count", [4096, 4097])

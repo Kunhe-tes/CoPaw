@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 import json
 
 from .errors import IntegrityError
-from .message_bundle import decode_message_bodies
+from .message_bundle import decode_message_bodies, validate_runtime_occurrences
 from .retention import ReaderPins, RetentionStore
 from .session_projection import hydrate_state, is_projection
 from .projection_cache import active, cache_key, cached, remember
@@ -136,6 +136,8 @@ async def snapshot_projection(
     snapshot = ProjectionReferences()
     if envelope is None:
         return snapshot
+    if is_projection(envelope):
+        validate_runtime_occurrences(envelope.get("message_directory", []))
     refs = references(envelope)
     cached_bodies = _cached_bodies(request, envelope)
     retentions = retentions or RetentionStore(service.db, request.scope)
@@ -239,6 +241,7 @@ def _resolve_payload(payload, ref, turns):
 async def hydrate_projection(adapter, envelope, session, publication, batch):
     if not is_projection(envelope):
         return envelope
+    validate_runtime_occurrences(envelope.get("message_directory", []))
     from types import SimpleNamespace
 
     source = SimpleNamespace(
@@ -274,6 +277,7 @@ async def refresh_projection_cache(service, row, envelope, snapshot):
     from collections import defaultdict
     from .projection_publication import canonical
 
+    validate_runtime_occurrences(envelope.get("message_directory", []))
     values = defaultdict(list)
     for entry in envelope.get("message_directory", []):
         layer = entry["layer"]

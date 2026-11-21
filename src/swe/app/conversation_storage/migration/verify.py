@@ -698,25 +698,19 @@ async def _verify_session_messages(
     )
     from ..bundle import BundleStore
 
-    from .importer import display_order_messages, extract_messages
+    from .importer import prepare_session_messages
 
-    messages = extract_messages(
+    messages = prepare_session_messages(
         expected,
         context_epoch=expected.get("context_epoch", 0),
+        task_projection=any(
+            item["spec"]["meta"].get("session_kind") == "task"
+            for item in workspace["chats"]
+            if item["spec"]["session_id"] == identity[6]
+            and item["spec"]["user_id"] == identity[4]
+            and item["spec"]["channel"] == identity[5]
+        ),
     )
-    messages = display_order_messages(messages)
-    session_chats = [
-        item
-        for item in workspace["chats"]
-        if item["spec"]["session_id"] == identity[6]
-        and item["spec"]["user_id"] == identity[4]
-        and item["spec"]["channel"] == identity[5]
-    ]
-    if any(
-        item["spec"]["meta"].get("session_kind") == "task"
-        for item in session_chats
-    ):
-        task_projections(messages, expected)
     assignments = manifest.data["assignments"].get("publication", {})
     scope = WorkspaceScope.from_values(workspace["scope"])
     prefix = session["position"] + "/messages:"
@@ -778,10 +772,15 @@ async def _verify_session_messages(
                 or entry["raw_id"]
                 != (expected_message["source_msg_key"] or "")
                 or not entry["visible"]
-                or entry["source_occurrence"]
-                != expected_message["source_occurrence_no"]
             ):
                 raise ValueError("Message directory/body/order differs")
+            if (
+                entry["source_occurrence"]
+                != expected_message["source_occurrence_no"]
+                or entry["source_occurrence_no"]
+                != expected_message["source_occurrence_no"]
+            ):
+                raise ValueError("Message occurrence identity differs")
             seen += 1
     if seen != len(messages):
         raise ValueError("Session Message occurrence count differs")
@@ -970,7 +969,11 @@ async def _verify_archive_rows(
                     "archive message directory/body count differs",
                 )
             for entry, body in zip(directory, bodies):
-                if body != next(expected) or entry["sequence"] != seen + 1:
+                if (
+                    body != next(expected)
+                    or entry["sequence"] != seen + 1
+                    or entry["source_occurrence_no"] != seen
+                ):
                     raise ValueError("archive message order/body differs")
                 seen += 1
     if seen != expected_count:

@@ -316,6 +316,45 @@ async def test_workspace_domain_publications_match_serial(tmp_path, frozen):
     } <= kinds
 
 
+async def test_archive_import_writes_runtime_occurrence_numbers(tmp_path):
+    from swe.app.conversation_storage.message_bundle import (
+        decode_message_directory,
+    )
+
+    source = workspace()
+    batch = source["chats"][0]["archive"]["epochs"][0]["batches"][0]
+    answer = Msg(
+        "assistant",
+        "old answer",
+        "assistant",
+        timestamp="2026-11-01T00:00:01Z",
+    ).to_dict()
+    answer["id"] = "old-answer"
+    batch["messages"].append(answer)
+    batch["boundary"].update(
+        archived_message_count=2,
+        last_message_id="old-answer",
+        last_timestamp="2026-11-01T00:00:01Z",
+    )
+    target = SimpleNamespace(
+        schema="test_conversation_fixture",
+        migration_id="migration",
+    )
+    record = Recorder()
+
+    await serial_run(record, source, target, tmp_path)
+
+    entries = [
+        entry
+        for blocks in record.blocks.values()
+        for block in blocks
+        if block.kind == "message_directory"
+        for entry in decode_message_directory(block.content)
+        if entry["layer"] == "archive"
+    ]
+    assert [entry.get("source_occurrence_no") for entry in entries] == [0, 1]
+
+
 @pytest.mark.parametrize("state", ["prepared", "committed"])
 async def test_workspace_retry_preserves_original_blocks(tmp_path, state):
     source = workspace()

@@ -93,7 +93,7 @@ async def test_recovery_write_projects_each_body_once(
 
 @pytest.mark.parametrize(
     "field",
-    ["identity", "dependencies", "installer", "samepub"],
+    ["identity", "dependencies", "installer", "samepub", "occurrence"],
 )
 async def test_effective_projection_cannot_change_prepared_identity_or_smuggle_installers(
     tmp_path,
@@ -143,15 +143,20 @@ async def test_effective_projection_cannot_change_prepared_identity_or_smuggle_i
         value["dependency_ids"] = [999]
     elif field == "installer":
         value["installations"][0]["layer"] = "anchor"
-    else:
+    elif field == "samepub":
         value["lists"][0]["entries"][0]["ref"]["operation_key"] = "b" * 64
+    else:
+        value["message_directory"][0]["source_occurrence_no"] = 1
     original = service._nas_io
 
     async def forged(key, function, *args, **kwargs):
         return json.dumps(value).encode()
 
     service._nas_io = forged
-    with pytest.raises(IntegrityError):
+    with pytest.raises(
+        IntegrityError,
+        match="occurrence" if field == "occurrence" else None,
+    ):
         await effective_recovery_plan(
             service,
             operation,
