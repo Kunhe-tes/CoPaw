@@ -161,7 +161,10 @@ async def test_resume_retains_exact_legacy_plan_bytes(tmp_path, committed):
         retained_plan(store.bundles, row, narrow, changed)
 
 
-async def test_verify_blocks_uses_one_safe_reader(tmp_path, monkeypatch):
+async def test_verify_blocks_checks_generator_after_one_safe_reader(
+    tmp_path,
+    monkeypatch,
+):
     from contextlib import contextmanager
     from swe.app.conversation_storage.migration.install_records import (
         plan_block,
@@ -176,6 +179,7 @@ async def test_verify_blocks_uses_one_safe_reader(tmp_path, monkeypatch):
         stored["updates"],
         stored["locks"],
     )
+    changed = type(block)(block.name, block.kind, block.content + b" ")
     original = store.bundles.open_reader
     calls = []
     reads = []
@@ -197,7 +201,8 @@ async def test_verify_blocks_uses_one_safe_reader(tmp_path, monkeypatch):
             yield CountedReader(reader)
 
     monkeypatch.setattr(store.bundles, "open_reader", counted)
-    await store.verify_blocks(row, (item for item in (block, block)))
+    with pytest.raises(IntegrityError):
+        await store.verify_blocks(row, (item for item in (block, changed)))
 
     assert len(calls) == 1
     assert len(reads) == 1
