@@ -161,18 +161,6 @@ def _inventory_shares(data, report):
             )
         if not snapshot_path.is_file():
             raise SourceInputInvalid("share snapshot must be a regular file")
-        if (
-            data.get("source_binding_storage") != "manifest-v1"
-            and snapshot_path.stat().st_size > MAX_READ_BYTES
-        ):
-            report["blockers"].append(
-                {
-                    "code": "share_snapshot_oversized",
-                    "position": source["position"],
-                    "detail": "share snapshot exceeds bounded reader size",
-                },
-            )
-            continue
         record = {
             key: source[key] for key in (*SHARE_FIELDS, "service_unit_id")
         }
@@ -594,13 +582,6 @@ def _preflight_share_budget(data, memory_bytes):
     count_limit = memory_bytes // 16384
     for share in data.get("shares", []):
         size = Path(share["snapshot_path"]).stat().st_size
-        if (
-            size > MAX_READ_BYTES
-            and data.get("source_binding_storage") != "manifest-v1"
-        ):
-            raise MigrationCapacityError(
-                "share snapshot exceeds the bounded reader limit",
-            )
         total += size
         count += 1
         if total > byte_limit or count > count_limit:

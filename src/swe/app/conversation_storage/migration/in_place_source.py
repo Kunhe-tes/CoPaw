@@ -6,7 +6,6 @@ from pathlib import Path
 import os
 import stat
 
-from ..bundle import MAX_READ_BYTES
 from .source_inputs import SourceInputInvalid, safe_input_entries
 
 
@@ -47,7 +46,6 @@ def freeze_evidence(workspace):
             path.parent,
             [path.name],
             recursive=False,
-            max_file_bytes=MAX_READ_BYTES,
         )
         before = path.lstat() if path in entries else None
         if before is None or not stat.S_ISREG(before.st_mode):
@@ -57,14 +55,8 @@ def freeze_evidence(workspace):
         if before.st_mode & 0o222:
             raise SourceInputInvalid("in-place identity evidence is writable")
         digest = sha256()
-        total = 0
         with path.open("rb") as stream:
             while chunk := stream.read(64 * 1024):
-                total += len(chunk)
-                if total > MAX_READ_BYTES:
-                    raise SourceInputInvalid(
-                        "in-place identity evidence exceeds reader limit",
-                    )
                 digest.update(chunk)
             after = os.fstat(stream.fileno())
         fields = (

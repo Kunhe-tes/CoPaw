@@ -358,6 +358,42 @@ async def test_runtime_prefetch_uses_fresh_real_bundle_and_fails_cache_misses(
         )
 
 
+async def test_runtime_prefetch_accepts_message_block_larger_than_8_mib(
+    tmp_path,
+):
+    from swe.app.conversation_storage.bundle import BundleBlock, BundleStore
+
+    store = BundleStore(tmp_path)
+    body = b"x" * (9 * 1024 * 1024)
+    operation = "ab" + "0" * 62
+    index = store.publish(
+        operation,
+        [BundleBlock("body", "message_bodies", body)],
+    )
+    row = {
+        "relative_path": index.relative_path.encode(),
+        "byte_length": index.byte_length,
+    }
+    async with MigrationIO(1) as io:
+        cache = await runtime_prefetch._prefetch(
+            store,
+            [row],
+            io,
+            256 * 1024 * 1024,
+        )
+
+    extent = index.blocks["body"]
+    assert (
+        cache.read_extent(
+            index.relative_path,
+            extent.offset,
+            extent.length,
+            expected_length=index.byte_length,
+        )
+        == body
+    )
+
+
 @pytest.mark.parametrize("kind", ["workspace", "share"])
 async def test_runtime_prefetch_merges_reports_in_inventory_order(
     monkeypatch,

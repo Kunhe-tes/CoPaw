@@ -1830,7 +1830,6 @@ class ParallelWorkspaceImporter(ConversationImporter):
 
 def _read_source_artifact(workspace, item, relaxed=False):
     from pathlib import Path
-    from ..bundle import MAX_READ_BYTES
     import stat
 
     root = Path(workspace["root"]).resolve(strict=True)
@@ -1845,9 +1844,7 @@ def _read_source_artifact(workspace, item, relaxed=False):
             "legacy artifact is outside its bound source root",
         )
     if not relaxed and (
-        path.is_symlink()
-        or stat.S_IMODE(path.stat().st_mode) & 0o222
-        or path.stat().st_size > MAX_READ_BYTES
+        path.is_symlink() or stat.S_IMODE(path.stat().st_mode) & 0o222
     ):
         raise TenantInputError(
             "legacy artifact is not inside frozen read-only source",

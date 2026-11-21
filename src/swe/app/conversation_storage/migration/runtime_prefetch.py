@@ -3,7 +3,7 @@
 
 from .parallel import MigrationCoordinator
 from .disk_manifest import DiskMap
-from ..bundle import BundleStore, MAX_READ_BYTES, UNBOUNDED
+from ..bundle import BundleStore, MAX_BUNDLE_BYTES, UNBOUNDED
 from ..errors import IntegrityError
 
 
@@ -15,7 +15,7 @@ class PrefetchedBundles:
         self.max_read_bytes = getattr(
             original,
             "max_read_bytes",
-            MAX_READ_BYTES,
+            MAX_BUNDLE_BYTES,
         )
         self.unbounded = getattr(original, "unbounded", False)
         self.indexes = {}
@@ -99,10 +99,7 @@ def _read_bounded(original, path, byte_length, allowance, *, unbounded=None):
         extents = list(index.blocks.values())
         size = sum(block.length * 16 + 512 for block in extents)
         reservation = reader.index_reservation + size
-        if not unbounded and (
-            reservation > allowance
-            or any(block.length > MAX_READ_BYTES for block in extents)
-        ):
+        if not unbounded and reservation > allowance:
             raise ValueError(
                 "runtime body evidence exceeds workspace memory allowance",
             )

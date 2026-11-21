@@ -582,6 +582,12 @@ def test_bad_share_content_and_share_budget_have_tenant_error_types(tmp_path):
     snapshot.write_text("{invalid")
     with pytest.raises(SourceInputInvalid, match="content is invalid"):
         _read_share_snapshot(snapshot)
+    with snapshot.open("wb") as stream:
+        stream.truncate(9 * 1024 * 1024)
+    _preflight_share_budget(
+        {"shares": [{"snapshot_path": str(snapshot)}]},
+        1024 * 1024 * 1024,
+    )
     with pytest.raises(cli.MigrationCapacityError):
         _preflight_share_budget(
             {"shares": [{"snapshot_path": str(snapshot)}]},

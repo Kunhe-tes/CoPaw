@@ -61,7 +61,6 @@ def test_inventory_blocks_oversized_registry_before_import(
     source_inputs = importlib.import_module(
         "swe.app.conversation_storage.migration.source_inputs",
     )
-    monkeypatch.setattr(module, "MAX_READ_BYTES", 16)
     monkeypatch.setattr(source_inputs, "MAX_READ_BYTES", 16)
 
     def unexpected_read(*args, **kwargs):
@@ -127,14 +126,10 @@ def test_v3_oversized_registry_is_rejected_before_metadata_read(
     tmp_path,
     monkeypatch,
 ):
-    from swe.app.conversation_storage.migration import (
-        inventory as inventory_module,
-    )
     from swe.app.conversation_storage.migration import inventory_v3
     from swe.app.conversation_storage.migration import source_inputs
 
     monkeypatch.setattr(inventory_v3, "MAX_READ_BYTES", 16)
-    monkeypatch.setattr(inventory_module, "MAX_READ_BYTES", 16)
     monkeypatch.setattr(source_inputs, "MAX_READ_BYTES", 16)
     root, _ = source(tmp_path)
     with (root / "chats.json").open("wb") as stream:

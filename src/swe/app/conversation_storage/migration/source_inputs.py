@@ -198,7 +198,7 @@ def session_input_roots(
     registry_path="chats.json",
     sessions_dir="sessions",
     dialog_dir="dialog",
-    max_session_bytes=MAX_READ_BYTES,
+    max_session_bytes=MAX_BUNDLE_BYTES,
 ):
     """Fixed conversation entrances plus reviewed Session/ledger overrides."""
     roots = [registry_path, sessions_dir, dialog_dir]

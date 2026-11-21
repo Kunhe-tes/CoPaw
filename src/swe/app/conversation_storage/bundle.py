@@ -711,7 +711,7 @@ class BundleReader:
         index,
         *,
         max_blocks=MAX_BLOCKS,
-        max_read_bytes=MAX_READ_BYTES,
+        max_read_bytes=MAX_BUNDLE_BYTES,
     ):
         """绑定当前打开文件与已校验索引，不延长文件生命周期。"""
         self.source = source

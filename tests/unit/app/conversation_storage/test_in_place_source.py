@@ -127,15 +127,19 @@ def test_evidence_must_remain_readonly(in_place_data):
         verify_evidence(data, data["workspaces"][0])
 
 
-def test_evidence_reader_is_bounded(in_place_data, monkeypatch):
-    from swe.app.conversation_storage.migration import in_place_source
-    from swe.app.conversation_storage.migration.spool import (
-        MigrationCapacityError,
-    )
+def test_evidence_reader_accepts_large_streamed_file(in_place_data):
+    from pathlib import Path
 
-    monkeypatch.setattr(in_place_source, "MAX_READ_BYTES", 1)
-    with pytest.raises(MigrationCapacityError, match="bounded reader limit"):
-        freeze_evidence(in_place_data["workspaces"][0])
+    path = Path(in_place_data["workspaces"][0]["evidence_refs"][0])
+    path.chmod(0o644)
+    with path.open("wb") as stream:
+        stream.seek(9 * 1024 * 1024 - 1)
+        stream.write(b"x")
+    path.chmod(0o444)
+
+    frozen = freeze_evidence(in_place_data["workspaces"][0])
+
+    assert str(path) in frozen
 
 
 def test_workspace_inventory_does_not_read_other_tenant_evidence(

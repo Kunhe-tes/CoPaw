@@ -510,6 +510,27 @@ def test_large_recovery_object_is_not_limited_by_reader_size():
     assert len(block.content) > 8 * 1024 * 1024
 
 
+def test_source_artifact_has_no_8_mib_reader_limit(tmp_path):
+    from swe.app.conversation_storage.migration.importer import (
+        _read_source_artifact,
+    )
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    path = root / "session.json"
+    with path.open("wb") as stream:
+        stream.seek(9 * 1024 * 1024 - 1)
+        stream.write(b"x")
+    path.chmod(0o444)
+
+    raw = _read_source_artifact(
+        {"root": str(root)},
+        {"path": "session.json", "bytes": path.stat().st_size},
+    )
+
+    assert len(raw) == path.stat().st_size
+
+
 def test_inventory_files_rebuilt_from_database_and_recovery_are_not_copied():
     from swe.app.conversation_storage.migration.importer import (
         artifact_is_reconstructed,

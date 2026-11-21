@@ -15,7 +15,6 @@ from ..identity import (
     chat_key_bytes,
     service_unit_bytes,
 )
-from ..bundle import MAX_READ_BYTES
 from .legacy import read_archive, read_session
 from .manifest import SourceBoundary
 from .source_inputs import (
@@ -459,8 +458,6 @@ def _shares(mappings, shares, report):
             )
             if snapshot_path not in entries or not snapshot_path.is_file():
                 raise ValueError("share snapshot is not a regular file")
-            if snapshot_path.stat().st_size > MAX_READ_BYTES:
-                raise ValueError("share snapshot exceeds bounded reader size")
             if any(
                 stat.S_IMODE(path.stat().st_mode) & 0o222 for path in entries
             ):

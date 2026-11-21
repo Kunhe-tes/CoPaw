@@ -6,7 +6,7 @@ import json
 from functools import partial
 from itertools import islice
 
-from ..bundle import MAX_READ_BYTES, BundleStore
+from ..bundle import BundleStore
 from ..chat_mutations import load_metadata_json
 from ..errors import IntegrityError
 from ..identity import WorkspaceScope
@@ -77,9 +77,9 @@ def _read_publication_plan(
         extent = reader.index.blocks.get("import_plan")
         if extent is None or extent.kind != "import_plan":
             raise IntegrityError("committed import plan block is missing")
-        if not store.bundles.unbounded and extent.length * 8 > min(
-            memory_allowance,
-            MAX_READ_BYTES * 8,
+        if (
+            not store.bundles.unbounded
+            and extent.length * 8 > memory_allowance
         ):
             raise ValueError("fast verification plan exceeds memory allowance")
         raw = reader.read_extents(
@@ -87,7 +87,7 @@ def _read_publication_plan(
             max_bytes=(
                 store.bundles.max_read_bytes
                 if store.bundles.unbounded
-                else min(memory_allowance, MAX_READ_BYTES)
+                else memory_allowance
             ),
         )[0]
         plan = load_metadata_json(raw)
