@@ -704,6 +704,7 @@ async def _verify_session_messages(
         expected,
         context_epoch=expected.get("context_epoch", 0),
     )
+    messages = display_order_messages(messages)
     session_chats = [
         item
         for item in workspace["chats"]
@@ -716,7 +717,6 @@ async def _verify_session_messages(
         for item in session_chats
     ):
         task_projections(messages, expected)
-    messages = display_order_messages(messages)
     assignments = manifest.data["assignments"].get("publication", {})
     scope = WorkspaceScope.from_values(workspace["scope"])
     prefix = session["position"] + "/messages:"

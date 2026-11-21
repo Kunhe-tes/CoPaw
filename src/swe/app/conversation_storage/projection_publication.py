@@ -21,7 +21,10 @@ from .session_projection import (
     FORMAT,
     VERSION,
 )
-from .message_bundle import encode_message_directory
+from .message_bundle import (
+    encode_message_directory,
+    validate_runtime_occurrences,
+)
 
 IDENTITY_FIELDS = (
     "operation_key",
@@ -206,6 +209,7 @@ async def _previous_directory(service, row):
         directory = envelope.get("message_directory", [])
         if not isinstance(directory, list):
             raise IntegrityError("recovery message directory is invalid")
+        validate_runtime_occurrences(directory)
         result = []
         for item in directory:
             entry = dict(item)
@@ -286,7 +290,7 @@ async def prepare_recovery_blocks(
         resolve_turn=lambda key, value: frozen_turns.get(key),
     )
     installations = []
-    for name, layer, body in projection.messages:
+    for offset, (name, layer, body) in enumerate(projection.messages):
         source = body.get("id")
         role = body.get("role") or "assistant"
         installations.append(
@@ -295,6 +299,7 @@ async def prepare_recovery_blocks(
                 layer,
                 role,
                 source_msg_key=source,
+                source_occurrence_no=context["history_high"] + offset,
                 turn_id=row["turn_id"],
                 context_epoch=epoch,
                 in_context=layer == "memory",
@@ -511,6 +516,7 @@ async def prepare_recovery_blocks(
     directory.sort(
         key=lambda entry: entry.get("session_order", entry["sequence"]),
     )
+    validate_runtime_occurrences(directory)
     encode_message_directory(directory)
     envelope["message_directory"] = directory
     envelope["dependency_ids"] = sorted(

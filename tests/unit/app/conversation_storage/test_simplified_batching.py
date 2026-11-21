@@ -286,6 +286,7 @@ def message_batch(*, bad_at=None):
             str(i),
             "memory",
             "user",
+            source_occurrence_no=9 + i,
             context_epoch=int(i == bad_at),
         )
         for i in range(201)

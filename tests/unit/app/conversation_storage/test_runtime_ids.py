@@ -92,7 +92,12 @@ async def test_message_batch_only_updates_session_watermark():
     db = Database()
     db.execute = AsyncMock()
     messages = [
-        message_installs.MessageInstall(f"body:{index}", "memory", "user")
+        message_installs.MessageInstall(
+            f"body:{index}",
+            "memory",
+            "user",
+            source_occurrence_no=index,
+        )
         for index in range(2)
     ]
     request = SimpleNamespace(session_id=10, chat_id=None, turn_id=None)

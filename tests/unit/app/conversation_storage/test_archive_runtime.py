@@ -262,8 +262,18 @@ async def test_compact_source_matching_uses_positions_and_full_body():
     second.id = "q"
     second.metadata = {"origin": "second"}
     rows = [
-        {"message": first.to_dict(), "source_occurrence_no": 0},
-        {"message": second.to_dict(), "source_occurrence_no": 1},
+        {
+            "layer": "memory",
+            "session_order": 1,
+            "message": first.to_dict(),
+            "source_occurrence_no": 0,
+        },
+        {
+            "layer": "memory",
+            "session_order": 2,
+            "message": second.to_dict(),
+            "source_occurrence_no": 1,
+        },
     ]
 
     async def session_messages(*_args, **_kwargs):
@@ -296,31 +306,49 @@ async def test_compact_source_matching_uses_positions_and_full_body():
 
 async def test_compact_rejects_ambiguous_or_reused_source_occurrence():
     from swe.app.conversation_storage.archive_runtime import MySQLArchiveStore
+    from swe.app.conversation_storage.errors import IntegrityError
     from swe.app.conversation_storage.errors import ConflictError
 
     message = Msg("user", "same", "user")
     message.id = "q"
-    rows = [
-        {"message": message.to_dict(), "source_occurrence_no": 0},
-        {"message": message.to_dict(), "source_occurrence_no": 0},
+    reused = [
+        {
+            "layer": "memory",
+            "session_order": 1,
+            "message": message.to_dict(),
+            "source_occurrence_no": 0,
+        },
+        {
+            "layer": "memory",
+            "session_order": 2,
+            "message": message.to_dict(),
+            "source_occurrence_no": 0,
+        },
     ]
 
     async def session_messages(*_args, **_kwargs):
-        return rows
+        return reused
 
     store = object.__new__(MySQLArchiveStore)
     store.reader = SimpleNamespace(session_messages=session_messages)
 
+    with pytest.raises(IntegrityError, match="numbering"):
+        await store._source_rows(
+            {"id": "session"},
+            [message],
+            source_positions=(0,),
+        )
+
+    valid = [dict(reused[0]), {**reused[1], "source_occurrence_no": 1}]
+
+    async def valid_messages(*_args, **_kwargs):
+        return valid
+
+    store.reader = SimpleNamespace(session_messages=valid_messages)
     with pytest.raises(ConflictError, match="ambiguous or absent"):
         await store._source_rows(
             {"id": "session"},
             [message],
-        )
-    with pytest.raises(ConflictError, match="occurrence sequence"):
-        await store._source_rows(
-            {"id": "session"},
-            [message, message],
-            source_positions=(0, 1),
         )
 
 

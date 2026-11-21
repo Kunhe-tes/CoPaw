@@ -210,6 +210,8 @@ async def install_messages(
         else:
             if message.context_epoch != session.get("context_epoch", 0):
                 raise ConflictError("message context epoch changed")
+            if message.source_occurrence_no != online:
+                raise ConflictError("message occurrence sequence changed")
             online += 1
         _validate_message(message, request, index, sources)
     if online != session["history_high"]:

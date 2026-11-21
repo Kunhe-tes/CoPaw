@@ -9,7 +9,10 @@ from .chat_mutations import load_metadata_json, utc_datetime
 from .checkpoint_reader import CheckpointReads
 from .errors import IntegrityError
 from .identity import chat_key_bytes
-from .message_bundle import decode_message_directory
+from .message_bundle import (
+    decode_message_directory,
+    validate_runtime_occurrences,
+)
 import asyncio
 import json
 from .retention import RetentionStore
@@ -140,6 +143,7 @@ class ArchiveReader(CheckpointReads):
                         separators=(",", ":"),
                     ).encode(),
                 )
+                validate_runtime_occurrences(directory)
                 result = []
                 for item in directory:
                     entry = dict(item)
@@ -185,10 +189,7 @@ class ArchiveReader(CheckpointReads):
                             )
                             else entry.get("source_msg_key", raw_id)
                         ),
-                        "source_occurrence_no": entry.get(
-                            "source_occurrence_no",
-                            0,
-                        ),
+                        "source_occurrence_no": entry["source_occurrence_no"],
                         "role_key": (
                             entry.get("role")
                             or body.get("role")

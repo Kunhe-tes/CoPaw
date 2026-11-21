@@ -90,13 +90,19 @@ async def test_message_watermark_counts_duplicate_source_ids():
         },
     )
     messages = (
-        MessageInstall("m:0", "memory", "user", source_msg_key="same"),
+        MessageInstall(
+            "m:0",
+            "memory",
+            "user",
+            source_msg_key="same",
+            source_occurrence_no=8,
+        ),
         MessageInstall(
             "m:1",
             "memory",
             "assistant",
             source_msg_key="same",
-            source_occurrence_no=1,
+            source_occurrence_no=9,
         ),
     )
     await install_messages(
@@ -277,6 +283,37 @@ async def test_archive_watermark_accepts_a_historical_turn():
     db.insert.assert_not_awaited()
     db.execute.assert_awaited_once()
     assert db.execute.await_args.args[1] == (1, 2)
+
+
+async def test_online_occurrence_must_follow_session_watermark():
+    db = SimpleNamespace(insert=AsyncMock(), execute=AsyncMock())
+    message = MessageInstall("m", "memory", "user")
+
+    with pytest.raises(ConflictError, match="occurrence sequence"):
+        await install_messages(
+            db,
+            SimpleNamespace(
+                scope=WorkspaceScope(
+                    "t",
+                    "s",
+                    "a",
+                    service_unit_id="schema-test-service",
+                ),
+                session_id=1,
+                chat_id=2,
+                turn_id=None,
+            ),
+            (message,),
+            {"id": 4},
+            BundleIndex(
+                "bundle",
+                100,
+                {},
+                {"m": BlockExtent("message", 50, 10)},
+            ),
+            ({"history_high": 4}, {"history_high": 0}, None),
+        )
+    db.execute.assert_not_awaited()
 
 
 async def test_online_occurrence_cannot_claim_another_turn():

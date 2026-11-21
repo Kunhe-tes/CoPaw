@@ -33,6 +33,7 @@ from .commit_plan import CommitPlan
 from .errors import ConflictError, IntegrityError
 from .identity import WorkspaceScope
 from .message_installs import MessageInstall
+from .message_bundle import validate_runtime_occurrences
 from .publications import PublicationRequest, PublicationStore
 from .retention import RetentionStore
 
@@ -334,6 +335,7 @@ class MySQLArchiveStore:
             session["id"],
             layers=("memory",),
         )
+        validate_runtime_occurrences(rows)
         if len(messages) > len(rows):
             raise ConflictError("compact source prefix is not indexed")
         if source_positions is None:
@@ -371,13 +373,6 @@ class MySQLArchiveStore:
                 raise ConflictError(
                     "compact requires exact indexed source prefix",
                 )
-        occurrences = [row["source_occurrence_no"] for row in rows]
-        if any(
-            type(value) is not int or value < 0 for value in occurrences
-        ) or occurrences != sorted(set(occurrences)):
-            raise ConflictError(
-                "compact source occurrence sequence is invalid",
-            )
         return rows
 
     async def compact(

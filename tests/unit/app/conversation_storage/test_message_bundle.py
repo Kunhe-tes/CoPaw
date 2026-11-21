@@ -15,6 +15,7 @@ from swe.app.conversation_storage.message_bundle import (
     prepare_message_batches,
     select_archive_chunks,
     split_message_batches,
+    validate_runtime_occurrences,
 )
 
 
@@ -69,6 +70,43 @@ def test_directory_requires_strict_sequence_order_but_keeps_duplicate_raw_ids():
     ) == ("same", "same")
     with pytest.raises(ValueError, match="strictly ordered"):
         encode_message_directory((_entry(3, "same", 0), _entry(2, "same", 1)))
+
+
+def test_runtime_occurrences_require_session_global_monotonic_numbers():
+    entries = (
+        {
+            "layer": "memory",
+            "session_order": 1,
+            "source_occurrence_no": 0,
+        },
+        {
+            "layer": "task",
+            "session_order": 2,
+            "source_occurrence_no": 1,
+        },
+        {
+            "layer": "archive",
+            "sequence": 3,
+            "source_occurrence_no": 0,
+        },
+    )
+
+    validate_runtime_occurrences(entries)
+    with pytest.raises(IntegrityError, match="numbering"):
+        validate_runtime_occurrences(
+            (
+                {
+                    "layer": "memory",
+                    "session_order": 1,
+                    "source_occurrence_no": 0,
+                },
+                {
+                    "layer": "task",
+                    "session_order": 2,
+                    "source_occurrence_no": 0,
+                },
+            ),
+        )
 
 
 def test_directory_rejects_duplicate_json_keys():

@@ -189,12 +189,16 @@ def display_order_messages(messages):
             SimpleNamespace(timestamp=item["payload"].get("timestamp")),
         )
 
-    return [
+    ordered = [
         *sorted(
             (item for item in messages if item["layer"] != "anchor"),
             key=key,
         ),
         *(item for item in messages if item["layer"] == "anchor"),
+    ]
+    return [
+        {**item, "source_occurrence_no": index}
+        for index, item in enumerate(ordered)
     ]
 
 
@@ -878,13 +882,13 @@ class ConversationImporter:
                 ]
         await self._turn_identities(session, scope, chats)
         messages = extract_messages(state, context_epoch=epoch)
+        messages = display_order_messages(messages)
         if any(
             item["spec"]["meta"].get("session_kind") == "task"
             for item in workspace["chats"]
             if item["spec"]["id"] in chats
         ):
             task_projections(messages, state)
-        messages = display_order_messages(messages)
         body_batches = iter_message_batches(
             [item["payload"] for item in messages],
             max_records=self.batch_size,
@@ -1348,7 +1352,6 @@ class ConversationImporter:
                 batch["messages"],
                 max_records=self.batch_size,
             )
-            offset = 0
             for chunk_index, body_batch in enumerate(body_batches):
                 bodies = body_batch.messages
                 entries = []
@@ -1365,7 +1368,7 @@ class ConversationImporter:
                             "visible": not chat["archive"]["deleted"],
                             "role": payload.get("role") or "assistant",
                             "kind": payload.get("type") or "message",
-                            "source_occurrence": offset + index,
+                            "source_occurrence": sequence - 1,
                             "timestamp": _timestamp(payload.get("timestamp")),
                             "epoch": batch["epoch"],
                             "body": {
@@ -1413,7 +1416,6 @@ class ConversationImporter:
                         "directory_block": "message_directory",
                     },
                 )
-                offset += len(bodies)
             rows = []
             blocks = [
                 BundleBlock(

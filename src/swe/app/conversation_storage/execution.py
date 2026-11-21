@@ -286,6 +286,7 @@ class ExecutionStore:
                     "anchor",
                     "user",
                     source_msg_key=question_key,
+                    source_occurrence_no=session["history_high"],
                     origin_chat_id=chat["id"],
                     turn_id=turn_id,
                     context_epoch=session["context_epoch"],

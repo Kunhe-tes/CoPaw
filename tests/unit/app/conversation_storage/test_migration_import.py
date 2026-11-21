@@ -73,7 +73,7 @@ def test_display_order_messages_stably_interleaves_error_layer():
     ordered = display_order_messages(messages)
 
     assert [item["payload"]["id"] for item in ordered] == ["q", "e", "later"]
-    assert [item["source_occurrence_no"] for item in ordered] == [0, 0, 1]
+    assert [item["source_occurrence_no"] for item in ordered] == [0, 1, 2]
 
 
 def test_display_order_messages_keeps_equal_and_missing_timestamp_order():
@@ -110,6 +110,7 @@ def test_display_order_messages_keeps_equal_and_missing_timestamp_order():
         "missing-first",
         "missing-second",
     ]
+    assert [item["source_occurrence_no"] for item in ordered] == [0, 1, 2, 3]
 
 
 def test_inventory_blockers_cannot_be_overridden_with_ready_boolean():

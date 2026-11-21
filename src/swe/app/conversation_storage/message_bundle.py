@@ -249,6 +249,30 @@ def decode_message_directory(payload: bytes) -> tuple[dict, ...]:
         raise IntegrityError("message directory entry is invalid") from error
 
 
+def validate_runtime_occurrences(entries):
+    """Require Session-global runtime occurrence numbering."""
+    if isinstance(entries, (str, bytes)) or not isinstance(entries, Sequence):
+        raise IntegrityError("runtime occurrence directory must be ordered")
+    session_orders = set()
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            raise IntegrityError("runtime occurrence entry is invalid")
+        layer = entry.get("layer", entry.get("category"))
+        if layer == "archive":
+            continue
+        session_order = entry.get("session_order", entry.get("sequence"))
+        source_occurrence = entry.get("source_occurrence_no")
+        if (
+            type(session_order) is not int
+            or session_order <= 0
+            or session_order in session_orders
+            or type(source_occurrence) is not int
+            or source_occurrence != session_order - 1
+        ):
+            raise IntegrityError("runtime occurrence numbering is invalid")
+        session_orders.add(session_order)
+
+
 @dataclass(frozen=True)
 class EncodedMessageBatch:
     """One body block with its canonical per-message encodings."""

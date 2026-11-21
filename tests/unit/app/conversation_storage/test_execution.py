@@ -46,6 +46,7 @@ class AuthorityDatabase:
             "owner_key": b"owner",
             "active_turn_id": 3,
             "lease_valid": 1,
+            "history_high": 0,
             "state_revision": 4,
         }
         self.chat = {
