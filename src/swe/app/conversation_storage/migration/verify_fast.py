@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import hashlib
 from functools import partial
 from itertools import islice
 
@@ -14,6 +15,8 @@ from ..message_bundle import (
     decode_archive_manifest,
     decode_message_bodies,
     decode_message_directory,
+    encode_message_directory,
+    encode_message_body,
     validate_runtime_occurrences,
 )
 from ..reference_queries import iter_reference_rows
@@ -70,6 +73,8 @@ def _read_publication_plan(
     memory_allowance,
     *,
     position=None,
+    message_batch=None,
+    session_id=None,
 ):
     path = BundleStore.validate_publication_locator(row)
     if path != assignment["relative_path"]:
@@ -124,8 +129,64 @@ def _read_publication_plan(
             plan,
             row,
             memory_allowance,
-            position=position,
+            position=position if message_batch is None else None,
+            batch=message_batch,
         )
+        recovery = None
+        if (
+            session_id is not None
+            and position is not None
+            and position.endswith("/recovery")
+        ):
+            updates = [
+                item["values"]
+                for item in plan["updates"]
+                if item["table"] == "sessions"
+                and item["values"].get("id") == session_id
+                and "history_high" in item["values"]
+            ]
+            extent = reader.index.blocks.get("recovery")
+            if (
+                len(updates) != 1
+                or extent is None
+                or extent.kind != "recovery"
+            ):
+                raise IntegrityError("session recovery evidence is missing")
+            envelope = load_metadata_json(
+                _read_checked(reader, extent, memory_allowance),
+            )
+            directory = envelope.get("message_directory")
+            if not isinstance(directory, list):
+                raise IntegrityError(
+                    "session recovery message directory is missing",
+                )
+            hashes_extent = reader.index.blocks.get("message_body_hashes")
+            if (
+                hashes_extent is None
+                or hashes_extent.kind != "message_body_hashes"
+            ):
+                raise IntegrityError(
+                    "session recovery message body hashes are missing",
+                )
+            body_hashes = load_metadata_json(
+                _read_checked(reader, hashes_extent, memory_allowance),
+            )
+            if not isinstance(body_hashes, list) or any(
+                not isinstance(value, str) or len(value) != 64
+                for value in body_hashes
+            ):
+                raise IntegrityError(
+                    "session recovery message body hashes are invalid",
+                )
+            recovery = (
+                updates[0]["history_high"],
+                _directory_hashes(
+                    decode_message_directory(
+                        encode_message_directory(directory),
+                    ),
+                ),
+                body_hashes,
+            )
         if not required_blocks.issubset(reader.index.blocks):
             raise IntegrityError(
                 "committed publication block set is incomplete",
@@ -142,6 +203,7 @@ def _read_publication_plan(
             len(plan["updates"]),
             archive,
             message_span,
+            recovery,
         )
 
 
@@ -152,11 +214,12 @@ def _validate_message_blocks(
     allowance,
     *,
     position=None,
+    batch=None,
 ):
     blocks = reader.index.blocks
     directory = blocks.get("message_directory")
     bodies = blocks.get("message_bodies")
-    batch = _message_batch(position)
+    batch = batch if batch is not None else _message_batch(position)
     if batch is not None and (directory is None or bodies is None):
         raise IntegrityError("session message batch blocks are missing")
     message_span = None
@@ -185,7 +248,26 @@ def _validate_message_blocks(
                 raise IntegrityError(
                     "session message batch occurrence start differs",
                 )
-            message_span = (prefix, start, len(entries))
+            normalized = [
+                {
+                    **entry,
+                    "body": {
+                        **entry["body"],
+                        "publication_id": publication["id"],
+                    },
+                }
+                for entry in entries
+            ]
+            message_span = (
+                prefix,
+                start,
+                len(entries),
+                _directory_hashes(normalized),
+                [
+                    hashlib.sha256(encode_message_body(body)).hexdigest()
+                    for body in messages
+                ],
+            )
         for offset, entry in enumerate(entries):
             if entry["body"] != {
                 "publication_id": "self",
@@ -354,13 +436,53 @@ def _message_batch(position):
     return prefix, int(start_text)
 
 
-def _validate_message_batch_spans(spans):
-    for values in spans.values():
+def _session_message_batch(position, sessions):
+    marker = position.rfind(MESSAGE_BATCH_MARKER)
+    if marker < 0 or position[:marker] not in sessions:
+        return None
+    return _message_batch(position)
+
+
+def _directory_hashes(entries):
+    return [
+        hashlib.sha256(
+            json.dumps(
+                entry,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode(),
+        ).digest()
+        for entry in entries
+    ]
+
+
+def _validate_message_batch_spans(spans, recoveries, sessions):
+    for position in sessions:
+        if position not in recoveries:
+            raise IntegrityError("session recovery evidence is missing")
+        high, directory, body_hashes = recoveries[position]
         expected = 0
-        for start, count in sorted(values):
+        hashes = []
+        actual_body_hashes = []
+        for start, count, batch_hashes, batch_body_hashes in sorted(
+            spans.get(position, []),
+        ):
             if start != expected:
                 raise IntegrityError("session message batch order differs")
             expected += count
+            hashes.extend(batch_hashes)
+            actual_body_hashes.extend(batch_body_hashes)
+        if type(high) is not int or expected != high or len(directory) != high:
+            raise IntegrityError("session message batch history high differs")
+        if hashes != directory:
+            raise IntegrityError(
+                "session message batch recovery directory differs",
+            )
+        if actual_body_hashes != body_hashes:
+            raise IntegrityError(
+                "session message batch body differs from recovery",
+            )
 
 
 def _merge_expected_rows(expected_by_table, service_unit_key, expected):
@@ -417,6 +539,16 @@ async def verify_fast_publications(
                 continue
             selected.append((position, assignment))
         publication_assignments = iter(selected)
+    session_assignments = manifest.data.get("assignments", {}).get(
+        "session",
+        {},
+    )
+    sessions = {
+        position: assignment["target_id"]
+        for position, assignment in session_assignments.items()
+        if expected_scopes is None
+        or _position_scope(position) in expected_scopes
+    }
     assignments = iter(publication_assignments)
     batches = manifest.data.get("batches", {})
     relevant_batches = batches.items()
@@ -439,6 +571,7 @@ async def verify_fast_publications(
     checked_records = 0
     seen_paths = set()
     message_spans = {}
+    recoveries = {}
     # A valid message body block can be 8 MiB and decoded JSON needs headroom.
     # Limit concurrent decoders rather than rejecting valid importer output.
     verify_workers = max(
@@ -488,6 +621,16 @@ async def verify_fast_publications(
                     "expected committed publication is missing",
                 )
             _publication_identity(row, assignment)
+            message_batch = _session_message_batch(position, sessions)
+            recovery_position = (
+                position[: -len("/recovery")]
+                if position.endswith("/recovery")
+                else None
+            )
+            owner = message_batch[0] if message_batch else recovery_position
+            session_id = sessions.get(owner)
+            if session_id is not None and row.get("session_id") != session_id:
+                raise IntegrityError("session publication association differs")
             scope = WorkspaceScope.from_values(assignment["scope"])
             store = stores_by_service.get(scope.service_unit_id)
             if store is None:
@@ -498,7 +641,9 @@ async def verify_fast_publications(
                     service_unit_id=scope.service_unit_id,
                 )
                 stores_by_service[scope.service_unit_id] = store
-            checks.append((position, store, row, assignment))
+            checks.append(
+                (position, store, row, assignment, message_batch, session_id),
+            )
 
         for start in range(0, len(checks), verify_workers):
             batch = checks[start : start + verify_workers]
@@ -512,23 +657,36 @@ async def verify_fast_publications(
                         manifest.migration_id,
                         target.schema,
                         allowance,
-                        position=position,
+                        position=(
+                            position if message_batch or session_id else None
+                        ),
+                        message_batch=message_batch,
+                        session_id=session_id,
                     )
-                    for position, store, row, assignment in batch
+                    for position, store, row, assignment, message_batch, session_id in batch
                 ),
             )
             expected_by_table = {}
             archive_checks = []
             for check, result in zip(batch, results):
                 service_unit_key = check[2]["service_unit_key"]
-                expected, rows_count, updates_count, archive, message_span = (
-                    result
-                )
+                (
+                    expected,
+                    rows_count,
+                    updates_count,
+                    archive,
+                    message_span,
+                    recovery,
+                ) = result
                 checked_rows += rows_count
                 checked_updates += updates_count
                 if message_span is not None:
-                    prefix, start, count = message_span
-                    message_spans.setdefault(prefix, []).append((start, count))
+                    prefix, start, count, hashes, body_hashes = message_span
+                    message_spans.setdefault(prefix, []).append(
+                        (start, count, hashes, body_hashes),
+                    )
+                if recovery is not None:
+                    recoveries[check[0][: -len("/recovery")]] = recovery
                 if archive is not None:
                     archive_checks.append((check, archive))
                 _merge_expected_rows(
@@ -577,7 +735,7 @@ async def verify_fast_publications(
                 checked_records += len(expected)
                 batch_records += len(expected)
         verified_publications += len(chunk)
-    _validate_message_batch_spans(message_spans)
+    _validate_message_batch_spans(message_spans, recoveries, sessions)
     return {
         "publications": verified_publications,
         "planned_rows": checked_rows,

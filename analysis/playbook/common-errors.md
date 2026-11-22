@@ -962,3 +962,9 @@
 - 生产 `DatabaseConfig` 默认两者均为 600 秒，可分别用 `SWE_DB_READ_TIMEOUT`、`SWE_DB_WRITE_TIMEOUT` 调整。单次 database facade 操作超过期限会抛 `TimeoutError("Database operation timed out")`。
 - 写事务超时只说明当前等待被客户端终止，最终提交结果可能未知。保留原 `operation_key` 和 prepared publication，先对账再续跑，不能把超时直接重试成新写入。
 - 远端 MySQL 返回 `InterfaceError 2013` 或握手重置时属于连接中断，不等于 SQL timeout；先确认 `SELECT 1` 和连接池恢复，再评估是否在同一 manifest 重跑。
+
+## 会话迁移 fast verify 报消息批次或正文证据不匹配
+
+- fast verify 按 manifest 中的 Session 身份核对消息 publication 归属、连续范围、恢复目录、`history_high` 和恢复 publication 中的 `message_body_hashes`；artifact 或 Turn 路径中的 `/messages:` 不作为消息批次。
+- 缺少尾批、跨 Session 引用、正文被替换或恢复证据缺失都会阻止 fast verify。保留原始 manifest 和 bundle，先检查 Session 归属、恢复 publication 与源快照，不能手改校验状态。
+- 在引入正文摘要前生成的恢复 publication 不含该证据，无法通过新版 fast verify；应基于保留的源快照重新导入，或按现有完整验证及迁移操作流程处理。

@@ -1018,7 +1018,7 @@ async def test_fast_publication_reads_are_batched_and_bundle_checks_concurrent(
     assert result["publications"] == 129
 
 
-def _message_batch_inputs(tmp_path, batches):
+def _message_batch_inputs(tmp_path, batches, *, substitute_body=False):
     from swe.app.conversation_storage.message_bundle import (
         encode_message_bodies,
         encode_message_directory,
@@ -1029,6 +1029,8 @@ def _message_batch_inputs(tmp_path, batches):
     bundles.root.mkdir()
     scope = WorkspaceScope("tenant", "source", "agent", service_unit_id="svc")
     assignments, rows, states = {}, {}, {}
+    recovery_directory = []
+    recovery_hashes = []
     for identity, (position, entries) in enumerate(batches.items(), start=1):
         operation_key = f"{identity:064x}"
         import_plan = {
@@ -1061,6 +1063,25 @@ def _message_batch_inputs(tmp_path, batches):
             }
             for offset, (entry, body) in enumerate(zip(entries, bodies))
         ]
+        from hashlib import sha256
+        from swe.app.conversation_storage.message_bundle import (
+            encode_message_body,
+        )
+
+        recovery_hashes.extend(
+            sha256(encode_message_body(body)).hexdigest() for body in bodies
+        )
+        if substitute_body:
+            bodies[0]["content"] = "another session's message"
+        recovery_directory.extend(
+            [
+                {
+                    **entry,
+                    "body": {**entry["body"], "publication_id": identity},
+                }
+                for entry in directory
+            ],
+        )
         index = bundles.publish(
             operation_key,
             [
@@ -1103,17 +1124,100 @@ def _message_batch_inputs(tmp_path, batches):
             "state": "committed",
             "gc_state": "live",
             "durable_at": "durable",
+            "session_id": 42,
         }
         states[position] = "committed"
 
+    identity = len(rows) + 1
+    operation_key = f"{identity:064x}"
+    high = len(recovery_directory)
+    plan = {
+        "version": 1,
+        "migration_id": migration_id,
+        "schema": "test_fast_verify",
+        "rows": [],
+        "updates": [
+            {"table": "sessions", "values": {"id": 42, "history_high": high}},
+        ],
+        "locks": {},
+    }
+    index = bundles.publish(
+        operation_key,
+        [
+            BundleBlock(
+                "import_plan",
+                "import_plan",
+                json.dumps(plan).encode(),
+            ),
+            BundleBlock(
+                "recovery",
+                "recovery",
+                json.dumps({"message_directory": recovery_directory}).encode(),
+            ),
+            BundleBlock(
+                "message_body_hashes",
+                "message_body_hashes",
+                json.dumps(recovery_hashes).encode(),
+            ),
+        ],
+        scope=scope,
+        metadata={"operation_key": operation_key},
+    )
+    assignments["session/recovery"] = {
+        "target_id": identity,
+        "operation_key": operation_key,
+        "relative_path": index.relative_path,
+        "scope": list(scope.values),
+        "scope_kind": "workspace",
+    }
+    rows[identity] = {
+        "id": identity,
+        "scope_kind": "workspace",
+        "service_unit_key": b"svc",
+        "tenant_key": b"tenant",
+        "source_key": b"source",
+        "agent_key": b"agent",
+        "operation_key": operation_key.encode(),
+        "relative_path": index.relative_path,
+        "byte_length": index.byte_length,
+        "state": "committed",
+        "gc_state": "live",
+        "durable_at": "durable",
+        "session_id": 42,
+    }
+    states["session/recovery"] = "committed"
+
     class Database:
+        publication_rows = rows
+        max_allowed_packet = 16 * 1024 * 1024
+
+        def acquire(self):
+            return self
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
         async def fetch_all(self, _query, params):
+            if "swe_conversation_sessions" in _query:
+                return [
+                    {
+                        "id": 42,
+                        "history_high": high,
+                        "service_unit_key": b"svc",
+                    },
+                ]
             return [rows[identity] for identity in params]
 
     manifest = SimpleNamespace(
         migration_id=migration_id,
         data={
-            "assignments": {"publication": assignments},
+            "assignments": {
+                "publication": assignments,
+                "session": {"session": {"target_id": 42}},
+            },
             "batches": states,
             "target": {"schema": "test_fast_verify"},
         },
@@ -1168,7 +1272,7 @@ async def test_fast_session_message_batches_accept_global_occurrences(
 
     result = await _run_fast_message_batches(database, bundles, manifest)
 
-    assert result["publications"] == 2
+    assert result["publications"] == 3
 
 
 @pytest.mark.parametrize(
@@ -1213,3 +1317,99 @@ async def test_fast_session_message_batches_require_global_occurrences(
 
 async def _empty_rows():
     return []
+
+
+async def test_fast_rejects_missing_last_message_batch(tmp_path):
+    batches = {
+        f"session/messages:{i}": [
+            {
+                "sequence": i + 1,
+                "session_order": i + 1,
+                "source_occurrence": i,
+                "source_occurrence_no": i,
+            },
+        ]
+        for i in range(2)
+    }
+    database, bundles, manifest = _message_batch_inputs(tmp_path, batches)
+    del manifest.data["assignments"]["publication"]["session/messages:1"]
+    with pytest.raises(IntegrityError, match="history high"):
+        await _run_fast_message_batches(database, bundles, manifest)
+
+
+async def test_fast_rejects_message_publication_from_another_session(tmp_path):
+    batches = {
+        "session/messages:0": [
+            {
+                "sequence": 1,
+                "session_order": 1,
+                "source_occurrence": 0,
+                "source_occurrence_no": 0,
+            },
+        ],
+    }
+    database, bundles, manifest = _message_batch_inputs(tmp_path, batches)
+    database.publication_rows[1]["session_id"] = 43
+    with pytest.raises(IntegrityError, match="association"):
+        await _run_fast_message_batches(database, bundles, manifest)
+
+
+def test_fast_classifies_only_direct_session_message_positions():
+    from swe.app.conversation_storage.migration.verify_fast import (
+        _session_message_batch,
+    )
+
+    sessions = {"session": 42}
+    assert _session_message_batch("session/messages:0", sessions) == (
+        "session",
+        0,
+    )
+    assert (
+        _session_message_batch(
+            "artifact/source-artifact:0/messages:0",
+            sessions,
+        )
+        is None
+    )
+    assert (
+        _session_message_batch("session/turn:abc/messages:0", sessions) is None
+    )
+    assert (
+        _session_message_batch("session/turn:abc/messages:bad", sessions)
+        is None
+    )
+
+
+def test_fast_rejects_directory_from_another_session():
+    from swe.app.conversation_storage.migration.verify_fast import (
+        _validate_message_batch_spans,
+    )
+
+    with pytest.raises(IntegrityError, match="recovery directory"):
+        _validate_message_batch_spans(
+            {"session": [(0, 1, [b"other"], ["body"])]},
+            {"session": (1, [b"expected"], ["body"])},
+            {"session": 42},
+        )
+
+
+async def test_fast_rejects_replaced_message_body_with_same_directory(
+    tmp_path,
+):
+    batches = {
+        "session/messages:0": [
+            {
+                "sequence": 1,
+                "session_order": 1,
+                "source_occurrence": 0,
+                "source_occurrence_no": 0,
+            },
+        ],
+    }
+    database, bundles, manifest = _message_batch_inputs(
+        tmp_path,
+        batches,
+        substitute_body=True,
+    )
+    with pytest.raises(IntegrityError, match="body differs"):
+        await _run_fast_message_batches(database, bundles, manifest)

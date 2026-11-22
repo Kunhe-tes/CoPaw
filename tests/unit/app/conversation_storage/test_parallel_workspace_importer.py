@@ -219,9 +219,9 @@ class Recorder:
         return {"session_id": self.chat_sessions[params[0]]}
 
 
-async def serial_run(record, source, target, tmp_path):
+async def serial_run(record, source, target, tmp_path, batch_size=1):
     importer = ConversationImporter.__new__(ConversationImporter)
-    importer.target, importer.batch_size = target, 1
+    importer.target, importer.batch_size = target, batch_size
     importer.db = record
     importer.bundle_stores = {"svc": SimpleNamespace(root=tmp_path)}
     importer.stores = {"svc": record}
@@ -640,3 +640,109 @@ async def test_legacy_identity_allocation_keeps_first_use_order(tmp_path):
         ("publication", "session/identities"),
         ("session", "another-session"),
     ]
+
+
+async def test_importer_message_batches_pass_fast_verification_at_128(
+    tmp_path,
+    monkeypatch,
+):
+    from swe.app.conversation_storage.bundle import BundleStore
+    from swe.app.conversation_storage.migration.parallel import MigrationIO
+    from swe.app.conversation_storage.migration.verify_fast import (
+        verify_fast_publications,
+    )
+
+    source = workspace()
+    state = source["sessions"][0]["legacy"]["state"]
+    state["turn_states"] = {}
+    state["agent"]["memory"]["content"] = [
+        {
+            **Msg("user", str(i), "user", timestamp=STAMP).to_dict(),
+            "id": str(i),
+        }
+        for i in range(129)
+    ]
+    source["chats"][0]["archive"]["epochs"] = []
+    target = SimpleNamespace(
+        schema="test_conversation_fixture",
+        migration_id="migration",
+    )
+    record = Recorder()
+    await serial_run(record, source, target, tmp_path, batch_size=128)
+    bundles = BundleStore(tmp_path / "nas")
+    bundles.root.mkdir()
+    assignments, rows = {}, {}
+    session_id = record.assignments[("session", "session")]["target_id"]
+    for (kind, position), assignment in record.assignments.items():
+        if kind != "publication" or not (
+            position.startswith("session/messages:")
+            or position == "session/recovery"
+        ):
+            continue
+        request, identity, _ = next(
+            item
+            for item in record.publications
+            if item[1] == assignment["target_id"]
+        )
+        index = bundles.publish(
+            request.operation_key,
+            record.blocks[request.operation_key],
+            scope=request.scope,
+            metadata={"operation_key": request.operation_key},
+        )
+        assignments[position] = {
+            **assignment,
+            "relative_path": index.relative_path,
+            "scope": list(request.scope.values),
+            "scope_kind": request.scope_kind,
+        }
+        rows[identity] = {
+            "id": identity,
+            "scope_kind": request.scope_kind,
+            "service_unit_key": b"svc",
+            "tenant_key": b"tenant",
+            "source_key": b"source",
+            "agent_key": b"agent",
+            "operation_key": request.operation_key.encode(),
+            "session_id": request.session_id,
+            "relative_path": index.relative_path,
+            "byte_length": index.byte_length,
+            "state": "committed",
+            "gc_state": "live",
+            "durable_at": STAMP,
+        }
+
+    class Database:
+        async def fetch_all(self, _query, params):
+            return [rows[identity] for identity in params]
+
+    async def reference_rows(_database, _query, expected, _service):
+        yield tuple(expected), expected
+
+    monkeypatch.setattr(
+        "swe.app.conversation_storage.migration.verify_fast.iter_reference_rows",
+        reference_rows,
+    )
+    manifest = SimpleNamespace(
+        migration_id=target.migration_id,
+        data={
+            "assignments": {
+                "publication": assignments,
+                "session": {"session": {"target_id": session_id}},
+            },
+            "batches": {position: "committed" for position in assignments},
+        },
+    )
+    assert "session/messages:0" in assignments
+    assert "session/messages:128" in assignments
+    async with MigrationIO(2) as io:
+        result = await verify_fast_publications(
+            Database(),
+            {"svc": bundles},
+            manifest,
+            target,
+            io=io,
+            io_workers=2,
+            memory_bytes=64 * 1024 * 1024,
+        )
+    assert result["publications"] == 3

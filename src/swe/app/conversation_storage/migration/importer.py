@@ -2,6 +2,7 @@
 """Offline semantic extraction and bounded immutable migration batches."""
 
 import asyncio
+import hashlib
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -1325,12 +1326,36 @@ class ConversationImporter:
                 sid,
             )
         )
+        body_hashes = {
+            (locator["publication_id"], locator["position"]): hashlib.sha256(
+                body,
+            ).hexdigest()
+            for (_layer, body), locators in self.session_message_refs.get(
+                session["position"],
+                {},
+            ).items()
+            for locator in locators
+        }
+        message_hashes = [
+            body_hashes[
+                (entry["body"]["publication_id"], entry["body"]["position"])
+            ]
+            for entry in self.session_message_directory.get(
+                session["position"],
+                [],
+            )
+        ]
         await self._publish(
             root_position,
             scope,
             [],
             [
                 _block("recovery", "recovery", projection.envelope),
+                _block(
+                    "message_body_hashes",
+                    "message_body_hashes",
+                    message_hashes,
+                ),
                 *projection.blocks,
                 _block(
                     "legacy_root",
