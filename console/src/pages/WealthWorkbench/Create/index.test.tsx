@@ -250,7 +250,7 @@ describe("TaskSchedule", () => {
 });
 
 describe("Create", () => {
-  it("按来源排列场景并保留未知来源，筛选后更新分组数量且保留选择", async () => {
+  it("从来源导航切换场景，切换和分类筛选均保留选择", async () => {
     const base: Scene = {
       id: "head-office",
       name: "总部存款场景",
@@ -269,8 +269,8 @@ describe("Create", () => {
       {
         ...base,
         id: "legacy-head",
-        name: "总行旧标签场景",
-        source: "总行预置",
+        name: "总部旧标签场景",
+        source: "总部预置",
       },
       { ...base, id: "custom", name: "自定义来源场景", source: "新来源" },
     ];
@@ -295,30 +295,42 @@ describe("Create", () => {
       </MemoryRouter>,
     );
     const branch = await screen.findByRole("region", { name: "分行自建" });
+    const nav = within(screen.getByRole("group", { name: "场景来源" }));
     expect(
-      screen
-        .getAllByRole("region")
-        .map((region) => region.getAttribute("aria-label")),
-    ).toEqual(["分行自建", "总行预置", "其他来源"]);
-    expect(within(branch).getByText("2 个场景")).toBeInTheDocument();
-    expect(
-      within(branch)
-        .getAllByRole("button")
-        .map((button) => button.textContent),
-    ).toEqual(
-      expect.arrayContaining([
-        expect.stringContaining("分行场景甲"),
-        expect.stringContaining("分行场景乙"),
-      ]),
+      nav.getAllByRole("button").map((button) => button.textContent),
+    ).toEqual(["分行自建2", "总行预置2", "其他来源2"]);
+    expect(nav.getByRole("button", { name: /分行自建/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
     );
+    expect(within(branch).getByText("2 个场景")).toBeInTheDocument();
+    const chosen = within(branch).getByRole("button", { name: /分行场景甲/ });
+    fireEvent.click(chosen);
+    expect(chosen).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(
+      within(branch).getByRole("button", { name: /查看总行预置/ }),
+    );
+    const headOffice = screen.getByRole("region", { name: "总行预置" });
+    expect(within(headOffice).getByText("总部旧标签场景")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "分行自建" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(
+      within(headOffice).getByRole("button", { name: /查看分行自建/ }),
+    );
+    expect(
+      within(screen.getByRole("region", { name: "分行自建" })).getByRole(
+        "button",
+        { name: /分行场景甲/ },
+      ),
+    ).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(nav.getByRole("button", { name: /其他来源/ }));
     expect(
       within(screen.getByRole("region", { name: "其他来源" })).getByText(
         /新来源/,
       ),
     ).toBeInTheDocument();
-    const chosen = within(branch).getByRole("button", { name: /分行场景甲/ });
-    fireEvent.click(chosen);
-    expect(chosen).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(nav.getByRole("button", { name: /分行自建/ }));
     fireEvent.click(screen.getByRole("button", { name: "保险" }));
     await waitFor(() =>
       expect(

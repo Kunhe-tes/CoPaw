@@ -1,5 +1,12 @@
 # 定位路径
 
+## HTML 批注入口隐藏与报告意见空壳
+
+- 聊天 HTML 批注主体在 `console/src/components/agentscope-chat/HtmlAnnotations/` 和 `FilePreviewModal/index.tsx`；先检查 `pages/Chat/index.tsx` 的 `FileManager enableSessionAnnotations` 与 `FilePreviewDrawer/index.tsx` 的 `enableAnnotations`，当前均显式为 false。2026-10-09 的 `0e7c6a8c7`（hide annotations function）主动隐藏入口，代码保留不代表用户可见。
+- 请求链路为 Chat 上传原始 HTML、`/console/chat` 的 `_append_document_annotation_context`、`src/swe/app/document_annotations.py` 校验，再由请求级 `publish_annotated_html` 发布独立的新文件。进度清单见 `openspec/changes/add-html-drawer-annotations/tasks.md`，未勾选项应结合实际代码与测试复核，不能直接当作缺失实现。
+- `pages/ReportView/annotation/` 是另一套报告意见占位代码：Hook 仅返回模式状态，工具栏和列表为空，ReportView 未引用；`api/modules/reportAnnotation.ts` 的 `/report/note/rework` 声明不能证明该流程已经接通。
+- 回归入口：`tests/unit/app/test_document_annotations.py`、`tests/unit/agents/tools/test_publish_annotated_html.py`、前端 `HtmlAnnotations/*.test.*` 与 `FilePreviewModal/index.test.tsx`。2026-11-23 本地核查后端 29 项通过，前端上述范围 48 项中 46 项通过，失败项为 HTML URL 切换和原始字节保留（收到 `[object Blob]`）；尚未验证真实 Chromium 108、嵌入场景及模型端到端产物。
+
 ## 只暂停当前执行批次
 
 - 看板详情的“暂停本批／恢复本批”通过批次级接口修改回执的 `batch_paused`，不会修改任务启停或批入口模式。
@@ -533,9 +540,9 @@ document.body.appendChild(frame);
 ## 财富规划场景来源分组
 
 - 入口为 `console/src/pages/WealthWorkbench/Create/index.tsx` 的第一步，场景来源取 `api.ts` 将接口 `skillBbkLabel` 映射出的 `Scene.source`。
-- 先展示“分行自建”，再展示“总部预置”（兼容“总行预置”标签），各组保留接口顺序。空来源与未识别标签放入“其他来源”，避免旧数据被丢弃。
-- 产品大类筛选继续使用原接口的 `category` 参数，分组数量按当前筛选结果计算，空分组隐藏。切换分类保留已选场景，第二步沿用原配置逻辑。
-- 卡片网格按容器可用宽度自动换列，使用 `auto-fill + minmax(min(100%, 360px), 1fr)`，少量卡片保留空列，避免拉伸成整行宽卡。
+- 来源导航默认选中“分行自建”，下方可切换“总行预置”（兼容“总部预置”标签）。右侧只展示当前来源，组内保留接口顺序。空来源与未识别标签放入“其他来源”，避免旧数据被丢弃。
+- 产品大类筛选继续使用原接口的 `category` 参数，导航数量按当前筛选结果计算，空来源隐藏。当前来源无匹配时展示首个有结果的来源。切换分类或来源保留已选场景，第二步沿用原配置逻辑。
+- 场景卡片按右侧容器可用宽度自动换列，最小列宽为 340px，四列需要 1390px（包含三个 10px 间距）。少量卡片保留空列。
 - 分组回归入口为 `console/src/pages/WealthWorkbench/Create/index.test.tsx`。
 
 ## 财富工作台运维模式
