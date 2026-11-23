@@ -10,8 +10,10 @@ from .identity import WorkspaceScope, service_unit_bytes, service_unit_from_env
 from .shares import ShareStorage
 
 AUTHORITY_ENV = "SWE_CONVERSATION_STORAGE_AUTHORITY"
+METADATA_AUTHORITY = "mysql-metadata"
 CURSOR_ENV = "SWE_CONVERSATION_ARCHIVE_CURSOR_SECRET"
 _runtime = None
+_metadata_database = None
 
 
 def resolved_scope(workspace, installed=None, *, service_unit_id):
@@ -94,11 +96,15 @@ def require_empty_conversation(root):
             )
 
 
-def mysql_authority():
+def storage_authority():
     authority = os.environ.get(AUTHORITY_ENV, "legacy")
-    if authority not in ("legacy", "mysql"):
+    if authority not in ("legacy", "mysql", METADATA_AUTHORITY):
         raise ValueError("invalid conversation storage authority")
-    return authority == "mysql"
+    return authority
+
+
+def mysql_authority():
+    return storage_authority() == "mysql"
 
 
 class ConversationRuntime:
@@ -255,13 +261,18 @@ class ConversationRuntime:
 
 async def configure_runtime(database):
     global _runtime
-    _runtime = None
-    if not mysql_authority():
+
+    reset_runtime()
+    authority = storage_authority()
+    if authority == "legacy":
         return
     if database is None or not database.is_connected:
         raise RuntimeError(
             "conversation storage requires a connected database",
         )
+    if authority == METADATA_AUTHORITY:
+        await _configure_metadata_runtime(database)
+        return
     secret = os.environ.get(CURSOR_ENV)
     service_unit_id = service_unit_from_env()
     if not secret:
@@ -307,10 +318,93 @@ async def configure_runtime(database):
     _runtime = candidate
 
 
+async def _configure_metadata_runtime(database):
+    global _metadata_database
+    from .metadata_repository import SOURCES, WORKSPACES
+
+    service_unit_from_env()
+    await database.fetch_all(
+        f"SELECT published,manifest_digest FROM {SOURCES} LIMIT 0",
+    )
+    await database.fetch_all(
+        f"SELECT workspace_root FROM {WORKSPACES} LIMIT 0",
+    )
+    await database.fetch_all(
+        "SELECT nas_filename FROM swe_conversation_sessions LIMIT 0",
+    )
+    await database.fetch_all(
+        "SELECT extended_metadata_text,resources_cleaned_at FROM swe_conversation_chats LIMIT 0",
+    )
+    _metadata_database = database
+
+
+async def workspace_metadata_repository(workspace):
+    if storage_authority() != METADATA_AUTHORITY:
+        return None
+    from .metadata_repository import (
+        MySQLMetadataRepository,
+        SOURCES,
+        WORKSPACES,
+        SCOPE_PREDICATE,
+        SOURCE_PREDICATE,
+    )
+    from .tenant_admission import TenantNotPublished
+
+    if _metadata_database is None:
+        raise RuntimeError("conversation metadata authority is not ready")
+    root = existing_root(workspace.workspace_dir).resolve(strict=True)
+    service_unit_id = service_unit_from_env()
+    root_key = str(root).encode()
+    installed = None
+    if (
+        getattr(workspace, "tenant_id", None) is None
+        and getattr(workspace, "source_id", None) is None
+    ):
+        row = await _metadata_database.fetch_one(
+            f"SELECT service_unit_key,tenant_key,source_key,agent_key FROM {WORKSPACES} "
+            "WHERE service_unit_key=%s AND workspace_root=%s",
+            (service_unit_bytes(service_unit_id), root_key),
+        )
+        if row is not None:
+            installed = WorkspaceScope.from_row(row)
+    scope = resolved_scope(
+        workspace,
+        installed,
+        service_unit_id=service_unit_id,
+    )
+    binding = await _metadata_database.fetch_one(
+        f"SELECT workspace_root FROM {WORKSPACES} WHERE " + SCOPE_PREDICATE,
+        scope.sql_values,
+    )
+    source = await _metadata_database.fetch_one(
+        f"SELECT published FROM {SOURCES} WHERE " + SOURCE_PREDICATE,
+        scope.sql_values[:3],
+    )
+    if source is None or not source["published"]:
+        raise TenantNotPublished()
+    if binding is None:
+        require_empty_conversation(root)
+        await _metadata_database.execute(
+            f"INSERT INTO {WORKSPACES} "
+            "(service_unit_key,tenant_key,source_key,agent_key,workspace_root,registry_digest) "
+            "VALUES (%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE workspace_root=workspace_root",
+            (*scope.sql_values, root_key, bytes(32)),
+        )
+        binding = await _metadata_database.fetch_one(
+            f"SELECT workspace_root FROM {WORKSPACES} WHERE "
+            + SCOPE_PREDICATE,
+            scope.sql_values,
+        )
+    if binding is None or binding["workspace_root"] != root_key:
+        raise TenantNotPublished()
+    return MySQLMetadataRepository(_metadata_database, scope)
+
+
 def reset_runtime():
     """Discard process adapters when their application database shuts down."""
-    global _runtime
+    global _runtime, _metadata_database
     _runtime = None
+    _metadata_database = None
 
 
 def workspace_storage(workspace):
@@ -329,8 +423,41 @@ def runtime_shares():
     return _runtime.shares
 
 
-async def require_tenant_published(tenant_id):
+async def require_tenant_published(
+    tenant_id,
+    *,
+    source_id=None,
+    scope_id=None,
+):
     """Call before tenant initialization; logical identity comes from trusted scope."""
+    if storage_authority() == METADATA_AUTHORITY:
+        from ...config.context import decode_scope_id, get_current_source_id
+        from .metadata_repository import SOURCES, SOURCE_PREDICATE
+        from .tenant_admission import TenantNotPublished
+
+        if _metadata_database is None:
+            raise RuntimeError("conversation metadata authority is not ready")
+        try:
+            logical_tenant, source = decode_scope_id(scope_id or tenant_id)
+        except ValueError:
+            logical_tenant = tenant_id
+            source = (
+                source_id if source_id is not None else get_current_source_id()
+            )
+        if source is not None:
+            scope = WorkspaceScope(
+                logical_tenant,
+                source,
+                "",
+                service_unit_id=service_unit_from_env(),
+            )
+            result = await _metadata_database.fetch_one(
+                f"SELECT published FROM {SOURCES} WHERE " + SOURCE_PREDICATE,
+                scope.sql_values[:3],
+            )
+            if result is None or not result["published"]:
+                raise TenantNotPublished()
+        return
     if mysql_authority():
         if _runtime is None:
             raise RuntimeError("conversation database authority is not ready")

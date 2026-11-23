@@ -14,7 +14,7 @@ set -euo pipefail
 
 case "${SWE_CONVERSATION_STORAGE_AUTHORITY:-legacy}" in
     legacy) ;;
-    mysql) echo "Error: MySQL conversation authority requires complete metadata and NAS backup/restore." >&2; exit 1 ;;
+    mysql|mysql-metadata) echo "Error: MySQL conversation authority requires complete metadata and NAS backup/restore." >&2; exit 1 ;;
     *) echo "Error: Invalid conversation storage authority." >&2; exit 1 ;;
 esac
 

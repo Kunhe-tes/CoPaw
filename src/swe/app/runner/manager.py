@@ -120,6 +120,11 @@ class ChatManager:
             expected_revision,
         )
 
+    async def claim_session_path(self, session_id, user_id, channel):
+        claim = getattr(self._repo, "claim_session", None)
+        if claim is not None:
+            await claim(session_id, user_id, channel)
+
     # ----- Read Operations -----
 
     async def list_chats(
@@ -376,6 +381,12 @@ class ChatManager:
                         False,
                     )
                     is not True
+                    and getattr(
+                        self._repo,
+                        "preserve_failed_scenario_resources",
+                        False,
+                    )
+                    is not True
                 ):
                     self._delete_session_resources([spec.id])
                 raise
@@ -521,6 +532,16 @@ class ChatManager:
             True if deleted, False if not found
         """
         async with self._lock:
+            if (
+                getattr(self._repo, "pending_resource_cleanup", None)
+                is not None
+            ):
+                deleted = await self._repo.delete_chats(
+                    chat_ids,
+                    expected_chats=expected_chats,
+                )
+                await self.cleanup_deleted_chat_resources(chat_ids=chat_ids)
+                return deleted
             if getattr(self._repo, "deferred_resource_cleanup", False) is True:
                 if expected_chats is not None:
                     return await self._repo.delete_chats(
@@ -556,7 +577,36 @@ class ChatManager:
 
             return deleted
 
-    def _delete_session_resources(self, chat_ids: list[str]) -> None:
+    async def cleanup_deleted_chat_resources(self, *, chat_ids=None):
+        pending = getattr(self._repo, "pending_resource_cleanup", None)
+        if pending is None:
+            return
+        after = b""
+        while ids := await pending(chat_ids=chat_ids, after=after):
+            for chat_id in ids:
+                await self._cleanup_deleted_chat(chat_id)
+            after = ids[-1].encode()
+
+    async def _cleanup_deleted_chat(self, chat_id):
+        if not _is_valid_chat_id(chat_id):
+            return
+        try:
+            if self._archive_store is not None:
+                await self._archive_store.delete_chat(chat_id)
+            self._delete_session_resources([chat_id], strict=True)
+            await self._repo.finish_resource_cleanup(chat_id)
+        except (OSError, RuntimeError):
+            logger.exception(
+                "Chat resource cleanup will be retried for %s",
+                chat_id,
+            )
+
+    def _delete_session_resources(
+        self,
+        chat_ids: list[str],
+        *,
+        strict: bool = False,
+    ) -> None:
         if (
             self._resource_root is None
             and self._expert_dependency_root is None
@@ -584,7 +634,15 @@ class ChatManager:
                 except OSError:
                     safe_to_remove = False
                 if safe_to_remove:
-                    shutil.rmtree(target, ignore_errors=True)
+                    if strict:
+                        try:
+                            shutil.rmtree(target)
+                        except FileNotFoundError:
+                            pass
+                    else:
+                        shutil.rmtree(target, ignore_errors=True)
+                elif strict:
+                    raise OSError(f"invalid Chat resource path: {target}")
             if self._expert_dependency_root is not None:
                 from ..subagents import (
                     release_community_expert_dependency_view_for_chat,
@@ -593,6 +651,7 @@ class ChatManager:
                 release_community_expert_dependency_view_for_chat(
                     workspace_dir=self._expert_dependency_root,
                     chat_id=chat_id,
+                    strict=strict,
                 )
 
     async def count_chats(

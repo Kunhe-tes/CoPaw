@@ -176,6 +176,7 @@ async def install_chat_metadata(
     associations,
     *,
     target_session=None,
+    extended_metadata=None,
 ):
     """Caller holds guard (create), Session, Chat, then publication locks."""
     session, chat, _ = associations
@@ -199,13 +200,22 @@ async def install_chat_metadata(
             locator,
             session,
             existing=chat,
+            extended_metadata=extended_metadata,
         )
     if chat is None or chat["deleted_at"] is not None:
         raise ConflictError("Chat was deleted")
     if chat["external_chat_key"] != chat_key_bytes(plan.external_chat_key):
         raise IntegrityError("Chat metadata external identity mismatch")
     _validate_rebind(plan, session, target, chat)
-    return await _update_chat(db, request, plan, locator, chat, target)
+    return await _update_chat(
+        db,
+        request,
+        plan,
+        locator,
+        chat,
+        target,
+        extended_metadata,
+    )
 
 
 def _validate_rebind(plan, session, target, chat):
@@ -224,7 +234,16 @@ def _validate_rebind(plan, session, target, chat):
             raise IntegrityError("target Session identity mismatch")
 
 
-async def _create_chat(db, request, plan, locator, session, *, existing=None):
+async def _create_chat(
+    db,
+    request,
+    plan,
+    locator,
+    session,
+    *,
+    existing=None,
+    extended_metadata=None,
+):
     if plan.expected_metadata_revision is not None:
         raise ConflictError("new Chat cannot require an existing revision")
     if plan.create_if_absent and session.get("draft_chat_id") is not None:
@@ -287,6 +306,9 @@ async def _create_chat(db, request, plan, locator, session, *, existing=None):
         utc_datetime(plan.created_at),
         utc_datetime(plan.updated_at),
     )
+    if extended_metadata is not None:
+        columns += ("extended_metadata_text",)
+        values += (extended_metadata,)
     identity = await runtime_identity(db)
     if identity is not None:
         columns = ("id", *columns)
@@ -305,7 +327,15 @@ async def _create_chat(db, request, plan, locator, session, *, existing=None):
     return chat_id
 
 
-async def _update_chat(db, request, plan, locator, chat, target):
+async def _update_chat(
+    db,
+    request,
+    plan,
+    locator,
+    chat,
+    target,
+    extended_metadata=None,
+):
     if (
         plan.expected_metadata_revision is None
         or chat["metadata_revision"] != plan.expected_metadata_revision
@@ -321,6 +351,12 @@ async def _update_chat(db, request, plan, locator, chat, target):
         expert_id = None
         binding_revision += 1
     status_sql = ",status='idle'" if plan.target_session_id is not None else ""
+    extension_sql = (
+        ",extended_metadata_text=%s" if extended_metadata is not None else ""
+    )
+    extension_params = (
+        (extended_metadata,) if extended_metadata is not None else ()
+    )
     result = await db.execute(
         "UPDATE swe_conversation_chats SET title=%s,metadata_text=%s,"
         "external_session_key=%s,"
@@ -329,6 +365,7 @@ async def _update_chat(db, request, plan, locator, chat, target):
         "content_meta_publication_id=%s,content_meta_offset=%s,content_meta_length=%s,"
         "metadata_revision=metadata_revision+1,updated_at=%s"
         + status_sql
+        + extension_sql
         + " WHERE id=%s AND deleted_at IS NULL AND metadata_revision=%s",
         (
             plan.title,
@@ -341,6 +378,7 @@ async def _update_chat(db, request, plan, locator, chat, target):
             binding_revision,
             *locator,
             utc_datetime(plan.updated_at),
+            *extension_params,
             request.chat_id,
             plan.expected_metadata_revision,
         ),

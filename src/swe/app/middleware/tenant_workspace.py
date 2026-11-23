@@ -390,7 +390,7 @@ class TenantWorkspaceMiddleware(BaseHTTPMiddleware):
                 f"dir={workspace_dir}",
             )
             return context
-        except _TenantBootstrapUnavailable:
+        except (TenantNotPublished, _TenantBootstrapUnavailable):
             logger.warning(
                 "tenant_bootstrap_unavailable tenant_id=%s",
                 tenant_id,

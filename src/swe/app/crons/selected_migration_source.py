@@ -92,7 +92,7 @@ def _warn_chat_conflicts(chat, candidate):
             )
 
 
-def read_member(root, key, loaded):
+def read_member(root, key, loaded, *, validate_chat=True):
     """Only inspect the requested tenant and Agent; no global workspace walk."""
     root = Path(root).expanduser().resolve()
     found = []
@@ -114,8 +114,12 @@ def read_member(root, key, loaded):
             )  # pylint: disable=protected-access
             if candidate.identity != tuple(key):
                 raise ValueError("cron_migration_identity_conflict")
-            _chat(item.path, root, candidate)
-            found.append(candidate)
+            if validate_chat:
+                _chat(item.path, root, candidate)
+            workspace = item.path.parent
+            if not validate_chat and workspace.parent == root:
+                workspace = workspace / "workspaces" / key[2]
+            found.append((candidate, workspace))
     if len(found) != 1:
         raise ValueError(
             (
@@ -124,7 +128,7 @@ def read_member(root, key, loaded):
                 else "cron_migration_duplicate_source"
             ),
         )
-    candidate = found[0]
+    candidate, workspace = found[0]
     if candidate.definition["task_type"] not in {"text", "agent", "workflow"}:
         raise ValueError("cron_migration_system_job_unsupported")
     state = copy.deepcopy(candidate.state_patch)
@@ -154,7 +158,37 @@ def read_member(root, key, loaded):
         "fingerprint": candidate.fingerprint,
         "warnings": candidate.warnings,
         "memory_available": candidate.memory_available,
+        **({"workspace": workspace} if not validate_chat else {}),
     }
+
+
+async def verify_sql_member_chat(result, key):
+    """Resolve the task Chat against the live directory after metadata cutover."""
+    from types import SimpleNamespace
+    from ..conversation_storage.runtime import workspace_metadata_repository
+
+    repo = await workspace_metadata_repository(
+        SimpleNamespace(
+            workspace_dir=result.pop("workspace"),
+            tenant_id=key[0],
+            source_id=key[1],
+            agent_id=key[2],
+        ),
+    )
+    state = result["state"]
+    if not state.get("task_chat_id") or not state.get("task_session_id"):
+        raise ValueError("cron_migration_binding_conflict")
+    chat = await repo.get_chat(state["task_chat_id"])
+    if chat is None:
+        raise ValueError("cron_migration_chat_missing")
+    _warn_chat_conflicts(
+        chat.model_dump(),
+        SimpleNamespace(
+            definition=result["definition"],
+            state_patch=state,
+            warnings=result["warnings"],
+        ),
+    )
 
 
 def _legacy_file(root, key):

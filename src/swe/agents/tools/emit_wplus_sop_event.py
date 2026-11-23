@@ -108,27 +108,30 @@ async def emit_wplus_sop_event(
     ownership = OwnershipTuple.model_validate(
         record.projection.ownership,
     )
-    from ...app.conversation_storage.runtime import workspace_storage
+    from ...app.conversation_storage.runtime import (
+        workspace_metadata_repository,
+        workspace_storage,
+    )
     from ...app.runner.manager import ChatManager
 
-    storage = workspace_storage(
-        SimpleNamespace(
-            workspace_dir=workspace_dir,
-            agent_id=agent_id,
-            tenant_id=tenant_id,
-            source_id=source_id,
-        ),
+    workspace = SimpleNamespace(
+        workspace_dir=workspace_dir,
+        agent_id=agent_id,
+        tenant_id=tenant_id,
+        source_id=source_id,
+    )
+    storage = workspace_storage(workspace)
+    repo = (
+        storage.chats
+        if storage is not None
+        else await workspace_metadata_repository(workspace)
     )
     chats_path = Path(workspace_dir) / "chats.json"
-    chat_manager = None
-    if storage is not None:
-        chat_manager = ChatManager(repo=storage.chats)
-    elif chats_path.is_file():
+    if repo is None and chats_path.is_file():
         from ...app.runner.repo.json_repo import JsonChatRepository
 
-        chat_manager = ChatManager(
-            repo=JsonChatRepository(str(chats_path)),
-        )
+        repo = JsonChatRepository(str(chats_path))
+    chat_manager = ChatManager(repo=repo) if repo is not None else None
     service = WPlusSopService(
         workspace=SimpleNamespace(
             workspace_dir=workspace_dir,

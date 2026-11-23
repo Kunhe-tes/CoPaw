@@ -107,6 +107,11 @@ class MySQLChatRepository(BaseChatRepository):
     """All filtering and pagination are performed against one trusted scope."""
 
     deferred_resource_cleanup = True
+    select_chat = SELECT_CHAT
+    select_summary = SELECT_SUMMARY
+
+    async def _assert_writes_allowed(self):
+        await self.retentions.assert_writes_allowed()
 
     def __init__(self, database, scope: WorkspaceScope, bundles):
         self.db = database
@@ -212,7 +217,7 @@ class MySQLChatRepository(BaseChatRepository):
     async def _rows(self, where, params, suffix=""):
         async with self.db.transaction():
             rows = await self.db.fetch_all(
-                SELECT_CHAT + where + suffix,
+                self.select_chat + where + suffix,
                 tuple(params),
             )
             ids = sorted(
@@ -396,7 +401,7 @@ class MySQLChatRepository(BaseChatRepository):
                 [_sql_time(stamp), _sql_time(stamp), chat_key_bytes(key)],
             )
         rows = await self.db.fetch_all(
-            SELECT_SUMMARY
+            self.select_summary
             + where
             + " ORDER BY c.updated_at DESC,c.external_chat_key DESC LIMIT %s",
             (*params, page_size + 1),
@@ -521,7 +526,7 @@ class MySQLChatRepository(BaseChatRepository):
     async def _locked_chat(self, chat_id):
         params = (*self.scope.sql_values, chat_key_bytes(chat_id))
         row = await self.db.fetch_one(
-            SELECT_CHAT + SCOPE_WHERE + " AND c.external_chat_key=%s",
+            self.select_chat + SCOPE_WHERE + " AND c.external_chat_key=%s",
             params,
         )
         if row is None:
@@ -555,7 +560,7 @@ class MySQLChatRepository(BaseChatRepository):
         if expert_id is not None:
             identity_bytes(expert_id, 256)
         async with self.db.transaction():
-            await self.retentions.assert_writes_allowed()
+            await self._assert_writes_allowed()
             session, row = await self._locked_chat(chat_id)
             if session["active_turn_id"] is not None:
                 raise ConflictError("Session is busy")
@@ -609,7 +614,7 @@ class MySQLChatRepository(BaseChatRepository):
 
     async def update_title(self, chat_id, title, *, expected_revision):
         async with self.db.transaction():
-            await self.retentions.assert_writes_allowed()
+            await self._assert_writes_allowed()
             try:
                 _, row = await self._locked_chat(chat_id)
             except KeyError:
@@ -635,7 +640,7 @@ class MySQLChatRepository(BaseChatRepository):
         if not keys:
             return False
         async with self.db.transaction():
-            await self.retentions.assert_writes_allowed()
+            await self._assert_writes_allowed()
             rows = await query_collection(
                 self.db,
                 CollectionQuery.DELETE_CANDIDATES,
@@ -698,7 +703,7 @@ class MySQLChatRepository(BaseChatRepository):
             spec.session_id,
         )
         async with self.db.transaction():
-            await self.retentions.assert_writes_allowed()
+            await self._assert_writes_allowed()
             ticket = await runtime_identity(self.db)
             id_column = "id," if ticket is not None else ""
             id_value = "%s," if ticket is not None else ""
@@ -723,7 +728,7 @@ class MySQLChatRepository(BaseChatRepository):
 
     async def _raw_chat(self, chat_id):
         return await self.db.fetch_one(
-            SELECT_CHAT + SCOPE_WHERE + " AND c.external_chat_key=%s",
+            self.select_chat + SCOPE_WHERE + " AND c.external_chat_key=%s",
             (*self.scope.sql_values, chat_key_bytes(chat_id)),
         )
 
@@ -808,7 +813,7 @@ class MySQLChatRepository(BaseChatRepository):
     async def _write_sql_metadata(self, request, mutation):
         """Install body-free metadata under the same locks as publication."""
         async with self.db.transaction():
-            await self.retentions.assert_writes_allowed()
+            await self._assert_writes_allowed()
             associations, target = (
                 await self.publications._lock_metadata_associations(
                     request,
@@ -937,7 +942,7 @@ class MySQLChatRepository(BaseChatRepository):
 
     async def _freeze_draft_choice(self, session_id):
         async with self.db.transaction():
-            await self.retentions.assert_writes_allowed()
+            await self._assert_writes_allowed()
             session = await self.db.fetch_one(
                 "SELECT * FROM swe_conversation_sessions "
                 "WHERE id=%s AND service_unit_key=%s FOR UPDATE",

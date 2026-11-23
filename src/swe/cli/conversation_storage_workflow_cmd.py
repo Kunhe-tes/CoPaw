@@ -87,6 +87,98 @@ def prepare_workflow(
     }
 
 
+async def _execute_metadata(
+    operation,
+    path,
+    *,
+    apply=False,
+    destination=None,
+    full_audit=False,
+):
+    from swe.app.conversation_storage.migration import metadata
+    from swe.database.config import get_database_config
+    from swe.database.connection import DatabaseConnection
+
+    config = get_database_config()
+    manifest, digest = metadata.read_manifest(path, config.database)
+    if operation == "migrate" and not apply:
+        return await metadata.migrate(
+            None,
+            manifest,
+            digest,
+            apply=False,
+            full_audit=full_audit,
+        )
+    config = config.model_copy(update={"time_zone": "+00:00"})
+    control = DatabaseConnection(config)
+    database = DatabaseConnection(config)
+    try:
+        await control.connect()
+        await database.connect()
+        # A failed source transaction can discard its own connection without
+        # releasing the migration lock or preventing the next source from running.
+        async with control.named_lock(
+            "conversation-metadata-migration:" + config.database,
+            timeout=0,
+        ):
+            if operation == "export":
+                workspaces = await metadata.export(
+                    database,
+                    manifest,
+                    digest,
+                    destination,
+                )
+                return {"status": "exported", "workspaces": workspaces}
+            return await metadata.migrate(
+                database,
+                manifest,
+                digest,
+                apply=True,
+                full_audit=full_audit,
+            )
+    finally:
+        try:
+            await database.close()
+        finally:
+            await control.close()
+
+
+def _prepare_metadata(workspaces, options):
+    from swe.app.conversation_storage.migration import metadata
+    from swe.database.config import get_database_config
+    from .conversation_storage_discovery_cmd import _list, _read
+
+    if workspaces is None:
+        raise ValueError("mysql-metadata requires --workspaces")
+    if any(
+        options[name]
+        for name in (
+            "services",
+            "boundary",
+            "overrides",
+            "in_place",
+            "shares_file",
+        )
+    ):
+        raise ValueError(
+            "mysql-metadata takes --workspaces as its input",
+        )
+    schema = get_database_config().database
+    if options["application_schema"] not in (None, schema):
+        raise ValueError(
+            "configured application schema differs from prepare",
+        )
+    result = metadata.prepare(
+        _list(_read(workspaces), "workspaces"),
+        schema,
+        options["manifest"],
+    )
+    return {
+        "status": "prepared",
+        "migration_id": result["migration_id"],
+    }
+
+
 def register_workflow_commands(group):
     from .conversation_storage_discovery_cmd import _resource_options
     from .conversation_storage_v3_cmd import (
@@ -98,12 +190,10 @@ def register_workflow_commands(group):
     @_resource_options
     @click.option(
         "--services",
-        required=True,
         type=click.Path(exists=True, dir_okay=False),
     )
     @click.option(
         "--boundary",
-        required=True,
         type=click.Path(exists=True, dir_okay=False),
     )
     @click.option("--manifest", required=True, type=click.Path(dir_okay=False))
@@ -116,15 +206,40 @@ def register_workflow_commands(group):
     @click.option("--tenant-isolation", is_flag=True)
     @click.option("--in-place", is_flag=True)
     @click.option("--application-schema")
-    def prepare_command(**options):
+    @click.option(
+        "--mode",
+        type=click.Choice(["bundle", "mysql-metadata"]),
+        default="bundle",
+    )
+    @click.option("--workspaces", type=click.Path(exists=True, dir_okay=False))
+    def prepare_command(mode, workspaces, **options):
         try:
-            result = prepare_workflow(**options)
+            if mode == "mysql-metadata":
+                result = _prepare_metadata(workspaces, options)
+            else:
+                if (
+                    workspaces is not None
+                    or not options["services"]
+                    or not options["boundary"]
+                ):
+                    raise ValueError(
+                        "bundle prepare requires --services and --boundary",
+                    )
+                result = prepare_workflow(**options)
             echo_migration_report(result)
             if result.get("status") == "partial_success":
                 raise click.exceptions.Exit(2)
             if result.get("passed") is False:
                 raise click.ClickException("prepare preflight failed")
-        except (OSError, ValueError, KeyError, TypeError) as error:
+        except click.exceptions.Exit:
+            raise
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            KeyError,
+            TypeError,
+        ) as error:
             raise click.ClickException(str(error)) from error
 
     @group.command("migrate")
@@ -138,6 +253,61 @@ def register_workflow_commands(group):
     @click.option("--full-audit", is_flag=True)
     def migrate_command(manifest, **options):
         try:
-            run_v3_and_echo("migrate", manifest, **options)
-        except (OSError, ValueError, KeyError, TypeError) as error:
+            import asyncio
+            from swe.app.conversation_storage.migration.disk_manifest import (
+                read_manifest_header,
+            )
+
+            if read_manifest_header(manifest).get("mode") == "mysql-metadata":
+                result = asyncio.run(
+                    _execute_metadata(
+                        "migrate",
+                        manifest,
+                        apply=options["apply"],
+                        full_audit=options["full_audit"],
+                    ),
+                )
+                echo_migration_report(result)
+                if result["status"] == "partial_success":
+                    raise click.exceptions.Exit(2)
+            else:
+                run_v3_and_echo("migrate", manifest, **options)
+        except click.exceptions.Exit:
+            raise
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            KeyError,
+            TypeError,
+        ) as error:
             raise click.ClickException(str(error)) from error
+
+    @group.command("export-metadata")
+    @click.option(
+        "--manifest",
+        required=True,
+        type=click.Path(exists=True, dir_okay=False),
+    )
+    @click.option(
+        "--destination",
+        required=True,
+        type=click.Path(file_okay=False),
+    )
+    def export_metadata_command(manifest, destination):
+        """Export a published SQL Chat directory in the legacy file format."""
+        import asyncio
+
+        try:
+            result = asyncio.run(
+                _execute_metadata("export", manifest, destination=destination),
+            )
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            KeyError,
+            TypeError,
+        ) as error:
+            raise click.ClickException(str(error)) from error
+        echo_migration_report(result)
