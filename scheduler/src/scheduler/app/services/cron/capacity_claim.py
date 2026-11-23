@@ -3,7 +3,7 @@
 
 from typing import Mapping
 from datetime import datetime, timezone
-from .managed.run_accounting import occupied_run_sql
+from .managed.run_accounting import occupied_run_sql, standalone_direct_sql
 
 # 仅由新版后台在完整表结构校验后启用，不是新增运维配置。
 # 旧部署没有新表时沿用原统计，不探测或自动创建业务表。
@@ -25,11 +25,11 @@ def set_managed_priority(enabled):
 
 async def _managed_occupants(cur, scope, exclude_execution_id=None):
     await cur.execute(
-        "SELECT COUNT(*) AS count FROM swe_cron_execution_runs "
-        "WHERE source_id=%s AND provider_id=%s AND model_id=%s "
-        f"AND {occupied_run_sql()} "
-        "AND execution_id<>%s "
-        "AND JSON_UNQUOTE(JSON_EXTRACT(dispatch_meta_json,'$.protocol'))="
+        "SELECT COUNT(*) AS count FROM swe_cron_execution_runs r "
+        "WHERE r.source_id=%s AND r.provider_id=%s AND r.model_id=%s "
+        f"AND {occupied_run_sql('r')} AND NOT {standalone_direct_sql('r')} "
+        "AND r.execution_id<>%s "
+        "AND JSON_UNQUOTE(JSON_EXTRACT(r.dispatch_meta_json,'$.protocol'))="
         "'scheduler_managed_v1'",
         (*scope, exclude_execution_id or ""),
     )

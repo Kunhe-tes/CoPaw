@@ -34,6 +34,7 @@ from ..source_system_config.runtime import (
     resolve_cron_notification_config,
     resolve_cron_task_session_cleanup_config,
     resolve_cron_unread_auto_pause_config,
+    read_cron_unread_auto_pause_branch,
 )
 from .auth_state import prefetch_auth_token
 from .cron_utils import compute_next_run_at, compute_next_run_times
@@ -1997,11 +1998,17 @@ class CronManager(
                 preview,
                 execution_key,
             )
+        bbk_id = await read_cron_unread_auto_pause_branch(
+            get_current_source_system_config(),
+            job.tenant_id or creator_user_id,
+            job.source_id,
+        )
         apply_success = lambda jobs_file: self._apply_task_execution_success(
             jobs_file,
             job.id,
             preview,
             execution_key,
+            bbk_id,
         )
         async with self._lock:
             _, auto_paused, _ = await self._mutate_jobs_file_locked(
@@ -2157,6 +2164,7 @@ class CronManager(
         job_id: str,
         preview: str,
         execution_key: str = "",
+        bbk_id: str | None = None,
     ) -> tuple[bool, bool]:
         for index, job in enumerate(jobs_file.jobs):
             if job.id != job_id:
@@ -2185,6 +2193,7 @@ class CronManager(
             auto_paused = False
             auto_pause_config = resolve_cron_unread_auto_pause_config(
                 get_current_source_system_config(),
+                bbk_id or job.bbk_id,
             )
             if (
                 auto_pause_config.enabled

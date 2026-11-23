@@ -20,7 +20,13 @@ export interface ToolResultCompactConfig {
 export interface CronUnreadAutoPauseConfig {
   enabled: boolean;
   threshold: number;
+  by_branch?: CronUnreadPauseBranches;
 }
+
+export type CronUnreadPauseBranches = Record<
+  string,
+  { enabled?: boolean; threshold?: number }
+>;
 
 export interface CronNotificationConfig {
   skip_weekend_zhaohu_enabled: boolean;
@@ -427,6 +433,9 @@ export function readCronUnreadAutoPauseConfig(
     return { ...CRON_UNREAD_AUTO_PAUSE_DEFAULTS };
   }
   return {
+    ...(isPlainObject(rawValue.by_branch)
+      ? { by_branch: rawValue.by_branch as CronUnreadPauseBranches }
+      : {}),
     enabled:
       typeof rawValue.enabled === "boolean"
         ? rawValue.enabled
@@ -450,7 +459,16 @@ export function writeCronUnreadAutoPauseValue<
   if (!isPlainObject(rawValue)) {
     nextConfig.cron_unread_auto_pause = {};
   }
-  (nextConfig.cron_unread_auto_pause as Record<string, unknown>)[key] = value;
+  const section = nextConfig.cron_unread_auto_pause as Record<string, unknown>;
+  if (
+    key === "by_branch" &&
+    isPlainObject(value) &&
+    Object.keys(value).length === 0
+  ) {
+    delete section.by_branch;
+  } else {
+    section[key] = value;
+  }
   return nextConfig;
 }
 

@@ -16,6 +16,39 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : "新版任务请求失败";
 }
 
+const BATCH_RUN_ERRORS: Record<string, string> = {
+  cron_job_not_found: "父任务不存在、已删除或无权操作",
+  cron_batch_run_requires_parent: "请选择批调度父任务",
+  job_not_in_batch_mode: "任务尚未开启批调度",
+  batch_paused: "批入口已暂停",
+  job_outside_date_range: "当前日期不在任务可执行区间",
+  job_not_eligible: "当前没有符合条件的批成员",
+  job_not_ready: "任务尚未就绪",
+  cron_managed_runtime_not_ready: "Scheduler 后台未就绪",
+  cron_batch_run_unavailable: "批调度服务暂不可用",
+};
+
+function batchRunMessage(error: unknown): string {
+  const data =
+    error && typeof error === "object" && "data" in error ? error.data : null;
+  const detail =
+    data && typeof data === "object" && "detail" in data ? data.detail : null;
+  if (
+    detail &&
+    typeof detail === "object" &&
+    "code" in detail &&
+    detail.code === "cron_batch_already_active"
+  ) {
+    const id =
+      "batch_id" in detail && typeof detail.batch_id === "string"
+        ? detail.batch_id
+        : "";
+    return `该父任务已有未结束批次${id ? `（${id}）` : ""}`;
+  }
+  const message = messageOf(error);
+  return BATCH_RUN_ERRORS[message] ?? message;
+}
+
 function operationFromError(error: unknown): ManagedOperation | null {
   if (!error || typeof error !== "object" || !("data" in error)) return null;
   const data = error.data;
@@ -157,8 +190,17 @@ export function useManagedCronJobs(
     [reload, scopeKey],
   );
 
-  const run = useCallback(
-    async (job: ManagedJob, requestId: string) => {
+  const runExecution = useCallback(
+    async <T>(
+      send: (snapshot: ManagedCronContext) => Promise<T>,
+      {
+        record,
+        errorMessage = messageOf,
+      }: {
+        record?: (result: T) => void;
+        errorMessage?: (error: unknown) => string;
+      } = {},
+    ) => {
       const key = scopeKey;
       if (
         !mounted.current ||
@@ -168,21 +210,16 @@ export function useManagedCronJobs(
         return null;
       writeLock.current = key;
       setBusy(true);
+      setError(null);
       try {
-        const result = await schedulerCronApi.run(
-          targetManagedContext(contextRef.current, job),
-          job.id,
-          job.definition_version,
-          requestId,
-        );
-        if (mounted.current && currentKey.current === key) {
-          setExecution(result.execution);
-          await reload();
-        }
-        return result.execution;
+        const result = await send({ ...contextRef.current });
+        if (!mounted.current || currentKey.current !== key) return null;
+        record?.(result);
+        await reload();
+        return mounted.current && currentKey.current === key ? result : null;
       } catch (failure) {
         if (mounted.current && currentKey.current === key)
-          setError(messageOf(failure));
+          setError(errorMessage(failure));
         return null;
       } finally {
         if (writeLock.current === key) writeLock.current = null;
@@ -287,6 +324,24 @@ export function useManagedCronJobs(
           operationId,
         ),
       ),
-    run,
+    run: (job: ManagedJob, requestId: string) =>
+      runExecution(
+        async (ctx) => {
+          const result = await schedulerCronApi.run(
+            targetManagedContext(ctx, job),
+            job.id,
+            job.definition_version,
+            requestId,
+          );
+          return result.execution;
+        },
+        { record: setExecution },
+      ),
+    runBatch: (job: ManagedJob) =>
+      runExecution(
+        (ctx) =>
+          schedulerCronApi.runBatch(targetManagedContext(ctx, job), job.id),
+        { errorMessage: batchRunMessage },
+      ),
   };
 }

@@ -15,6 +15,39 @@ HEADERS = {"X-User-Id": "alice", "X-Tenant-Id": "alice", "X-Source-Id": "bank"}
 
 
 @pytest.mark.asyncio
+async def test_run_now_dispatches_registered_execution(execution_setup):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from scheduler.app.routers import managed_cron_controls
+
+    db, _, _ = execution_setup
+    row, _ = await enqueue(execution_setup)
+    app = FastAPI()
+    app.include_router(managed_cron_controls.router, prefix="/api")
+    app.dependency_overrides[managed_cron_controls.management_database] = (
+        lambda: db
+    )
+    dispatch = AsyncMock()
+    app.state.managed_cron_worker = SimpleNamespace(
+        dispatcher=SimpleNamespace(dispatch_registered=dispatch),
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            f"/api/scheduler/cron/jobs/{row['job_id']}/run",
+            headers=HEADERS,
+            json={"request_id": "run-now", "expected_definition_version": 1},
+        )
+    assert response.status_code == 202
+    dispatch.assert_awaited_once_with(
+        response.json()["execution"]["execution_id"],
+    )
+
+
+@pytest.mark.asyncio
 async def test_new_manual_and_control_routes_use_durable_operations(
     execution_setup,
 ):

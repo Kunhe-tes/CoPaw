@@ -27,12 +27,12 @@ logger = logging.getLogger(__name__)
 
 async def create_managed_worker(db):
     await assert_managed_schema_ready(db)
+    await assert_managed_board_schema_ready(db)
     # 在启动旧循环之前启用合并统计，即使后续新客户端配置失败，
     # 已有新运行占位也不能被旧循环忽略。这里没有新增环境开关。
     enable_managed_capacity_accounting()
     legacy = get_cron_scheduling_service()
     legacy.bind_managed_feedback(ManagedCapacityFeedback(db))
-    await assert_managed_board_schema_ready(db)
     rechecks_enabled = await prepare_recheck_storage(db)
     base = os.environ.get("SCHEDULER_SWE_API_BASE_URL", "")
     resources = ManagedSweClient(base)

@@ -1,7 +1,7 @@
 import { Button, Tag, Tooltip, Typography } from "antd";
 import { CopyOutlined } from "@ant-design/icons";
 import type { ManagedJob } from "@/api/types/schedulerCron";
-import { isBroadcastChildJob } from "../CronJobs/components/columns";
+import { getBroadcastParentInfo } from "../CronJobs/components/columns";
 import { beijingRunTime, RESULT_LABELS } from "./presentation";
 import { copyToClipboard } from "@/utils/clipboard";
 import styles from "./management.module.less";
@@ -13,6 +13,11 @@ export function TaskIdentity({
   job: ManagedJob;
   onCopy: (success: boolean) => void;
 }) {
+  const parent = getBroadcastParentInfo(job);
+  const owner =
+    parent.sourceTenantName && parent.sourceTenantId
+      ? `${parent.sourceTenantName}（${parent.sourceTenantId}）`
+      : parent.sourceTenantName || parent.sourceTenantId || "未记录";
   const text = (value: string, label: string) => (
     <div className={styles.identityRow}>
       <Typography.Text
@@ -34,8 +39,21 @@ export function TaskIdentity({
     <div className={styles.identity}>
       {text(job.name, "任务名称")}
       <div className={styles.identifier}>{text(job.id, "任务ID")}</div>
-      {isBroadcastChildJob(job) ? (
-        <Tag color="blue">分发子任务</Tag>
+      {parent.sourceJobId ? (
+        <Tooltip
+          placement="topLeft"
+          trigger={["hover", "focus"]}
+          title={
+            <div className={styles.fullText}>
+              <div>父任务ID：{parent.sourceJobId}</div>
+              <div>拥有人：{owner}</div>
+            </div>
+          }
+        >
+          <Tag color="blue" tabIndex={0}>
+            分发子任务
+          </Tag>
+        </Tooltip>
       ) : job.has_distributed_children ? (
         <Tag>父任务</Tag>
       ) : null}

@@ -10,11 +10,13 @@ from ..models.managed_board import (
     BoardDetailQuery,
     BoardListQuery,
     BoardOccupancyQuery,
+    BoardWorkerTrendQuery,
 )
 from ..services.cron.managed_board import ManagedBoardQuery
 from ..services.cron.managed_board_sql import db_time
 from ..services.cron.managed_board_workers import shared_workers
 from ..services.cron.managed_board_occupancy import worker_occupants
+from ..services.cron.managed_worker_trends import worker_trends
 
 router = APIRouter(
     prefix="/monitor/cron/managed-dispatch",
@@ -74,6 +76,7 @@ async def batches(
             end=filters.end_time,
             status=filters.status,
             query=filters.query,
+            child_status=filters.child_status,
             page=filters.page,
             page_size=filters.page_size,
         )
@@ -119,6 +122,26 @@ async def occupants(
         raise board_error(exc) from exc
 
 
+@router.get("/workers/trends", summary="查询指定模型池的新版批执行趋势")
+async def trends(
+    filters: BoardWorkerTrendQuery = Depends(),
+    source=Depends(manager_source),
+    service=Depends(board_service),
+):
+    check_range(filters.start_time, filters.end_time)
+    try:
+        return await worker_trends(
+            service.db,
+            source,
+            filters.provider_id,
+            filters.model_id,
+            filters.start_time,
+            filters.end_time,
+        )
+    except Exception as exc:
+        raise board_error(exc) from exc
+
+
 @router.get("/failure-summary", summary="按当前全局筛选统计失败类型及具体详情")
 async def failure_summary(
     filters: BoardListQuery = Depends(),
@@ -133,6 +156,7 @@ async def failure_summary(
             end=filters.end_time,
             status=filters.status,
             query=filters.query,
+            child_status=filters.child_status,
         )
     except Exception as exc:
         raise board_error(exc) from exc

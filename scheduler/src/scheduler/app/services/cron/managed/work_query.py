@@ -3,7 +3,7 @@
 
 from .executions import RUN_TABLE
 from .operations import IDENTITY_FIELDS, utc_now
-from .run_accounting import occupied_run_sql
+from .run_accounting import occupied_run_sql, standalone_direct_sql
 from .date_policy import BEIJING
 from datetime import timezone
 
@@ -37,7 +37,7 @@ def _occupied_for_job():
     )
 
 
-def _base(running, now=None):
+def _base(running, now=None, *, direct=False):
     status = (
         "('running')"
         if running
@@ -54,23 +54,29 @@ def _base(running, now=None):
     timestamp = moment.replace(tzinfo=None).isoformat(" ")
     params = [timestamp]
     if not running:
-        # Filter paused batches before LIMIT so they cannot block other work.
-        sql += (
-            " AND (r.status='accepted' OR NOT EXISTS ("
-            "SELECT 1 FROM swe_cron_managed_trigger_receipts p "
-            "JOIN swe_cron_managed_batch_members pm ON pm.batch_id=p.batch_id AND pm.source_id=p.source_id "
-            "WHERE pm.current_execution_id=r.execution_id "
-            "AND p.source_id=r.source_id AND p.kind='batch' "
-            "AND p.status='accepted' AND p.batch_paused=1))"
-        )
-        sql += (
-            f" AND (r.not_before_at<=%s OR r.not_before_at IS NULL OR {INVALIDATED}) "
-            f"AND (r.status='accepted' OR {INVALIDATED} OR "
-            f"{_occupied_for_job()} "
-            "< CAST(JSON_UNQUOTE(JSON_EXTRACT(r.spec_json,'$.runtime.max_concurrency')) AS UNSIGNED))"
-        )
+        if direct:
+            sql += f" AND {standalone_direct_sql('r')}"
+        else:
+            sql += f" AND NOT {standalone_direct_sql('r')}"
+            # 分页前排除暂停的批次，避免挡住其他可执行工作。
+            sql += (
+                " AND (r.status='accepted' OR NOT EXISTS ("
+                "SELECT 1 FROM swe_cron_managed_trigger_receipts p "
+                "JOIN swe_cron_managed_batch_members pm ON pm.batch_id=p.batch_id AND pm.source_id=p.source_id "
+                "WHERE pm.current_execution_id=r.execution_id "
+                "AND p.source_id=r.source_id AND p.kind='batch' "
+                "AND p.status='accepted' AND p.batch_paused=1))"
+            )
+        sql += f" AND (r.not_before_at<=%s OR r.not_before_at IS NULL OR {INVALIDATED})"
         today = moment.astimezone(BEIJING).date().isoformat()
-        params.extend((timestamp, today, today, today, today))
+        params.extend((timestamp, today, today))
+        if not direct:
+            sql += (
+                f" AND (r.status='accepted' OR {INVALIDATED} OR "
+                f"{_occupied_for_job()} "
+                "< CAST(JSON_UNQUOTE(JSON_EXTRACT(r.spec_json,'$.runtime.max_concurrency')) AS UNSIGNED))"
+            )
+            params.extend((today, today))
     return sql, params
 
 
@@ -122,8 +128,8 @@ class ManagedWorkQuery:
             (*params, self.limit),
         )
 
-    async def rows(self, *, running, scope=None):
-        sql, params = _base(running)
+    async def rows(self, *, running, scope=None, direct=False):
+        sql, params = _base(running, direct=direct)
         if scope is not None:
             sql += " AND " + " AND ".join(
                 f"r.{name}=%s" for name in SCOPE_FIELDS
@@ -134,7 +140,7 @@ class ManagedWorkQuery:
             + sql
             + (
                 " ORDER BY r.updated_at,r.queue_order"
-                if running
+                if running or direct
                 else _batch_order()
             )
             + " LIMIT %s",

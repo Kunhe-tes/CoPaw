@@ -14,7 +14,7 @@ from .identity import CallerIdentity, encode_scope, identity_value
 from .operations import utc_now
 from .repository import IDENTITY_FIELDS, ManagedCronRepository
 from .storage import transaction, update
-from .run_accounting import occupied_run_sql
+from .run_accounting import DIRECT_DISPATCH_KINDS, occupied_run_sql
 from .swe_client import checked_base
 from .dispatch_events import append_run_event
 from .date_policy import reason as date_reason
@@ -199,10 +199,19 @@ class ExecutionDispatcher:
         recovery=False,
         capacity_permit=None,
     ):
-        permit = await self._capacity_permit(row, recovery, capacity_permit)
-        if self.capacity is not None and not recovery and permit is None:
-            return None
-        receipt = None if recovery else await batch_for_execution(self.db, row)
+        direct = row["kind"] in DIRECT_DISPATCH_KINDS and not recovery
+        receipt = await batch_for_execution(self.db, row) if direct else None
+        permit = None
+        if not direct or receipt is not None:
+            permit = await self._capacity_permit(
+                row,
+                recovery,
+                capacity_permit,
+            )
+            if self.capacity is not None and not recovery and permit is None:
+                return None
+        if not direct and not recovery:
+            receipt = await batch_for_execution(self.db, row)
         if (
             not recovery
             and receipt is None

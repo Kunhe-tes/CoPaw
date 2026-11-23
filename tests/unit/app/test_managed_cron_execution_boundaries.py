@@ -25,7 +25,7 @@ async def setup_job(execution_setup):
     return db, caller, management, created["job_id"]
 
 
-async def add_run(db, caller, job_id, trigger):
+async def add_run(db, caller, job_id, trigger, *, kind="ordinary"):
     from scheduler.app.services.cron.managed.executions import (
         ExecutionRequest,
         ExecutionStore,
@@ -35,12 +35,39 @@ async def add_run(db, caller, job_id, trigger):
         caller,
         job_id,
         ExecutionRequest(
-            "ordinary",
+            kind,
             trigger,
             datetime(2026, 10, 16, 1, tzinfo=timezone.utc),
         ),
     )
     return row
+
+
+@pytest.mark.asyncio
+async def test_overlapping_ordinary_execution_is_skipped(execution_setup):
+    from swe.app.crons.managed_results import ExecutionWriter
+
+    db, caller, _, job_id = await setup_job(execution_setup)
+    key, writer = caller.job_key(job_id), ExecutionWriter(db)
+    first = await add_run(db, caller, job_id, "first")
+    second = await add_run(db, caller, job_id, "second")
+    await writer.accept(first["execution_id"], key)
+    await writer.accept(second["execution_id"], key)
+    assert await writer.start(first["execution_id"], key, "first")
+    assert await writer.start(second["execution_id"], key, "second") is None
+    skipped = await writer.get(second["execution_id"], key)
+    assert (
+        skipped["status"],
+        skipped["error_code"],
+        skipped["started_at"],
+    ) == (
+        "skipped",
+        "cron_job_running",
+        None,
+    )
+    assert (await writer.get(first["execution_id"], key))[
+        "status"
+    ] == "running"
 
 
 @pytest.mark.asyncio
@@ -86,7 +113,7 @@ async def test_old_completion_never_overwrites_a_later_started_success(
 
     db, caller, management, job_id = await setup_job(execution_setup)
     key, writer = caller.job_key(job_id), ExecutionWriter(db)
-    first = await add_run(db, caller, job_id, "period-1")
+    first = await add_run(db, caller, job_id, "period-1", kind="batch")
     await writer.accept(first["execution_id"], key)
     await writer.start(first["execution_id"], key, "first")
     await management.update(
@@ -105,7 +132,7 @@ async def test_old_completion_never_overwrites_a_later_started_success(
             )["spec"],
         },
     )
-    second = await add_run(db, caller, job_id, "period-2")
+    second = await add_run(db, caller, job_id, "period-2", kind="batch")
     await writer.accept(second["execution_id"], key)
     await writer.start(second["execution_id"], key, "second")
     await writer.complete(
@@ -187,7 +214,7 @@ async def test_inflight_success_preserves_manual_pause_reason(
     monkeypatch.setattr(
         managed_results,
         "resolve_cron_unread_auto_pause_config",
-        lambda _: SimpleNamespace(enabled=True, threshold=1),
+        lambda *_: SimpleNamespace(enabled=True, threshold=1),
     )
     await writer.complete(
         row["execution_id"],

@@ -10,17 +10,28 @@ from tests.unit.scheduler.test_managed_batch_retry import failed_batch
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["ordinary", "manual"])
 async def test_worker_occupants_scopes_totals_and_current_attempt(
     callback_setup,
+    kind,
 ):
     from monitor.app.routers import managed_cron_board as api
     from monitor.app.services.cron.managed_board import ManagedBoardQuery
 
-    db = callback_setup[0]
+    from datetime import datetime, timezone
+    from scheduler.app.services.cron.managed.executions import (
+        ExecutionRequest,
+        ExecutionStore,
+    )
+
+    db, caller, _ = callback_setup
     await failed_batch(callback_setup)
+    job_id = db.conn.execute("SELECT job_id FROM swe_cron_jobs_v2").fetchone()[
+        0
+    ]
     db.conn.executescript("""
         UPDATE swe_cron_execution_runs
-        SET status='success', settled_status=NULL,
+        SET kind='ordinary', status='success', settled_status=NULL,
             spec_json=JSON_SET(spec_json,'$.tenant_name','Alice'),
             dispatch_meta_json=JSON_SET(
                 dispatch_meta_json,'$.daily_failure_retry.call_id','call-one'
@@ -41,6 +52,15 @@ async def test_worker_occupants_scopes_totals_and_current_attempt(
         ALTER TABLE swe_cron_executions ADD COLUMN dispatch_batch_id TEXT;
         ALTER TABLE swe_cron_executions ADD COLUMN dispatch_attempt INTEGER;
     """)
+    standalone, _ = await ExecutionStore(db).enqueue(
+        caller,
+        job_id,
+        ExecutionRequest(kind, "standalone", datetime.now(timezone.utc)),
+    )
+    await db.execute(
+        "UPDATE swe_cron_execution_runs SET status='running' WHERE execution_id=%s",
+        (standalone["execution_id"],),
+    )
     app = FastAPI()
     app.include_router(api.router)
     app.dependency_overrides[api.board_service] = lambda: ManagedBoardQuery(db)

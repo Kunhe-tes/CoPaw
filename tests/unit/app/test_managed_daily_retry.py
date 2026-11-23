@@ -216,7 +216,11 @@ async def test_started_retry_is_not_interrupted_or_overwrites_newer_success(
         "UPDATE swe_cron_jobs_v2 SET spec_json=%s",
         (json.dumps(spec),),
     )
-    await scenario.run(job_id=original["job_id"], status="success")
+    await scenario.run(
+        job_id=original["job_id"],
+        kind="batch",
+        status="success",
+    )
     assert await writer.complete(
         row["execution_id"],
         key(row),
@@ -266,7 +270,7 @@ async def test_daily_success_still_obeys_unread_auto_pause(
     monkeypatch.setattr(
         managed_results,
         "resolve_cron_unread_auto_pause_config",
-        lambda _: SimpleNamespace(enabled=True, threshold=1),
+        lambda *_: SimpleNamespace(enabled=True, threshold=1),
     )
     await scenario.finish(row, status="success")
     state = await scenario.db.fetch_one("SELECT * FROM swe_cron_job_states")

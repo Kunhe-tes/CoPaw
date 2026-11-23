@@ -2,12 +2,15 @@
 """实际领取事务共用模型池行锁，满额不超领，接管不重复占位。"""
 
 import asyncio
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from tests.unit.scheduler.test_managed_cron_capacity import configure_pool
-from tests.unit.scheduler.test_managed_cron_executions import execution_setup
+from tests.unit.scheduler.test_managed_cron_executions import (
+    enqueue,
+    execution_setup,
+)
 from tests.unit.scheduler.test_managed_cron_management import create_payload
 
 
@@ -42,7 +45,11 @@ async def run_for(setup, index):
     row, _ = await ExecutionStore(db).enqueue(
         caller,
         created["job_id"],
-        ExecutionRequest("manual", f"click-{index}"),
+        ExecutionRequest(
+            "batch",
+            f"claim-{index}",
+            datetime.now(timezone.utc),
+        ),
     )
     return row
 
@@ -60,6 +67,43 @@ def dispatcher(db, now, monkeypatch):
     monkeypatch.setattr(capacity_claim, "MANAGED_CAPACITY_ACCOUNTING", True)
     gate = ManagedCapacityGate(RuntimePolicy(), clock=lambda: now[0])
     return ExecutionDispatcher(db, None, clock=lambda: now[0], capacity=gate)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["ordinary", "manual"])
+@pytest.mark.parametrize("pool_state", ["full", "leased"])
+async def test_standalone_claim_bypasses_batch_capacity(
+    execution_setup,
+    monkeypatch,
+    kind,
+    pool_state,
+):
+    from scheduler.app.services.cron.managed.operations import utc_now
+    from scheduler.app.services.cron.managed.work_query import ManagedWorkQuery
+
+    db, _, _ = execution_setup
+    standalone, _ = await enqueue(execution_setup, kind=kind)
+    other = await run_for(execution_setup, 2)
+    service = dispatcher(db, [utc_now()], monkeypatch)
+    if pool_state == "full":
+        db.conn.execute(
+            "INSERT INTO swe_cron_dispatch_intents VALUES "
+            "(1,'bank','tenant-provider','tenant-model','dispatched'), "
+            "(2,'bank','tenant-provider','tenant-model','dispatched')",
+        )
+    else:
+        db.conn.execute(
+            "UPDATE swe_cron_dispatch_scope_leases SET lock_owner='another-worker'",
+        )
+    work = ManagedWorkQuery(db, 10)
+    assert await work.rows(running=False, direct=True) == [
+        {"execution_id": standalone["execution_id"]},
+    ]
+    assert (await service._claim(standalone, True))["status"] == "dispatching"
+    assert await service._claim(other, True) is None
+    assert await work.rows(running=False) == [
+        {"execution_id": other["execution_id"]},
+    ]
 
 
 @pytest.mark.asyncio
@@ -219,7 +263,7 @@ async def test_job_concurrency_limit_does_not_reserve_pool_for_waiting_periods(
         caller,
         first["job_id"],
         ExecutionRequest(
-            "ordinary",
+            "batch",
             "another-period",
             scheduled_at=utc_now().replace(tzinfo=timezone.utc),
         ),
@@ -250,8 +294,8 @@ async def test_scope_lock_precedes_definition_snapshot_read(
 
     monkeypatch.setattr(db, "fetch_all", record)
     assert await service._claim(row, True) is not None
-    assert "swe_cron_dispatch_scope_leases" in queries[0]
-    assert "FOR UPDATE" in queries[0]
+    first_lock = next(sql for sql in queries if "FOR UPDATE" in sql)
+    assert "swe_cron_dispatch_scope_leases" in first_lock
 
 
 @pytest.mark.asyncio
@@ -276,6 +320,7 @@ async def test_gate_reuses_actual_existing_policy_and_scope_lease_methods(
     now = [utc_now()]
     dispatcher(db, now, monkeypatch)
     db.conn.executescript("""
+        ALTER TABLE swe_cron_dispatch_worker_capacity ADD COLUMN decision_reason TEXT;
         ALTER TABLE swe_cron_dispatch_scope_leases ADD COLUMN locked_at TEXT;
         ALTER TABLE swe_cron_dispatch_scope_leases ADD COLUMN heartbeat_at TEXT;
         CREATE UNIQUE INDEX uk_test_scope ON swe_cron_dispatch_scope_leases(source_id,provider_id,model_id);

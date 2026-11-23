@@ -8,6 +8,7 @@ from .executions import RUN_TABLE
 from .operations import utc_now
 from .storage import transaction, update
 from .dispatch_events import append_run_event
+from .run_accounting import standalone_direct_sql
 
 logger = logging.getLogger(__name__)
 TERMINAL = ("success", "error", "skipped", "cancelled")
@@ -15,6 +16,7 @@ PROTOCOL = (
     "JSON_UNQUOTE(JSON_EXTRACT(r.dispatch_meta_json,'$.protocol'))="
     "'scheduler_managed_v1'"
 )
+WORKER_RUN = f"{PROTOCOL} AND NOT {standalone_direct_sql('r')}"
 SUBTASK_TERMINAL = "('SUC','FAIL','PART_SUC','TIMEOUT')"
 
 
@@ -41,12 +43,13 @@ def _history_matches(run, history):
 
 
 class ExecutionSettlement:
-    def __init__(self, db, *, limit=32, clock=None):
+    def __init__(self, db, *, limit=32, clock=None, worker_only=False):
         if type(limit) is not int or not 1 <= limit <= 200:
             raise ValueError("invalid_cron_settlement_limit")
         self.db = db
         self.limit = limit
         self.clock = clock or utc_now
+        self.run_filter = WORKER_RUN if worker_only else PROTOCOL
         # 仅是巡检位置；不缓存权威状态，重启仍从共库重新观察。
         self.after = 0
 
@@ -69,7 +72,7 @@ class ExecutionSettlement:
             "WHERE r.settled_status IS NULL AND r.queue_order>%s "
             "AND (r.status IN ('error','skipped','cancelled') OR "
             "(r.status='success' AND (e.id IS NULL OR e.async_status IN ('success','error')))) "
-            f"AND {PROTOCOL} ORDER BY r.queue_order LIMIT %s",
+            f"AND {self.run_filter} ORDER BY r.queue_order LIMIT %s",
             (after, self.limit),
         )
 
@@ -118,7 +121,7 @@ class ExecutionSettlement:
     async def _settle(self, execution_id):
         async with transaction(self.db) as tx:
             run = await tx.fetch_one(
-                f"SELECT r.* FROM {RUN_TABLE} r WHERE execution_id=%s AND {PROTOCOL} FOR UPDATE",
+                f"SELECT r.* FROM {RUN_TABLE} r WHERE execution_id=%s AND {self.run_filter} FOR UPDATE",
                 (execution_id,),
             )
             if run is None or run["settled_status"] is not None:

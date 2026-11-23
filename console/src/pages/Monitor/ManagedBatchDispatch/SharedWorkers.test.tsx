@@ -38,7 +38,18 @@ it.each([true, false])(
         },
       ],
     } as unknown as CronDispatchWorkersResponse;
-    render(<SharedWorkers value={value} loading={false} />);
+    render(
+      <SharedWorkers
+        value={value}
+        loading={false}
+        scope={{
+          source: "bank",
+          start: "2026-10-19T00:00:00Z",
+          end: "2026-10-20T00:00:00Z",
+          refresh: 0,
+        }}
+      />,
+    );
     fireEvent.click(screen.getByText("错误率升高"));
     expect(screen.getByText("Worker ID")).toBeInTheDocument();
     expect(screen.getByText("worker-one")).toBeInTheDocument();

@@ -3,6 +3,7 @@ import {
   render,
   screen,
   fireEvent,
+  waitFor,
   within,
 } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
@@ -17,6 +18,46 @@ vi.mock("./FailurePanel", () => ({ default: () => null }));
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+});
+
+it("当前批次可按异步子任务状态查询成员", async () => {
+  const batch = {
+    batch_id: "batch-ledger",
+    job_id: "parent",
+    member_count: 1,
+    status: "running",
+  } as ManagedBatch;
+  api.detail.mockResolvedValue({
+    batch,
+    members: [],
+    member_total: 0,
+    events: [],
+    event_total: 0,
+  });
+  render(
+    <BatchDetail
+      source="bank"
+      actor="manager"
+      batch={batch}
+      refresh={0}
+      onQueued={() => {}}
+    />,
+  );
+  fireEvent.mouseDown(
+    screen.getByRole("combobox", { name: "批次内子任务状态" }),
+  );
+  fireEvent.click(await screen.findByText("等待子任务完成", { exact: true }));
+  await waitFor(() =>
+    expect(api.detail).toHaveBeenLastCalledWith(
+      "bank",
+      "batch-ledger",
+      expect.objectContaining({
+        subtask_status: "waiting_subtasks",
+        member_page: 1,
+      }),
+      expect.any(AbortSignal),
+    ),
+  );
 });
 
 it.each([

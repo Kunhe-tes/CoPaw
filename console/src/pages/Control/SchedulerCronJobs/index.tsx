@@ -11,7 +11,11 @@ import { useAgentStore } from "@/stores/agentStore";
 import { useIframeStore } from "@/stores/iframeStore";
 import { DEFAULT_SOURCE_ID } from "@/constants/identity";
 import { getUserId } from "@/utils/identity";
-import { createManagedColumns, type ManagedJobPanel } from "./columns";
+import {
+  createManagedColumns,
+  type ManagedJobAction,
+  type ManagedJobPanel,
+} from "./columns";
 import { useManagedCronJobs } from "./useManagedCronJobs";
 import { ManagedJobEditor } from "./ManagedJobEditor";
 import { ManagedBroadcastModal } from "./ManagedBroadcastModal";
@@ -39,14 +43,19 @@ function SchedulerCronWorkspace({ context }: { context: ManagedCronContext }) {
   const requests = useRef(new Map<string, RequestIdentity>());
   const refresh = () => void data.reload();
   const close = () => setPanel(null);
-  const perform = async (
-    kind: "toggle" | "remove" | "run" | "pause",
-    job: ManagedJob,
-  ) => {
+  const perform = async (kind: ManagedJobAction, job: ManagedJob) => {
+    setActionError(null);
+    if (kind === "runBatch") {
+      const result = await data.runBatch(job);
+      if (result)
+        message.success(
+          `整批运行已受理，已登记 ${result.enqueued_intents} 条执行`,
+        );
+      return;
+    }
     const key = `${kind}:${job.tenant_id}:${job.source_id}:${job.agent_id}:${job.id}`;
     const identity = requests.current.get(key) ?? new RequestIdentity();
     requests.current.set(key, identity);
-    setActionError(null);
     try {
       const result = await data[kind](
         job,

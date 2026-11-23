@@ -217,6 +217,13 @@ export const schedulerCronApi = {
       "POST",
       { request_id: requestId, expected_definition_version: version },
     ),
+  runBatch: (context: ManagedCronContext, id: string) =>
+    write<{ batch_id: string; enqueued_intents: number }>(
+      context,
+      "/scheduler/external/cron/batch/run",
+      "POST",
+      { jobId: id },
+    ),
   execution: (context: ManagedCronContext, id: string, executionId: string) =>
     call<ManagedExecution>(
       context,

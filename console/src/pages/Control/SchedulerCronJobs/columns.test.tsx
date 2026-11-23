@@ -85,7 +85,20 @@ it("子任务菜单不展示分发、子任务管理或重复暂停入口", asyn
   expect(screen.getByText("删除")).toBeInTheDocument();
   expect(screen.queryByText("分发")).toBeNull();
   expect(screen.queryByText("子任务管理")).toBeNull();
+  expect(screen.queryByText("运行整批")).toBeNull();
   expect(screen.queryByText("暂停任务")).toBeNull();
+});
+
+it("父任务批入口暂停时，菜单显示不可用的运行整批", async () => {
+  const parent = {
+    ...job("batch_paused", false),
+    has_distributed_children: true,
+  };
+  render(<>{column("action").render?.(null, parent, 0)}</>);
+  fireEvent.click(screen.getByRole("button", { name: "更多操作 任务" }));
+  expect(
+    await screen.findByRole("menuitem", { name: "运行整批" }),
+  ).toHaveAttribute("aria-disabled", "true");
 });
 it("失败悬浮同时包含北京时间和完整错误", async () => {
   const record = {
@@ -152,9 +165,32 @@ it("增加执行时间标识不移除任务名旁的分发子任务标签", () =
   expect(screen.getByText("分发子任务")).toBeVisible();
 });
 
+it.each(["hover", "focus"] as const)(
+  "%s 分发标签展示父任务ID和拥有人",
+  async (trigger) => {
+    const record = job("batch_enabled", true);
+    record.meta = {
+      ...record.meta,
+      broadcast_source_tenant_id: "owner-001",
+      broadcast_source_tenant_name: "父任务负责人",
+    };
+    render(<>{column("name").render?.(record.name, record, 0)}</>);
+    const tag = screen.getByText("分发子任务");
+    if (trigger === "focus") {
+      expect(tag).toHaveAttribute("tabindex", "0");
+      fireEvent.focus(tag);
+    } else fireEvent.mouseEnter(tag);
+    const tip = await screen.findByRole("tooltip");
+    expect(tip).toHaveTextContent("父任务ID：parent");
+    expect(tip).toHaveTextContent("拥有人：父任务负责人（owner-001）");
+  },
+);
+
 it("没有实际分发过的独立任务不显示父任务标识", () => {
   const record = job("batch_enabled", false);
-  const { rerender } = render(<>{column("name").render?.(record.name, record, 0)}</>);
+  const { rerender } = render(
+    <>{column("name").render?.(record.name, record, 0)}</>,
+  );
   expect(screen.queryByText("父任务")).toBeNull();
   const parent = { ...record, has_distributed_children: true };
   rerender(<>{column("name").render?.(parent.name, parent, 0)}</>);

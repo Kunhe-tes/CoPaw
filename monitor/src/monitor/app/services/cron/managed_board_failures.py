@@ -75,8 +75,23 @@ def summary_query(where, filtered):
     )
 
 
-async def failure_summary(db, source, start, end, status, query):
-    where, params = sql.batch_where(source, start, end, query)
+async def failure_summary(
+    db,
+    source,
+    start,
+    end,
+    status,
+    query,
+    *,
+    child_status=None,
+):
+    where, params = sql.batch_where(
+        source,
+        start,
+        end,
+        query,
+        child_status=child_status,
+    )
     rows = await db.fetch_all(
         summary_query(where, bool(status)),
         (*params, status) if status else params,
