@@ -8,6 +8,13 @@ from pathlib import Path
 import json
 from uuid import UUID, uuid4
 
+from mysql.connector.errorcode import ER_CHECK_CONSTRAINT_VIOLATED
+from mysql.connector.errors import (
+    DatabaseError,
+    DataError,
+    IntegrityError as SQLIntegrityError,
+)
+
 from ...runner.expert_binding import (
     EXPERT_BINDING_META_KEY,
     read_expert_binding,
@@ -23,6 +30,7 @@ from ..chat_mutations import (
 from ..metadata_catalog import _utc, SCOPE_WHERE
 from ..errors import ConflictError
 from ..paths import existing_root
+from ..runtime import require_empty_conversation
 from ..identity import (
     WorkspaceScope,
     SessionIdentity,
@@ -45,6 +53,15 @@ from ..metadata_repository import (
 MODE = "mysql-metadata"
 BATCH_SIZE = 100
 VERIFY_PAGE_SIZE = 100
+EMPTY_REGISTRY_DIGEST = sha256(b"missing chats.json").hexdigest()
+WORKSPACE_ERRORS = (
+    ConflictError,
+    ValueError,
+    OSError,
+    TypeError,
+    DataError,
+    SQLIntegrityError,
+)
 
 
 def _workspace(item):
@@ -56,11 +73,24 @@ def _workspace(item):
     return scope, root
 
 
-def _registry(root):
+def _registry_bytes(root):
     path = root / "chats.json"
+    if not path.exists() and not path.is_symlink():
+        require_empty_conversation(root)
+        return None
     if path.is_symlink() or not path.is_file():
         raise ValueError(f"expected a regular Chat registry at {path}")
-    raw = path.read_bytes()
+    return path.read_bytes()
+
+
+def _registry_digest(raw):
+    return EMPTY_REGISTRY_DIGEST if raw is None else sha256(raw).hexdigest()
+
+
+def _parse_registry(root, raw):
+    if raw is None:
+        return ChatsFile(version=1, chats=[])
+    path = root / "chats.json"
     document = load_metadata_json(raw)
     if (
         not isinstance(document, dict)
@@ -68,7 +98,7 @@ def _registry(root):
         or document["version"] != 1
     ):
         raise ValueError(f"unsupported Chat registry version at {path}")
-    return ChatsFile.model_validate(document), sha256(raw).hexdigest()
+    return ChatsFile.model_validate(document)
 
 
 def _validate_chats(scope, chats):
@@ -91,6 +121,8 @@ def _validate_chats(scope, chats):
         identity_bytes(filename, 255)
         if sessions.setdefault(filename, session) != session:
             raise ValueError(f"multiple Session identities map to {filename}")
+        if len(chat.name.encode("utf-8")) > 65_535:
+            raise ValueError(f"Chat {chat.id} title exceeds the SQL TEXT size")
         metadata_fields(chat.meta)
         binding = read_expert_binding(chat)
         if binding.expert_id is not None:
@@ -102,22 +134,24 @@ def prepare(workspaces, schema, manifest):
     roots, scopes = set(), set()
     output = Path(manifest).resolve()
     for item in workspaces:
-        scope, root = _workspace(item)
-        if output.is_relative_to(root):
+        scope = WorkspaceScope.from_values(item["scope"])
+        root = Path(item["root"])
+        if output.is_relative_to(root.resolve()):
             raise ValueError("manifest must be outside the Chat workspace")
         if root in roots or scope in scopes:
             raise ValueError("duplicate Chat workspace scope or path")
         roots.add(root)
         scopes.add(scope)
-        registry, digest = _registry(root)
-        _validate_chats(scope, registry.chats)
-        bindings.append(
-            {
-                "root": str(root),
-                "scope": scope.values,
-                "registry_sha256": digest,
-            },
-        )
+        binding = {"root": str(root), "scope": scope.values}
+        try:
+            _, root = _workspace(item)
+            raw = _registry_bytes(root)
+            binding["registry_sha256"] = _registry_digest(raw)
+            if raw is None:
+                binding["registry_missing"] = True
+        except WORKSPACE_ERRORS as error:
+            binding["prepare_error"] = str(error)
+        bindings.append(binding)
     if not bindings:
         raise ValueError("at least one workspace is required")
     data = {
@@ -184,16 +218,21 @@ def _verify_nas(root, registry, *, full_audit=False):
 
 
 def _frozen_registry(item, scope, root):
-    registry, digest = _registry(root)
-    if digest != item["registry_sha256"]:
+    raw = _registry_bytes(root)
+    if (raw is None) != item.get("registry_missing", False) or (
+        _registry_digest(raw) != item["registry_sha256"]
+    ):
         raise ConflictError(
             f"Chat registry changed after preparation at {root}",
         )
+    registry = _parse_registry(root, raw)
     _validate_chats(scope, registry.chats)
     return registry
 
 
 def _verify_workspace(item, *, full_audit):
+    if "prepare_error" in item:
+        raise ValueError(item["prepare_error"])
     scope, root = _workspace(item)
     registry = _frozen_registry(item, scope, root)
     _verify_nas(root, registry, full_audit=full_audit)
@@ -217,23 +256,21 @@ async def migrate(
     ):
         workspaces = list(group)
         try:
-            if apply:
-                changed = await _migrate_source(
-                    database,
-                    manifest["migration_id"],
-                    manifest_digest,
-                    workspaces,
-                    full_audit=full_audit,
-                )
-                if not changed:
-                    skipped.append(key)
-                    continue
-            else:
-                for item in workspaces:
-                    _verify_workspace(item, full_audit=full_audit)
-        except (ConflictError, ValueError, OSError, TypeError) as error:
+            state, errors = await _migrate_source(
+                database,
+                manifest["migration_id"],
+                manifest_digest,
+                workspaces,
+                apply=apply,
+                full_audit=full_audit,
+            )
+        except (ConflictError, DataError, SQLIntegrityError) as error:
             failed.append({"source": key, "detail": str(error)})
-        else:
+            continue
+        failed.extend(errors)
+        if state == "skipped":
+            skipped.append(key)
+        elif state == "ready":
             published.append(key)
     return {
         "mode": MODE,
@@ -247,50 +284,82 @@ async def migrate(
     }
 
 
+def _workspace_failure(item, phase, error):
+    return {
+        "source": tuple(item["scope"][:3]),
+        "scope": tuple(item["scope"]),
+        "root": item["root"],
+        "phase": phase,
+        "detail": str(error),
+    }
+
+
 async def _migrate_source(
     database,
     migration_id,
     digest,
     workspaces,
     *,
+    apply,
     full_audit,
 ):
-    scope, _ = _workspace(workspaces[0])
-    source_key = scope.sql_values[:3]
-    row = await database.fetch_one(
-        f"SELECT migration_id,manifest_digest,published FROM {SOURCES} WHERE "
-        + SOURCE_PREDICATE,
-        source_key,
-    )
-    if row is not None:
-        if (
-            row["migration_id"] != migration_id
-            or row["manifest_digest"] != digest
-        ):
-            raise ConflictError(
-                "source is bound to a different metadata migration",
-            )
-        if row["published"]:
-            return False
-    else:
-        for item in workspaces:
+    source_key = WorkspaceScope.from_values(workspaces[0]["scope"]).sql_values[
+        :3
+    ]
+    row = None
+    if apply:
+        row = await database.fetch_one(
+            f"SELECT migration_id,manifest_digest,published FROM {SOURCES} WHERE "
+            + SOURCE_PREDICATE,
+            source_key,
+        )
+        if row is not None:
+            if (
+                row["migration_id"] != migration_id
+                or row["manifest_digest"] != digest
+            ):
+                raise ConflictError(
+                    "source is bound to a different metadata migration",
+                )
+            if row["published"]:
+                return "skipped", []
+
+    eligible, failures = [], []
+    for item in workspaces:
+        try:
             _verify_workspace(item, full_audit=full_audit)
+        except WORKSPACE_ERRORS as error:
+            failures.append(_workspace_failure(item, "preflight", error))
+        else:
+            eligible.append(item)
+    if not apply or not eligible:
+        return ("failed" if failures else "ready"), failures
+
+    if row is None:
         await database.execute(
             f"INSERT INTO {SOURCES} (service_unit_key,tenant_key,source_key,migration_id,manifest_digest) "
             "VALUES (%s,%s,%s,%s,%s)",
             (*source_key, migration_id, digest),
         )
-    for item in workspaces:
-        await _import_workspace(database, item)
-    for item in workspaces:
-        _verify_workspace(item, full_audit=full_audit)
+    for item in eligible:
+        try:
+            await _import_workspace(database, item)
+            _verify_workspace(item, full_audit=full_audit)
+        except WORKSPACE_ERRORS as error:
+            failures.append(_workspace_failure(item, "import", error))
+        except DatabaseError as error:
+            if error.errno != ER_CHECK_CONSTRAINT_VIOLATED:
+                raise
+            failures.append(_workspace_failure(item, "import", error))
+    if failures:
+        return "failed", failures
     await database.execute(
         f"UPDATE {SOURCES} SET published=1 WHERE "
         + SOURCE_PREDICATE
         + " AND migration_id=%s AND manifest_digest=%s AND published=0",
         (*source_key, migration_id, digest),
     )
-    return True
+    return "ready", []
 
 
 async def _import_workspace(database, item):

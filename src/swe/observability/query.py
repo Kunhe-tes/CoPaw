@@ -1592,6 +1592,80 @@ def _authorize_evidence_chat(
         raise KeyError("chat agent is outside the request scope")
 
 
+async def _nas_message_occurrence(workspace, request, run, reference):
+    from agentscope.message import Msg
+
+    from ..app.runner import api
+    from ..app.runner.query_attempt import (
+        _get_memory_entry_message,
+        _get_persisted_memory_entries,
+    )
+    from .nas_evidence import nas_reference
+
+    unavailable = {"status": "unavailable", "message": None}
+    chat_id = reference["chat_id"]
+    if _population_identity(run.get("chat_key")) != chat_id:
+        return unavailable
+    if _population_identity(run.get("agent_key")) != workspace.agent_id:
+        return unavailable
+    if _population_identity(run.get("source_key")) != workspace.source_id:
+        return unavailable
+    chat = await workspace.chat_manager.get_chat(chat_id)
+    if chat is None or chat.session_id != _population_identity(
+        run.get("session_key"),
+    ):
+        return unavailable
+    _authorize_evidence_chat(request, workspace, chat)
+
+    ref = reference.get("reference_id")
+    exact = isinstance(ref, str) and ref.startswith("nas:")
+    # Bundle occurrence numbers cannot identify NAS occurrences.
+    if not exact and reference.get("occurrence_id") is not None:
+        return unavailable
+
+    def matches(message):
+        return (
+            isinstance(message, dict)
+            and message.get("id") == reference["message_id"]
+            and (not exact or nas_reference(message) == ref)
+        )
+
+    state = await api._read_history_state(
+        workspace.runner.session,
+        chat.session_id,
+        chat.user_id,
+    )
+    messages = []
+    for entry in _get_persisted_memory_entries(state) or ():
+        message = _get_memory_entry_message(entry)
+        if matches(message):
+            messages.append(Msg.from_dict(message))
+    archive = api._archive_store(workspace)
+    cursor = None
+    if archive is not None and (not exact or not messages):
+        for _ in range(10):
+            page = await archive.read_page(chat_id, before=cursor)
+            messages.extend(
+                msg for msg in page.messages if matches(msg.to_dict())
+            )
+            if not page.has_more or (exact and messages):
+                break
+            cursor = page.next_cursor
+        else:
+            return unavailable
+    if not messages or (not exact and len(messages) != 1):
+        return unavailable
+    fragments = api._redact_hidden_context_messages(
+        api._history_msg_to_messages(messages[:1], session_id=chat.session_id),
+    )
+    if not fragments:
+        return unavailable
+    return {
+        "status": "available",
+        "message": fragments[0].model_dump(mode="json"),
+    }
+
+
 async def _load_evidence_item(
     reference: dict[str, Any],
     *,
@@ -1651,21 +1725,26 @@ async def _load_evidence_item(
             )
         except Exception:
             history = None
-    if history is None or not hasattr(history, "message_occurrence"):
-        item["status"] = "unavailable"
-        return item, history, workspace
     try:
-        result = await history.message_occurrence(
-            chat_id,
-            message_id,
-            occurrence_no=occurrence_no,
-            max_bytes=_MAX_EVIDENCE_SOURCE_BYTES,
-            authorize=lambda chat: _authorize_evidence_chat(
-                request,
+        if history is not None and hasattr(history, "message_occurrence"):
+            result = await history.message_occurrence(
+                chat_id,
+                message_id,
+                occurrence_no=occurrence_no,
+                max_bytes=_MAX_EVIDENCE_SOURCE_BYTES,
+                authorize=lambda chat: _authorize_evidence_chat(
+                    request,
+                    workspace,
+                    chat,
+                ),
+            )
+        else:
+            result = await _nas_message_occurrence(
                 workspace,
-                chat,
-            ),
-        )
+                request,
+                run,
+                reference,
+            )
     except Exception:
         result = {"status": "unavailable", "message": None}
     result_status = _evidence_status(result.get("status"))

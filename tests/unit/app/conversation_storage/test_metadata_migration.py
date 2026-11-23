@@ -130,7 +130,8 @@ async def test_metadata_preview_is_read_only_and_checks_frozen_registry(
     assert "changed after preparation" in result["failed"][0]["detail"]
 
 
-def test_metadata_prepare_rejects_legacy_filename_collision(tmp_path):
+@pytest.mark.asyncio
+async def test_metadata_preview_reports_legacy_filename_collision(tmp_path):
     chats = [
         {
             "id": str(uuid4()),
@@ -145,9 +146,11 @@ def test_metadata_prepare_rejects_legacy_filename_collision(tmp_path):
             "session_id": "x--y",
         },
     ]
-    with pytest.raises(ValueError, match="multiple Session identities"):
-        _prepare(tmp_path, chats)
-    assert not (tmp_path / "migration.json").exists()
+    _, manifest = _prepare(tmp_path, chats)
+    data, digest = metadata.read_manifest(manifest, "test_schema")
+    report = await metadata.migrate(None, data, digest, apply=False)
+    assert report["status"] == "partial_success"
+    assert "multiple Session identities" in report["failed"][0]["detail"]
 
 
 @pytest.mark.asyncio

@@ -1491,3 +1491,118 @@ def test_events_example_matches_ingest_contract():
     for line in lines:
         if line.strip():
             _validate_payload(line)
+
+
+@pytest.mark.asyncio
+async def test_nas_evidence_links_only_committed_messages_and_reads_archive(
+    tmp_path,
+):
+    from unittest.mock import AsyncMock, Mock
+    from uuid import uuid4
+
+    from agentscope.message import Msg
+
+    from swe.agents.memory.conversation_archive import ConversationArchiveStore
+    from swe.app.runner.models import ChatSpec
+    from swe.app.runner.session import SafeJSONSession
+    from swe.observability.instrumentation import (
+        _remember_model_response_span,
+        bind_tool_span,
+    )
+    from swe.observability.nas_evidence import (
+        collect_nas_evidence,
+        publish_nas_evidence,
+        remember_nas_message,
+    )
+    from swe.observability.query import _nas_message_occurrence
+
+    chat = ChatSpec(
+        id=str(uuid4()),
+        user_id="user",
+        session_id="session",
+        channel="console",
+    )
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("svc", "source", "tenant", "agent"),
+        business_ref={"chat_id": chat.id},
+    )
+
+    def span():
+        return Mock(
+            _context=context,
+            tool_output_was_compacted=Mock(return_value=False),
+        )
+
+    tool_span, model_span = span(), span()
+    answer = Msg("assistant", "answer", "assistant", invocation_id="response")
+    tool = Msg(
+        "tool",
+        [
+            {
+                "type": "tool_result",
+                "id": "call-1",
+                "name": "echo",
+                "output": [{"type": "text", "text": "saved output"}],
+            },
+        ],
+        "system",
+    )
+    session = SafeJSONSession(str(tmp_path / "sessions"))
+    archive = ConversationArchiveStore(tmp_path / "dialog")
+    async with collect_nas_evidence():
+        with bind_context(context):
+            _remember_model_response_span(model_span, answer.invocation_id)
+            remember_nas_message(chat.id, answer)
+            with bind_tool_span(tool_span):
+                remember_nas_message(chat.id, tool)
+        publish_nas_evidence([])
+        model_span.event.assert_not_called()
+        tool_span.event.assert_not_called()
+        async with session.execution(
+            chat.session_id,
+            chat.user_id,
+        ) as execution:
+            await execution.commit_state(
+                {"agent": {"memory": {"content": [[answer.to_dict(), []]]}}},
+            )
+            publish_nas_evidence([answer.to_dict()])
+        await archive.commit(chat.id, [tool])
+        publish_nas_evidence([tool.to_dict()], chat_id=chat.id)
+
+    workspace = SimpleNamespace(
+        agent_id="agent",
+        source_id="source",
+        workspace_dir=tmp_path,
+        runner=SimpleNamespace(session=session),
+        chat_manager=SimpleNamespace(get_chat=AsyncMock(return_value=chat)),
+    )
+    request = SimpleNamespace(state=SimpleNamespace(source_id="source"))
+    run = {
+        "agent_key": b"agent",
+        "source_key": b"source",
+        "chat_key": chat.id,
+        "session_key": chat.session_id,
+        "root_question_key": "question",
+    }
+    for handle, kind in (
+        (tool_span, "tool_output"),
+        (model_span, "assistant_answer"),
+    ):
+        assert handle.event.call_args.args == ("evidence.linked",)
+        reference = handle.event.call_args.kwargs
+        assert reference["content_type"] == kind
+        result = await _nas_message_occurrence(
+            workspace,
+            request,
+            run,
+            reference,
+        )
+        assert result["status"] == "available"
+        denied = await _nas_message_occurrence(
+            workspace,
+            request,
+            {**run, "source_key": b"other"},
+            reference,
+        )
+        assert denied["status"] == "unavailable"

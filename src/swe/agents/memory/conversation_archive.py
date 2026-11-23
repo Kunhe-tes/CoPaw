@@ -2560,6 +2560,14 @@ def attach_conversation_archive(
             if index not in selected_indexes
         ]
 
+    def publish_archived_evidence(messages: Sequence[Msg]) -> None:
+        from ...observability.nas_evidence import publish_nas_evidence
+
+        publish_nas_evidence(
+            (message.to_dict() for message in messages),
+            chat_id=canonical_chat_id,
+        )
+
     async def add(*args: Any, **kwargs: Any) -> Any:
         """Append an event only after ReMe has accepted the message."""
         if original_add is None:
@@ -2578,6 +2586,9 @@ def attach_conversation_archive(
                 facts={"message_id": message.id, "role": message.role},
                 source_refs=(f"message:{message.id}",),
             )
+        from ...observability.nas_evidence import remember_nas_message
+
+        remember_nas_message(canonical_chat_id, message)
         return result
 
     async def archive_compacted_messages(
@@ -2585,6 +2596,7 @@ def attach_conversation_archive(
     ) -> ConversationArchiveBoundary:
         advances_event_cursor = archived_messages_are_online_prefix(messages)
         boundary = await archive_store.commit(canonical_chat_id, messages)
+        publish_archived_evidence(messages)
         if advances_event_cursor:
             await archive_store.advance_archived_message_events(
                 canonical_chat_id,
@@ -2604,6 +2616,7 @@ def attach_conversation_archive(
             messages,
             candidate_id,
         )
+        publish_archived_evidence(messages)
         remove_archived_online_messages(messages)
         await install_checkpoint_projection(result.record)
         return result
@@ -2658,6 +2671,7 @@ def attach_conversation_archive(
         )
         if result is None:
             return False
+        publish_archived_evidence(messages)
         remove_archived_online_messages(messages)
         await install_checkpoint_projection()
         return True

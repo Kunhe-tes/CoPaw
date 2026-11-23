@@ -2,11 +2,14 @@
 import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
 from agentscope.message import Msg
 from click.testing import CliRunner
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
 
 from swe.app.conversation_storage import runtime
 from swe.agents.memory.conversation_archive import ConversationArchiveStore
@@ -14,6 +17,13 @@ from swe.app.conversation_storage.errors import ConflictError
 from swe.app.conversation_storage.tenant_admission import TenantNotPublished
 from swe.app.conversation_storage.identity import WorkspaceScope
 from swe.app.conversation_storage.migration import metadata
+from swe.app.conversation_storage.metadata_repository import (
+    MySQLMetadataRepository,
+)
+from swe.app.approvals import external
+from swe.app.channels.console.channel import ConsoleChannel
+from swe.app.routers import approvals
+from swe.app.runner.manager import ChatManager
 from swe.app.runner.models import ChatSpec
 from swe.app.runner.session import SafeJSONSession
 from swe.app.workspace.service_factories import create_chat_service
@@ -346,3 +356,168 @@ async def test_metadata_cli_uses_a_published_sql_registry(
     exported = json.loads((dest / "0" / "chats.json").read_text())
     assert ChatSpec.model_validate(exported["chats"][0]) == spec
     assert (root / "chats.json").read_text() == raw
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("restrict_title", "restore_title"),
+    [
+        (
+            "MODIFY title VARCHAR(20) NOT NULL",
+            "MODIFY title TEXT NOT NULL",
+        ),
+        (
+            "ADD CONSTRAINT test_title CHECK (CHAR_LENGTH(title) <= 20)",
+            "DROP CHECK test_title",
+        ),
+    ],
+    ids=["data-error", "check-constraint"],
+)
+async def test_workspace_sql_error_does_not_stop_later_imports(
+    conversation_test_database,
+    tmp_path,
+    restrict_title,
+    restore_title,
+    monkeypatch,
+):
+    db = conversation_test_database
+    await apply_sql_script(db, SQL_ROOT / "conversation_mysql_metadata.sql")
+    workspaces = []
+    specs = {}
+    for source, agent in (
+        ("source-a", "bad"),
+        ("source-a", "healthy"),
+        ("source-b", "empty"),
+    ):
+        scope = WorkspaceScope("tenant", source, agent, service_unit_id="svc")
+        root = tmp_path / agent
+        root.mkdir()
+        workspaces.append({"scope": scope.values, "root": str(root)})
+        if agent == "empty":
+            continue
+        spec = ChatSpec(
+            name=(
+                "title is longer than twenty bytes"
+                if agent == "bad"
+                else "ordinary"
+            ),
+            session_id=agent,
+            user_id="user",
+            channel="zhaohu",
+            meta={"multi_agent_mode_enabled": True},
+        )
+        specs[agent] = spec
+        (root / "chats.json").write_text(
+            json.dumps(
+                {"version": 1, "chats": [spec.model_dump(mode="json")]},
+            ),
+        )
+
+    await db.execute(f"ALTER TABLE swe_conversation_chats {restrict_title}")
+    manifest = tmp_path / "manifest.json"
+    metadata.prepare(workspaces, db.config.database, manifest)
+    data, digest = metadata.read_manifest(manifest, db.config.database)
+    report = await metadata.migrate(db, data, digest, apply=True)
+    assert report["status"] == "partial_success"
+    assert report["published"] == [("svc", "tenant", "source-b")]
+    assert [failure["scope"][-1] for failure in report["failed"]] == ["bad"]
+    assert report["failed"][0]["root"] == str(tmp_path / "bad")
+    assert report["failed"][0]["phase"] == "import"
+    assert await db.fetch_all(
+        "SELECT agent_key,imported_count FROM swe_conversation_metadata_workspaces "
+        "ORDER BY agent_key",
+    ) == [
+        {"agent_key": b"bad", "imported_count": 0},
+        {"agent_key": b"empty", "imported_count": 0},
+        {"agent_key": b"healthy", "imported_count": 1},
+    ]
+    await db.execute(f"ALTER TABLE swe_conversation_chats {restore_title}")
+    retry = await metadata.migrate(db, data, digest, apply=True)
+    assert retry["published"] == [("svc", "tenant", "source-a")]
+    assert retry["already_published"] == [("svc", "tenant", "source-b")]
+
+    scope = WorkspaceScope.from_values(workspaces[1]["scope"])
+    repo = MySQLMetadataRepository(db, scope)
+    spec = specs["healthy"]
+    binding = await repo.compare_and_set_expert_binding(spec.id, 0, "expert")
+    chat = await repo.get_chat(spec.id)
+    assert binding.expert_id == "expert"
+    assert chat.meta["multi_agent_mode_enabled"] is False
+    await _assert_native_approval_uses_existing_session(
+        repo,
+        spec,
+        tmp_path,
+        monkeypatch,
+    )
+
+
+async def _assert_native_approval_uses_existing_session(
+    repo,
+    spec,
+    tmp_path,
+    monkeypatch,
+):
+    pending = SimpleNamespace(
+        request_id="approval-1",
+        user_id=spec.user_id,
+        session_id=spec.session_id,
+        channel=spec.channel,
+        extra={"chat_id": spec.id},
+        status="pending",
+    )
+    console = ConsoleChannel(
+        process=AsyncMock(),
+        enabled=True,
+        bot_prefix="",
+        workspace_dir=tmp_path,
+    )
+
+    async def start_or_attach(chat_id, payload, producer, **kwargs):
+        assert chat_id == spec.id
+        request = console.build_agent_request_from_native(payload)
+        assert request.channel == "zhaohu"
+        assert request.channel_meta["chat_id"] == spec.id
+        await repo.ensure_session_path(
+            request.session_id,
+            request.user_id,
+            request.channel,
+        )
+        return SimpleNamespace(is_new_run=True)
+
+    service = SimpleNamespace(
+        get_request=AsyncMock(return_value=pending),
+        record_external_submission=AsyncMock(),
+    )
+    workspace = SimpleNamespace(
+        chat_manager=ChatManager(repo=repo),
+        channel_manager=SimpleNamespace(
+            get_channel=lambda name: console if name == "console" else None,
+        ),
+        task_tracker=SimpleNamespace(),
+        answer_turn_coordinator=SimpleNamespace(
+            start_or_attach=start_or_attach,
+        ),
+    )
+    monkeypatch.setattr(
+        approvals,
+        "get_agent_for_request",
+        AsyncMock(return_value=workspace),
+    )
+    monkeypatch.setattr(approvals, "get_approval_service", lambda: service)
+    monkeypatch.setattr(external, "get_approval_service", lambda: service)
+    monkeypatch.setattr(external, "notify_cron_approval_result", AsyncMock())
+    app = FastAPI()
+    app.include_router(approvals.router)
+    for action in ("approve", "deny"):
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                f"/approvals/{pending.request_id}/{action}",
+                headers={"X-User-Id": spec.user_id},
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["chat_id"] == spec.id
+    assert service.record_external_submission.await_count == 2
+    assert [chat.id for chat in await repo.list_chats()] == [spec.id]

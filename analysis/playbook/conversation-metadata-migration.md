@@ -7,7 +7,8 @@
 3. 准备 JSON 数组，例如 `[{"root":"/nas/workspace","scope":["service-unit","tenant","source","agent"]}]`。路径须规范且唯一，manifest 放在 workspace 外。
 4. 执行 `swe conversation-storage prepare --workspaces /audit/workspaces.json --manifest /audit/manifest.json`。
 5. 执行 `swe conversation-storage migrate --manifest /audit/manifest.json --full-audit` 预览，检查所有失败项。
-6. 执行相同命令并追加 `--apply`。按 source 发布；失败后保留并重用同一个 manifest，检查结构化结果与错误输出。
+6. 执行相同命令并追加 `--apply`。按 source 发布。单个 workspace 校验或写入失败时，迁移会继续处理同来源及后续来源的 workspace，并在最终报告的 `failed` 中列出范围、路径、阶段和错误。仅包含全部验收成功 workspace 的来源可发布。若失败原因可在保留冻结输入的前提下排除，重用原 manifest 续跑。
+   真正为空的 workspace 可以缺少 `chats.json`。迁移会冻结这个状态，并在导入前再次检查。
 7. 设置 `SWE_CONVERSATION_STORAGE_AUTHORITY=mysql-metadata` 和 `CMB_CAAS_SERVICEUNITID`，先在受控实例验证历史、续聊、重启、改名及删除，再恢复流量。
 
 ## 批量导入与性能验收
@@ -22,4 +23,4 @@
 
 旧 bundle 存储及迁移命令已移除。`SWE_CONVERSATION_STORAGE_AUTHORITY=mysql` 和 `--mode bundle` 不再受支持。现场 MySQL、共享 NAS、锁及回退需事先演练。
 
-审批审计和 Run/Attempt 追踪随 NAS 会话执行路径工作。可观测性的业务轮次覆盖率和消息证据详情依赖原 bundle 历史读取器，当前存储模式下分别返回 HTTP 503 和 `unavailable`。
+审批审计和 Run/Attempt 追踪随 NAS 会话执行路径工作。业务轮次覆盖率依赖原 bundle 历史读取器，当前存储模式下返回 HTTP 503。新消息证据从 NAS 中已持久化的消息生成引用，详情按 Chat、Session、消息 ID 和内容摘要定位。无法唯一定位到 NAS 消息的旧引用返回 `unavailable`。

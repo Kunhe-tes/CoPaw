@@ -304,6 +304,27 @@ class MySQLMetadataRepository(MetadataCatalog):
             await self._install(spec, session, row)
             return await self.get_chat(spec.id)
 
+    async def _write_expert_binding(self, row, updated):
+        if updated.expert_id is None:
+            await super()._write_expert_binding(row, updated)
+            return
+        extended = load_metadata_json(row["extended_metadata_text"] or "{}")
+        extended["multi_agent_mode_enabled"] = False
+        _, extended_text = metadata_fields(extended)
+        await self.db.execute(
+            "UPDATE swe_conversation_chats SET expert_id=%s,"
+            "expert_binding_revision=%s,extended_metadata_text=%s,"
+            "metadata_revision=metadata_revision+1,updated_at=UTC_TIMESTAMP(6) "
+            "WHERE id=%s AND service_unit_key=%s AND deleted_at IS NULL",
+            (
+                identity_bytes(updated.expert_id, 256),
+                updated.revision,
+                extended_text,
+                row["id"],
+                self.scope.sql_values[0],
+            ),
+        )
+
     async def set_multi_agent_mode(self, chat_id, enabled, expected_revision):
         async with self.db.transaction():
             await self._assert_writes_allowed()

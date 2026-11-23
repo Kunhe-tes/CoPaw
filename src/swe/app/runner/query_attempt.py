@@ -20,10 +20,15 @@ from ...config.context import (
     set_current_file_url_network,
 )
 from ...runtime_invocation_claims import runtime_invocation_claims_context
+from ...observability.nas_evidence import (
+    collect_nas_evidence,
+    publish_nas_evidence,
+)
 from ...tracing.models import TraceStatus
 from ...tracing.agent_trace_capture import mark_turn_cancelled
 from ...tracing.agent_trace_sdk import OperationName, start_child_span
 from ..agent_context import set_current_agent_id
+from ..channels.schema import DEFAULT_CHANNEL
 from .query_contracts import (
     QueryPersistenceResult,
     _QueryPreflight,
@@ -880,6 +885,13 @@ async def _save_and_close_session_execution(
             session_execution=session_execution,
         )
         if committed:
+            publish_nas_evidence(
+                _get_memory_entry_message(entry)
+                for entry in _get_persisted_memory_entries(
+                    session_execution.state,
+                )
+                or ()
+            )
             (
                 assistant_message_count,
                 persisted_assistant_content,
@@ -1129,13 +1141,16 @@ async def stream_query_after_preflight(
     runtime_start = None
     outcome = None
     try:
-        async with _query_session_execution(
-            owner,
-            session_id,
-            str(getattr(request, "user_id", "") or ""),
-            request=request,
-            session_execution=session_execution,
-        ) as session_execution:
+        async with (
+            collect_nas_evidence(),
+            _query_session_execution(
+                owner,
+                session_id,
+                str(getattr(request, "user_id", "") or ""),
+                request=request,
+                session_execution=session_execution,
+            ) as session_execution,
+        ):
             logger.debug(
                 "AgentRunner.stream_query: request=%s, agent_id=%s",
                 request,
@@ -1234,7 +1249,11 @@ async def _query_session_execution(
     manager = getattr(owner, "_chat_manager", None)
     claim = getattr(manager, "claim_session_path", None)
     if claim is not None and request is not None:
-        await claim(session_id, user_id, request.channel or "console")
+        await claim(
+            session_id,
+            user_id,
+            getattr(request, "channel", None) or DEFAULT_CHANNEL,
+        )
     async with session.execution(
         session_id,
         user_id=user_id,
