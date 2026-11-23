@@ -213,3 +213,77 @@ async def test_full_audit_reports_malformed_archive_and_continues(tmp_path):
     assert report["status"] == "partial_success"
     assert report["validated"] == [("service", "tenant", "healthy")]
     assert report["failed"][0]["root"] == str(root)
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_missing_workspace_even_without_source_row(
+    tmp_path,
+):
+    workspaces = [
+        {
+            "root": str(tmp_path / agent),
+            "scope": ["service", "tenant", "source", agent],
+        }
+        for agent in ("a", "b")
+    ]
+    original_path = tmp_path / "original.json"
+    metadata.prepare(workspaces, "test_schema", original_path)
+    original = metadata.read_manifest(original_path, "test_schema")
+    (tmp_path / "a").mkdir()
+    repaired_path = tmp_path / "repaired.json"
+    metadata.prepare(workspaces[:1], "test_schema", repaired_path)
+    repaired = metadata.read_manifest(repaired_path, "test_schema")
+    db = SimpleNamespace(
+        fetch_one=AsyncMock(return_value=None),
+        execute=AsyncMock(),
+    )
+
+    report = await metadata.migrate(
+        db,
+        *repaired,
+        apply=True,
+        resume_from=original,
+    )
+
+    assert report["failed"][0]["detail"] == (
+        "resume manifest changes source workspace membership"
+    )
+    assert report["published"] == []
+    db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_progress_requires_matching_database_binding_and_audit(tmp_path):
+    root, path = _prepare(tmp_path, [])
+    manifest, digest = metadata.read_manifest(path, "test_schema")
+    item = manifest["workspaces"][0]
+    config = SimpleNamespace(
+        host="localhost",
+        port=3306,
+        database="test_schema",
+    )
+    progress = metadata.WorkspaceProgress(path, digest, config)
+    progress.record(item, 0, full_audit=False)
+    progress = metadata.WorkspaceProgress(path, digest, config)
+    scope = WorkspaceScope.from_values(item["scope"])
+    binding = {
+        "agent_key": scope.sql_values[-1],
+        "workspace_root": str(root.parent).encode(),
+        "registry_digest": bytes.fromhex(item["registry_sha256"]),
+        "imported_count": 1,
+    }
+    db = SimpleNamespace(fetch_all=AsyncMock(return_value=[binding]))
+
+    async def completed(*, full_audit=False):
+        return await metadata._completed_workspaces(
+            db,
+            scope.sql_values[:3],
+            [item],
+            progress,
+            full_audit=full_audit,
+        )
+
+    assert not await completed()
+    binding["imported_count"] = 0
+    assert set(await completed()) == {scope.sql_values[-1]}
+    assert not await completed(full_audit=True)

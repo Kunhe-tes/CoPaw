@@ -21,6 +21,7 @@ from ...runner.expert_binding import (
 )
 from ...runner.models import ChatsFile
 from ...runner.session import session_filename
+from ...runner.turn_ledger import atomic_json
 from ..chat_mutations import (
     CHAT_INSERT,
     chat_insert_values,
@@ -248,6 +249,112 @@ def _verify_workspace(item, *, full_audit):
     _verify_nas(root, registry, full_audit=full_audit)
 
 
+class WorkspaceProgress:
+    """Receipts written after a workspace passes SQL and NAS verification."""
+
+    def __init__(self, path, digest, database, *, previous=None):
+        self.path = Path(path).with_name(Path(path).name + ".progress.json")
+        self.identity = {
+            "manifest_sha256": digest.hex(),
+            "database": [database.host, database.port, database.database],
+        }
+        self.completed = self._read(self.path, self.identity)
+        self.previous = previous.completed if previous is not None else {}
+
+    @staticmethod
+    def _read(path, identity):
+        if not path.exists():
+            return {}
+        try:
+            value = load_metadata_json(path.read_bytes())
+        except ValueError:
+            return {}
+        if not isinstance(value, dict) or value.get("identity") != identity:
+            return {}
+        completed = value.get("completed")
+        return completed if isinstance(completed, dict) else {}
+
+    @staticmethod
+    def _key(item):
+        return json.dumps(item["scope"], ensure_ascii=False)
+
+    def receipt(self, item, *, full_audit):
+        key = self._key(item)
+        for records in (self.completed, self.previous):
+            receipt = records.get(key)
+            if not isinstance(receipt, dict):
+                continue
+            chat_count = receipt.get("chat_count")
+            audited = receipt.get("full_audit")
+            if (
+                type(chat_count) is not int
+                or chat_count < 0
+                or type(audited) is not bool
+            ):
+                continue
+            if (
+                receipt.get("root") == item["root"]
+                and receipt.get("registry_sha256")
+                == item.get("registry_sha256")
+                and (not full_audit or audited)
+            ):
+                return receipt
+        return None
+
+    def record(self, item, chat_count, *, full_audit):
+        key = self._key(item)
+        receipt = {
+            "root": item["root"],
+            "registry_sha256": item["registry_sha256"],
+            "chat_count": chat_count,
+            "full_audit": full_audit,
+        }
+        if self.completed.get(key) == receipt:
+            return
+        completed = {**self.completed, key: receipt}
+        atomic_json(
+            self.path,
+            {"identity": self.identity, "completed": completed},
+        )
+        self.completed = completed
+
+
+async def _completed_workspaces(
+    database,
+    source_key,
+    workspaces,
+    progress,
+    *,
+    full_audit,
+):
+    receipts = {
+        WorkspaceScope.from_values(item["scope"]).sql_values[
+            -1
+        ]: progress.receipt(item, full_audit=full_audit)
+        for item in workspaces
+    }
+    if not any(receipts.values()):
+        return {}
+    rows = await database.fetch_all(
+        f"SELECT agent_key,workspace_root,registry_digest,imported_count FROM {WORKSPACES} WHERE "
+        + SOURCE_PREDICATE,
+        source_key,
+    )
+    completed = {}
+    for row in rows:
+        agent = bytes(row["agent_key"])
+        receipt = receipts.get(agent)
+        if (
+            receipt is not None
+            and receipt["root"].encode() == bytes(row["workspace_root"])
+            and receipt["registry_sha256"]
+            == bytes(row["registry_digest"]).hex()
+            and receipt["chat_count"] == row["imported_count"]
+        ):
+            completed[agent] = receipt
+    return completed
+
+
 async def migrate(
     database,
     manifest,
@@ -256,11 +363,13 @@ async def migrate(
     apply,
     full_audit=False,
     resume_from=None,
+    progress=None,
 ):
     def by_source(item):
         return tuple(item["scope"][:3])
 
     published, skipped, failed = [], [], []
+    skipped_workspaces = []
     for key, group in groupby(
         sorted(manifest["workspaces"], key=by_source),
         key=by_source,
@@ -275,6 +384,8 @@ async def migrate(
                 apply=apply,
                 full_audit=full_audit,
                 resume_from=resume_from,
+                progress=progress,
+                skipped_workspaces=skipped_workspaces,
             )
         except (ConflictError, DataError, SQLIntegrityError) as error:
             failed.append({"source": key, "detail": str(error)})
@@ -292,6 +403,7 @@ async def migrate(
         ),
         "published" if apply else "validated": published,
         "already_published": skipped,
+        "skipped_workspaces": skipped_workspaces,
         "failed": failed,
     }
 
@@ -304,6 +416,19 @@ def _workspace_failure(item, phase, error):
         "phase": phase,
         "detail": str(error),
     }
+
+
+def _check_resume_membership(workspaces, original_manifest):
+    source = tuple(workspaces[0]["scope"][:3])
+    original_scopes = {
+        tuple(item["scope"])
+        for item in original_manifest["workspaces"]
+        if tuple(item["scope"][:3]) == source
+    }
+    if {tuple(item["scope"]) for item in workspaces} != original_scopes:
+        raise ConflictError(
+            "resume manifest changes source workspace membership",
+        )
 
 
 async def _check_resume_bindings(
@@ -324,16 +449,6 @@ async def _check_resume_bindings(
     ):
         raise ConflictError(
             "resume manifest does not match the source binding",
-        )
-    source = tuple(workspaces[0]["scope"][:3])
-    original_scopes = {
-        tuple(item["scope"])
-        for item in original["workspaces"]
-        if tuple(item["scope"][:3]) == source
-    }
-    if {tuple(item["scope"]) for item in workspaces} != original_scopes:
-        raise ConflictError(
-            "resume manifest changes source workspace membership",
         )
     if row["published"]:
         raise ConflictError(
@@ -368,6 +483,8 @@ async def _migrate_source(
     apply,
     full_audit,
     resume_from,
+    progress,
+    skipped_workspaces,
 ):
     source_key = WorkspaceScope.from_values(workspaces[0]["scope"]).sql_values[
         :3
@@ -375,6 +492,8 @@ async def _migrate_source(
     row = None
     replace_binding = False
     if apply:
+        if resume_from is not None:
+            _check_resume_membership(workspaces, resume_from[0])
         row = await database.fetch_one(
             f"SELECT migration_id,manifest_digest,published FROM {SOURCES} WHERE "
             + SOURCE_PREDICATE,
@@ -394,15 +513,37 @@ async def _migrate_source(
             elif row["published"]:
                 return "skipped", []
 
+    completed = (
+        await _completed_workspaces(
+            database,
+            source_key,
+            workspaces,
+            progress,
+            full_audit=full_audit,
+        )
+        if row is not None and progress is not None
+        else {}
+    )
     eligible, failures = [], []
     for item in workspaces:
         try:
+            receipt = completed.get(
+                WorkspaceScope.from_values(item["scope"]).sql_values[-1],
+            )
+            if receipt is not None:
+                progress.record(
+                    item,
+                    receipt["chat_count"],
+                    full_audit=receipt["full_audit"],
+                )
+                skipped_workspaces.append(tuple(item["scope"]))
+                continue
             _verify_workspace(item, full_audit=full_audit)
         except WORKSPACE_ERRORS as error:
             failures.append(_workspace_failure(item, "preflight", error))
         else:
             eligible.append(item)
-    if not apply or not eligible:
+    if not apply or (not eligible and not completed):
         return ("failed" if failures else "ready"), failures
 
     if row is None:
@@ -422,8 +563,10 @@ async def _migrate_source(
             raise ConflictError("source binding changed during resume")
     for item in eligible:
         try:
-            await _import_workspace(database, item)
+            chat_count = await _import_workspace(database, item)
             _verify_workspace(item, full_audit=full_audit)
+            if progress is not None:
+                progress.record(item, chat_count, full_audit=full_audit)
         except WORKSPACE_ERRORS as error:
             failures.append(_workspace_failure(item, "import", error))
         except DatabaseError as error:
@@ -461,6 +604,7 @@ async def _import_workspace(database, item):
         raise ConflictError(
             f"SQL Chat registry verification failed for {root}",
         )
+    return len(registry.chats)
 
 
 def _normalized_chat(chat):

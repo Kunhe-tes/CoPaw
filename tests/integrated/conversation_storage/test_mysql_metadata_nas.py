@@ -549,7 +549,14 @@ async def test_resume_repaired_preflight_workspace_keeps_imported_rows(
     manifest = tmp_path / "original.json"
     metadata.prepare(workspaces, db.config.database, manifest)
     original = metadata.read_manifest(manifest, db.config.database)
-    report = await metadata.migrate(db, *original, apply=True)
+    progress = metadata.WorkspaceProgress(manifest, original[1], db.config)
+    report = await metadata.migrate(
+        db,
+        *original,
+        apply=True,
+        progress=progress,
+    )
+    assert progress.path.is_file()
     assert report["failed"][0]["scope"][-1] == "missing"
     assert report["published"] == []
     before = await db.fetch_all("SELECT id FROM swe_conversation_chats")
@@ -574,6 +581,13 @@ async def test_resume_repaired_preflight_workspace_keeps_imported_rows(
         "swe.database.config.get_database_config",
         lambda: db.config,
     )
+    verify_workspace = metadata._verify_workspace
+
+    def verify_only_unfinished(item, **kwargs):
+        assert item["scope"][-1] != "healthy"
+        return verify_workspace(item, **kwargs)
+
+    monkeypatch.setattr(metadata, "_verify_workspace", verify_only_unfinished)
     result = await asyncio.to_thread(
         CliRunner().invoke,
         conversation_storage_group,
@@ -587,7 +601,11 @@ async def test_resume_repaired_preflight_workspace_keeps_imported_rows(
         ],
     )
     assert result.exit_code == 0, (result.output, result.exception)
-    assert json.loads(result.output)["published"] == [
+    report = json.loads(result.output)
+    assert report["skipped_workspaces"] == [
+        ["svc", "tenant", "source", "healthy"],
+    ]
+    assert report["published"] == [
         ["svc", "tenant", "source"],
     ]
     assert (

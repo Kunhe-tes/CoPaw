@@ -56,6 +56,17 @@ async def _execute_metadata(
                     destination,
                 )
                 return {"status": "exported", "workspaces": workspaces}
+            previous = (
+                metadata.WorkspaceProgress(resume_from, original[1], config)
+                if original is not None
+                else None
+            )
+            progress = metadata.WorkspaceProgress(
+                path,
+                digest,
+                config,
+                previous=previous,
+            )
             return await metadata.migrate(
                 database,
                 manifest,
@@ -63,6 +74,7 @@ async def _execute_metadata(
                 apply=True,
                 full_audit=full_audit,
                 resume_from=original,
+                progress=progress,
             )
     finally:
         try:
