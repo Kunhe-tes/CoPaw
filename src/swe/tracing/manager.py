@@ -753,6 +753,22 @@ class TraceManager:
             )
             self._finalization_bytes += size
 
+    async def _end_skill_detection(
+        self,
+        trace_id: str,
+        ctx: Optional[TraceContext],
+    ) -> None:
+        if not ctx or ctx.trace_id != trace_id or not ctx.skill_detector:
+            return
+        try:
+            await ctx.skill_detector.on_reasoning_end()
+        except asyncio.CancelledError:
+            self._writer.mark_trace_unconfirmed(trace_id)
+            raise
+        except Exception as e:
+            self._writer.mark_trace_unconfirmed(trace_id)
+            logger.warning("Failed to end skill detection: %s", e)
+
     async def end_trace(
         self,
         trace_id: str,
@@ -782,15 +798,7 @@ class TraceManager:
         try:
             # End skill detection before the final span flush because cleanup may
             # update existing spans or emit a final skill span.
-            if ctx and ctx.trace_id == trace_id and ctx.skill_detector:
-                try:
-                    await ctx.skill_detector.on_reasoning_end()
-                except asyncio.CancelledError:
-                    self._writer.mark_trace_unconfirmed(trace_id)
-                    raise
-                except Exception as e:
-                    self._writer.mark_trace_unconfirmed(trace_id)
-                    logger.warning("Failed to end skill detection: %s", e)
+            await self._end_skill_detection(trace_id, ctx)
 
             self._writer.seal_trace(trace_id)
             if trace is None:

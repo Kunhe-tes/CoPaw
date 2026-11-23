@@ -8,6 +8,8 @@
 
 `end_trace` 捕获该 trace 已接纳的版本，包括正在 INSERT 的 Span 及其后续更新；只有这些版本确认后才更新 trace 状态。超时或数据库失败不会把 active trace 标为完成。调用者取消 flush 等待不会取消共享 writer。屏障之后才接纳的新版本不属于该次屏障，调用方仍需按先写 Span、后结束 trace 的顺序使用。
 
+技能检测收尾可能补写 Span，因此 `end_trace` 在封闭该 trace 的接纳入口前调用 `_end_skill_detection`。排查写入重试时，若失败的 Span 版本已被更新，`_retry_failed_batch` 会重置失败次数并把新版本留在队列中。
+
 批量 INSERT 使用稳定 `span_id` 的可重复 upsert，官方 aio 驱动的多行 prepared 传输块放在同一事务中；未知提交结果可重试。MySQL affected rows 可能为 0、1 或 2，不能用它判断确认了多少 Span。UPDATE 失败同样保留所有权，按最新接纳版本重试。writer 使用空 Context 启动，不继承请求的数据库事务或租户上下文，来源标识保存在 Span 本身。
 
 ## 容量与超时

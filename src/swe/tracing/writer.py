@@ -409,6 +409,47 @@ class SpanWriter:
         logger.exception("Tracing batch failed; isolating individual writes")
         return True
 
+    async def _retry_failed_batch(
+        self,
+        batch: list[tuple[_Entry, Span, int]],
+    ) -> None:
+        exhausted = []
+        for entry, _, version in batch:
+            entry.failures += 1
+            if entry.failures >= _MAX_WRITE_ATTEMPTS:
+                exhausted.append((entry, version))
+        if not exhausted:
+            self._requeue(batch)
+            return
+
+        async with self._changed:
+            for entry, version in exhausted:
+                logger.error(
+                    "Dropping tracing span after %d failed write attempts: %s",
+                    entry.failures,
+                    entry.span.span_id,
+                )
+                if entry.version != version:
+                    entry.failures = 0
+                    self._enqueue(entry)
+                    continue
+                entry.trace_state.failed = True
+                self.dropped_spans += 1
+                if (
+                    self._traces.get(entry.span.trace_id) is entry.trace_state
+                    and not entry.trace_state.external
+                ):
+                    self.retire_trace(entry.span.trace_id)
+                self._remove_entry(entry)
+            self._changed.notify_all()
+        retry_batch = [
+            item
+            for item in batch
+            if item[0].failures < _MAX_WRITE_ATTEMPTS
+            and item[0].version == item[2]
+        ]
+        self._requeue(retry_batch)
+
     async def _run(self) -> None:
         failures = 0
         while self._accepting or self._entries:
@@ -435,42 +476,7 @@ class SpanWriter:
                     failures += 1
                     if self._isolate_failed_batch(batch):
                         continue
-                    exhausted = []
-                    for entry, _, version in batch:
-                        entry.failures += 1
-                        if entry.failures >= _MAX_WRITE_ATTEMPTS:
-                            exhausted.append((entry, version))
-                    if exhausted:
-                        async with self._changed:
-                            for entry, version in exhausted:
-                                logger.error(
-                                    "Dropping tracing span after %d failed write attempts: %s",
-                                    entry.failures,
-                                    entry.span.span_id,
-                                )
-                                if entry.version == version:
-                                    entry.trace_state.failed = True
-                                    self.dropped_spans += 1
-                                    if (
-                                        self._traces.get(entry.span.trace_id)
-                                        is entry.trace_state
-                                        and not entry.trace_state.external
-                                    ):
-                                        self.retire_trace(entry.span.trace_id)
-                                    self._remove_entry(entry)
-                                else:
-                                    entry.failures = 0
-                                    self._enqueue(entry)
-                            self._changed.notify_all()
-                        retry_batch = [
-                            item
-                            for item in batch
-                            if item[0].failures < _MAX_WRITE_ATTEMPTS
-                            and item[0].version == item[2]
-                        ]
-                        self._requeue(retry_batch)
-                    else:
-                        self._requeue(batch)
+                    await self._retry_failed_batch(batch)
                     logger.exception("Tracing write failed")
                     await asyncio.sleep(
                         min(0.1 * 2 ** min(failures - 1, 6), 5),
