@@ -12,7 +12,7 @@
 
 7. 设置 `SWE_CONVERSATION_STORAGE_AUTHORITY=mysql-metadata` 和 `CMB_CAAS_SERVICEUNITID`，先在受控实例验证历史、续聊、重启、改名及删除，再恢复流量。
 
-`migrate --apply` 把已完成校验的 workspace 写入 manifest 旁的 `<manifest 文件名>.progress.json`。续跑时，记录与目标库中的 workspace 路径、注册表摘要和已导入条数相符即可跳过，并在最终报告的 `skipped_workspaces` 中列出。旧迁移若没有完成记录，会补做一次校验。`--full-audit` 只复用通过完整审计的记录。
+`migrate --apply` 把已完成校验的 workspace 写入 manifest 旁的 `<manifest 文件名>.progress.json`。续跑时，记录与目标库中的 workspace 路径、注册表摘要和已导入条数相符即可跳过，并在最终报告的 `skipped_workspaces` 中列出。旧迁移若没有完成记录，会补做一次校验。进度文件读写失败时，迁移记录警告，并按正常的校验和发布流程继续处理。`--full-audit` 只复用通过完整审计的记录。
 
 未发布来源如果有预检失败的 workspace 需要修正，保留原 manifest。用该来源的完整 workspace 列表重新执行 `prepare`，再执行 `migrate --manifest /audit/repaired.json --apply --resume-from /audit/manifest.json`。续跑会检查来源的 workspace 集合，以及所有已绑定 workspace 的路径和注册表摘要。已发布来源继续使用各自的原 manifest，续跑后发布的来源使用修正后的 manifest 导出。 保留原 manifest 旁的进度文件，续跑会复用匹配的记录。
 

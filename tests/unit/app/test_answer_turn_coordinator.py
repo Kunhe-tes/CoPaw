@@ -395,3 +395,48 @@ async def test_console_submission_during_settlement_gets_a_fresh_msgid(
     assert new.is_new_run
     assert new.identity.msgid == "fresh"
     assert len(adapters["stream"].start_calls) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replace_active", [False, True])
+async def test_console_submission_rejects_unobserved_turn(
+    monkeypatch,
+    replace_active,
+):
+    from types import SimpleNamespace
+
+    from swe.app.routers import console
+
+    coordinator, adapters = _coordinator()
+
+    async def producer(_identity, _payload):
+        return None
+
+    monkeypatch.setattr(console, "_console_turn_producer", lambda _: producer)
+    chat = SimpleNamespace(id="chat", channel="console")
+    start = coordinator.start_or_attach
+    original = (
+        await start(chat.id, {}, producer, msgid="original")
+        if replace_active
+        else None
+    )
+
+    async def start_competing_turn(*args, **kwargs):
+        if original:
+            assert await coordinator.settle(
+                TurnOutcome.completed(original.identity),
+            )
+        await start(chat.id, {"question": "winner"}, producer, msgid="winner")
+        return await start(*args, **kwargs)
+
+    monkeypatch.setattr(coordinator, "start_or_attach", start_competing_turn)
+    with pytest.raises(TurnSettlementPendingError, match="different question"):
+        await console._start_or_attach_console_turn(
+            coordinator,
+            chat,
+            {"meta": {}},
+            None,
+            "fresh",
+            None,
+        )
+    assert len(adapters["stream"].start_calls) == 1 + int(replace_active)

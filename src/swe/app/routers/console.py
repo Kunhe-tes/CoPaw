@@ -1420,6 +1420,7 @@ async def _start_or_attach_console_turn(
 ) -> Any:
     if chat.channel and chat.channel != "console":
         native_payload["meta"]["session_channel"] = chat.channel
+    observed_turn = await coordinator.current_identity(chat.id)
     try:
         return await coordinator.start_or_attach(
             chat.id,
@@ -1428,6 +1429,7 @@ async def _start_or_attach_console_turn(
             msgid=msgid,
             before_start=before_start,
             attach_current=True,
+            observed_turn=observed_turn,
         )
     except TurnStoppingError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

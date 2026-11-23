@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from itertools import groupby
 from pathlib import Path
 import json
+import logging
 from uuid import UUID, uuid4
 
 from mysql.connector.errorcode import ER_CHECK_CONSTRAINT_VIOLATED
@@ -50,6 +51,8 @@ from ..metadata_repository import (
     metadata_install,
     session_filename_key,
 )
+
+logger = logging.getLogger(__name__)
 
 MODE = "mysql-metadata"
 BATCH_SIZE = 100
@@ -263,11 +266,16 @@ class WorkspaceProgress:
 
     @staticmethod
     def _read(path, identity):
-        if not path.exists():
-            return {}
         try:
             value = load_metadata_json(path.read_bytes())
-        except ValueError:
+        except (FileNotFoundError, ValueError):
+            return {}
+        except OSError as error:
+            logger.warning(
+                "Cannot read migration progress at %s: %s",
+                path,
+                error,
+            )
             return {}
         if not isinstance(value, dict) or value.get("identity") != identity:
             return {}
@@ -312,10 +320,18 @@ class WorkspaceProgress:
         if self.completed.get(key) == receipt:
             return
         completed = {**self.completed, key: receipt}
-        atomic_json(
-            self.path,
-            {"identity": self.identity, "completed": completed},
-        )
+        try:
+            atomic_json(
+                self.path,
+                {"identity": self.identity, "completed": completed},
+            )
+        except OSError as error:
+            logger.warning(
+                "Cannot write migration progress at %s: %s",
+                self.path,
+                error,
+            )
+            return
         self.completed = completed
 
 

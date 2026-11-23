@@ -2,7 +2,7 @@
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import pytest
@@ -287,3 +287,52 @@ async def test_progress_requires_matching_database_binding_and_audit(tmp_path):
     binding["imported_count"] = 0
     assert set(await completed()) == {scope.sql_values[-1]}
     assert not await completed(full_audit=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["read", "write"])
+async def test_progress_io_failure_does_not_block_publication(
+    tmp_path,
+    monkeypatch,
+    failure,
+):
+    warning = Mock()
+    monkeypatch.setattr(metadata.logger, "warning", warning)
+    _, path = _prepare(tmp_path, [])
+    manifest, digest = metadata.read_manifest(path, "test_schema")
+    config = SimpleNamespace(
+        host="localhost",
+        port=3306,
+        database="test_schema",
+    )
+    if failure == "read":
+        path.with_name(path.name + ".progress.json").mkdir()
+    else:
+
+        def fail_write(*_args):
+            raise PermissionError("read-only directory")
+
+        monkeypatch.setattr(metadata, "atomic_json", fail_write)
+    progress = metadata.WorkspaceProgress(path, digest, config)
+    db = SimpleNamespace(
+        fetch_one=AsyncMock(return_value=None),
+        execute=AsyncMock(return_value=1),
+    )
+    import_workspace = AsyncMock(return_value=0)
+    monkeypatch.setattr(metadata, "_import_workspace", import_workspace)
+    report = await metadata.migrate(
+        db,
+        manifest,
+        digest,
+        apply=True,
+        progress=progress,
+    )
+
+    import_workspace.assert_awaited_once()
+    assert report["status"] == "ready"
+    assert report["published"] == [("service", "tenant", "source")]
+    assert report["failed"] == []
+    assert any(
+        call.args[0].startswith(f"Cannot {failure} migration progress")
+        for call in warning.call_args_list
+    )
