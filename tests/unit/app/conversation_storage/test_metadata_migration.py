@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import json
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -7,6 +8,91 @@ from uuid import uuid4
 import pytest
 
 from swe.app.conversation_storage.migration import metadata
+from swe.app.conversation_storage.identity import WorkspaceScope
+from swe.app.conversation_storage.metadata_repository import (
+    MySQLMetadataRepository,
+    session_filename,
+)
+from swe.app.runner.models import ChatsFile
+
+
+@pytest.mark.asyncio
+async def test_import_batch_uses_bulk_sql_and_preserves_registry_order():
+    @asynccontextmanager
+    async def transaction():
+        yield db
+
+    scope = WorkspaceScope("tenant", "source", "agent", service_unit_id="svc")
+    root, digest = b"/nas/workspace", bytes(32)
+    filename = session_filename("session", "user").encode()
+    registry = ChatsFile.model_validate(
+        {
+            "chats": [
+                {
+                    "id": str(uuid4()),
+                    "user_id": "user",
+                    "channel": "console",
+                    "session_id": "session",
+                }
+                for _ in range(102)
+            ],
+        },
+    )
+    inserted = []
+
+    async def insert_prepared(template, rows):
+        inserted.append((template, list(rows)))
+
+    db = SimpleNamespace(
+        transaction=transaction,
+        fetch_one=AsyncMock(
+            side_effect=[
+                {"workspace_root": root},
+                {"published": 0},
+                {
+                    "workspace_root": root,
+                    "registry_digest": digest,
+                    "imported_count": 2,
+                },
+                None,
+                {"high": 5},
+            ],
+        ),
+        fetch_all=AsyncMock(
+            return_value=[
+                {
+                    "id": 9,
+                    "user_key": b"user",
+                    "channel_key": b"console",
+                    "external_session_key": b"session",
+                    "nas_filename": filename,
+                },
+            ],
+        ),
+        insert_prepared=insert_prepared,
+        execute=AsyncMock(),
+    )
+    repo = MySQLMetadataRepository(db, scope, importing=True)
+    assert await metadata._import_batch(repo, registry, root, digest)
+    assert db.fetch_one.await_count == 5
+    db.fetch_all.assert_awaited_once()
+    db.execute.assert_awaited_once()
+    assert db.execute.await_args.args[1] == (102, *scope.sql_values)
+    assert len(inserted) == 2
+    session_rows = inserted[0][1]
+    assert len(session_rows) == 1
+    assert session_rows[0][:-2] == (
+        *scope.sql_values,
+        b"user",
+        b"console",
+        b"session",
+        filename,
+    )
+    assert session_rows[0][-2] == session_rows[0][-1]
+    assert [row[:4] for row in inserted[1][1]] == [
+        (9, chat.id.encode(), b"session", order)
+        for order, chat in enumerate(registry.chats[2:], 6)
+    ]
 
 
 def _prepare(tmp_path, chats):

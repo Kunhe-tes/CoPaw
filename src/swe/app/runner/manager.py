@@ -121,7 +121,9 @@ class ChatManager:
         )
 
     async def claim_session_path(self, session_id, user_id, channel):
-        claim = getattr(self._repo, "claim_session", None)
+        claim = getattr(self._repo, "ensure_session_path", None)
+        if claim is None:
+            claim = getattr(self._repo, "claim_session", None)
         if claim is not None:
             await claim(session_id, user_id, channel)
 
@@ -154,7 +156,9 @@ class ChatManager:
     async def list_chats_by_session(self, session_id, user_id, channel):
         lookup = getattr(self._repo, "filter_chats_by_session", None)
         if lookup is not None:
-            return await lookup(session_id, user_id, channel)
+            return self._repo.sort_chats_by_recency(
+                await lookup(session_id, user_id, channel),
+            )
         return [
             chat
             for chat in await self.list_chats(user_id=user_id, channel=channel)

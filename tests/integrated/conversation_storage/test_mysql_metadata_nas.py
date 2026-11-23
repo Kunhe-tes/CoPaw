@@ -34,6 +34,10 @@ async def test_metadata_cutover_keeps_nas_as_the_online_content_store(
 ):
     db = conversation_test_database
     await apply_sql_script(db, SQL_ROOT / "conversation_mysql_metadata.sql")
+    await apply_sql_script(
+        db,
+        SQL_ROOT / "conversation_metadata_performance.sql",
+    )
     scope = WorkspaceScope(
         "tenant",
         "source",
@@ -84,6 +88,7 @@ async def test_metadata_cutover_keeps_nas_as_the_online_content_store(
         if path.is_file()
     }
     monkeypatch.setattr(metadata, "BATCH_SIZE", 1)
+    monkeypatch.setattr(metadata, "VERIFY_PAGE_SIZE", 1)
     batch = metadata._import_batch
 
     async def interrupt(repo, registry, root_key, registry_digest):
@@ -145,8 +150,20 @@ async def test_metadata_cutover_keeps_nas_as_the_online_content_store(
         assert (await repo.list_summaries()).items[0].display_metadata == {
             "task_job_id": "task",
         }
+        async with db.transaction():
+            await db.fetch_one(
+                "SELECT workspace_root FROM swe_conversation_metadata_workspaces "
+                "WHERE service_unit_key=%s AND tenant_key=%s AND source_key=%s AND agent_key=%s FOR UPDATE",
+                scope.sql_values,
+            )
+            await asyncio.wait_for(
+                db.create_independent_task(
+                    repo.ensure_session_path("session", "user", "console"),
+                ),
+                timeout=3,
+            )
         with pytest.raises(ConflictError, match="filename"):
-            await repo.claim_session("session", "user", "zhaohu")
+            await repo.ensure_session_path("session", "user", "zhaohu")
         session = SafeJSONSession(str(state_dir))
         async with session.execution("session", "user") as state:
             assert state.state["example"] == "before"
@@ -187,6 +204,70 @@ async def test_metadata_cutover_keeps_nas_as_the_online_content_store(
 
 
 @pytest.mark.asyncio
+async def test_bulk_import_rolls_back_new_sessions_on_filename_conflict(
+    conversation_test_database,
+    tmp_path,
+    monkeypatch,
+):
+    db = conversation_test_database
+    await apply_sql_script(db, SQL_ROOT / "conversation_mysql_metadata.sql")
+    scope = WorkspaceScope("tenant", "source", "agent", service_unit_id="svc")
+    root = tmp_path / "workspace"
+    root.mkdir()
+    specs = [
+        ChatSpec(
+            id=str(uuid4()),
+            session_id=session_id,
+            user_id="user",
+            channel="console",
+        )
+        for session_id in ("new", "taken")
+    ]
+    (root / "chats.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "chats": [spec.model_dump(mode="json") for spec in specs],
+            },
+        ),
+    )
+    manifest = tmp_path / "manifest.json"
+    metadata.prepare(
+        [{"scope": scope.values, "root": str(root)}],
+        db.config.database,
+        manifest,
+    )
+    data, digest = metadata.read_manifest(manifest, db.config.database)
+    batch = metadata._import_batch
+
+    async def seed_conflicting_owner(
+        repo,
+        registry,
+        root_key,
+        registry_digest,
+    ):
+        await repo.claim_session("taken", "user", "zhaohu")
+        return await batch(repo, registry, root_key, registry_digest)
+
+    monkeypatch.setattr(metadata, "_import_batch", seed_conflicting_owner)
+    result = await metadata.migrate(db, data, digest, apply=True)
+    assert result["status"] == "partial_success"
+    assert (
+        "filename belongs to another identity" in result["failed"][0]["detail"]
+    )
+    assert await db.fetch_all(
+        "SELECT external_session_key FROM swe_conversation_sessions",
+    ) == [{"external_session_key": b"taken"}]
+    assert not await db.fetch_one("SELECT id FROM swe_conversation_chats")
+    assert await db.fetch_one(
+        "SELECT imported_count FROM swe_conversation_metadata_workspaces",
+    ) == {"imported_count": 0}
+    assert await db.fetch_one(
+        "SELECT published FROM swe_conversation_metadata_sources",
+    ) == {"published": 0}
+
+
+@pytest.mark.asyncio
 async def test_metadata_cli_uses_a_published_sql_registry(
     conversation_test_database,
     tmp_path,
@@ -194,6 +275,10 @@ async def test_metadata_cli_uses_a_published_sql_registry(
 ):
     db = conversation_test_database
     await apply_sql_script(db, SQL_ROOT / "conversation_mysql_metadata.sql")
+    await apply_sql_script(
+        db,
+        SQL_ROOT / "conversation_metadata_performance.sql",
+    )
     from swe.database import config
 
     monkeypatch.setattr(config, "get_database_config", lambda: db.config)

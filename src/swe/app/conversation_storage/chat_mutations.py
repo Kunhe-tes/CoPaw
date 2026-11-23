@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 import json
 
+from ...database.prepared import PreparedInsert
 from .errors import ConflictError, IntegrityError
 from .identity import chat_key_bytes, identity_bytes
 
@@ -211,6 +212,68 @@ def _validate_rebind(plan, session, target, chat):
             raise IntegrityError("target Session identity mismatch")
 
 
+CHAT_INSERT_COLUMNS = (
+    "session_id",
+    "external_chat_key",
+    "external_session_key",
+    "registry_order",
+    "service_unit_key",
+    "tenant_key",
+    "source_key",
+    "agent_key",
+    "user_key",
+    "channel_key",
+    "title",
+    "metadata_text",
+    "expert_id",
+    "expert_binding_revision",
+    "status",
+    "created_at",
+    "updated_at",
+)
+
+CHAT_INSERT = PreparedInsert(
+    "INSERT INTO swe_conversation_chats ("
+    + ",".join(CHAT_INSERT_COLUMNS)
+    + ",extended_metadata_text) VALUES ",
+    "(" + ",".join(["%s"] * (len(CHAT_INSERT_COLUMNS) + 1)) + ")",
+    allow_single_text_insert=True,
+)
+
+
+async def highest_registry_order(db, scope):
+    row = await db.fetch_one(
+        "SELECT registry_order AS high FROM swe_conversation_chats "
+        "WHERE service_unit_key=%s AND tenant_key=%s AND source_key=%s AND agent_key=%s "
+        "ORDER BY registry_order DESC LIMIT 1",
+        scope.sql_values,
+    )
+    return row["high"] if row is not None else 0
+
+
+def chat_insert_values(scope, plan, session, registry_order):
+    return (
+        session["id"],
+        chat_key_bytes(plan.external_chat_key),
+        session["external_session_key"],
+        registry_order,
+        *scope.sql_values,
+        identity_bytes(plan.user_id, 256),
+        identity_bytes(plan.channel, 64),
+        plan.title,
+        plan.metadata_text,
+        (
+            identity_bytes(plan.expert_id, 256)
+            if plan.expert_id is not None
+            else None
+        ),
+        plan.expert_binding_revision,
+        "idle",
+        utc_datetime(plan.created_at),
+        utc_datetime(plan.updated_at),
+    )
+
+
 async def _create_chat(
     db,
     request,
@@ -232,56 +295,11 @@ async def _create_chat(
                 (existing["id"], request.session_id),
             )
             return existing["id"]
-    high = await db.fetch_one(
-        "SELECT COALESCE(MAX(registry_order),0) AS high FROM swe_conversation_chats "
-        "WHERE service_unit_key=%s AND tenant_key=%s AND source_key=%s AND agent_key=%s",
-        request.scope.sql_values,
-    )
-    columns = (
-        "session_id",
-        "external_chat_key",
-        "external_session_key",
-        "registry_order",
-        "service_unit_key",
-        "tenant_key",
-        "source_key",
-        "agent_key",
-        "user_key",
-        "channel_key",
-        "title",
-        "metadata_text",
-        "expert_id",
-        "expert_binding_revision",
-        "status",
-        "created_at",
-        "updated_at",
-    )
-    values = (
-        request.session_id,
-        chat_key_bytes(plan.external_chat_key),
-        session["external_session_key"],
-        high["high"] + 1,
-        *request.scope.sql_values,
-        identity_bytes(plan.user_id, 256),
-        identity_bytes(plan.channel, 64),
-        plan.title,
-        plan.metadata_text,
-        (
-            identity_bytes(plan.expert_id, 256)
-            if plan.expert_id is not None
-            else None
-        ),
-        plan.expert_binding_revision,
-        "idle",
-        utc_datetime(plan.created_at),
-        utc_datetime(plan.updated_at),
-    )
-    if extended_metadata is not None:
-        columns += ("extended_metadata_text",)
-        values += (extended_metadata,)
+    high = await highest_registry_order(db, request.scope)
+    values = chat_insert_values(request.scope, plan, session, high + 1)
     chat_id = await db.insert(
-        f"INSERT INTO swe_conversation_chats ({','.join(columns)}) VALUES ({','.join(['%s'] * len(columns))})",
-        values,
+        CHAT_INSERT.prefix + CHAT_INSERT.row_template,
+        (*values, extended_metadata),
     )
     if not chat_id:
         raise IntegrityError("Chat creation did not return its identity")

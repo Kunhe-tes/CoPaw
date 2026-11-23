@@ -2,6 +2,7 @@
 """Import a frozen Chat registry while leaving the original NAS files in place."""
 
 from hashlib import sha256
+from datetime import datetime, timezone
 from itertools import groupby
 from pathlib import Path
 import json
@@ -13,8 +14,13 @@ from ...runner.expert_binding import (
 )
 from ...runner.models import ChatsFile
 from ...runner.session import session_filename
-from ..chat_mutations import load_metadata_json
-from ..metadata_catalog import _utc
+from ..chat_mutations import (
+    CHAT_INSERT,
+    chat_insert_values,
+    highest_registry_order,
+    load_metadata_json,
+)
+from ..metadata_catalog import _utc, SCOPE_WHERE
 from ..errors import ConflictError
 from ..paths import existing_root
 from ..identity import (
@@ -30,11 +36,15 @@ from ..metadata_repository import (
     WORKSPACES,
     SOURCE_PREDICATE,
     SCOPE_PREDICATE,
+    SESSION_INSERT,
     metadata_fields,
+    metadata_install,
+    session_filename_key,
 )
 
 MODE = "mysql-metadata"
 BATCH_SIZE = 100
+VERIFY_PAGE_SIZE = 100
 
 
 def _workspace(item):
@@ -297,25 +307,47 @@ async def _import_workspace(database, item):
     )
     while await _import_batch(repo, registry, root_key, digest):
         pass
-    expected = []
-    for chat in registry.chats:
-        normalized = chat.model_copy(
-            deep=True,
-            update={
-                "status": "idle",
-                "created_at": _utc(chat.created_at),
-                "updated_at": _utc(chat.updated_at),
-            },
-        )
-        binding = read_expert_binding(chat)
-        normalized.meta.pop(EXPERT_BINDING_META_KEY, None)
-        if binding.revision or binding.expert_id is not None:
-            normalized.meta[EXPERT_BINDING_META_KEY] = binding.model_dump()
-        expected.append(normalized)
-    if await repo.list_chats() != expected:
+    if not await _verify_import(repo, registry.chats):
         raise ConflictError(
             f"SQL Chat registry verification failed for {root}",
         )
+
+
+def _normalized_chat(chat):
+    meta = dict(chat.meta)
+    binding = read_expert_binding(chat)
+    meta.pop(EXPERT_BINDING_META_KEY, None)
+    if binding.revision or binding.expert_id is not None:
+        meta[EXPERT_BINDING_META_KEY] = binding.model_dump()
+    return chat.model_copy(
+        update={
+            "meta": meta,
+            "status": "idle",
+            "created_at": _utc(chat.created_at),
+            "updated_at": _utc(chat.updated_at),
+        },
+    )
+
+
+async def _verify_import(repo, chats):
+    index = 0
+    order, row_id = 0, 0
+    while True:
+        rows = await repo.db.fetch_all(
+            repo.select_chat + SCOPE_WHERE + " AND c.deleted_at IS NULL "
+            "AND (c.registry_order>%s OR (c.registry_order=%s AND c.id>%s)) "
+            "ORDER BY c.registry_order,c.id LIMIT %s",
+            (*repo.scope.sql_values, order, order, row_id, VERIFY_PAGE_SIZE),
+        )
+        for row in rows:
+            if index >= len(chats) or repo._spec(row) != _normalized_chat(
+                chats[index],
+            ):
+                return False
+            index += 1
+        if len(rows) < VERIFY_PAGE_SIZE:
+            return index == len(chats)
+        order, row_id = rows[-1]["registry_order"], rows[-1]["id"]
 
 
 async def _import_batch(repo, registry, root_key, digest):
@@ -336,21 +368,93 @@ async def _import_batch(repo, registry, root_key, digest):
                 "workspace is bound to a different Chat registry",
             )
         start = row["imported_count"]
-        chats = registry.chats[start : start + BATCH_SIZE]
-        for chat in chats:
-            if await repo._raw_chat(chat.id) is not None:
-                raise ConflictError(
-                    f"target Chat {chat.id} already exists outside the committed batch",
-                )
-            session = await repo._session_for(chat)
-            await repo._install(chat, session, None)
-        if chats:
-            await database.execute(
-                f"UPDATE {WORKSPACES} SET imported_count=%s WHERE "
-                + SCOPE_PREDICATE,
-                (start + len(chats), *scope.sql_values),
+        if start > len(registry.chats):
+            raise ConflictError(
+                "workspace progress exceeds the frozen registry",
             )
-        return bool(chats)
+        chats = registry.chats[start : start + BATCH_SIZE]
+        if not chats:
+            return False
+        await _insert_chats(repo, chats)
+        await database.execute(
+            f"UPDATE {WORKSPACES} SET imported_count=%s WHERE "
+            + SCOPE_PREDICATE,
+            (start + len(chats), *scope.sql_values),
+        )
+        return True
+
+
+async def _insert_chats(repo, chats):
+    db, scope = repo.db, repo.scope
+    keys = tuple(chat_key_bytes(chat.id) for chat in chats)
+    placeholders = ",".join(["%s"] * len(keys))
+    existing = await db.fetch_one(
+        "SELECT external_chat_key FROM swe_conversation_chats WHERE "
+        + SCOPE_PREDICATE
+        + f" AND external_chat_key IN ({placeholders}) LIMIT 1",
+        (*scope.sql_values, *keys),
+    )
+    if existing is not None:
+        key = bytes(existing["external_chat_key"]).decode()
+        raise ConflictError(
+            f"target Chat {key} already exists outside the committed batch",
+        )
+    high = await highest_registry_order(db, scope)
+    identities = [
+        SessionIdentity(scope, chat.user_id, chat.channel, chat.session_id)
+        for chat in chats
+    ]
+    sessions = await _insert_sessions(db, scope, identities)
+
+    def rows():
+        for order, (chat, identity) in enumerate(
+            zip(chats, identities),
+            high + 1,
+        ):
+            plan, extended = metadata_install(chat, chat.meta)
+            yield (
+                *chat_insert_values(scope, plan, sessions[identity], order),
+                extended,
+            )
+
+    await db.insert_prepared(CHAT_INSERT, rows())
+
+
+async def _insert_sessions(db, scope, identities):
+    keys = {
+        identity: session_filename_key(identity)
+        for identity in dict.fromkeys(identities)
+    }
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    await db.insert_prepared(
+        SESSION_INSERT,
+        (
+            (*identity.sql_values, name, now, now)
+            for identity, name in keys.items()
+        ),
+    )
+    names = tuple(dict.fromkeys(keys.values()))
+    placeholders = ",".join(["%s"] * len(names))
+    rows = await db.fetch_all(
+        "SELECT id,user_key,channel_key,external_session_key,nas_filename "
+        "FROM swe_conversation_sessions WHERE "
+        + SCOPE_PREDICATE
+        + f" AND nas_filename IN ({placeholders})",
+        (*scope.sql_values, *names),
+    )
+    by_identity = {
+        (row["user_key"], row["channel_key"], row["external_session_key"]): row
+        for row in rows
+    }
+    sessions = {}
+    for identity, name in keys.items():
+        row = by_identity.get(identity.sql_values[4:])
+        if row is None or row["nas_filename"] != name:
+            raise ConflictError(
+                "NAS Session filename belongs to another identity",
+            )
+        sessions[identity] = row
+    return sessions
 
 
 async def export(database, manifest, manifest_digest, destination):

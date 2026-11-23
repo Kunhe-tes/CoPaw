@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from datetime import datetime, timezone
 import json
 
+from ...database.prepared import PreparedInsert
 from ..runner.expert_binding import (
     EXPERT_BINDING_META_KEY,
     ExpertBindingConflict,
@@ -39,6 +40,20 @@ SESSION_PREDICATE = (
     SCOPE_PREDICATE
     + " AND user_key=%s AND channel_key=%s AND external_session_key=%s"
 )
+SESSION_INSERT = PreparedInsert(
+    "INSERT INTO swe_conversation_sessions "
+    "(service_unit_key,tenant_key,source_key,agent_key,user_key,channel_key,"
+    "external_session_key,nas_filename,created_at,updated_at) VALUES ",
+    "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+    " ON DUPLICATE KEY UPDATE id=id",
+)
+
+
+def session_filename_key(identity):
+    return identity_bytes(
+        session_filename(identity.session_id, identity.user_id),
+        255,
+    )
 
 
 def _catalog_select(query):
@@ -69,6 +84,35 @@ def metadata_fields(meta):
     if len(payload.encode()) > 16_777_215:
         raise ValueError("Extended Chat metadata exceeds the SQL column size")
     return _json(light), payload
+
+
+def metadata_install(
+    spec,
+    meta,
+    *,
+    revision=None,
+    create_if_absent=False,
+    target_session_id=None,
+):
+    light, extended = metadata_fields(meta)
+    binding = read_expert_binding(spec) if revision is None else None
+    mutation = ChatMetadataInstall(
+        external_chat_key=spec.id,
+        user_id=spec.user_id,
+        channel=spec.channel,
+        title=spec.name,
+        metadata_text=light,
+        created_at=_utc(spec.created_at).isoformat(),
+        updated_at=_utc(spec.updated_at).isoformat(),
+        expected_metadata_revision=revision,
+        expert_id=binding.expert_id if binding is not None else None,
+        expert_binding_revision=(
+            binding.revision if binding is not None else 0
+        ),
+        create_if_absent=create_if_absent,
+        target_session_id=target_session_id,
+    )
+    return mutation, extended
 
 
 class MySQLMetadataRepository(MetadataCatalog):
@@ -130,7 +174,7 @@ class MySQLMetadataRepository(MetadataCatalog):
 
     async def claim_session(self, session_id, user_id, channel):
         identity = SessionIdentity(self.scope, user_id, channel, session_id)
-        name = identity_bytes(session_filename(session_id, user_id), 255)
+        name = session_filename_key(identity)
         async with self.db.transaction():
             await self._assert_writes_allowed()
             await self.db.insert(
@@ -152,6 +196,33 @@ class MySQLMetadataRepository(MetadataCatalog):
                     "NAS Session filename belongs to another identity",
                 )
             return row
+
+    async def ensure_session_path(self, session_id, user_id, channel):
+        identity = SessionIdentity(self.scope, user_id, channel, session_id)
+        name = session_filename_key(identity)
+        # Published sources stay published and Session filename mappings are
+        # immutable. Only a missing mapping needs the write transaction.
+        row = await self.db.fetch_one(
+            "SELECT nas_filename FROM swe_conversation_sessions "
+            "WHERE "
+            + SESSION_PREDICATE
+            + f" AND EXISTS (SELECT 1 FROM {WORKSPACES} WHERE "
+            + SCOPE_PREDICATE
+            + f") AND EXISTS (SELECT 1 FROM {SOURCES} WHERE "
+            + SOURCE_PREDICATE
+            + " AND published=1)",
+            (
+                *identity.sql_values,
+                *self.scope.sql_values,
+                *self.scope.sql_values[:3],
+            ),
+        )
+        if row is None:
+            await self.claim_session(session_id, user_id, channel)
+        elif row["nas_filename"] != name:
+            raise ConflictError(
+                "NAS Session filename belongs to another identity",
+            )
 
     async def _publish_metadata(
         self,
@@ -199,23 +270,10 @@ class MySQLMetadataRepository(MetadataCatalog):
             meta.pop(mode_key, None)
             if mode_key in current_meta:
                 meta[mode_key] = current_meta[mode_key]
-        light, extended = metadata_fields(meta)
-        binding = read_expert_binding(spec) if row is None else None
-        mutation = ChatMetadataInstall(
-            external_chat_key=spec.id,
-            user_id=spec.user_id,
-            channel=spec.channel,
-            title=spec.name,
-            metadata_text=light,
-            created_at=_utc(spec.created_at).isoformat(),
-            updated_at=_utc(spec.updated_at).isoformat(),
-            expected_metadata_revision=(
-                row["metadata_revision"] if row else None
-            ),
-            expert_id=binding.expert_id if binding is not None else None,
-            expert_binding_revision=(
-                binding.revision if binding is not None else 0
-            ),
+        mutation, extended = metadata_install(
+            spec,
+            meta,
+            revision=row["metadata_revision"] if row else None,
             create_if_absent=create_if_absent,
             target_session_id=target_id if rebind else None,
         )

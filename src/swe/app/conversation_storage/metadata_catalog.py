@@ -123,10 +123,14 @@ class MetadataCatalog(BaseChatRepository):
         )
 
     async def filter_chats_by_session(self, session_id, user_id, channel):
+        try:
+            session_key = identity_bytes(session_id, 1024)
+        except ValueError:
+            return []
         where, params = self._where(user_id=user_id, channel=channel)
         return await self._rows(
             where + " AND s.external_session_key=%s",
-            [*params, identity_bytes(session_id, 1024)],
+            [*params, session_key],
             " ORDER BY c.registry_order ASC,c.id ASC",
         )
 

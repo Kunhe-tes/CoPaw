@@ -1494,14 +1494,11 @@ async def get_answer_turn(
             except HTTPException:
                 chat_spec = None
     elif sessionid:
-        candidate_chats = [
-            chat
-            for chat in await mgr.list_chats(
-                user_id=user_id,
-                channel="console",
-            )
-            if chat.session_id == sessionid
-        ]
+        candidate_chats = await mgr.list_chats_by_session(
+            sessionid,
+            user_id,
+            "console",
+        )
         for candidate in candidate_chats:
             try:
                 _authorize_chat(request, candidate, workspace)
