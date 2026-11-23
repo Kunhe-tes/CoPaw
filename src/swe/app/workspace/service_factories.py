@@ -27,10 +27,6 @@ async def create_chat_service(ws: "Workspace", service):
     from ..runner.manager import ChatManager
     from ..runner.repo.json_repo import JsonChatRepository
 
-    storage = getattr(ws, "conversation_storage", None)
-    if storage is not None:
-        return await storage.bind_workspace(ws)
-
     if service is not None:
         # Reused ChatManager - just wire to new runner
         cm = service
@@ -39,7 +35,13 @@ async def create_chat_service(ws: "Workspace", service):
     else:
         # Create new ChatManager
         chats_path = str(ws.workspace_dir / "chats.json")
-        chat_repo = JsonChatRepository(chats_path)
+        from ..conversation_storage.runtime import (
+            workspace_metadata_repository,
+        )
+
+        chat_repo = await workspace_metadata_repository(ws)
+        if chat_repo is None:
+            chat_repo = JsonChatRepository(chats_path)
         cm = ChatManager(
             repo=chat_repo,
             archive_store=ConversationArchiveStore(
@@ -49,7 +51,8 @@ async def create_chat_service(ws: "Workspace", service):
             expert_dependency_root=ws.workspace_dir,
         )
         ws._service_manager.services["chat_manager"] = cm
-        logger.info(f"ChatManager created: {chats_path}")
+        logger.info("ChatManager created: %s", chat_repo.path)
+        await cm.cleanup_deleted_chat_resources()
 
     # Always wire to new runner
     ws._service_manager.services["runner"].set_chat_manager(cm)

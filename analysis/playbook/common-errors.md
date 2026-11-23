@@ -1,3 +1,5 @@
+> 会话 bundle 相关旧排查记录仅供历史参考；现行迁移步骤见 [会话元数据迁移](conversation-metadata-migration.md)。
+
 # 常见报错
 
 ## SQL 会话已 completed 但 answer_turn 只有问题
@@ -935,13 +937,36 @@
 
 - 现象：原始保留文件正好 8MiB，inventory 与 publication 成功，验证合读 artifact metadata 和正文时失败。
 - 原因：单 extent 的 8MiB 限制被误用为 metadata 加正文的合计限制。
-- 处理：`migration/verify.py` 的 `_read_extents()` 使用固定 16MiB 调用方总额，覆盖最多两个合法 extent；底层每 extent 8MiB 限制、共享 IO 并发、单次打开/索引及文件状态复查保持有效，不按输入长度生成无界总额。
-- 回归：`test_migration_verify_extents.py` 覆盖直接、共享 IO 和预取证据路径的 8MiB 正文加 metadata、超单块限制及超两块数量限制。
+- 处理：`migration/verify.py` 的 `_read_extents()` 最多合读两个 extent，预算取自当前 bundle reader 的单 extent 上限；共享 IO、单次打开/索引及文件状态复查仍有效。
+- 回归：`test_migration_verify_extents.py` 覆盖直接、共享 IO 和预取证据路径的正文加 metadata，以及超过两个 extent 的数量限制。
 
-## 会话迁移被无关附件触发容量限制
+## 会话迁移报 one message exceeds the message block byte limit
+
+- 现象：旧 Session 或归档中存在超过 8MiB 的合法单条消息，`migrate --apply` 在消息分块阶段失败。
+- 原因：8MiB 曾被同时用作常规打包目标、单消息硬上限和线上正文读取上限；一个消息没有可继续拆分的位置，因此不能被普通批次切分器拆开。
+- 当前规则：8MiB 只作为批次目标。超限消息单独形成一个消息块，`sessions/` 与 `dialog/` 源文件按 bundle 容器上限 256MiB 读取；线上 bundle reader 和 fast verify 也按实际 extent 字节读取。旧 artifact 保留、原地身份证据、share 单文件和 bounded runtime prefetch 不再保留 8MiB 门禁；`chats.json` registry 仍使用独立 reader 限制。
+- 回归：`test_message_bundle.py::test_single_message_larger_than_target_is_kept_as_a_singleton`、`test_bundle.py::test_online_store_reads_a_large_single_message_block`，以及使用 9MiB Session 消息跑通 import/resume/verify/finalize 的 `test_v3_migration_mysql.py`。
+
+## 会话迁移输入范围与容量限制
 
 - 输入范围采用明确包含规则：`chats.json`、`sessions/`、`dialog/`（或清单明确配置的对应入口），以及审核过的 `session_paths` 文件和对应 generation ledger。附件、代码、技能目录不递归枚举、不计入 `inventoried_source_bytes`；分享按记录指定路径读取。
-- 排查 `MigrationCapacityError` 时先看实际会话输入的单文件、累计字节和条目准入，不应只提高 workers 或内存参数。增加 workers 会缩小单 worker 额度；单文件 reader 硬上限不随总预算增加。
+- v3 扫描不再为每个 workspace 另设内存额度，也不再以 `memory allowance / 16` 预先拒绝大 workspace。`CS_RESOURCES` 仍提供全局解析与 IO 预算；文件类型、符号链接、bundle 大小和越界检查保持不变。
+- `sessions/`、`dialog/` 中承载消息的文件使用 bundle 的 256MiB 容器上限；`chats.json` 等 registry 文件继续使用 8MiB reader 限制。单个超过 8MiB 的消息独占消息块，不会静默截断或要求人工拆 Session。
+- share 的单文件 8MiB 门禁已删除。旧冻结模式仍对所有 share snapshot 的合计大小执行 `memory_bytes / 64` 的解析预算，并限制数量为 `memory_bytes / 16384`；`manifest-v1` 源隔离流程跳过这项聚合预检。
+- 排查 `MigrationCapacityError` 时先看实际文件类型、累计字节、条目和 spool 限制，不应只提高 workers 或内存参数。
 - 容量、文件清单、只读检查和源变化检查应使用同一范围；配置证据父目录仅浅检查。未映射的 Session/ledger/归档仍需阻断，不能通过删除数据或手改成功状态绕过。
-- 旧清单有非空 `fingerprints` 时保留原全源哈希契约，可能仍读取业务文件。不能手工清空；需审核后重新 discovery/freeze。
-- 入口：`migration/source_inputs.py`、`inventory_parallel._preflight_workspace`、`inventory._source_files`、`inventory_v3.inventory_discovery`；操作说明见[并行迁移补充](../../docs/superpowers/plans/2026-11-12-conversation-parallel-migration-operations.md)。
+- 正常 v3 迁移只解析 registered workspace 一次，不再生成或复核 whole-source fingerprint，也不在完成前重跑完整 inventory。已有 `freshness_protocol` 的 `chats.json` mtime 检查和明确 source 边界的正常解析校验仍保留。
+- 入口：`migration/source_inputs.py`、`inventory_parallel.spool_workspaces`、`inventory._source_files`、`inventory_v3.inventory_discovery`；操作说明见[并行迁移补充](../../docs/superpowers/plans/2026-11-12-conversation-parallel-migration-operations.md)。
+
+## MySQL 单次操作超过 30 秒会报错
+
+- `tests/integrated/conversation_storage/conftest.py` 把集成 fixture 的 `read_timeout`、`write_timeout` 设为 30 秒；这不是生产默认值。
+- 生产 `DatabaseConfig` 默认两者均为 600 秒，可分别用 `SWE_DB_READ_TIMEOUT`、`SWE_DB_WRITE_TIMEOUT` 调整。单次 database facade 操作超过期限会抛 `TimeoutError("Database operation timed out")`。
+- 写事务超时只说明当前等待被客户端终止，最终提交结果可能未知。保留原 `operation_key` 和 prepared publication，先对账再续跑，不能把超时直接重试成新写入。
+- 远端 MySQL 返回 `InterfaceError 2013` 或握手重置时属于连接中断，不等于 SQL timeout；先确认 `SELECT 1` 和连接池恢复，再评估是否在同一 manifest 重跑。
+
+## 会话迁移 fast verify 报消息批次或正文证据不匹配
+
+- fast verify 按 manifest 中的 Session 身份核对消息 publication 归属、连续范围、恢复目录、`history_high` 和恢复 publication 中的 `message_body_hashes`；artifact 或 Turn 路径中的 `/messages:` 不作为消息批次。
+- 缺少尾批、跨 Session 引用、正文被替换或恢复证据缺失都会阻止 fast verify。保留原始 manifest 和 bundle，先检查 Session 归属、恢复 publication 与源快照，不能手改校验状态。
+- 在引入正文摘要前生成的恢复 publication 不含该证据，无法通过新版 fast verify；应基于保留的源快照重新导入，或按现有完整验证及迁移操作流程处理。

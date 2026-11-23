@@ -1231,6 +1231,10 @@ async def _query_session_execution(
     if session is None or not hasattr(session, "execution"):
         yield None
         return
+    manager = getattr(owner, "_chat_manager", None)
+    claim = getattr(manager, "claim_session_path", None)
+    if claim is not None and request is not None:
+        await claim(session_id, user_id, request.channel or "console")
     async with session.execution(
         session_id,
         user_id=user_id,

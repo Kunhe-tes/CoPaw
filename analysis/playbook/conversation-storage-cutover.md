@@ -1,4 +1,8 @@
+> 历史文档：bundle 协议及其命令已移除；现行步骤见 [会话元数据迁移](conversation-metadata-migration.md)。
+
 # Conversation MySQL/NAS 离线切换
+
+`migrate --apply --full-audit` 在来源发布前先做快速校验，再执行完整语义审计。单独运行 `verify --full-audit` 时，查看报告的 `full_audit.executed`、`passed` 和 `skipped`；有未覆盖来源时退出码为 2。已发布来源的历史完整审计摘要可出现在 `previous_full_audit`。重审中断后，下一次带 `--apply` 的命令在作业锁内对账待恢复修订。招乎的活动指针使用 SQL 的 Console Session 身份，业务目标仍按招乎 Chat 的用户和来源匹配。[功能修复方案](../../docs/superpowers/specs/2026-11-23-conversation-migration-correctness-followup.md)
 
 ## 当前迁移入口
 
@@ -21,17 +25,24 @@ DBA 使用当前分支的 SQL 脚本准备空目标库，服务和 CLI 使用同
 
 业务元数据包含 3 个 Session、3 个 Chat 和 15 条 Publication。迁移控制表包含 15 条批次票据、15 条发布票据及 7 条保护票据，消息票据为 0。另一个实库用例在两个 source 发布后执行 DBA finalize，再使用同一 manifest 重跑，CLI 返回退出码 0 和 `ready`。
 
-10k workspace、2 个 source、500 个有数据的 workspace、1 worker 的容量样本未完成。dataset、preflight 分别约 24.42 秒、28.94 秒；进入 import-and-resume 后运行 2,094.34 秒，在远端数据库单次操作超过 30 秒时抛出 `Database operation timed out`。超时前记录约 17,754 次 SQL cursor 调用（累计 1,577.35 秒）、247 次 bundle publish 和 247 次 inspect；进程 RSS 峰值约 573 MiB，spool 峰值约 18.8 MiB。该结果说明 10k、1 worker 路径没有在本次测试窗口内完成，不能作为容量验收通过。
+2026-11-21 完成 10k workspace、2 个 source、500 个有数据 workspace、1 worker 的完整远端 MySQL 验收。样本约 20,514 个源文件、4.49 MiB 源数据，包含 64 条归档消息。测试从首个提交后中断并使用同一 manifest 续跑，最终 `verify` 和 `finalize` 均通过。
 
-迁移只读审计确认以下风险仍待容量验证：
+| 阶段 | 耗时（秒） |
+|---|---:|
+| discovery/freeze | 12.288 |
+| preflight | 24.260 |
+| import、中断与 resume | 5,431.447 |
+| fast verify | 148.985 |
+| finalize | 161.564 |
+| 测试主体合计（不含 dataset 构造） | 5,778.972 |
 
-- `manifest-v1` 新版路径绕过 workspace 输入预检；旧归档和 checkpoint events 仍通过 `read_text().splitlines()` 整文件载入内存，再保留全部消息。
-- 默认预检启用时，512 MiB 内存预算按 4 个 worker 切分后，每个 workspace 可分配约 8 MiB，大型 workspace 可能过早被拒绝。
-- 完整审计和快速校验按 archive chunk 查询 Publication；完整审计还会逐 bundle inspect/read，形成 chunk 数量相关 SQL 和串行 NAS I/O。
-- source 会经过 fingerprint、spooled inventory recheck 和逐 Chat 临时目录复制等多次扫描；消息分块先编码计算大小，写入时再次编码。
-- SQL 由单一 owner task 串行执行。代表性样本队列峰值很低，但 10k 单 worker 的数据库超时表明仍需在生产链路评估延迟、重试和超时边界。
+同一轮记录 105,841 次 SQL cursor 调用，累计等待 4,209.230 秒，最慢单次 SQL 1.020 秒，未再触发 30 秒超时；SQL owner 记录 49,755 次逻辑调用，其中 1 次失败是测试主动注入的首提交中断。1 worker 下同类命令短窗口没有形成跨命令合批，观测峰值为 1，因此本样本不能证明 4/8/16 worker 的合批收益。NAS 记录 1,520 次 publish 和 1,520 次 inspect；进程 RSS 峰值约 564 MiB，spool 峰值约 18.8 MiB。远端 MySQL 最慢 cursor 和 SQL owner 调用均显著低于测试 fixture 的 30 秒期限。
 
-发布前还应以单 Chat 100k 消息或数 GB 归档覆盖 100 个以上 chunk，记录 parser/spool RSS、临时磁盘、SQL 行数、bundle open/read 次数和分页耗时。
+本轮代码同时消除了审计中的主要重复路径：v3 不再为每个 workspace 另设 `memory allowance / 16` 门槛，`CS_RESOURCES` 继续约束全局解析和 IO；正常迁移只解析 source 一次，不再生成 fingerprint 或在完成前重跑 inventory。archive Publication 按 128 条查询，dependency retention 按批读取，boundary/chunk NAS IO 受 worker 和内存约束，chunk directory/body 在同一次 bundle open 中读取。消息 body 在流式分块时只编码一次，Session/archive payload 与引用 key 复用编码结果。SQL owner 使用 3 ms、最多 32 条的同类命令短窗口合批，并记录批次、最后命令、位置、耗时和成功状态；journal job binding 改为小型结构绑定，避免 10k workspace 映射形成单条超时 INSERT。
+
+本次 10k 样本只包含 64 条归档消息。单 Chat 100k 消息、100 个以上 chunk 或数 GB 归档的 parser/spool RSS、临时磁盘、bundle open/read、分页和回收耗时仍需独立容量样本验证。
+
+另用一个 9MiB 单条 Session 消息跑了完整 V3 远端 MySQL 回归，覆盖 discovery、首个提交后中断、同 manifest resume、fast verify 和 finalize；当前规则把 8MiB 作为常规消息块目标，超限单消息独占一个块，消息文件上限对齐 bundle 的 256MiB 容器上限。旧 artifact、原地证据、share 单文件和 bounded runtime prefetch 的静态 8MiB 门禁也已删除；share 聚合预算和 `chats.json` registry 上限仍独立存在。
 
 ## 历史流程与故障记录
 

@@ -20,12 +20,11 @@ def test_tenant_workspace_import_does_not_load_repository():
             "import sys; "
             "from swe.app.middleware.tenant_workspace "
             "import TenantWorkspaceContext; "
-            "assert 'swe.app.conversation_storage.chat_repository' "
+            "assert 'swe.app.conversation_storage.metadata_repository' "
             "not in sys.modules; "
-            "from swe.app.conversation_storage import MySQLChatRepository; "
-            "from swe.app.conversation_storage.chat_repository "
-            "import MySQLChatRepository as implementation; "
-            "assert MySQLChatRepository is implementation",
+            "from swe.app.conversation_storage.metadata_repository "
+            "import MySQLMetadataRepository; "
+            "assert MySQLMetadataRepository",
         ],
         cwd=root,
         env=env,

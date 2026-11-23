@@ -152,6 +152,39 @@ def test_ready_marker_does_not_hide_damaged_agent(good_tenant: Path) -> None:
     assert readiness.invalid_json_paths == (agent_path,)
 
 
+@pytest.mark.parametrize("contents", [None, "{broken"])
+def test_mysql_metadata_bootstrap_ignores_legacy_chat_registry(
+    good_tenant: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    contents: str | None,
+) -> None:
+    from swe.app.migration import _ensure_workspace_json_files
+
+    workspace = good_tenant / "workspaces" / "default"
+    registry = workspace / "chats.json"
+    if contents is None:
+        registry.unlink()
+    else:
+        registry.write_text(contents, encoding="utf-8")
+
+    monkeypatch.setenv("SWE_CONVERSATION_STORAGE_AUTHORITY", "legacy")
+    assert not inspect_bootstrap_readiness(good_tenant).ready
+
+    monkeypatch.setenv("SWE_CONVERSATION_STORAGE_AUTHORITY", "mysql-metadata")
+    _ensure_workspace_json_files(workspace)
+    assert inspect_bootstrap_readiness(good_tenant).ready
+    if contents is None:
+        assert not registry.exists()
+    else:
+        assert registry.read_text(encoding="utf-8") == contents
+
+    jobs = workspace / "jobs.json"
+    jobs.write_text("{broken", encoding="utf-8")
+    readiness = inspect_bootstrap_readiness(good_tenant)
+    assert not readiness.ready
+    assert readiness.invalid_json_paths == (jobs,)
+
+
 def test_atomic_write_fsyncs_and_cleans_its_temp_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

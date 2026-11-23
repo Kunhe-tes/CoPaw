@@ -1,8 +1,10 @@
+> 历史文档：bundle 协议及其命令已移除；现行步骤见 [会话元数据迁移](../../../analysis/playbook/conversation-metadata-migration.md)。
+
 # 会话迁移：失败租户隔离与正常租户独立上线
 
 本篇是 **显式 `--tenant-isolation` 模式**的操作增补。未使用该选项的全量严格流程仍按 `2026-11-02-conversation-migration-and-launch-runbook.md` 执行。本篇覆盖的部分发布顺序、预览连接数据库、runtime v3 和 schema 准备与旧流程不同，不能混用。设计依据是 `2026-11-13-conversation-tenant-cutover-design.md` 和 ADR 0046。
 
-**迁移范围说明（2026-11-17）：**历史分享记录不属于本次迁移输入。`discover` / `prepare` 不读取分享表；`shares-file` 若提供必须为空；inventory、导入、fast/full verify 和发布均不读取或复制旧分享记录。报告通过 `excluded_scopes: ["historical_shares"]` 标明范围。该决定不更改新版运行时永久分享功能及分享表 schema 要求。
+**迁移范围说明（2026-11-17）：**历史分享记录不属于本次迁移输入。`discover` / `prepare` 不读取分享表；兼容的 `shares-file` 内容直接跳过；inventory、导入、fast/full verify 和发布均不读取或复制旧分享记录。报告通过 `excluded_scopes: ["historical_shares"]` 标明范围。该决定不更改新版运行时永久分享功能及分享表 schema 要求。
 
 **新简化协议说明（2026-11-18）：**`prepare` 发现服务、租户、source、Agent 和 workspace 映射并检查目标表，不盘点会话输入。`migrate --apply` 先从 SQL 剪枝 published source，再逐 source 扫描 workspace 到有界临时记录，导入、验证并独立发布；不记录或比较 chats mtime，不计算输入或 manifest 摘要。未发布 source 的会话输入、sessions/dialog、身份配置和 manifest 固定映射须从 prepare 至发布保持不变。部署侧保证每个应用 schema 全局仅有一个迁移进程。详见 ADR 0052。
 
@@ -40,7 +42,7 @@
   --manifest "$AUDIT_DIR/manifest.json" --apply "${CS_RESOURCES[@]}"
 ```
 
-`prepare` 发现身份及 workspace 位置并预检目标数据库，不解析会话正文、不导入业务行、不发布账号；输出 manifest 及相邻的 `<manifest文件名>.discovery.json`。输出文件必须不存在。可选 `--overrides` 使用已审核的完整记录；兼容的 `--shares-file` 只能指向空列表，非空时命令拒绝。检查发现的失败和 workspace 覆盖后，可让正常 source 进入 migrate。
+`prepare` 发现身份及 workspace 位置并预检目标数据库，不解析会话正文、不导入业务行、不发布账号；输出 manifest 及相邻的 `<manifest文件名>.discovery.json`。输出文件必须不存在。可选 `--overrides` 使用已审核的完整记录；兼容的 `--shares-file` 即使包含内容也会被跳过。检查发现的失败和 workspace 覆盖后，可让正常 source 进入 migrate。
 
 `migrate --apply` 对每个可执行 source 扫描会话输入到有界临时记录，再完成导入/续跑、快速结构验证和发布；无需再人工运行 verify/finalize 才发布正常 source。已发布 source 从 SQL 读取并跳过其旧输入。它不会部署应用、改变外部流量、停止 writer 或自动 chmod。新版服务仍按 SQL published 与凭证动态准入。
 

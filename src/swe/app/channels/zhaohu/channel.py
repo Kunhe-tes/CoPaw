@@ -368,6 +368,10 @@ class ZhaohuChannel(BaseChannel):
 
         meta_session_id = f"zhaohu:active:{sap_id}"
         try:
+            manager = getattr(self._workspace, "chat_manager", None)
+            claim = getattr(manager, "claim_session_path", None)
+            if claim is not None:
+                await claim(meta_session_id, sap_id, "zhaohu-active")
             state = (
                 await self._workspace.runner.session.get_session_state_dict(
                     session_id=meta_session_id,
@@ -440,6 +444,10 @@ class ZhaohuChannel(BaseChannel):
 
         meta_session_id = f"zhaohu:active:{sap_id}"
         try:
+            manager = getattr(self._workspace, "chat_manager", None)
+            claim = getattr(manager, "claim_session_path", None)
+            if claim is not None:
+                await claim(meta_session_id, sap_id, "zhaohu-active")
             await self._workspace.runner.session.update_session_state(
                 session_id=meta_session_id,
                 key="active_session_id",

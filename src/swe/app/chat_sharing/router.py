@@ -155,17 +155,7 @@ def _message_payload(message: Any) -> dict[str, Any]:
 
 
 async def _share_context(chat, workspace, selected_turn_ids=None):
-    storage = getattr(workspace, "conversation_storage", None)
-    snapshot = (
-        await storage.shares.selection_snapshot(chat.id)
-        if storage is not None
-        else None
-    )
-    session = (
-        storage.session_for(chat.channel)
-        if storage is not None
-        else workspace.runner.session
-    )
+    session = workspace.runner.session
     state = await _read_history_state(
         session,
         chat.session_id,
@@ -194,12 +184,6 @@ async def _share_context(chat, workspace, selected_turn_ids=None):
         state=state,
     )
     messages = await _load_share_messages(chat, workspace, history)
-    if storage is not None and (
-        await storage.shares.selection_snapshot(chat.id) != snapshot
-    ):
-        from ..conversation_storage.errors import ConflictError
-
-        raise ConflictError("share history changed while reading")
     return history, messages, _turn_statuses(messages, state)
 
 
@@ -207,12 +191,9 @@ def init_chat_sharing_module(db: Any | None = None) -> None:
     global _service
     if db is None or not getattr(db, "is_connected", False):
         raise RuntimeError("Chat sharing requires a connected database")
-    from ..conversation_storage.runtime import runtime_shares
-
     _service = ChatSharingService(
         ChatShareStore(db),
         WORKING_DIR / "chat_shares",
-        conversation_shares=runtime_shares(),
     )
 
 
@@ -282,13 +263,6 @@ async def create_chat_share(
     workspace=Depends(get_workspace),
 ) -> ChatShareCreateResponse:
     service = get_service()
-    storage = getattr(workspace, "conversation_storage", None)
-    if storage is not None:
-        service = ChatSharingService(
-            storage.shares.store,
-            storage.workspace_root,
-            conversation_shares=storage.shares,
-        )
     user_id = _request_user_id(request)
     try:
         chat = await workspace.chat_manager.get_chat(chat_id)
@@ -301,26 +275,10 @@ async def create_chat_share(
         raise HTTPException(status_code=404, detail="Chat not found")
     _authorize_chat(request, chat, workspace)
     try:
-        selection_snapshot = (
-            await storage.shares.selection_snapshot(chat.id)
-            if storage is not None
-            else None
-        )
         _, messages, statuses = await _share_context(
             chat,
             workspace,
             payload.turn_ids,
-        )
-        selection_proof = (
-            await storage.shares.prove_selection(
-                chat.id,
-                selection_snapshot,
-                payload.turn_ids,
-                messages,
-                statuses,
-            )
-            if storage is not None
-            else None
         )
         record = await service.create_snapshot(
             chat_id=chat.id,
@@ -329,16 +287,7 @@ async def create_chat_share(
             selected_turn_ids=payload.turn_ids,
             turn_statuses=statuses,
             creator_id=user_id,
-            tenant_id=(
-                storage.scope.tenant_id
-                if storage is not None
-                else _request_tenant_id(request)
-            ),
-            **(
-                {"selection_proof": selection_proof}
-                if selection_proof is not None
-                else {}
-            ),
+            tenant_id=_request_tenant_id(request),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

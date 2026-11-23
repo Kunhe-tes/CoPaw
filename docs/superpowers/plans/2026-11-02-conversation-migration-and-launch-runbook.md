@@ -1,3 +1,5 @@
+> 历史文档：bundle 协议及其命令已移除；现行步骤见 [会话元数据迁移](../../../analysis/playbook/conversation-metadata-migration.md)。
+
 # 会话元数据迁移及上线全流程操作方案
 
 更新日期：2026-11-12。本次以最近 24 小时提交及当前实现核对，工作树：`.worktrees/conversation-mysql-nas`，HEAD `b8c3f853258eaa6d11f5af3392a005f94875e98d`。本次未读取或运行测试，未以其他文档或历史验收数字作为实现依据；保留核对前本文件已有的数据库环境配置说明。
@@ -396,7 +398,7 @@ run_cs 01-discover discover --services "$AUDIT_DIR/services.json" \
 ```
 
 所有根必须事先存在、绝对且规范，不含软链接；应用 Pod 的最终原 workspace 也必须真实存在。
-**本次会话迁移不包含历史分享记录。** `discover` / `prepare` 不读取分享表，也不扫描旧分享正文；报告标记 `excluded_scopes: ["historical_shares"]`。兼容的 `--shares-file` 只能为空，非空时拒绝执行。旧分享在切换后的运行时功能、分享表 schema 扩展和 DBA 收口要求不变，不表示这些记录已迁移或验证。
+**本次会话迁移不包含历史分享记录。** `discover` / `prepare` 不读取分享表，也不扫描旧分享正文；报告标记 `excluded_scopes: ["historical_shares"]`。兼容的 `--shares-file` 不会读取其内容，其中的记录直接跳过，不影响迁移。旧分享在切换后的运行时功能、分享表 schema 扩展和 DBA 收口要求不变，不表示这些记录已迁移或验证。
 
 特殊布局的服务级补充字段：
 

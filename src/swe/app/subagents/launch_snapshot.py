@@ -604,12 +604,15 @@ def _copy_skill_directory(source_fd: int, target_fd: int) -> None:
             os.close(source_file_fd)
 
 
-def _remove_snapshot_tree(path: Path) -> None:
+def _remove_snapshot_tree(path: Path, *, strict: bool = False) -> None:
     """Best-effort cleanup that never traverses a substituted symlink root."""
     try:
         if path.is_symlink():
             path.unlink()
         elif path.exists():
             shutil.rmtree(path)
-    except OSError:
+    except FileNotFoundError:
         pass
+    except OSError:
+        if strict:
+            raise

@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Typed body-free Chat mutations shared by SQL and content publications."""
+"""Typed Chat metadata mutations."""
 
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 import json
 
-from .runtime_ids import runtime_identity
+from ...database.prepared import PreparedInsert
 from .errors import ConflictError, IntegrityError
 from .identity import chat_key_bytes, identity_bytes
 
@@ -99,7 +99,6 @@ class ChatMetadataInstall:
     metadata_text: str
     created_at: str
     updated_at: str
-    content_meta_block: str | None = None
     expected_metadata_revision: int | None = None
     expert_id: str | None = None
     expert_binding_revision: int = 0
@@ -119,10 +118,6 @@ class ChatMetadataInstall:
         self._validate_optional_fields()
 
     def _validate_optional_fields(self):
-        if self.content_meta_block is not None:
-            identity_bytes(self.content_meta_block, 256)
-            if not self.content_meta_block:
-                raise ValueError("content metadata block must be nonempty")
         if self.expert_id is not None:
             identity_bytes(self.expert_id, 256)
         for value in (
@@ -158,27 +153,17 @@ class ChatMetadataInstall:
             raise ValueError("incomplete Chat metadata mutation") from error
 
 
-def content_locator(plan, row, index):
-    if plan.content_meta_block is None:
-        return None, None, None
-    extent = index.blocks.get(plan.content_meta_block)
-    if extent is None or extent.kind != "content_meta":
-        raise IntegrityError("Chat content metadata block is missing")
-    return row["id"], extent.offset, extent.length
-
-
 async def install_chat_metadata(
     db,
     request,
     plan,
-    publication,
-    index,
     associations,
     *,
     target_session=None,
+    extended_metadata=None,
 ):
-    """Caller holds guard (create), Session, Chat, then publication locks."""
-    session, chat, _ = associations
+    """Caller holds the workspace, Session and Chat locks."""
+    session, chat = associations
     if session is None or request.turn_id is not None:
         raise IntegrityError(
             "Chat metadata publication requires a Session and no Turn",
@@ -190,34 +175,114 @@ async def install_chat_metadata(
         "channel_key"
     ] != identity_bytes(plan.channel, 64):
         raise IntegrityError("Chat metadata Session identity mismatch")
-    locator = content_locator(plan, publication, index)
     if request.chat_id is None:
         return await _create_chat(
             db,
             request,
             plan,
-            locator,
             session,
             existing=chat,
+            extended_metadata=extended_metadata,
         )
     if chat is None or chat["deleted_at"] is not None:
         raise ConflictError("Chat was deleted")
     if chat["external_chat_key"] != chat_key_bytes(plan.external_chat_key):
         raise IntegrityError("Chat metadata external identity mismatch")
-    _validate_rebind(plan, session, target)
-    return await _update_chat(db, request, plan, locator, chat, target)
+    _validate_rebind(plan, session, target, chat)
+    return await _update_chat(
+        db,
+        request,
+        plan,
+        chat,
+        target,
+        extended_metadata,
+    )
 
 
-def _validate_rebind(plan, session, target):
+def _validate_rebind(plan, session, target, chat):
     if plan.target_session_id is not None:
-        for associated in (session, target):
-            if associated["active_turn_id"] is not None:
-                raise ConflictError("cannot rebind a busy Session")
+        if (
+            target["id"] != session["id"]
+            and session.get("draft_chat_id") == chat["id"]
+        ):
+            raise ConflictError(
+                "cannot rebind the Session's designated draft Chat",
+            )
         if target["id"] != plan.target_session_id:
             raise IntegrityError("target Session identity mismatch")
 
 
-async def _create_chat(db, request, plan, locator, session, *, existing=None):
+CHAT_INSERT_COLUMNS = (
+    "session_id",
+    "external_chat_key",
+    "external_session_key",
+    "registry_order",
+    "service_unit_key",
+    "tenant_key",
+    "source_key",
+    "agent_key",
+    "user_key",
+    "channel_key",
+    "title",
+    "metadata_text",
+    "expert_id",
+    "expert_binding_revision",
+    "status",
+    "created_at",
+    "updated_at",
+)
+
+CHAT_INSERT = PreparedInsert(
+    "INSERT INTO swe_conversation_chats ("
+    + ",".join(CHAT_INSERT_COLUMNS)
+    + ",extended_metadata_text) VALUES ",
+    "(" + ",".join(["%s"] * (len(CHAT_INSERT_COLUMNS) + 1)) + ")",
+    allow_single_text_insert=True,
+)
+
+
+async def highest_registry_order(db, scope):
+    row = await db.fetch_one(
+        "SELECT registry_order AS high FROM swe_conversation_chats "
+        "WHERE service_unit_key=%s AND tenant_key=%s AND source_key=%s AND agent_key=%s "
+        "ORDER BY registry_order DESC LIMIT 1",
+        scope.sql_values,
+    )
+    return row["high"] if row is not None else 0
+
+
+def chat_insert_values(scope, plan, session, registry_order):
+    return (
+        session["id"],
+        chat_key_bytes(plan.external_chat_key),
+        session["external_session_key"],
+        registry_order,
+        *scope.sql_values,
+        identity_bytes(plan.user_id, 256),
+        identity_bytes(plan.channel, 64),
+        plan.title,
+        plan.metadata_text,
+        (
+            identity_bytes(plan.expert_id, 256)
+            if plan.expert_id is not None
+            else None
+        ),
+        plan.expert_binding_revision,
+        "idle",
+        utc_datetime(plan.created_at),
+        utc_datetime(plan.updated_at),
+    )
+
+
+async def _create_chat(
+    db,
+    request,
+    plan,
+    session,
+    *,
+    existing=None,
+    extended_metadata=None,
+):
     if plan.expected_metadata_revision is not None:
         raise ConflictError("new Chat cannot require an existing revision")
     if plan.create_if_absent and session.get("draft_chat_id") is not None:
@@ -230,63 +295,11 @@ async def _create_chat(db, request, plan, locator, session, *, existing=None):
                 (existing["id"], request.session_id),
             )
             return existing["id"]
-    high = await db.fetch_one(
-        "SELECT COALESCE(MAX(registry_order),0) AS high FROM swe_conversation_chats "
-        "WHERE service_unit_key=%s AND tenant_key=%s AND source_key=%s AND agent_key=%s",
-        request.scope.sql_values,
-    )
-    columns = (
-        "session_id",
-        "external_chat_key",
-        "external_session_key",
-        "registry_order",
-        "service_unit_key",
-        "tenant_key",
-        "source_key",
-        "agent_key",
-        "user_key",
-        "channel_key",
-        "title",
-        "metadata_text",
-        "expert_id",
-        "expert_binding_revision",
-        "content_meta_publication_id",
-        "content_meta_offset",
-        "content_meta_length",
-        "epoch",
-        "status",
-        "created_at",
-        "updated_at",
-    )
-    values = (
-        request.session_id,
-        chat_key_bytes(plan.external_chat_key),
-        session["external_session_key"],
-        high["high"] + 1,
-        *request.scope.sql_values,
-        identity_bytes(plan.user_id, 256),
-        identity_bytes(plan.channel, 64),
-        plan.title,
-        plan.metadata_text,
-        (
-            identity_bytes(plan.expert_id, 256)
-            if plan.expert_id is not None
-            else None
-        ),
-        plan.expert_binding_revision,
-        *locator,
-        1,
-        "idle",
-        utc_datetime(plan.created_at),
-        utc_datetime(plan.updated_at),
-    )
-    identity = await runtime_identity(db)
-    if identity is not None:
-        columns = ("id", *columns)
-        values = (identity, *values)
+    high = await highest_registry_order(db, request.scope)
+    values = chat_insert_values(request.scope, plan, session, high + 1)
     chat_id = await db.insert(
-        f"INSERT INTO swe_conversation_chats ({','.join(columns)}) VALUES ({','.join(['%s'] * len(columns))})",
-        values,
+        CHAT_INSERT.prefix + CHAT_INSERT.row_template,
+        (*values, extended_metadata),
     )
     if not chat_id:
         raise IntegrityError("Chat creation did not return its identity")
@@ -298,7 +311,14 @@ async def _create_chat(db, request, plan, locator, session, *, existing=None):
     return chat_id
 
 
-async def _update_chat(db, request, plan, locator, chat, target):
+async def _update_chat(
+    db,
+    request,
+    plan,
+    chat,
+    target,
+    extended_metadata=None,
+):
     if (
         plan.expected_metadata_revision is None
         or chat["metadata_revision"] != plan.expected_metadata_revision
@@ -314,14 +334,20 @@ async def _update_chat(db, request, plan, locator, chat, target):
         expert_id = None
         binding_revision += 1
     status_sql = ",status='idle'" if plan.target_session_id is not None else ""
+    extension_sql = (
+        ",extended_metadata_text=%s" if extended_metadata is not None else ""
+    )
+    extension_params = (
+        (extended_metadata,) if extended_metadata is not None else ()
+    )
     result = await db.execute(
         "UPDATE swe_conversation_chats SET title=%s,metadata_text=%s,"
         "external_session_key=%s,"
         "session_id=%s,user_key=%s,channel_key=%s,"
         "expert_id=%s,expert_binding_revision=%s,"
-        "content_meta_publication_id=%s,content_meta_offset=%s,content_meta_length=%s,"
         "metadata_revision=metadata_revision+1,updated_at=%s"
         + status_sql
+        + extension_sql
         + " WHERE id=%s AND deleted_at IS NULL AND metadata_revision=%s",
         (
             plan.title,
@@ -332,8 +358,8 @@ async def _update_chat(db, request, plan, locator, chat, target):
             identity_bytes(plan.channel, 64),
             expert_id,
             binding_revision,
-            *locator,
             utc_datetime(plan.updated_at),
+            *extension_params,
             request.chat_id,
             plan.expected_metadata_revision,
         ),

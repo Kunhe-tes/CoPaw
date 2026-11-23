@@ -14,9 +14,9 @@ class RestoreTargetRejected(ValueError):
 
 def require_legacy_storage():
     authority = os.environ.get("SWE_CONVERSATION_STORAGE_AUTHORITY", "legacy")
-    if authority not in ("legacy", "mysql"):
+    if authority not in ("legacy", "mysql", "mysql-metadata"):
         raise ValueError("Invalid conversation storage authority")
-    if authority == "mysql":
+    if authority in ("mysql", "mysql-metadata"):
         raise RestoreTargetRejected(
             "MySQL conversation authority requires a complete metadata and NAS backup/restore; memory-storage is offline legacy-format maintenance only",
         )

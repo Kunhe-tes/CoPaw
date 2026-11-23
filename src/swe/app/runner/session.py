@@ -556,6 +556,12 @@ class SessionExecution:
         return revision if isinstance(revision, int) and revision >= 0 else 0
 
 
+def session_filename(session_id: str, user_id: str) -> str:
+    safe_sid = sanitize_filename(session_id)
+    safe_uid = sanitize_filename(user_id) if user_id else ""
+    return f"{safe_uid}_{safe_sid}.json" if safe_uid else f"{safe_sid}.json"
+
+
 class SafeJSONSession(SessionBase):
     """SessionBase subclass with filename sanitization and async file I/O.
 
@@ -582,13 +588,10 @@ class SafeJSONSession(SessionBase):
         filename is valid on Windows, macOS and Linux.
         """
         os.makedirs(self.save_dir, exist_ok=True)
-        safe_sid = sanitize_filename(session_id)
-        safe_uid = sanitize_filename(user_id) if user_id else ""
-        if safe_uid:
-            file_path = f"{safe_uid}_{safe_sid}.json"
-        else:
-            file_path = f"{safe_sid}.json"
-        return os.path.join(self.save_dir, file_path)
+        return os.path.join(
+            self.save_dir,
+            session_filename(session_id, user_id),
+        )
 
     async def get_turn_state(self, session_id, user_id, state, turn_id):
         return await run_runtime_state_work(

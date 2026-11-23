@@ -16,7 +16,7 @@ from ..identity_resolver import resolve_user_identity
 from ..runner.api import (
     _archive_page,
     _build_chat_history,
-    _indexed_history_call,
+    _storage_call,
 )
 from ..runner.models import ChatArchivePage, ChatHistory, ChatSpec
 from ..runner.chat_summary import (
@@ -138,7 +138,7 @@ async def get_user_chat_summaries(
     """Read target-user discovery fields without complete metadata bodies."""
     workspace = await _get_target_workspace(request, user_id)
     try:
-        return await _indexed_history_call(
+        return await _storage_call(
             workspace.chat_manager.list_summaries,
             user_id=user_id,
             channel=channel,
@@ -172,10 +172,6 @@ async def _target_chat(request: Request, user_id: str, chat_id: str):
             ):
                 raise HTTPException(status_code=404, detail="Chat not found")
 
-    storage = getattr(workspace, "conversation_storage", None)
-    if getattr(storage, "history", None) is not None:
-        return workspace, None, authorize
-
     chat = await workspace.chat_manager.get_chat(chat_id)
     if chat is None:
         raise HTTPException(
@@ -193,15 +189,7 @@ async def get_user_chat(
     user_id: str = Query(..., description="目标用户 ID"),
 ) -> ChatHistory:
     """Read target-user history using the same durable assembly as Chat."""
-    workspace, chat, authorize = await _target_chat(request, user_id, chat_id)
-    storage = getattr(workspace, "conversation_storage", None)
-    indexed = getattr(storage, "history", None)
-    if indexed is not None:
-        return await _indexed_history_call(
-            indexed.current,
-            chat_id,
-            authorize=authorize,
-        )
+    workspace, chat, _ = await _target_chat(request, user_id, chat_id)
 
     return await _build_chat_history(
         chat,
@@ -220,18 +208,8 @@ async def get_user_chat_history(
     limit: int = Query(50, ge=1, le=50),
 ) -> ChatArchivePage:
     """Page through the target user's compacted history without impersonation."""
-    workspace, chat, authorize = await _target_chat(request, user_id, chat_id)
-    storage = getattr(workspace, "conversation_storage", None)
-    indexed = getattr(storage, "history", None)
+    workspace, chat, _ = await _target_chat(request, user_id, chat_id)
     try:
-        if indexed is not None:
-            return await _indexed_history_call(
-                indexed.archive_page,
-                chat_id,
-                before=before,
-                limit=limit,
-                authorize=authorize,
-            )
         return await _archive_page(workspace, chat.id, before, limit)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

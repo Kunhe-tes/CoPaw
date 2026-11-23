@@ -7586,10 +7586,6 @@ class AgentRunner(Runner):
         """
         Init handler.
         """
-        storage = getattr(self._workspace, "conversation_storage", None)
-        if storage is not None:
-            self.session = storage.session_for("console")
-            return
         # Load environment variables from .env file
         # env_path = Path(__file__).resolve().parents[4] / ".env"
         env_path = Path("./") / ".env"

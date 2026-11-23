@@ -735,7 +735,15 @@ def _ensure_workspace_json_files(
     workspace_dir: Path,
     label: str = "",
 ) -> None:
+    from .conversation_storage.runtime import (
+        METADATA_AUTHORITY,
+        storage_authority,
+    )
+
+    authority = storage_authority()
     for filename, default in _WORKSPACE_JSON_DEFAULTS:
+        if filename == "chats.json" and authority == METADATA_AUTHORITY:
+            continue
         filepath = workspace_dir / filename
         if not filepath.exists():
             with open(filepath, "w", encoding="utf-8") as f:
@@ -751,7 +759,7 @@ def ensure_default_agent_exists(
 
     This function is called on startup to verify the default agent
     is properly configured. If not, it will be created.
-    Also ensures necessary workspace files exist (chats.json, jobs.json).
+    Also creates the workspace JSON files required by the storage mode.
 
     Args:
         working_dir: Optional tenant-scoped working directory.

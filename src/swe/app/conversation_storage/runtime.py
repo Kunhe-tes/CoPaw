@@ -3,15 +3,13 @@
 
 import os
 
-from .bundle import BundleStore
 from .chat_mutations import load_metadata_json
-from .factory import WorkspaceConversationStorage, existing_root
+from .paths import existing_root
 from .identity import WorkspaceScope, service_unit_bytes, service_unit_from_env
-from .shares import ShareStorage
 
 AUTHORITY_ENV = "SWE_CONVERSATION_STORAGE_AUTHORITY"
-CURSOR_ENV = "SWE_CONVERSATION_ARCHIVE_CURSOR_SECRET"
-_runtime = None
+METADATA_AUTHORITY = "mysql-metadata"
+_metadata_database = None
 
 
 def resolved_scope(workspace, installed=None, *, service_unit_id):
@@ -94,261 +92,149 @@ def require_empty_conversation(root):
             )
 
 
-def mysql_authority():
+def storage_authority():
     authority = os.environ.get(AUTHORITY_ENV, "legacy")
-    if authority not in ("legacy", "mysql"):
-        raise ValueError("invalid conversation storage authority")
-    return authority == "mysql"
-
-
-class ConversationRuntime:
-    """One database and NAS root, mapped to existing workspace identities."""
-
-    def __init__(
-        self,
-        database,
-        document,
-        cursor_secret,
-        *,
-        service_unit_id,
-        authority_validated=False,
-    ):
-        service_unit_bytes(service_unit_id)
-        self.admission = None
-        if document.get("version") == 3:
-            from .tenant_admission import TenantAdmission
-            from .runtime_ids import SharedIdDatabase
-
-            self.admission = TenantAdmission(database, document)
-            database = SharedIdDatabase(database, document["migration_id"])
-            document = {
-                "version": 2,
-                "service_unit_id": document["service_unit_id"],
-                "nas_root": document["nas_root"],
-                "workspaces": [],
-            }
-        if document.get("version") != 2 or set(document) - {
-            "migration_authority",
-        } != {
-            "version",
-            "service_unit_id",
-            "nas_root",
-            "workspaces",
-        }:
-            raise ValueError("invalid installed conversation scope manifest")
-        if document["service_unit_id"] != service_unit_id:
-            raise ValueError("conversation manifest service unit mismatch")
-        self.service_unit_id = service_unit_id
-        self.database = database
-        self.nas_root = existing_root(document["nas_root"])
-        self.cursor_secret = cursor_secret
-        self._admitted_tenants = set()
-        self.mappings = {}
-        self._workspaces = {}
-        scopes = set()
-        for item in document["workspaces"]:
-            if set(item) != {"root", "scope"}:
-                raise ValueError("invalid installed workspace mapping")
-            root = existing_root(item["root"])
-            scope = WorkspaceScope.from_values(item["scope"])
-            if scope.service_unit_id != service_unit_id:
-                raise ValueError("workspace manifest service unit mismatch")
-            if root in self.mappings or scope in scopes:
-                raise ValueError("duplicate installed workspace identity")
-            self.mappings[root] = scope
-            scopes.add(scope)
-        if (
-            not self.mappings
-            and self.admission is None
-            and not (
-                authority_validated and document.get("migration_authority")
-            )
-        ):
-            raise ValueError("conversation scope manifest has no workspaces")
-        self.shares = ShareStorage(
-            database,
-            BundleStore(self.nas_root),
-            service_unit_id=service_unit_id,
-            admission=self.admission,
+    if authority not in ("legacy", METADATA_AUTHORITY):
+        raise ValueError(
+            "invalid conversation storage authority; use legacy or mysql-metadata",
         )
-
-    async def admit(self, tenant_id, source_id=None):
-        if self.admission is None:
-            return
-        mappings = await self.admission.require(tenant_id, source_id)
-        self._admitted_tenants.add((tenant_id, source_id))
-        for item in mappings:
-            root = existing_root(item["root"])
-            scope = WorkspaceScope.from_values(item["scope"])
-            if root in self.mappings and self.mappings[root] != scope:
-                raise ValueError("tenant workspace binding changed")
-            self.mappings[root] = scope
-
-    def for_workspace(self, workspace):
-        root = existing_root(workspace.workspace_dir)
-        scope = self.mappings.get(root)
-        resolved = resolved_scope(
-            workspace,
-            scope,
-            service_unit_id=self.service_unit_id,
-        )
-        if (
-            self.admission is not None
-            and (
-                resolved.tenant_id,
-                (
-                    resolved.source_id
-                    if getattr(self.admission, "source_binding", {}).get(
-                        "source_isolation",
-                    )
-                    else None
-                ),
-            )
-            not in self._admitted_tenants
-        ):
-            from .tenant_admission import TenantNotPublished
-
-            raise TenantNotPublished()
-        if scope is None:
-            require_empty_conversation(root)
-            if resolved in self.mappings.values():
-                raise ValueError(
-                    "conversation scope already belongs to another workspace",
-                )
-            scope = resolved
-            self.mappings[root] = scope
-        if scope != resolved:
-            raise ValueError("workspace conversation scope mismatch")
-        if root not in self._workspaces:
-            self._workspaces[root] = WorkspaceConversationStorage(
-                self.database,
-                scope,
-                root,
-                cursor_secret=self.cursor_secret,
-                nas_root=self.nas_root,
-                admission=self.admission,
-            )
-        return self._workspaces[root]
-
-    async def verify(self):
-        root, scope = next(
-            iter(self.mappings.items()),
-            (
-                self.nas_root,
-                WorkspaceScope(
-                    "",
-                    "",
-                    "",
-                    service_unit_id=self.service_unit_id,
-                ),
-            ),
-        )
-        await WorkspaceConversationStorage(
-            self.database,
-            scope,
-            root,
-            cursor_secret=self.cursor_secret,
-            nas_root=self.nas_root,
-            partial_schema=self.admission is not None,
-        ).verify_schema()
+    return authority
 
 
 async def configure_runtime(database):
-    global _runtime
-    _runtime = None
-    if not mysql_authority():
+    reset_runtime()
+    authority = storage_authority()
+    if authority == "legacy":
         return
     if database is None or not database.is_connected:
         raise RuntimeError(
             "conversation storage requires a connected database",
         )
-    secret = os.environ.get(CURSOR_ENV)
-    service_unit_id = service_unit_from_env()
-    if not secret:
-        raise RuntimeError(
-            "conversation storage requires an archive cursor secret",
-        )
-    from .tenant_admission import TenantAdmission, partial_jobs
-    from .migration.preflight import check_tenant_schema
+    if authority == METADATA_AUTHORITY:
+        await _configure_metadata_runtime(database)
+        return
 
-    jobs = await partial_jobs(database, service_unit_id)
-    if len(jobs) != 1:
-        raise RuntimeError(
-            "conversation storage requires exactly one tenant migration job",
-        )
-    row, binding = jobs[0]
-    migration_id = row["migration_id"]
-    if isinstance(migration_id, bytes):
-        migration_id = migration_id.decode()
-    document = {
-        "version": 3,
-        "migration_id": migration_id,
-        "service_unit_id": service_unit_id,
-        "nas_root": binding["nas_roots"][service_unit_id],
-    }
-    admission = TenantAdmission(database, document)
-    await admission.validate()
-    identity = await database.fetch_one("SELECT DATABASE() AS schema_name")
-    await check_tenant_schema(
-        database,
-        identity["schema_name"],
-        source_isolation=admission.source_binding.get(
-            "source_isolation",
-            False,
-        ),
+
+async def _configure_metadata_runtime(database):
+    global _metadata_database
+    from .metadata_repository import SOURCES, WORKSPACES
+
+    service_unit_from_env()
+    await database.fetch_all(
+        f"SELECT published,manifest_digest FROM {SOURCES} LIMIT 0",
     )
-    candidate = ConversationRuntime(
-        database,
-        document,
-        secret.encode(),
+    await database.fetch_all(
+        f"SELECT workspace_root FROM {WORKSPACES} LIMIT 0",
+    )
+    await database.fetch_all(
+        "SELECT nas_filename FROM swe_conversation_sessions LIMIT 0",
+    )
+    await database.fetch_all(
+        "SELECT extended_metadata_text,resources_cleaned_at FROM swe_conversation_chats LIMIT 0",
+    )
+    _metadata_database = database
+
+
+async def workspace_metadata_repository(workspace):
+    if storage_authority() != METADATA_AUTHORITY:
+        return None
+    from .metadata_repository import (
+        MySQLMetadataRepository,
+        SOURCES,
+        WORKSPACES,
+        SCOPE_PREDICATE,
+        SOURCE_PREDICATE,
+    )
+    from .tenant_admission import TenantNotPublished
+
+    if _metadata_database is None:
+        raise RuntimeError("conversation metadata authority is not ready")
+    root = existing_root(workspace.workspace_dir).resolve(strict=True)
+    service_unit_id = service_unit_from_env()
+    root_key = str(root).encode()
+    installed = None
+    if (
+        getattr(workspace, "tenant_id", None) is None
+        and getattr(workspace, "source_id", None) is None
+    ):
+        row = await _metadata_database.fetch_one(
+            f"SELECT service_unit_key,tenant_key,source_key,agent_key FROM {WORKSPACES} "
+            "WHERE service_unit_key=%s AND workspace_root=%s",
+            (service_unit_bytes(service_unit_id), root_key),
+        )
+        if row is not None:
+            installed = WorkspaceScope.from_row(row)
+    scope = resolved_scope(
+        workspace,
+        installed,
         service_unit_id=service_unit_id,
     )
-    await candidate.verify()
-    _runtime = candidate
+    binding = await _metadata_database.fetch_one(
+        f"SELECT workspace_root FROM {WORKSPACES} WHERE " + SCOPE_PREDICATE,
+        scope.sql_values,
+    )
+    source = await _metadata_database.fetch_one(
+        f"SELECT published FROM {SOURCES} WHERE " + SOURCE_PREDICATE,
+        scope.sql_values[:3],
+    )
+    if source is None or not source["published"]:
+        raise TenantNotPublished()
+    if binding is None:
+        require_empty_conversation(root)
+        await _metadata_database.execute(
+            f"INSERT INTO {WORKSPACES} "
+            "(service_unit_key,tenant_key,source_key,agent_key,workspace_root,registry_digest) "
+            "VALUES (%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE workspace_root=workspace_root",
+            (*scope.sql_values, root_key, bytes(32)),
+        )
+        binding = await _metadata_database.fetch_one(
+            f"SELECT workspace_root FROM {WORKSPACES} WHERE "
+            + SCOPE_PREDICATE,
+            scope.sql_values,
+        )
+    if binding is None or binding["workspace_root"] != root_key:
+        raise TenantNotPublished()
+    return MySQLMetadataRepository(_metadata_database, scope)
 
 
 def reset_runtime():
     """Discard process adapters when their application database shuts down."""
-    global _runtime
-    _runtime = None
+    global _metadata_database
+    _metadata_database = None
 
 
-def workspace_storage(workspace):
-    if not mysql_authority():
-        return None
-    if _runtime is None:
-        raise RuntimeError("conversation database authority is not ready")
-    return _runtime.for_workspace(workspace)
-
-
-def runtime_shares():
-    if not mysql_authority():
-        return None
-    if _runtime is None:
-        raise RuntimeError("conversation database authority is not ready")
-    return _runtime.shares
-
-
-async def require_tenant_published(tenant_id):
+async def require_tenant_published(
+    tenant_id,
+    *,
+    source_id=None,
+    scope_id=None,
+):
     """Call before tenant initialization; logical identity comes from trusted scope."""
-    if mysql_authority():
-        if _runtime is None:
-            raise RuntimeError("conversation database authority is not ready")
-        if _runtime.admission is not None:
-            from ...config.context import decode_scope_id
+    if storage_authority() == METADATA_AUTHORITY:
+        from ...config.context import decode_scope_id, get_current_source_id
+        from .metadata_repository import SOURCES, SOURCE_PREDICATE
+        from .tenant_admission import TenantNotPublished
 
-            try:
-                tenant_id, source_id = decode_scope_id(tenant_id)
-            except ValueError:
-                source_id = ""
-            await _runtime.admission.validate()
-            await _runtime.admit(
-                tenant_id,
-                (
-                    source_id
-                    if _runtime.admission.source_binding.get(
-                        "source_isolation",
-                    )
-                    else None
-                ),
+        if _metadata_database is None:
+            raise RuntimeError("conversation metadata authority is not ready")
+        try:
+            logical_tenant, source = decode_scope_id(scope_id or tenant_id)
+        except ValueError:
+            logical_tenant = tenant_id
+            source = (
+                source_id if source_id is not None else get_current_source_id()
             )
+        if source is not None:
+            scope = WorkspaceScope(
+                logical_tenant,
+                source,
+                "",
+                service_unit_id=service_unit_from_env(),
+            )
+            result = await _metadata_database.fetch_one(
+                f"SELECT published FROM {SOURCES} WHERE " + SOURCE_PREDICATE,
+                scope.sql_values[:3],
+            )
+            if result is None or not result["published"]:
+                raise TenantNotPublished()
+        return

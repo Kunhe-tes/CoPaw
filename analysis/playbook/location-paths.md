@@ -1,10 +1,16 @@
 # 定位路径
 
+## 会话迁移与历史读取性能
+- 会话元数据迁移、source 准入与回退：参见 [会话元数据迁移](conversation-metadata-migration.md)。
+
+- 来源注册查看 `migration/source_state.py::SourceState.register` 的批量锁读和插入。快速校验查看 `migration/verify_fast.py::_verification_tickets` 及 `DiskMap.grouped_items` 的来源分组和磁盘预算。
+- 历史与答复轮次查看 `history.py::_snapshot`、`_turn_snapshot` 及 `archive_reader.py::session_messages`。排查时分别记录短事务、NAS 读取耗时和 reader pin 释放。
+- 排查未发布来源导致的频繁建连时，检查 `TenantDatabase._admitted_lease`。准入拒绝在连接租约正常归还后抛出，SQL 执行失败继续走连接淘汰逻辑。
+
 ## 会话离线迁移关联锁与旧计划续跑
 
 - 锁入口：`conversation_storage/migration/install_records.py::_lock_associations`；固定 Session → Chat → Turn，参数化 ID 集合按行数与服务器 packet 分块，缺失行保留 None 并由原关系检查拒绝非法引用。
 - 消息声明入口：`migration/importer.py::_session`；长会话每批只锁实际 Chat/Turn，避免全部 Turn × 批次的锁查询。
-- 旧 bundle 续跑：`migration/plan_compatibility.py::retained_plan` 保留原 import_plan 字节；只接受当前精确计划或冻结源映射重建的精确旧版计划，不接受通用锁超集。不能通过覆盖原 bundle 或删除校验修复不匹配。
 - MySQL 锁验收：`tests/integrated/conversation_storage/test_migration_association_locks_mysql.py`；假数据库计数不代表真实 InnoDB 锁验收。
 
 ## 只暂停当前执行批次

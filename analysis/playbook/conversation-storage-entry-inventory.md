@@ -1,3 +1,5 @@
+> 历史文档：bundle 协议及其命令已移除；现行步骤见 [会话元数据迁移](conversation-metadata-migration.md)。
+
 # 会话存储入口审计
 
 2026-11-06 最新[SQL 契约与实施拆解](../../docs/superpowers/specs/2026-11-06-conversation-sql-contract-review.md)给出单来源表 CREATE 草案与列矩阵：Chat 不增加重复 checkpoint source head；publication 的 archive/checkpoint/event 分角色定位，GC 明确区分 bundle/legacy_index。Chat 状态投影需覆盖 reserve/Stop/reject/settling，保留原终态/历史 updated_at 行为。合成 16,385 文件描述约 4.56 MB，仅证明清单增长，不是业务规模或延迟验收；DDL 未执行。
