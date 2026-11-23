@@ -1,5 +1,8 @@
 # 定位路径
 
+## Console 轮次身份
+- 排查两个轮次复用同一 `msgid` 时，检查 `answer_turn/coordinator.py::start_or_attach`。Console 在进入协调器前生成新轮次 ID，协调器持有 Chat 锁时决定挂接当前轮次或使用新 ID 创建轮次。响应头 `X-Swe-Msgid` 使用协调器返回的轮次身份。
+
 ## 会话迁移与历史读取性能
 - 会话元数据迁移、source 准入与回退：参见 [会话元数据迁移](conversation-metadata-migration.md)。
 

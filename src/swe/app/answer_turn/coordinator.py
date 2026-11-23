@@ -34,6 +34,10 @@ class TurnSettlementPendingError(RuntimeError):
     """A terminal turn is waiting for its durable outcome to be retried."""
 
 
+class TurnStoppingError(RuntimeError):
+    """The active turn is stopping and cannot accept new submissions."""
+
+
 @dataclass
 class _TurnState:
     identity: TurnIdentity
@@ -85,7 +89,13 @@ class AnswerTurnCoordinator:
         msgid: str | None = None,
         before_start: Any | None = None,
         defer_producer_start: bool = False,
+        attach_current: bool = False,
     ) -> TurnLease:
+        """Use msgid for a new turn.
+
+        With attach_current, reuse the running turn regardless of the new ID.
+        Otherwise, a supplied msgid must match the running turn.
+        """
         lock = await self._chat_lock(chat_id)
         async with lock:
             state = self._turns.get(chat_id)
@@ -94,7 +104,13 @@ class AnswerTurnCoordinator:
                     f"settlement pending for chat {chat_id}",
                 )
             if state is not None and state.status not in TERMINAL_STATUSES:
-                if msgid is not None and msgid != state.identity.msgid:
+                if attach_current and state.status == TurnStatus.STOPPING:
+                    raise TurnStoppingError("Chat is stopping")
+                if (
+                    not attach_current
+                    and msgid is not None
+                    and msgid != state.identity.msgid
+                ):
                     raise TurnSettlementPendingError(
                         f"different question is busy for chat {chat_id}",
                     )
