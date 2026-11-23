@@ -521,3 +521,75 @@ async def _assert_native_approval_uses_existing_session(
         assert response.json()["chat_id"] == spec.id
     assert service.record_external_submission.await_count == 2
     assert [chat.id for chat in await repo.list_chats()] == [spec.id]
+
+
+@pytest.mark.asyncio
+async def test_resume_repaired_preflight_workspace_keeps_imported_rows(
+    conversation_test_database,
+    tmp_path,
+    monkeypatch,
+):
+    db = conversation_test_database
+    await apply_sql_script(db, SQL_ROOT / "conversation_mysql_metadata.sql")
+    workspaces = [
+        {
+            "scope": ["svc", "tenant", "source", agent],
+            "root": str(tmp_path / agent),
+        }
+        for agent in ("missing", "healthy")
+    ]
+    healthy = tmp_path / "healthy"
+    healthy.mkdir()
+    spec = ChatSpec(session_id="session", user_id="user", channel="console")
+    registry = healthy / "chats.json"
+    original_registry = json.dumps(
+        {"version": 1, "chats": [spec.model_dump(mode="json")]},
+    )
+    registry.write_text(original_registry)
+    manifest = tmp_path / "original.json"
+    metadata.prepare(workspaces, db.config.database, manifest)
+    original = metadata.read_manifest(manifest, db.config.database)
+    report = await metadata.migrate(db, *original, apply=True)
+    assert report["failed"][0]["scope"][-1] == "missing"
+    assert report["published"] == []
+    before = await db.fetch_all("SELECT id FROM swe_conversation_chats")
+    assert len(before) == 1
+
+    (tmp_path / "missing").mkdir()
+    registry.write_text(original_registry + "\n")
+    rejected = tmp_path / "changed-bound-workspace.json"
+    metadata.prepare(workspaces, db.config.database, rejected)
+    report = await metadata.migrate(
+        db,
+        *metadata.read_manifest(rejected, db.config.database),
+        apply=True,
+        resume_from=original,
+    )
+    assert "changes a bound workspace" in report["failed"][0]["detail"]
+
+    registry.write_text(original_registry)
+    repaired = tmp_path / "repaired.json"
+    metadata.prepare(workspaces, db.config.database, repaired)
+    monkeypatch.setattr(
+        "swe.database.config.get_database_config",
+        lambda: db.config,
+    )
+    result = await asyncio.to_thread(
+        CliRunner().invoke,
+        conversation_storage_group,
+        [
+            "migrate",
+            "--manifest",
+            str(repaired),
+            "--resume-from",
+            str(manifest),
+            "--apply",
+        ],
+    )
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert json.loads(result.output)["published"] == [
+        ["svc", "tenant", "source"],
+    ]
+    assert (
+        await db.fetch_all("SELECT id FROM swe_conversation_chats") == before
+    )

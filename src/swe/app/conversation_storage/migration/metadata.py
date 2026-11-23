@@ -212,9 +212,19 @@ def _verify_nas(root, registry, *, full_audit=False):
             ):
                 raise ValueError(f"invalid legacy Session file {session}")
             if full_audit and session.exists():
-                read_session(session, trusted_root=root)
+                _audit_legacy(read_session, session, trusted_root=root)
         if full_audit and dialog.exists():
-            read_archive(dialog, chat.id, trusted_root=root)
+            _audit_legacy(read_archive, dialog, chat.id, trusted_root=root)
+
+
+def _audit_legacy(reader, path, *args, trusted_root):
+    try:
+        reader(path, *args, trusted_root=trusted_root)
+    except (KeyError, IndexError, AttributeError) as error:
+        location = path.joinpath(*args)
+        raise ValueError(
+            f"invalid legacy data at {location}: {error}",
+        ) from error
 
 
 def _frozen_registry(item, scope, root):
@@ -245,6 +255,7 @@ async def migrate(
     *,
     apply,
     full_audit=False,
+    resume_from=None,
 ):
     def by_source(item):
         return tuple(item["scope"][:3])
@@ -263,6 +274,7 @@ async def migrate(
                 workspaces,
                 apply=apply,
                 full_audit=full_audit,
+                resume_from=resume_from,
             )
         except (ConflictError, DataError, SQLIntegrityError) as error:
             failed.append({"source": key, "detail": str(error)})
@@ -294,6 +306,59 @@ def _workspace_failure(item, phase, error):
     }
 
 
+async def _check_resume_bindings(
+    database,
+    source_key,
+    workspaces,
+    row,
+    resume_from,
+):
+    if resume_from is None:
+        raise ConflictError(
+            "source is bound to a different metadata migration",
+        )
+    original, original_digest = resume_from
+    if (row["migration_id"], row["manifest_digest"]) != (
+        original["migration_id"],
+        original_digest,
+    ):
+        raise ConflictError(
+            "resume manifest does not match the source binding",
+        )
+    source = tuple(workspaces[0]["scope"][:3])
+    original_scopes = {
+        tuple(item["scope"])
+        for item in original["workspaces"]
+        if tuple(item["scope"][:3]) == source
+    }
+    if {tuple(item["scope"]) for item in workspaces} != original_scopes:
+        raise ConflictError(
+            "resume manifest changes source workspace membership",
+        )
+    if row["published"]:
+        raise ConflictError(
+            "published source must retain its original manifest",
+        )
+    expected = {
+        WorkspaceScope.from_values(item["scope"]).sql_values[-1]: item
+        for item in workspaces
+    }
+    rows = await database.fetch_all(
+        f"SELECT agent_key,workspace_root,registry_digest FROM {WORKSPACES} WHERE "
+        + SOURCE_PREDICATE,
+        source_key,
+    )
+    for binding in rows:
+        item = expected.get(bytes(binding["agent_key"]))
+        if (
+            item is None
+            or bytes(binding["workspace_root"]) != item["root"].encode()
+            or bytes(binding["registry_digest"]).hex()
+            != item.get("registry_sha256")
+        ):
+            raise ConflictError("resume manifest changes a bound workspace")
+
+
 async def _migrate_source(
     database,
     migration_id,
@@ -302,11 +367,13 @@ async def _migrate_source(
     *,
     apply,
     full_audit,
+    resume_from,
 ):
     source_key = WorkspaceScope.from_values(workspaces[0]["scope"]).sql_values[
         :3
     ]
     row = None
+    replace_binding = False
     if apply:
         row = await database.fetch_one(
             f"SELECT migration_id,manifest_digest,published FROM {SOURCES} WHERE "
@@ -314,14 +381,17 @@ async def _migrate_source(
             source_key,
         )
         if row is not None:
-            if (
-                row["migration_id"] != migration_id
-                or row["manifest_digest"] != digest
-            ):
-                raise ConflictError(
-                    "source is bound to a different metadata migration",
+            original_identity = (row["migration_id"], row["manifest_digest"])
+            replace_binding = original_identity != (migration_id, digest)
+            if replace_binding:
+                await _check_resume_bindings(
+                    database,
+                    source_key,
+                    workspaces,
+                    row,
+                    resume_from,
                 )
-            if row["published"]:
+            elif row["published"]:
                 return "skipped", []
 
     eligible, failures = [], []
@@ -341,6 +411,15 @@ async def _migrate_source(
             "VALUES (%s,%s,%s,%s,%s)",
             (*source_key, migration_id, digest),
         )
+    elif replace_binding:
+        changed = await database.execute(
+            f"UPDATE {SOURCES} SET migration_id=%s,manifest_digest=%s WHERE "
+            + SOURCE_PREDICATE
+            + " AND migration_id=%s AND manifest_digest=%s AND published=0",
+            (migration_id, digest, *source_key, *original_identity),
+        )
+        if changed != 1:
+            raise ConflictError("source binding changed during resume")
     for item in eligible:
         try:
             await _import_workspace(database, item)
@@ -353,12 +432,14 @@ async def _migrate_source(
             failures.append(_workspace_failure(item, "import", error))
     if failures:
         return "failed", failures
-    await database.execute(
+    changed = await database.execute(
         f"UPDATE {SOURCES} SET published=1 WHERE "
         + SOURCE_PREDICATE
         + " AND migration_id=%s AND manifest_digest=%s AND published=0",
         (*source_key, migration_id, digest),
     )
+    if changed != 1:
+        raise ConflictError("source binding changed before publication")
     return "ready", []
 
 

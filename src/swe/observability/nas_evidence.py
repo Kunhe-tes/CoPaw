@@ -7,6 +7,8 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import Any
 
+from agentscope.message import Msg
+
 from .context import current_context
 from .instrumentation import (
     SpanHandle,
@@ -15,7 +17,7 @@ from .instrumentation import (
 )
 
 _pending: ContextVar[
-    dict[tuple[str, str], tuple[SpanHandle, dict[str, Any]]] | None
+    dict[tuple[str, str], tuple[SpanHandle, Msg, dict[str, Any]]] | None
 ] = ContextVar("nas_message_evidence", default=None)
 
 
@@ -67,38 +69,38 @@ def remember_nas_message(chat_id, message):
         return
     if span is None or span._context.business_ref.get("chat_id") != chat_id:
         return
-    reference = nas_reference(message.to_dict())
-    if reference:
-        pending[(chat_id, reference)] = (
-            span,
-            {
-                "chat_id": chat_id,
-                "message_id": message.id,
-                "content_type": kind,
-                "saved_state": state,
-                "reference_id": reference,
-            },
-        )
+    pending[(chat_id, message.id)] = (
+        span,
+        message,
+        {
+            "chat_id": chat_id,
+            "message_id": message.id,
+            "content_type": kind,
+            "saved_state": state,
+        },
+    )
 
 
 def publish_nas_evidence(messages, *, chat_id=None):
     pending = _pending.get()
     if not pending:
         return
-    known = {
-        (attributes["message_id"], key[1]): key
-        for key, (_, attributes) in pending.items()
-        if chat_id is None or key[0] == chat_id
+    keys = {
+        message_id: (candidate_chat, message_id)
+        for candidate_chat, message_id in pending
+        if chat_id is None or candidate_chat == chat_id
     }
-    message_ids = {message_id for message_id, _ in known}
     for message in messages:
-        if (
-            not isinstance(message, dict)
-            or message.get("id") not in message_ids
-        ):
+        if not isinstance(message, dict):
             continue
-        key = known.get((message["id"], nas_reference(message)))
-        candidate = pending.pop(key, None) if key is not None else None
-        if candidate is not None:
-            span, attributes = candidate
-            span.event("evidence.linked", **attributes)
+        key = keys.get(message.get("id"))
+        if key is None or key not in pending:
+            continue
+        span, candidate, attributes = pending[key]
+        reference = nas_reference(message)
+        # The accepted message can be replaced in place by the tool timeout
+        # path before Session or archive persistence completes.
+        if not reference or reference != nas_reference(candidate.to_dict()):
+            continue
+        pending.pop(key)
+        span.event("evidence.linked", **attributes, reference_id=reference)

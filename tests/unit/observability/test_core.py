@@ -1535,7 +1535,15 @@ async def test_nas_evidence_links_only_committed_messages_and_reads_archive(
         )
 
     tool_span, model_span = span(), span()
-    answer = Msg("assistant", "answer", "assistant", invocation_id="response")
+    answer = Msg(
+        "assistant",
+        [
+            {"type": "thinking", "thinking": "private probe"},
+            {"type": "text", "text": "visible answer"},
+        ],
+        "assistant",
+        invocation_id="response",
+    )
     tool = Msg(
         "tool",
         [
@@ -1567,7 +1575,12 @@ async def test_nas_evidence_links_only_committed_messages_and_reads_archive(
                 {"agent": {"memory": {"content": [[answer.to_dict(), []]]}}},
             )
             publish_nas_evidence([answer.to_dict()])
+        tool.content[0]["output"] = [{"type": "text", "text": "final output"}]
         await archive.commit(chat.id, [tool])
+        await archive.commit(
+            chat.id,
+            [Msg("user", f"later {index}", "user") for index in range(501)],
+        )
         publish_nas_evidence([tool.to_dict()], chat_id=chat.id)
 
     workspace = SimpleNamespace(
@@ -1599,6 +1612,13 @@ async def test_nas_evidence_links_only_committed_messages_and_reads_archive(
             reference,
         )
         assert result["status"] == "available"
+        payload = json.dumps(result["message"])
+        if kind == "assistant_answer":
+            assert (
+                "visible answer" in payload and "private probe" not in payload
+            )
+        else:
+            assert "final output" in payload and "saved output" not in payload
         denied = await _nas_message_occurrence(
             workspace,
             request,

@@ -166,3 +166,50 @@ async def test_changed_registry_does_not_reserve_source(tmp_path):
     assert result["status"] == "partial_success"
     assert "changed after preparation" in result["failed"][0]["detail"]
     database.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_full_audit_reports_malformed_archive_and_continues(tmp_path):
+    chat_id = str(uuid4())
+    workspaces = []
+    for source in ("bad", "healthy"):
+        root = tmp_path / source
+        root.mkdir()
+        workspaces.append(
+            {
+                "scope": ["service", "tenant", source, "agent"],
+                "root": str(root),
+            },
+        )
+    root = tmp_path / "bad"
+    (root / "chats.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "chats": [
+                    {
+                        "id": chat_id,
+                        "session_id": "session",
+                        "user_id": "user",
+                        "channel": "console",
+                    },
+                ],
+            },
+        ),
+    )
+    archive = root / "dialog" / chat_id
+    archive.mkdir(parents=True)
+    (archive / "manifest.json").write_text('{"boundaries":[{}]}')
+    manifest = tmp_path / "manifest.json"
+    metadata.prepare(workspaces, "test_schema", manifest)
+    data, digest = metadata.read_manifest(manifest, "test_schema")
+    report = await metadata.migrate(
+        None,
+        data,
+        digest,
+        apply=False,
+        full_audit=True,
+    )
+    assert report["status"] == "partial_success"
+    assert report["validated"] == [("service", "tenant", "healthy")]
+    assert report["failed"][0]["root"] == str(root)

@@ -1641,29 +1641,64 @@ async def _nas_message_occurrence(workspace, request, run, reference):
         if matches(message):
             messages.append(Msg.from_dict(message))
     archive = api._archive_store(workspace)
-    cursor = None
-    if archive is not None and (not exact or not messages):
-        for _ in range(10):
-            page = await archive.read_page(chat_id, before=cursor)
-            messages.extend(
-                msg for msg in page.messages if matches(msg.to_dict())
-            )
-            if not page.has_more or (exact and messages):
-                break
-            cursor = page.next_cursor
-        else:
-            return unavailable
+    limit = 1 if exact else 2
+    if archive is not None and len(messages) < limit:
+        messages.extend(
+            await archive.find_messages(
+                chat_id,
+                lambda message: matches(message.to_dict()),
+                limit=limit - len(messages),
+            ),
+        )
     if not messages or (not exact and len(messages) != 1):
         return unavailable
-    fragments = api._redact_hidden_context_messages(
-        api._history_msg_to_messages(messages[:1], session_id=chat.session_id),
+    payload = _nas_evidence_payload(messages[0], chat.session_id, reference)
+    return (
+        {"status": "available", "message": payload} if payload else unavailable
     )
-    if not fragments:
-        return unavailable
-    return {
-        "status": "available",
-        "message": fragments[0].model_dump(mode="json"),
-    }
+
+
+def _nas_evidence_payload(message, session_id, reference):
+    from agentscope.message import Msg
+
+    from ..app.runner import api
+
+    kind = reference.get("content_type")
+    content = message.content
+    if kind in {"assistant_answer", "tool_output"}:
+        if kind == "assistant_answer" and message.role != "assistant":
+            return None
+        block_type = "text" if kind == "assistant_answer" else "tool_result"
+        if isinstance(content, list):
+            content = [
+                block
+                for block in content
+                if isinstance(block, dict) and block.get("type") == block_type
+            ]
+        elif kind == "tool_output":
+            return None
+        if not content:
+            return None
+        message = Msg.from_dict(
+            {**message.to_dict(), "content": content, "metadata": {}},
+        )
+    elif kind != "user_question" or message.role != "user":
+        return None
+
+    fragments = api._redact_hidden_context_messages(
+        api._history_msg_to_messages([message], session_id=session_id),
+    )
+    expected_type = (
+        "plugin_call_output" if kind == "tool_output" else "message"
+    )
+    return next(
+        (
+            fragment.model_dump(mode="json")
+            for fragment in fragments
+            if fragment.type == expected_type
+        ),
+        None,
+    )
 
 
 async def _load_evidence_item(
@@ -1757,6 +1792,9 @@ async def _load_evidence_item(
         item["truncated"] = True
     payload = result.get("message")
     if result_status == "available":
+        if not isinstance(payload, dict) or payload.get("type") == "reasoning":
+            item["status"] = "unavailable"
+            return item, history, workspace
         _set_evidence_content(
             item,
             payload,

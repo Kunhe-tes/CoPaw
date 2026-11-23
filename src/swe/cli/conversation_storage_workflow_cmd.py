@@ -15,6 +15,7 @@ async def _execute_metadata(
     apply=False,
     destination=None,
     full_audit=False,
+    resume_from=None,
 ):
     from swe.app.conversation_storage.migration import metadata
     from swe.database.config import get_database_config
@@ -30,6 +31,11 @@ async def _execute_metadata(
             apply=False,
             full_audit=full_audit,
         )
+    original = (
+        metadata.read_manifest(resume_from, config.database)
+        if resume_from is not None
+        else None
+    )
     config = config.model_copy(update={"time_zone": "+00:00"})
     control = DatabaseConnection(config)
     database = DatabaseConnection(config)
@@ -56,6 +62,7 @@ async def _execute_metadata(
                 digest,
                 apply=True,
                 full_audit=full_audit,
+                resume_from=original,
             )
     finally:
         try:
@@ -122,7 +129,14 @@ def register_workflow_commands(group):
     )
     @click.option("--apply", is_flag=True)
     @click.option("--full-audit", is_flag=True)
-    def migrate_command(manifest, apply, full_audit):
+    @click.option(
+        "--resume-from",
+        type=click.Path(exists=True, dir_okay=False),
+        help="Previous manifest for the unpublished sources being repaired.",
+    )
+    def migrate_command(manifest, apply, full_audit, resume_from):
+        if resume_from is not None and not apply:
+            raise click.UsageError("--resume-from requires --apply")
         try:
             result = asyncio.run(
                 _execute_metadata(
@@ -130,6 +144,7 @@ def register_workflow_commands(group):
                     manifest,
                     apply=apply,
                     full_audit=full_audit,
+                    resume_from=resume_from,
                 ),
             )
             _echo(result)
