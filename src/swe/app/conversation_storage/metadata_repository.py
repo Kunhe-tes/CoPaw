@@ -17,14 +17,13 @@ from .chat_mutations import (
     install_chat_metadata,
     load_metadata_json,
 )
-from .chat_repository import (
+from .metadata_catalog import (
     CHAT_FROM,
     SELECT_CHAT,
     SELECT_SUMMARY,
     PROJECTED_STATUS,
     STATUS_FROM,
-    SCOPE_WHERE,
-    MySQLChatRepository,
+    MetadataCatalog,
     _utc,
 )
 from .errors import ConflictError, IntegrityError
@@ -72,7 +71,7 @@ def metadata_fields(meta):
     return _json(light), payload
 
 
-class MySQLMetadataRepository(MySQLChatRepository):
+class MySQLMetadataRepository(MetadataCatalog):
     """Reuse SQL directory operations with a workspace row as the write lock."""
 
     deferred_resource_cleanup = False
@@ -103,8 +102,6 @@ class MySQLMetadataRepository(MySQLChatRepository):
             raise ConflictError("Chat workspace publication state changed")
 
     def _spec(self, row, content=None):
-        if row["content_meta_publication_id"] is not None:
-            raise IntegrityError("Chat directory contains a bundle locator")
         try:
             extended = load_metadata_json(
                 row["extended_metadata_text"] or "{}",
@@ -231,9 +228,7 @@ class MySQLMetadataRepository(MySQLChatRepository):
                 turn_id=None,
             ),
             mutation,
-            None,
-            None,
-            (old_session, current, None),
+            (old_session, current),
             target_session=session if rebind else None,
             extended_metadata=extended,
         )
@@ -275,28 +270,33 @@ class MySQLMetadataRepository(MySQLChatRepository):
             return await self.get_chat(chat_id)
 
     async def delete_chats(self, chat_ids, *, expected_chats=None):
+        deleted = []
         async with self.db.transaction():
-            if expected_chats is not None:
-                await self._assert_writes_allowed()
-                for chat_id in set(chat_ids):
-                    current = await self.get_chat(chat_id)
-                    if current is not None and current != expected_chats.get(
-                        chat_id,
-                    ):
-                        raise ConflictError("Chat changed since authorization")
-            deleted = await super().delete_chats(
-                chat_ids,
-                expected_chats=expected_chats,
-            )
-            if deleted:
-                await self.db.execute(
-                    "UPDATE swe_conversation_sessions s JOIN swe_conversation_chats c "
-                    "ON c.id=s.draft_chat_id SET s.draft_chat_id=NULL "
-                    "WHERE s.service_unit_key=%s AND s.tenant_key=%s AND s.source_key=%s "
-                    "AND s.agent_key=%s AND c.deleted_at IS NOT NULL",
-                    self.scope.sql_values,
+            await self._assert_writes_allowed()
+            for chat_id in sorted(set(chat_ids)):
+                try:
+                    _, row = await self._locked_chat(chat_id)
+                except KeyError:
+                    continue
+                if expected_chats is not None and self._spec(
+                    row,
+                ) != expected_chats.get(
+                    chat_id,
+                ):
+                    raise ConflictError("Chat changed since authorization")
+                changed = await self.db.execute(
+                    "UPDATE swe_conversation_chats SET deleted_at=UTC_TIMESTAMP(6), "
+                    "metadata_revision=metadata_revision+1 WHERE id=%s AND deleted_at IS NULL",
+                    (row["id"],),
                 )
-            return deleted
+                if changed:
+                    deleted.append(row["id"])
+                    await self.db.execute(
+                        "UPDATE swe_conversation_sessions SET draft_chat_id=NULL "
+                        "WHERE id=%s AND draft_chat_id=%s",
+                        (row["session_id"], row["id"]),
+                    )
+        return bool(deleted)
 
     async def pending_resource_cleanup(
         self,

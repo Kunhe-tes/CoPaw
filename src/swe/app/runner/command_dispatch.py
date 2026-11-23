@@ -7,7 +7,6 @@ Yields (Msg, last) compatible with query_handler stream.
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
 import logging
 from dataclasses import dataclass
 from typing import AsyncIterator
@@ -228,28 +227,6 @@ def _command_error(text: str, *, prefix: str = "**Error**\n\n") -> Msg:
     )
 
 
-def _bind_command_memory(runner, memory, context, session_execution):
-    workspace = getattr(runner, "_workspace", None)
-    storage = getattr(workspace, "conversation_storage", None)
-    if storage is None:
-        return
-    if session_execution is None or not context.chat_id:
-        raise RuntimeError("Indexed command requires its Session and Chat")
-
-    def root_provider():
-        state = deepcopy(session_execution.state)
-        state.setdefault("agent", {})["memory"] = memory.state_dict()
-        return state
-
-    storage.archive.bind_memory(
-        memory,
-        context.chat_id,
-        session_execution,
-        root_provider,
-        None,
-    )
-
-
 async def _reset_multi_agent_mode(runner, chat_id: str, expected_revision):
     from .expert_binding import ExpertBindingConflict, read_expert_binding
 
@@ -299,7 +276,6 @@ async def _run_conversation_command(
         session_state = await session_execution.read_state()
     memory_state = session_state.get("agent", {}).get("memory", {})
     memory.load_state_dict(memory_state, strict=False)
-    _bind_command_memory(runner, memory, context, session_execution)
 
     expert = _is_expert_conversation(request, runner)
     command = query.strip().split(maxsplit=1)[0]

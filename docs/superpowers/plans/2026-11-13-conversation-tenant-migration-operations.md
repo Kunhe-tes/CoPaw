@@ -1,3 +1,5 @@
+> 历史文档：bundle 协议及其命令已移除；现行步骤见 [会话元数据迁移](../../../analysis/playbook/conversation-metadata-migration.md)。
+
 # 会话迁移：失败租户隔离与正常租户独立上线
 
 本篇是 **显式 `--tenant-isolation` 模式**的操作增补。未使用该选项的全量严格流程仍按 `2026-11-02-conversation-migration-and-launch-runbook.md` 执行。本篇覆盖的部分发布顺序、预览连接数据库、runtime v3 和 schema 准备与旧流程不同，不能混用。设计依据是 `2026-11-13-conversation-tenant-cutover-design.md` 和 ADR 0046。

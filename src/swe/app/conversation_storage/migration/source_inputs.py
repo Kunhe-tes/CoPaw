@@ -1,35 +1,17 @@
 # -*- coding: utf-8 -*-
-"""Explicit conversation inputs, shared by inventory and source fencing."""
+"""Validate selected legacy input paths before auditing them."""
 
 from pathlib import Path
 import os
 import stat
-import uuid
-
-from ..bundle import MAX_BUNDLE_BYTES, MAX_READ_BYTES
-from ..chat_mutations import load_metadata_json
-from .spool import MigrationCapacityError
 
 
 class SourceInputInvalid(ValueError):
-    """Unsafe or malformed tenant source input, distinct from shared failures."""
+    pass
 
 
-def conversation_artifact_limit(
-    path,
-    root,
-    *,
-    sessions_dir="sessions",
-    dialog_dir="dialog",
-):
-    """Use the bundle size limit for message-bearing legacy files."""
-    relative = Path(path).relative_to(Path(root))
-    if any(
-        relative == Path(directory) or relative.is_relative_to(Path(directory))
-        for directory in (sessions_dir, dialog_dir)
-    ):
-        return MAX_BUNDLE_BYTES
-    return MAX_READ_BYTES
+class MigrationCapacityError(ValueError):
+    pass
 
 
 def _relative(value):
@@ -189,72 +171,3 @@ def safe_input_entries(
             if recursive:
                 walk(path)
     return sorted(found)
-
-
-def session_input_roots(
-    root,
-    session_paths=(),
-    *,
-    registry_path="chats.json",
-    sessions_dir="sessions",
-    dialog_dir="dialog",
-    max_session_bytes=MAX_BUNDLE_BYTES,
-):
-    """Fixed conversation entrances plus reviewed Session/ledger overrides."""
-    roots = [registry_path, sessions_dir, dialog_dir]
-    values = (
-        session_paths.values()
-        if isinstance(session_paths, dict)
-        else session_paths
-    )
-    root = Path(root).absolute()
-    for value in values:
-        relative = _relative(value)
-        roots.append(relative)
-        # Validate each component before reading an override outside sessions/.
-        entries = safe_input_entries(root, [relative], recursive=False)
-        path = root / relative
-        if path in entries and not path.is_file():
-            raise SourceInputInvalid(
-                "Session override must name a regular file",
-            )
-        if (
-            path not in entries
-            or not path.is_file()
-            or path.stat().st_size > max_session_bytes
-        ):
-            continue
-        try:
-            state = load_metadata_json(path.read_bytes())
-        except (ValueError, UnicodeError) as error:
-            raise SourceInputInvalid("Session override is invalid") from error
-        if isinstance(state, dict) and state.get("schema_version") == 3:
-            generation = state.get("session_generation")
-            try:
-                valid_generation = (
-                    isinstance(generation, str)
-                    and str(uuid.UUID(generation)) == generation
-                )
-            except ValueError:
-                valid_generation = False
-            if not valid_generation:
-                raise SourceInputInvalid("Invalid session ledger generation")
-            roots.append(relative.parent / ".turn-ledger" / generation)
-    return tuple(roots)
-
-
-def workspace_entries(mapping):
-    return safe_input_entries(
-        mapping.root,
-        session_input_roots(
-            mapping.root,
-            mapping.session_paths,
-            registry_path=mapping.registry_path,
-            sessions_dir=mapping.sessions_dir,
-            dialog_dir=mapping.dialog_dir,
-        ),
-    )
-
-
-def workspace_files(mapping):
-    return [path for path in workspace_entries(mapping) if path.is_file()]

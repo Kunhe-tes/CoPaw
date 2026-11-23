@@ -26,12 +26,9 @@ class ChatSharingService:
         self,
         store: Any,
         snapshot_root: Path,
-        *,
-        conversation_shares=None,
     ):
         self.store = store
         self.snapshot_root = Path(snapshot_root).resolve()
-        self.conversation_shares = conversation_shares
 
     @staticmethod
     def _safe_component(value: str, field: str) -> str:
@@ -73,7 +70,6 @@ class ChatSharingService:
         turn_statuses: dict[str, str],
         creator_id: str,
         tenant_id: str = "default",
-        selection_proof: dict | None = None,
     ) -> ChatShareRecord:
         if not selected_turn_ids:
             raise ValueError("Select at least one answer turn")
@@ -100,19 +96,6 @@ class ChatSharingService:
             chat_name=(chat_name or "分享的会话").strip() or "分享的会话",
             messages=[message.model_dump(mode="json") for message in redacted],
         ).model_dump(mode="json")
-        if self.conversation_shares is not None:
-            return await self.conversation_shares.create_snapshot(
-                chat_id=chat_id,
-                creator_id=creator_id,
-                tenant_id=tenant_id,
-                payload=payload,
-                selected_question_keys=tuple(dict.fromkeys(selected_turn_ids)),
-                **(
-                    {"selection_proof": selection_proof}
-                    if selection_proof is not None
-                    else {}
-                ),
-            )
         tenant_component = self._safe_component(tenant_id, "tenant")
         token = secrets.token_urlsafe(32)
         relative_key = f"{tenant_component}/chat_shares/{token}.json"
@@ -132,8 +115,6 @@ class ChatSharingService:
         return record
 
     async def get_snapshot(self, token: str) -> dict[str, Any]:
-        if self.conversation_shares is not None:
-            return await self.conversation_shares.get_snapshot(token)
         record = await self.store.get(token)
         if record is None:
             raise KeyError("Share not found")

@@ -141,7 +141,6 @@ async def test_metadata_cutover_keeps_nas_as_the_online_content_store(
         await create_chat_service(workspace, None)
         manager = runner.chat_manager
         repo = manager._repo
-        assert runtime.workspace_storage(workspace) is None
         assert await repo.list_chats() == specs
         assert (await repo.list_summaries()).items[0].display_metadata == {
             "task_job_id": "task",
@@ -195,11 +194,6 @@ async def test_metadata_cli_uses_a_published_sql_registry(
 ):
     db = conversation_test_database
     await apply_sql_script(db, SQL_ROOT / "conversation_mysql_metadata.sql")
-    # The fixture creates the full schema for the existing bundle tests.
-    # This case exercises the same schema with only the metadata tables.
-    for suffix in ("turns", "publications", "retentions"):
-        await db.execute(f"DROP TABLE swe_conversation_{suffix}")
-
     from swe.database import config
 
     monkeypatch.setattr(config, "get_database_config", lambda: db.config)

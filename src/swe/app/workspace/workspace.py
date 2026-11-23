@@ -169,16 +169,6 @@ class Workspace:
         from ...config.context import get_current_source_id
 
         self.source_id = get_current_source_id()
-        from ..conversation_storage.runtime import (
-            mysql_authority,
-            workspace_storage,
-        )
-
-        if mysql_authority() and not self.workspace_dir.is_dir():
-            raise ValueError(
-                "conversation storage requires the existing workspace",
-            )
-        self.conversation_storage = workspace_storage(self)
         self._source_system_config_service = source_system_config_service
         self._workflow_config_store = workflow_config_store
         self._continuous_governance_service = continuous_governance_service
@@ -500,10 +490,6 @@ class Workspace:
 
             # 2. Start all services via ServiceManager
             await self._service_manager.start_all()
-            if self.conversation_storage is not None:
-                self.memory_manager.bind_conversation_archive(
-                    self.conversation_storage.archive,
-                )
 
             self._started = True
             self._starting = False

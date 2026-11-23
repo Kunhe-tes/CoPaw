@@ -110,7 +110,6 @@ async def emit_wplus_sop_event(
     )
     from ...app.conversation_storage.runtime import (
         workspace_metadata_repository,
-        workspace_storage,
     )
     from ...app.runner.manager import ChatManager
 
@@ -120,12 +119,7 @@ async def emit_wplus_sop_event(
         tenant_id=tenant_id,
         source_id=source_id,
     )
-    storage = workspace_storage(workspace)
-    repo = (
-        storage.chats
-        if storage is not None
-        else await workspace_metadata_repository(workspace)
-    )
+    repo = await workspace_metadata_repository(workspace)
     chats_path = Path(workspace_dir) / "chats.json"
     if repo is None and chats_path.is_file():
         from ...app.runner.repo.json_repo import JsonChatRepository

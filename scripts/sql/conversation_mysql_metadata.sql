@@ -1,5 +1,5 @@
 -- Apply after the two Session/Chat CREATE statements from conversation_metadata_tables.sql.
--- Dedicated mysql-metadata deployment schema. Existing bundle DDL is independent.
+-- Dedicated mysql-metadata deployment schema.
 ALTER TABLE swe_conversation_sessions
     ADD COLUMN nas_filename VARBINARY(255) NULL,
     ADD UNIQUE KEY uq_conv_nas_filename

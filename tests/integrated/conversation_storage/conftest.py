@@ -13,16 +13,6 @@ import pytest
 from swe.database.config import DatabaseConfig, get_database_config
 from swe.database.connection import DatabaseConnection
 
-TABLES = tuple(
-    "swe_conversation_" + suffix
-    for suffix in (
-        "sessions",
-        "chats",
-        "turns",
-        "publications",
-        "retentions",
-    )
-)
 SQL_ROOT = Path(__file__).resolve().parents[3] / "scripts" / "sql"
 
 

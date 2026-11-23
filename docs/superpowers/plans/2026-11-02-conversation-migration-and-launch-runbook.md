@@ -1,3 +1,5 @@
+> 历史文档：bundle 协议及其命令已移除；现行步骤见 [会话元数据迁移](../../../analysis/playbook/conversation-metadata-migration.md)。
+
 # 会话元数据迁移及上线全流程操作方案
 
 更新日期：2026-11-12。本次以最近 24 小时提交及当前实现核对，工作树：`.worktrees/conversation-mysql-nas`，HEAD `b8c3f853258eaa6d11f5af3392a005f94875e98d`。本次未读取或运行测试，未以其他文档或历史验收数字作为实现依据；保留核对前本文件已有的数据库环境配置说明。

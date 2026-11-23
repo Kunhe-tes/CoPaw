@@ -14,9 +14,9 @@ from ...runner.expert_binding import (
 from ...runner.models import ChatsFile
 from ...runner.session import session_filename
 from ..chat_mutations import load_metadata_json
-from ..chat_repository import _utc
+from ..metadata_catalog import _utc
 from ..errors import ConflictError
-from ..factory import existing_root
+from ..paths import existing_root
 from ..identity import (
     WorkspaceScope,
     SessionIdentity,
@@ -130,7 +130,11 @@ def _write_new_json(path, data):
 def read_manifest(path, schema):
     raw = Path(path).read_bytes()
     data = load_metadata_json(raw)
-    if data.get("mode") != MODE or data.get("version") != 1:
+    if (
+        not isinstance(data, dict)
+        or data.get("mode") != MODE
+        or data.get("version") != 1
+    ):
         raise ValueError("invalid MySQL metadata manifest")
     if (
         data["schema"] != schema
@@ -193,7 +197,9 @@ async def migrate(
     apply,
     full_audit=False,
 ):
-    by_source = lambda item: tuple(item["scope"][:3])
+    def by_source(item):
+        return tuple(item["scope"][:3])
+
     published, skipped, failed = [], [], []
     for key, group in groupby(
         sorted(manifest["workspaces"], key=by_source),

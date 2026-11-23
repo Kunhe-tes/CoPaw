@@ -1,3 +1,5 @@
+> 历史文档：bundle 协议及其命令已移除；现行步骤见 [会话元数据迁移](conversation-metadata-migration.md)。
+
 # 会话元数据入库设计复核
 
 日期：2026-10-29。代码基线：`93aee5b90`，分支

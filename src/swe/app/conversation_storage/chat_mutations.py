@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Typed body-free Chat mutations shared by SQL and content publications."""
+"""Typed Chat metadata mutations."""
 
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 import json
 
-from .runtime_ids import runtime_identity
 from .errors import ConflictError, IntegrityError
 from .identity import chat_key_bytes, identity_bytes
 
@@ -99,7 +98,6 @@ class ChatMetadataInstall:
     metadata_text: str
     created_at: str
     updated_at: str
-    content_meta_block: str | None = None
     expected_metadata_revision: int | None = None
     expert_id: str | None = None
     expert_binding_revision: int = 0
@@ -119,10 +117,6 @@ class ChatMetadataInstall:
         self._validate_optional_fields()
 
     def _validate_optional_fields(self):
-        if self.content_meta_block is not None:
-            identity_bytes(self.content_meta_block, 256)
-            if not self.content_meta_block:
-                raise ValueError("content metadata block must be nonempty")
         if self.expert_id is not None:
             identity_bytes(self.expert_id, 256)
         for value in (
@@ -158,28 +152,17 @@ class ChatMetadataInstall:
             raise ValueError("incomplete Chat metadata mutation") from error
 
 
-def content_locator(plan, row, index):
-    if plan.content_meta_block is None:
-        return None, None, None
-    extent = index.blocks.get(plan.content_meta_block)
-    if extent is None or extent.kind != "content_meta":
-        raise IntegrityError("Chat content metadata block is missing")
-    return row["id"], extent.offset, extent.length
-
-
 async def install_chat_metadata(
     db,
     request,
     plan,
-    publication,
-    index,
     associations,
     *,
     target_session=None,
     extended_metadata=None,
 ):
-    """Caller holds guard (create), Session, Chat, then publication locks."""
-    session, chat, _ = associations
+    """Caller holds the workspace, Session and Chat locks."""
+    session, chat = associations
     if session is None or request.turn_id is not None:
         raise IntegrityError(
             "Chat metadata publication requires a Session and no Turn",
@@ -191,13 +174,11 @@ async def install_chat_metadata(
         "channel_key"
     ] != identity_bytes(plan.channel, 64):
         raise IntegrityError("Chat metadata Session identity mismatch")
-    locator = content_locator(plan, publication, index)
     if request.chat_id is None:
         return await _create_chat(
             db,
             request,
             plan,
-            locator,
             session,
             existing=chat,
             extended_metadata=extended_metadata,
@@ -211,7 +192,6 @@ async def install_chat_metadata(
         db,
         request,
         plan,
-        locator,
         chat,
         target,
         extended_metadata,
@@ -227,9 +207,6 @@ def _validate_rebind(plan, session, target, chat):
             raise ConflictError(
                 "cannot rebind the Session's designated draft Chat",
             )
-        for associated in (session, target):
-            if associated["active_turn_id"] is not None:
-                raise ConflictError("cannot rebind a busy Session")
         if target["id"] != plan.target_session_id:
             raise IntegrityError("target Session identity mismatch")
 
@@ -238,7 +215,6 @@ async def _create_chat(
     db,
     request,
     plan,
-    locator,
     session,
     *,
     existing=None,
@@ -276,10 +252,6 @@ async def _create_chat(
         "metadata_text",
         "expert_id",
         "expert_binding_revision",
-        "content_meta_publication_id",
-        "content_meta_offset",
-        "content_meta_length",
-        "epoch",
         "status",
         "created_at",
         "updated_at",
@@ -300,8 +272,6 @@ async def _create_chat(
             else None
         ),
         plan.expert_binding_revision,
-        *locator,
-        1,
         "idle",
         utc_datetime(plan.created_at),
         utc_datetime(plan.updated_at),
@@ -309,10 +279,6 @@ async def _create_chat(
     if extended_metadata is not None:
         columns += ("extended_metadata_text",)
         values += (extended_metadata,)
-    identity = await runtime_identity(db)
-    if identity is not None:
-        columns = ("id", *columns)
-        values = (identity, *values)
     chat_id = await db.insert(
         f"INSERT INTO swe_conversation_chats ({','.join(columns)}) VALUES ({','.join(['%s'] * len(columns))})",
         values,
@@ -331,7 +297,6 @@ async def _update_chat(
     db,
     request,
     plan,
-    locator,
     chat,
     target,
     extended_metadata=None,
@@ -362,7 +327,6 @@ async def _update_chat(
         "external_session_key=%s,"
         "session_id=%s,user_key=%s,channel_key=%s,"
         "expert_id=%s,expert_binding_revision=%s,"
-        "content_meta_publication_id=%s,content_meta_offset=%s,content_meta_length=%s,"
         "metadata_revision=metadata_revision+1,updated_at=%s"
         + status_sql
         + extension_sql
@@ -376,7 +340,6 @@ async def _update_chat(
             identity_bytes(plan.channel, 64),
             expert_id,
             binding_revision,
-            *locator,
             utc_datetime(plan.updated_at),
             *extension_params,
             request.chat_id,

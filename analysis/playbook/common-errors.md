@@ -1,3 +1,5 @@
+> 会话 bundle 相关旧排查记录仅供历史参考；现行迁移步骤见 [会话元数据迁移](conversation-metadata-migration.md)。
+
 # 常见报错
 
 ## SQL 会话已 completed 但 answer_turn 只有问题
