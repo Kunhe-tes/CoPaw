@@ -6,7 +6,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { DatePicker } from "antd";
+import { DatePicker, Tooltip } from "antd";
 import cx from "classnames";
 import dayjs from "dayjs";
 import type { CronType } from "@/utils/parseCron";
@@ -48,6 +48,11 @@ const MONITORING_PUSH_TIME_LABEL = "督办推送时间";
 const BRANCH_SCENE_SOURCE = "分行自建";
 const HEAD_OFFICE_SCENE_SOURCE = "总行预置";
 const OTHER_SCENE_SOURCE = "其他来源";
+const SCENE_SOURCE_ICONS: Record<string, string> = {
+  [BRANCH_SCENE_SOURCE]: "building",
+  [HEAD_OFFICE_SCENE_SOURCE]: "bank",
+  [OTHER_SCENE_SOURCE]: "layer",
+};
 
 function groupScenesBySource(scenes: Scene[]) {
   const groups = new Map<string, Scene[]>([
@@ -60,7 +65,7 @@ function groupScenesBySource(scenes: Scene[]) {
     const label =
       source === BRANCH_SCENE_SOURCE
         ? BRANCH_SCENE_SOURCE
-        : source === HEAD_OFFICE_SCENE_SOURCE || source === "总行预置"
+        : source === HEAD_OFFICE_SCENE_SOURCE || source === "总部预置"
         ? HEAD_OFFICE_SCENE_SOURCE
         : OTHER_SCENE_SOURCE;
     groups.get(label)!.push(scene);
@@ -192,6 +197,28 @@ function TargetNamesSummary({
         </button>
       )}
     </div>
+  );
+}
+
+function SceneName({ name }: { name: string }) {
+  const nameRef = useRef<HTMLSpanElement>(null);
+  const [open, setOpen] = useState(false);
+
+  return (
+    <Tooltip
+      title={name}
+      open={open}
+      onOpenChange={(visible) => {
+        const element = nameRef.current;
+        setOpen(
+          visible && !!element && element.scrollWidth > element.clientWidth,
+        );
+      }}
+    >
+      <span ref={nameRef} className={styles.sceneName}>
+        {name}
+      </span>
+    </Tooltip>
   );
 }
 
@@ -797,6 +824,7 @@ export default function Create() {
   const navigate = useNavigate();
 
   const [filterCategory, setFilterCategory] = useState("全部");
+  const [sceneSource, setSceneSource] = useState(BRANCH_SCENE_SOURCE);
   const [activeStep, setActiveStep] = useState(0);
 
   const sceneRef = useRef<HTMLElement>(null);
@@ -981,6 +1009,17 @@ export default function Create() {
 
   const visibleScenes = scenesByCategory[filterCode] ?? [];
   const sceneGroups = groupScenesBySource(visibleScenes);
+  const activeSceneGroup =
+    sceneGroups.find((group) => group.label === sceneSource) ?? sceneGroups[0];
+  const alternateSource =
+    activeSceneGroup?.label === BRANCH_SCENE_SOURCE
+      ? HEAD_OFFICE_SCENE_SOURCE
+      : activeSceneGroup?.label === HEAD_OFFICE_SCENE_SOURCE
+      ? BRANCH_SCENE_SOURCE
+      : undefined;
+  const showSourceLink = sceneGroups.some(
+    (group) => group.label === alternateSource,
+  );
   const allScenes = Object.values(scenesByCategory).flat();
   const publishLabel = plansLoaded
     ? editingId
@@ -1072,22 +1111,42 @@ export default function Create() {
                 ))}
               </div>
             </div>
-            <div className={styles.sceneGroups}>
+            <div>
               {scenesLoading && !(filterCode in scenesByCategory) ? (
                 <div className={styles.empty}>场景加载中…</div>
-              ) : visibleScenes.length ? (
-                sceneGroups.map((group) => (
+              ) : activeSceneGroup ? (
+                <div className={styles.sceneBrowser}>
+                  <div
+                    className={styles.sceneSourceNav}
+                    role="group"
+                    aria-label="场景来源"
+                  >
+                    <strong>场景来源</strong>
+                    {sceneGroups.map(({ label, items }) => (
+                      <button
+                        key={label}
+                        type="button"
+                        aria-pressed={label === activeSceneGroup.label}
+                        onClick={() => setSceneSource(label)}
+                      >
+                        <span className={styles.sceneSourceLabel}>
+                          <Icon name={SCENE_SOURCE_ICONS[label]} />
+                          {label}
+                        </span>
+                        <span>{items.length}</span>
+                      </button>
+                    ))}
+                  </div>
                   <section
-                    key={group.label}
-                    aria-label={group.label}
+                    aria-label={activeSceneGroup.label}
                     className={styles.sceneGroup}
                   >
                     <div className={styles.sceneGroupHeading}>
-                      <h4>{group.label}</h4>
-                      <span>{group.items.length} 个场景</span>
+                      <h4>{activeSceneGroup.label}</h4>
+                      <span>{activeSceneGroup.items.length} 个场景</span>
                     </div>
                     <div className={styles.scenes}>
-                      {group.items.map((s) => {
+                      {activeSceneGroup.items.map((s) => {
                         const chosen = draft.items.some((x) => x.id === s.id);
                         return (
                           <button
@@ -1107,14 +1166,15 @@ export default function Create() {
                             </div>
                             <div className={styles.sceneContent}>
                               <div className={styles.sceneTitle}>
-                                {s.name}
+                                <SceneName name={s.name} />
                                 <span className={styles.tag}>{s.category}</span>
                               </div>
                               <SceneDescription description={s.desc} />
                               <span className={styles.status}>
                                 <i className={styles.dot}></i>
                                 AI能力已就绪
-                                {group.label === OTHER_SCENE_SOURCE &&
+                                {activeSceneGroup.label ===
+                                  OTHER_SCENE_SOURCE &&
                                   s.source && (
                                     <span className={styles.muted}>
                                       {" "}
@@ -1127,8 +1187,17 @@ export default function Create() {
                         );
                       })}
                     </div>
+                    {alternateSource && showSourceLink && (
+                      <button
+                        type="button"
+                        className={styles.sceneSourceLink}
+                        onClick={() => setSceneSource(alternateSource)}
+                      >
+                        查看{alternateSource} →
+                      </button>
+                    )}
                   </section>
-                ))
+                </div>
               ) : (
                 <div className={styles.empty}>该产品大类暂无可用经营场景</div>
               )}
