@@ -218,6 +218,7 @@ export default function BatchDetail({
     member_page: 1,
     member_limit: 50,
     member_status: "",
+    subtask_status: "",
     member_role: "",
     member_query: "",
     event_page: 1,
@@ -245,31 +246,32 @@ export default function BatchDetail({
   const detail = useBoardResource(load);
   const data = detail.value;
   const skipped = data?.skipped_members;
-  const skippedTable = skipped?.length ? (
-    <Table
-      size="small"
-      title={() => <strong>入队前跳过 ({skipped.length})</strong>}
-      rowKey={(item) =>
-        JSON.stringify([item.tenant_id, item.agent_id, item.job_id])
-      }
-      columns={skippedColumns}
-      dataSource={skipped}
-      pagination={false}
-      scroll={{ x: 510, y: 160 }}
-      style={{ marginBottom: 8 }}
-    />
-  ) : null;
   const current = data?.batch || batch;
-  const emptyBatchDetail =
-    data &&
-    current.member_count === 0 &&
-    (skippedTable ?? (
-      <Alert
-        type="info"
-        showIcon
-        message={skipped ? "无可执行成员" : "该批次未记录跳过明细"}
-      />
-    ));
+  const emptyBatchDetail = data && current.member_count === 0 && (
+    <Alert
+      type="info"
+      showIcon
+      message={skipped ? "无可执行成员" : "该批次未记录跳过明细"}
+    />
+  );
+  const skippedTab = skipped?.length
+    ? {
+        key: "skipped",
+        label: `入队前跳过 (${skipped.length})`,
+        children: (
+          <Table
+            size="small"
+            rowKey={(item) =>
+              JSON.stringify([item.tenant_id, item.agent_id, item.job_id])
+            }
+            columns={skippedColumns}
+            dataSource={skipped}
+            pagination={false}
+            scroll={{ x: 510, y: 320 }}
+          />
+        ),
+      }
+    : null;
   return (
     <div className={styles.detailContent}>
       <div className={styles.detailHead}>
@@ -343,7 +345,6 @@ export default function BatchDetail({
             label: `执行成员 (${data?.member_total ?? batch.member_count})`,
             children: emptyBatchDetail || (
               <div className={styles.intentTab}>
-                {skippedTable}
                 <div className={styles.intentFilters}>
                   <Input
                     aria-label="筛选新版执行成员"
@@ -398,6 +399,26 @@ export default function BatchDetail({
                       })
                     }
                   />
+                  <Select
+                    aria-label="批次内子任务状态"
+                    value={filters.subtask_status}
+                    options={[
+                      { value: "", label: "全部子任务状态" },
+                      { value: "waiting_subtasks", label: "等待子任务完成" },
+                      { value: "success", label: "子任务成功" },
+                      { value: "error", label: "子任务失败" },
+                      { value: "skipped", label: "子任务已跳过" },
+                      { value: "cancelled", label: "子任务已取消" },
+                      { value: "unconfirmed", label: "子任务状态未确认" },
+                    ]}
+                    onChange={(value) =>
+                      setFilters({
+                        ...filters,
+                        subtask_status: value,
+                        member_page: 1,
+                      })
+                    }
+                  />
                   <strong>{data?.member_total ?? "-"} 条匹配结果</strong>
                 </div>
                 <Table
@@ -439,6 +460,7 @@ export default function BatchDetail({
               </div>
             ),
           },
+          ...(skippedTab ? [skippedTab] : []),
           {
             key: "events",
             label: `调度事件 (${data?.event_total ?? "-"})`,

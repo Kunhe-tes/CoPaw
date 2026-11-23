@@ -105,6 +105,7 @@ export type ManagedFailureFilters = {
   start_time?: string;
   end_time?: string;
   status?: string;
+  child_status?: string;
   query?: string;
 };
 export interface ManagedFailureSummary {
@@ -197,6 +198,20 @@ export interface ManagedWorkerOccupancy {
   items: ManagedWorkerOccupant[];
 }
 
+export interface ManagedWorkerTrendPoint {
+  at: string;
+  total: number;
+  success: number;
+  failed: number;
+  requests: number;
+  retries: number;
+}
+
+export interface ManagedWorkerTrends {
+  bucket_seconds: number;
+  points: ManagedWorkerTrendPoint[];
+}
+
 type Filters = Record<string, string | number | undefined>;
 const MONITOR = "/monitor/cron/managed-dispatch";
 const SCHEDULER = "/scheduler/cron/managed-dispatch/batches";
@@ -258,6 +273,13 @@ export const managedBatchBoard = {
     call<ManagedWorkerOccupancy>(
       source,
       `${MONITOR}/workers/occupants`,
+      filters,
+      signal,
+    ),
+  workerTrends: (source: string, filters: Filters, signal?: AbortSignal) =>
+    call<ManagedWorkerTrends>(
+      source,
+      `${MONITOR}/workers/trends`,
       filters,
       signal,
     ),

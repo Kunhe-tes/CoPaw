@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""新平台普通/批回调入口，校验绑定和执行日期后只登记工作。"""
+"""新平台普通/批回调入口，校验并登记后直接派发普通任务。"""
 
 import base64
 import json
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
+from starlette.background import BackgroundTask
 
 from .managed_cron_management import management_database
 from ..services.cron.managed.contracts import ManagedCronNotFound
@@ -81,7 +82,23 @@ async def accept_callback(request, body, kind, service):
         params = callback_params(body)
         caller = callback_caller(request.headers, params)
         result = await service.accept(caller, params, kind)
-        return JSONResponse(status_code=202, content=result)
+        worker = getattr(request.app.state, "managed_cron_worker", None)
+        dispatch = None
+        if (
+            kind == "ordinary"
+            and worker is not None
+            and result.get("accepted")
+            and result.get("execution_id")
+        ):
+            dispatch = BackgroundTask(
+                worker.dispatcher.dispatch_registered,
+                result["execution_id"],
+            )
+        return JSONResponse(
+            status_code=202,
+            content=result,
+            background=dispatch,
+        )
     except ManagedCronNotFound as exc:
         raise HTTPException(404, "cron_callback_job_not_found") from exc
     except ValueError as exc:

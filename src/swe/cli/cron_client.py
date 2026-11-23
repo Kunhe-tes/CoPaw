@@ -66,8 +66,7 @@ def scheduler_base_url(ctx, override):
 
 
 def scheduler_headers(agent, tenant=None, user=None, source=None):
-    ctx = click.get_current_context(silent=True)
-    options = (ctx.obj or {}) if ctx is not None else {}
+    options = click.get_current_context().obj or {}
     incoming = {
         key.lower(): value
         for key, value in (get_current_passthrough_headers() or {}).items()

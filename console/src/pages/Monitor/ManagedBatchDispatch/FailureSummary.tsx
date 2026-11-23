@@ -14,11 +14,18 @@ interface Props {
 
 function FailureDetails({ source, filters, value }: Omit<Props, "refresh">) {
   const [retry, setRetry] = useState(0);
-  const { start_time, end_time, status, query } = filters;
-  const load = useCallback((signal: AbortSignal) => {
-    void retry;
-    return managedBatchBoard.failureSummary(source, { start_time, end_time, status, query }, signal);
-  }, [source, start_time, end_time, status, query, retry]);
+  const { start_time, end_time, status, child_status, query } = filters;
+  const load = useCallback(
+    (signal: AbortSignal) => {
+      void retry;
+      return managedBatchBoard.failureSummary(
+        source,
+        { start_time, end_time, status, child_status, query },
+        signal,
+      );
+    },
+    [source, start_time, end_time, status, child_status, query, retry],
+  );
   const resource = useBoardResource(load);
   if (resource.loading) return <Spin size="small" aria-label="加载失败明细" />;
   if (resource.error) return <div role="alert">失败明细加载失败 <Button size="small" onClick={() => setRetry(current => current + 1)}>重试查询</Button></div>;
@@ -61,6 +68,14 @@ function FailureCount(props: Props) {
 export default function FailureSummary(props: Props) {
   const { source, filters, refresh } = props;
   // 条件切换卸载旧查询，迟到响应和缓存不能串到下一来源/筛选。
-  const key = JSON.stringify([source, filters.start_time, filters.end_time, filters.status, filters.query, refresh]);
+  const key = JSON.stringify([
+    source,
+    filters.start_time,
+    filters.end_time,
+    filters.status,
+    filters.child_status,
+    filters.query,
+    refresh,
+  ]);
   return <FailureCount key={key} {...props} />;
 }

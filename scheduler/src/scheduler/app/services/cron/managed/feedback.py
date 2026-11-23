@@ -5,7 +5,7 @@ from datetime import timezone
 
 from .executions import RUN_TABLE
 from .operations import IDENTITY_FIELDS
-from .settlement import ExecutionSettlement, PROTOCOL
+from .settlement import ExecutionSettlement, WORKER_RUN
 from .run_accounting import occupied_run_sql
 from .failure_policy import worker_history_join_sql, worker_model_failure_sql
 
@@ -39,7 +39,7 @@ def _scope_filter(scope):
 class ManagedCapacityFeedback:
     def __init__(self, db):
         self.db = db
-        self.settlement = ExecutionSettlement(db)
+        self.settlement = ExecutionSettlement(db, worker_only=True)
 
     async def tick(self):
         return await self.settlement.tick()
@@ -60,7 +60,7 @@ class ManagedCapacityFeedback:
         return await self.db.fetch_all(
             "SELECT DISTINCT r.source_id,r.provider_id,r.model_id "
             f"FROM {RUN_TABLE} r JOIN swe_cron_jobs_v2 d ON {joins} "
-            f"WHERE d.management_owner='scheduler' AND {PROTOCOL} "
+            f"WHERE d.management_owner='scheduler' AND {WORKER_RUN} "
             "AND ((r.status IN ('queued','dispatch_failed') "
             "AND (r.not_before_at IS NULL OR r.not_before_at<=%s)) "
             f"OR {occupied_run_sql('r')}) "
@@ -85,7 +85,7 @@ class ManagedCapacityFeedback:
             "SUM(CASE WHEN r.status='dispatching' THEN 1 ELSE 0 END) AS claimed_count, "
             "SUM(CASE WHEN r.status IN ('accepted','running') OR "
             "(r.status='success' AND r.settled_status IS NULL) THEN 1 ELSE 0 END) AS running_count "
-            f"FROM {RUN_TABLE} r WHERE {PROTOCOL} "
+            f"FROM {RUN_TABLE} r WHERE {WORKER_RUN} "
             f"AND (r.settled_status IS NULL OR r.settled_at>=%s){clause}",
             (now, start, *params),
         )
@@ -122,7 +122,7 @@ class ManagedCapacityFeedback:
         rows = await self.db.fetch_all(
             f"SELECT {', '.join(fields)} FROM {RUN_TABLE} r "
             f"LEFT JOIN swe_cron_executions h ON {worker_history_join_sql()} "
-            f"WHERE {PROTOCOL} AND r.settled_at BETWEEN %s AND %s{unused}{clause}",
+            f"WHERE {WORKER_RUN} AND r.settled_at BETWEEN %s AND %s{unused}{clause}",
             (start, now, *params),
         )
         # 跳过的未开始工作、未知 HTTP 回执不伪装成模型执行失败。

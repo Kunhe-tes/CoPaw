@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """一个热模型池或同任务并发限制不能挡住后面的可运行工作。"""
 
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -67,7 +67,11 @@ async def test_full_hot_pool_does_not_starve_later_model_pool(
     second, _ = await ExecutionStore(db).enqueue(
         caller,
         created["job_id"],
-        ExecutionRequest("manual", "other-model-click"),
+        ExecutionRequest(
+            "batch",
+            "other-model-claim",
+            datetime.now(timezone.utc),
+        ),
     )
     runtime, client = worker(mode_setup, monkeypatch)
     db.conn.execute(
@@ -116,7 +120,7 @@ async def test_concurrency_blocked_head_does_not_hide_other_task_in_same_pool(
         caller,
         busy["job_id"],
         ExecutionRequest(
-            "ordinary",
+            "batch",
             "next-period",
             scheduled_at=utc_now().replace(tzinfo=timezone.utc),
         ),
@@ -214,7 +218,7 @@ async def test_invalid_policy_in_one_scope_does_not_abort_other_scopes(
     healthy, _ = await ExecutionStore(db).enqueue(
         caller,
         created["job_id"],
-        ExecutionRequest("manual", "healthy-click"),
+        ExecutionRequest("batch", "healthy-claim", datetime.now(timezone.utc)),
     )
     runtime, client = worker(mode_setup, monkeypatch, limit=2)
     db.conn.execute(

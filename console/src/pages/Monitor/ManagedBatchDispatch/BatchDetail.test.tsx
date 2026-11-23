@@ -3,6 +3,7 @@ import {
   render,
   screen,
   fireEvent,
+  waitFor,
   within,
 } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
@@ -19,6 +20,46 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+it("当前批次可按异步子任务状态查询成员", async () => {
+  const batch = {
+    batch_id: "batch-ledger",
+    job_id: "parent",
+    member_count: 1,
+    status: "running",
+  } as ManagedBatch;
+  api.detail.mockResolvedValue({
+    batch,
+    members: [],
+    member_total: 0,
+    events: [],
+    event_total: 0,
+  });
+  render(
+    <BatchDetail
+      source="bank"
+      actor="manager"
+      batch={batch}
+      refresh={0}
+      onQueued={() => {}}
+    />,
+  );
+  fireEvent.mouseDown(
+    screen.getByRole("combobox", { name: "批次内子任务状态" }),
+  );
+  fireEvent.click(await screen.findByText("等待子任务完成", { exact: true }));
+  await waitFor(() =>
+    expect(api.detail).toHaveBeenLastCalledWith(
+      "bank",
+      "batch-ledger",
+      expect.objectContaining({
+        subtask_status: "waiting_subtasks",
+        member_page: 1,
+      }),
+      expect.any(AbortSignal),
+    ),
+  );
+});
+
 it.each([
   {
     skipped: [
@@ -31,8 +72,9 @@ it.each([
         reason: "auto_unread_threshold",
       },
     ],
-    text: "未读过多自动暂停",
+    text: "无可执行成员",
   },
+  { skipped: [], text: "无可执行成员" },
   { skipped: null, text: "该批次未记录跳过明细" },
 ])("零执行成员时展示入队前跳过信息 $text", async ({ skipped, text }) => {
   const batch = {
@@ -60,10 +102,64 @@ it.each([
   );
   expect(await screen.findByText(text)).toBeInTheDocument();
   expect(screen.getByRole("tab", { name: "执行成员 (0)" })).toBeInTheDocument();
-  if (skipped) {
-    expect(screen.getByText("保险经营专家")).toBeInTheDocument();
-    expect(screen.getByText("父任务 · alice")).toBeInTheDocument();
+  if (skipped?.length) {
+    fireEvent.click(screen.getByRole("tab", { name: "入队前跳过 (1)" }));
+    const panel = screen.getByRole("tabpanel", { name: "入队前跳过 (1)" });
+    expect(within(panel).getByText("保险经营专家")).toBeInTheDocument();
+    expect(within(panel).getByText("父任务 · alice")).toBeInTheDocument();
+  } else {
+    expect(screen.queryByRole("tab", { name: /入队前跳过/ })).toBeNull();
   }
+});
+
+it("同时有执行成员和跳过成员时，通过独立页签查看跳过明细", async () => {
+  const batch = {
+    batch_id: "mixed-batch",
+    job_id: "parent",
+    member_count: 1,
+    status: "failed",
+  } as ManagedBatch;
+  api.detail.mockResolvedValue({
+    batch,
+    members: [
+      {
+        member_id: "member",
+        member_role: "child",
+        member_order: 0,
+        job_id: "child",
+        job_name: "已执行任务",
+        status: "error",
+        business_attempt: 1,
+        dispatch_priority: {},
+      },
+    ],
+    member_total: 1,
+    skipped_members: [
+      {
+        tenant_id: "alice",
+        agent_id: "default",
+        job_id: "parent",
+        member_role: "parent",
+        reason: "auto_unread_threshold",
+      },
+    ],
+    events: [],
+    event_total: 0,
+  });
+  render(
+    <BatchDetail
+      source="bank"
+      actor="manager"
+      batch={batch}
+      refresh={0}
+      onQueued={() => {}}
+    />,
+  );
+  expect(await screen.findByText("已执行任务")).toBeVisible();
+  expect(screen.queryByText("未读过多自动暂停")).toBeNull();
+  fireEvent.click(screen.getByRole("tab", { name: "入队前跳过 (1)" }));
+  const panel = screen.getByRole("tabpanel", { name: "入队前跳过 (1)" });
+  expect(within(panel).getByText("未读过多自动暂停")).toBeInTheDocument();
 });
 
 it("详情不展示任务数说明行，成员保留子任务状态文案", async () => {

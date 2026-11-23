@@ -261,7 +261,7 @@ async def test_manual_unread_does_not_directly_trigger_automatic_pause(
     monkeypatch.setattr(
         managed_results,
         "resolve_cron_unread_auto_pause_config",
-        lambda _: SimpleNamespace(enabled=True, threshold=1),
+        lambda *_: SimpleNamespace(enabled=True, threshold=1),
     )
     db = execution_setup[0]
     run, _ = await enqueue(execution_setup, kind="manual")
@@ -434,7 +434,7 @@ async def test_auto_pause_writes_only_state_and_never_definition(
     monkeypatch.setattr(
         managed_results,
         "resolve_cron_unread_auto_pause_config",
-        lambda _: SimpleNamespace(enabled=True, threshold=1),
+        lambda *_: SimpleNamespace(enabled=True, threshold=1),
     )
     await ManagedExecutionService(
         managed_results.ExecutionWriter(db),

@@ -6,7 +6,43 @@ from datetime import timedelta
 import pytest
 
 from tests.unit.scheduler.test_managed_cron_executions import execution_setup
-from tests.unit.scheduler.test_managed_cron_settlement import completed
+from tests.unit.scheduler.test_managed_cron_settlement import (
+    completed as settle_fixture,
+)
+
+
+async def completed(execution_setup, async_status=None):
+    return await settle_fixture(execution_setup, async_status, kind="batch")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["ordinary", "manual"])
+async def test_standalone_result_does_not_enter_worker_feedback(
+    execution_setup,
+    kind,
+):
+    from scheduler.app.services.cron.managed.feedback import (
+        ManagedCapacityFeedback,
+    )
+    from scheduler.app.services.cron.managed.operations import utc_now
+    from scheduler.app.services.cron.managed.settlement import (
+        ExecutionSettlement,
+    )
+
+    db, _, _ = execution_setup
+    await settle_fixture(execution_setup, "success", kind=kind)
+    feedback = ManagedCapacityFeedback(db)
+    now = utc_now()
+    assert await feedback.scopes(now_utc=now) == []
+    assert await feedback.tick() == 0
+    assert await ExecutionSettlement(db).tick() == 1
+    value = await feedback.summarize(
+        since=now - timedelta(minutes=1),
+        now_utc=now + timedelta(minutes=1),
+        unused_only=True,
+    )
+    assert value["success_count"] == value["failure_count"] == 0
+    assert value["feedback_samples"] == {"managed_runs": []}
 
 
 @pytest.mark.asyncio
@@ -236,7 +272,7 @@ async def test_one_capacity_controller_merges_old_and_new_feedback_once(
     await ExecutionStore(db).enqueue(
         caller,
         run["job_id"],
-        ExecutionRequest("ordinary", "next", scheduled_at=now),
+        ExecutionRequest("batch", "next", scheduled_at=now),
     )
     legacy = _DispatchStore([])
     legacy.scopes = (

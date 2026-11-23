@@ -19,6 +19,7 @@ from .managed_daily_retry import finalize_daily_history, newer_success_exists
 from .managed_recheck_store import register_recheck
 from ..source_system_config.runtime import (
     get_current_source_system_config,
+    read_cron_unread_auto_pause_branch,
     resolve_cron_unread_auto_pause_config,
 )
 
@@ -225,6 +226,23 @@ class ExecutionWriter:
                 f"SELECT COUNT(*) AS count FROM {TABLE} WHERE {WHERE} AND status='running'",
                 key,
             )
+            if active["count"] and run["kind"] == "ordinary":
+                batch = await self.db.fetch_one(
+                    "SELECT 1 AS member FROM swe_cron_managed_batch_members "
+                    "WHERE source_id=%s AND current_execution_id=%s LIMIT 1",
+                    (run["source_id"], execution_id),
+                )
+                if batch is None:
+                    # 未开始的冲突触发只记执行事件，避免替换已有业务结果。
+                    await self._change(
+                        run,
+                        {
+                            "status": "skipped",
+                            "error_code": "cron_job_running",
+                            "finished_at": utc_now(),
+                        },
+                    )
+                    return None
             if active["count"] >= spec["runtime"]["max_concurrency"]:
                 return None
             now = utc_now()
@@ -306,6 +324,13 @@ class ExecutionWriter:
         if outcome.status not in TERMINAL:
             raise ValueError("invalid_cron_execution_status")
         completed_at = utc_now()
+        bbk_id = None
+        if outcome.status == "success":
+            bbk_id = await read_cron_unread_auto_pause_branch(
+                get_current_source_system_config(),
+                key[0],
+                key[1],
+            )
         calendar_result = None
         if notification_calendar_enabled(outcome):
             observed = await self.get(execution_id, key)
@@ -329,6 +354,7 @@ class ExecutionWriter:
                 outcome,
                 completed_at=completed_at,
                 calendar_result=calendar_result,
+                bbk_id=bbk_id,
             )
         logger.info(
             "执行结果事务已提交 execution_id=%s status=%s",
@@ -345,6 +371,7 @@ class ExecutionWriter:
         *,
         completed_at=None,
         calendar_result=None,
+        bbk_id=None,
     ):
         now = completed_at or utc_now()
         history_id = await _insert_history(
@@ -382,6 +409,7 @@ class ExecutionWriter:
                 outcome,
                 now,
                 bool(definition["enabled"]),
+                bbk_id or definition.get("bbk_id"),
             )
         else:
             await self._release_stale_running(run, outcome)
@@ -457,7 +485,7 @@ class ExecutionWriter:
                 await self._runtime_values(key, outcome),
             )
 
-    async def _result_state(self, run, outcome, now, enabled):
+    async def _result_state(self, run, outcome, now, enabled, bbk_id):
         key = tuple(run[name] for name in KEYS)
         state = await self._state(key)
         latest = await self.db.fetch_one(
@@ -475,6 +503,7 @@ class ExecutionWriter:
                     outcome,
                     now,
                     enabled and run["kind"] != "manual",
+                    bbk_id,
                 ),
             )
             if latest and latest["execution_id"] != run["execution_id"]:
@@ -483,7 +512,7 @@ class ExecutionWriter:
         await self._write_state(key, state, values)
 
     @staticmethod
-    def _success_values(state, outcome, now, allow_auto_pause):
+    def _success_values(state, outcome, now, allow_auto_pause, bbk_id):
         unread = int(state.get("unread_execution_count") or 0) + 1
         values = {
             "has_scheduled_result": 1,
@@ -493,6 +522,7 @@ class ExecutionWriter:
         }
         config = resolve_cron_unread_auto_pause_config(
             get_current_source_system_config(),
+            bbk_id,
         )
         if (
             config.enabled

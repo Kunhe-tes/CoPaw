@@ -18,6 +18,12 @@ export interface ManagedJobPanel {
   kind: "edit" | "broadcast" | "children" | "progress";
   job: ManagedJob;
 }
+export type ManagedJobAction =
+  | "toggle"
+  | "remove"
+  | "run"
+  | "pause"
+  | "runBatch";
 interface ColumnOptions {
   t: TFunction;
   models: { options: ExecutionModelOption[]; tenantDefaultLabel: string };
@@ -25,10 +31,7 @@ interface ColumnOptions {
     success: (text: string) => unknown;
     error: (text: string) => unknown;
   };
-  perform: (
-    kind: "toggle" | "remove" | "run" | "pause",
-    job: ManagedJob,
-  ) => Promise<void>;
+  perform: (kind: ManagedJobAction, job: ManagedJob) => Promise<void>;
   setPanel: (panel: ManagedJobPanel) => void;
   busy: boolean;
 }
@@ -70,6 +73,27 @@ export function createManagedColumns({
                 label: "子任务管理",
                 onClick: () => setPanel({ kind: "children", job }),
               },
+              ...(job.has_distributed_children
+                ? [
+                    {
+                      key: "runBatch",
+                      label: "运行整批",
+                      disabled:
+                        busy ||
+                        job.deleted ||
+                        job.dispatch_state !== "batch_enabled",
+                      onClick: () =>
+                        Modal.confirm({
+                          title: `运行「${job.name}」整批？`,
+                          content:
+                            "符合条件的父任务和分发子任务将按批调度规则入队。",
+                          okText: "运行整批",
+                          cancelText: t("cronJobs.cancelText"),
+                          onOk: () => perform("runBatch", job),
+                        }),
+                    },
+                  ]
+                : []),
               { type: "divider" as const },
             ]
           : []),

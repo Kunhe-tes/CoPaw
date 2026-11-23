@@ -15,6 +15,31 @@ from scheduler.app.services.cron.managed.daily_retry_service import (
 
 
 @pytest.mark.asyncio
+async def test_ordinary_retry_dispatches_after_its_audit_commits(scenario):
+    await scenario.run()
+    dispatched = []
+
+    async def dispatch(execution_id):
+        run = scenario.db.conn.execute(
+            "SELECT kind, status FROM swe_cron_execution_runs WHERE execution_id=?",
+            (execution_id,),
+        ).fetchone()
+        assert tuple(run) == ("ordinary", "queued")
+        call = await retry.calls.get("bank", submitted["call_id"])
+        assert call["status"] == "completed"
+        dispatched.append(execution_id)
+
+    retry = DailyFailureRetry(
+        scenario.db,
+        clock=scenario.clock,
+        dispatch_ordinary=dispatch,
+    )
+    submitted = await retry.calls.submit("bank")
+    assert await retry.tick() == 1
+    assert len(dispatched) == 1
+
+
+@pytest.mark.asyncio
 async def test_recovery_tick_resumes_expired_call(scenario, monkeypatch):
     await scenario.run()
     old = DailyFailureRetry(scenario.db, clock=scenario.clock)

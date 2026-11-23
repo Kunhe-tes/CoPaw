@@ -113,7 +113,15 @@ def like_text(value):
     )
 
 
-def batch_where(source, start=None, end=None, query=None, batch_id=None):
+def batch_where(
+    source,
+    start=None,
+    end=None,
+    query=None,
+    batch_id=None,
+    *,
+    child_status=None,
+):
     clauses = [
         "c.source_id=%s",
         "c.source_id COLLATE utf8mb4_bin=%s",
@@ -129,6 +137,17 @@ def batch_where(source, start=None, end=None, query=None, batch_id=None):
     if batch_id is not None:
         clauses.append("c.batch_id=%s")
         params.append(batch_id)
+    if child_status:
+        clauses.append(
+            f"EXISTS (SELECT 1 FROM {MEMBERS} child JOIN {RUNS} cr "
+            f"ON child.current_execution_id=cr.execution_id AND {identity_join('child', 'cr')} "
+            "WHERE child.batch_id=c.batch_id AND child.source_id=c.source_id "
+            "AND child.source_id COLLATE utf8mb4_bin=c.source_id AND child.member_role='child' "
+            "AND CASE WHEN cr.settled_status='error' THEN 'error' "
+            "WHEN cr.status='success' AND cr.settled_status IS NULL THEN 'waiting_subtasks' "
+            "ELSE cr.status END=%s)",
+        )
+        params.append(child_status)
     if query:
         fields = (
             "c.batch_id",
