@@ -273,11 +273,10 @@ class SessionLifecycleOwner(Protocol):
     ) -> str | None: ...
 
 
-async def get_state_loaded(
+async def restore_session_state(
     owner: SessionLifecycleOwner,
     agent: SWEAgent,
     session_id: str | None,
-    session_state_loaded: bool,
     skip_history: bool | Any,
     user_id: str | None,
     *,
@@ -285,25 +284,25 @@ async def get_state_loaded(
     coerce_user_id: Any,
     session_execution: Any = None,
     retry_state_snapshot: dict[str, Any] | None = None,
-) -> bool:
-    """Restore state once, retaining cron and schema-mismatch behavior."""
+) -> None:
+    """Restore session state, honoring retry snapshots and cron history policy."""
     storage_session_id = coerce_session_id(session_id)
     storage_user_id = coerce_user_id(user_id)
     if retry_state_snapshot is not None:
         agent.load_state_dict(_normalize_state_for_load(retry_state_snapshot))
-        return True
+        return
     if skip_history:
         logger.info(
             "Cron task: skipping session state load (session_id=%s)",
             session_id,
         )
-        return True
+        return
     if session_execution is not None:
         state = await session_execution.read_state()
         agent_state = state.get("agent") if isinstance(state, dict) else None
         if isinstance(agent_state, dict):
             agent.load_state_dict(_normalize_state_for_load(agent_state))
-        return True
+        return
     try:
         await owner.session.load_session_state(
             session_id=storage_session_id,
@@ -316,7 +315,6 @@ async def get_state_loaded(
             "will save fresh state on completion to recover file",
             exc,
         )
-    return True
 
 
 async def save_job_session_state(

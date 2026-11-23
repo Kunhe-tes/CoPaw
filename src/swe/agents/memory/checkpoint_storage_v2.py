@@ -153,18 +153,20 @@ class CheckpointStorageV2:
                 bool(value["active_count"]) != bool(value["committed_bytes"])
             ):
                 raise ValueError("invalid active segment size")
-            for key in ("checkpoint", "manifest", "evidence", "epochs"):
-                if not isinstance(value[key], dict):
-                    raise ValueError("invalid metadata reference")
-            if value["previous_epoch"] is not None and not isinstance(
-                value["previous_epoch"],
-                dict,
-            ):
-                raise ValueError("invalid epoch reference")
+            self._validate_head_references(value)
             return value
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
             self.quarantine("invalid-root")
             raise ValueError("Checkpoint journal root is invalid") from exc
+
+    @staticmethod
+    def _validate_head_references(value: dict[str, Any]) -> None:
+        for key in ("checkpoint", "manifest", "evidence", "epochs"):
+            if not isinstance(value[key], dict):
+                raise ValueError("invalid metadata reference")
+        previous = value["previous_epoch"]
+        if previous is not None and not isinstance(previous, dict):
+            raise ValueError("invalid epoch reference")
 
     def _object(self, value: Any) -> dict[str, Any]:
         payload = canonical_bytes(value)
