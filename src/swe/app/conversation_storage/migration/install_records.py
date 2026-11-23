@@ -640,17 +640,25 @@ class OfflineImportStore(PublicationStore):
                 expected_length=row["byte_length"],
             ) as reader:
                 extents = []
+                matched = []
                 for block in blocks:
                     extent = reader.index.blocks.get(block.name)
+                    if (
+                        extent is None
+                        and block.name == block.kind == "message_body_hashes"
+                        and "recovery" in reader.index.blocks
+                    ):
+                        continue
                     if extent is None or extent.kind != block.kind:
                         raise IntegrityError(
                             "original migration bundle block identity differs",
                         )
                     extents.append(extent)
-                return reader.index, reader.read_extents(extents)
+                    matched.append(block)
+                return reader.index, matched, reader.read_extents(extents)
 
-        index, bodies = await self._nas_io(operation, read_blocks)
-        for block, raw in zip(blocks, bodies):
+        index, matched, bodies = await self._nas_io(operation, read_blocks)
+        for block, raw in zip(matched, bodies):
             if raw != block.content:
                 if block.kind != "recovery" or not await self._same_recovery(
                     row,

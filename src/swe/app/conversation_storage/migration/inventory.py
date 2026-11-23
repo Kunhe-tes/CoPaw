@@ -102,10 +102,39 @@ def _sessions(
         for index, chat in enumerate(chats)
     ]
     known = {(user, channel, sid) for user, channel, sid, _ in candidates}
-    if not chats_authoritative:
-        candidates.extend(
-            (*key, None) for key in mapping.session_paths if key not in known
+    # The Zhaohu channel stores its active pointer through runner.session,
+    # which is the console-bound adapter once SQL becomes authoritative.
+    active_pointers = set()
+    if chats_authoritative:
+        users = {chat.user_id for chat in chats if chat.channel == "zhaohu"}
+        users.update(
+            user
+            for user, channel, sid in mapping.session_paths
+            if channel == "console" and sid == f"zhaohu:active:{user}"
         )
+        for user in sorted(users):
+            sid = f"zhaohu:active:{user}"
+            key = user, "console", sid
+            identity = SessionIdentity(mapping.scope, *key)
+            if (
+                key in mapping.session_paths
+                or mapping.session_path(identity).exists()
+            ):
+                active_pointers.add(key)
+    candidates.extend(
+        (*key, None)
+        for key in (
+            sorted(active_pointers)
+            if chats_authoritative
+            else mapping.session_paths
+        )
+        if key not in known
+    )
+    chats_by_session = (
+        {(chat.user_id, chat.channel, chat.session_id): chat for chat in chats}
+        if active_pointers
+        else {}
+    )
     for user_id, channel, session_id, index in candidates:
         identity = SessionIdentity(
             mapping.scope,
@@ -145,12 +174,30 @@ def _sessions(
             "chat_positions": [index] if index is not None else [],
         }
         grouped[key] = record
+        if (user_id, channel, session_id) in active_pointers:
+            record["zhaohu_active_pointer"] = True
         try:
             record["legacy"] = read_session(
                 path,
                 trusted_root=mapping.root if chats_authoritative else None,
                 allow_in_root_symlinks=chats_authoritative,
             )
+            if record.get("zhaohu_active_pointer"):
+                state = record["legacy"]["state"]
+                target = state.get("active_session_id", "")
+                if not isinstance(target, str):
+                    raise ValueError("invalid Zhaohu active Session pointer")
+                if (
+                    target
+                    and (user_id, "zhaohu", target) not in chats_by_session
+                    and any(
+                        other_sid == target
+                        for _, _, other_sid in chats_by_session
+                    )
+                ):
+                    raise ValueError(
+                        "Zhaohu active Session pointer ownership differs",
+                    )
         except (OSError, ValueError, KeyError, TypeError) as error:
             _block(report, "session_invalid", record["position"], error)
         result.append(record)
@@ -163,6 +210,23 @@ def _sessions(
                 str(path.relative_to(Path(mapping.root).resolve())),
             )
     return result
+
+
+def verify_active_session_pointers(inventory):
+    for workspace in inventory["workspaces"]:
+        for session in workspace["sessions"]:
+            if not session.get("zhaohu_active_pointer"):
+                continue
+            root = Path(workspace["root"])
+            current = read_session(
+                root / session["path"],
+                trusted_root=root,
+                allow_in_root_symlinks=True,
+            )
+            if current != session["legacy"]:
+                raise SourceInputInvalid(
+                    "Zhaohu active Session changed during migration",
+                )
 
 
 def _unmapped_session_files(mapping, files, mapped_paths, sessions):

@@ -75,7 +75,7 @@ def skipped(path):
 def published_pruning(data, published):
     roots = set()
     for service in data["services"]:
-        base = Path(service["source_root"])
+        base = Path(service.get("config_root") or service["source_root"])
         owners = {}
         candidates = list(data["workspaces"]) + list(data.get("tenants", []))
         for workspace in candidates:

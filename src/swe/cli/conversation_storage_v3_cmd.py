@@ -520,8 +520,8 @@ def run_v3_command(
         raise ValueError("workers and io-workers must be between 1 and 32")
     if not 128 <= memory_budget_mib <= 65536:
         raise ValueError("memory budget must be between 128 and 65536 MiB")
-    if full_audit and operation != "verify":
-        raise ValueError("--full-audit is only valid with verify")
+    if full_audit and operation not in ("verify", "migrate"):
+        raise ValueError("--full-audit is only valid with verify or migrate")
     verification_level = "full" if full_audit else "fast"
     manifest = V3Manifest.load(manifest_path)
     output = None

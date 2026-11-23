@@ -32,6 +32,59 @@ def _root(tmp_path):
     return root
 
 
+async def test_chat_authoritative_inventory_keeps_zhaohu_active_pointer(
+    tmp_path,
+):
+    from swe.app.conversation_storage.migration.inventory import (
+        _workspace,
+        verify_active_session_pointers,
+    )
+    from swe.app.conversation_storage.migration.source_inputs import (
+        SourceInputInvalid,
+    )
+
+    root = _root(tmp_path)
+    session = SafeJSONSession(str(root / "sessions"))
+    sid = "zhaohu:active:alice"
+    await session.update_session_state(
+        sid,
+        "active_session_id",
+        "zhaohu:callback:alice:4",
+        user_id="alice",
+    )
+    path = next((root / "sessions").glob("*.json"))
+    report = {"blockers": [], "files": []}
+    item = _workspace(
+        _mapping(
+            root,
+            session_paths={
+                ("alice", "console", sid): str(path.relative_to(root)),
+            },
+        ),
+        report,
+        0,
+        chats_authoritative=True,
+    )
+    assert report["blockers"] == []
+    (pointer,) = item["sessions"]
+    assert pointer["identity"][-3:] == ["alice", "console", sid]
+    assert (
+        pointer["legacy"]["state"]["active_session_id"]
+        == "zhaohu:callback:alice:4"
+    )
+    assert pointer["path"] in {entry["path"] for entry in report["files"]}
+    captured = {"workspaces": [item]}
+    verify_active_session_pointers(captured)
+    await session.update_session_state(
+        sid,
+        "active_session_id",
+        "zhaohu:callback:alice:5",
+        user_id="alice",
+    )
+    with pytest.raises(SourceInputInvalid, match="changed during migration"):
+        verify_active_session_pointers(captured)
+
+
 @pytest.mark.parametrize(
     "relative",
     [

@@ -174,13 +174,14 @@ def map_tenant_calls(items, function, *, workers=4, io_workers=4):
 
 def _source_configs(service):
     from .discovery import _identity, _is_default_scope_encoding
+    from .in_place_review import skipped
 
     root = Path(service["config_root"])
     from .failure_scope import config_candidates
 
     candidates = config_candidates(root)
     for path in candidates:
-        if path == root / "config.json":
+        if path == root / "config.json" or skipped(path):
             continue
         component = path.parent.relative_to(root).parts[0]
         if _is_default_scope_encoding(component):

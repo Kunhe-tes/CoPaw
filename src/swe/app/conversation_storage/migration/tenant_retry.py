@@ -576,6 +576,10 @@ def _discover_review(
     from .tenant_inputs import retained_input_digests
 
     in_place = manifest.data.get("in_place", False)
+    prune_published = (
+        in_place
+        or manifest.data.get("source_binding_storage") == "manifest-v1"
+    )
     published_positions = {
         item["position"]
         for item in manifest.data["workspaces"]
@@ -583,7 +587,7 @@ def _discover_review(
     }
     context = (
         published_pruning(manifest.data, published)
-        if in_place
+        if prune_published
         else nullcontext()
     )
     with context, retained_input_digests(manifest.data, published):
@@ -596,7 +600,7 @@ def _discover_review(
                 if old_owners.get(s["token"]) not in published
             ]
         overrides = reviewed_report.get("overrides", [])
-        if in_place:
+        if prune_published:
             overrides = [
                 entry
                 for entry in overrides
@@ -609,6 +613,8 @@ def _discover_review(
             tenant_isolation=True,
             source_isolation=manifest.data.get("source_isolation", False),
             in_place=in_place,
+            source_binding_storage=manifest.data.get("source_binding_storage"),
+            freshness_protocol=manifest.data.get("freshness_protocol"),
             semantic_validator=_review_validator(
                 manifest,
                 published,
@@ -616,7 +622,7 @@ def _discover_review(
                 semantic_validator,
             ),
         )
-    if in_place:
+    if prune_published:
         for field in ("workspaces", "shares", "tenants"):
             result[field].extend(
                 item
@@ -634,7 +640,8 @@ def _discover_review(
             for entry in manifest.data.get("overrides", [])
             if entry.get("position") in published_positions
         )
-        _review_boundaries(result, published, manifest.data)
+        if in_place:
+            _review_boundaries(result, published, manifest.data)
     return result
 
 
@@ -805,6 +812,33 @@ async def _review_owners(db, manifest, eligible):
     return published, preserved
 
 
+def _reviewed_source_evidence(report, preserved):
+    keys = {_key(item) for item in report["tenants"]} - preserved
+    return {
+        key: (
+            _without_counts(_evidence(report, key)),
+            next(
+                item["state"]
+                for item in report["tenants"]
+                if _key(item) == key
+            ),
+        )
+        for key in keys
+    }
+
+
+def _validate_published_review(manifest, reviewed_report, published):
+    if manifest.data.get("source_binding_storage") == "manifest-v1":
+        for workspace in reviewed_report.get("workspaces", []):
+            key = _key(workspace)
+            if key in published and _without_counts(workspace) not in [
+                _without_counts(item)
+                for item in manifest.data["workspaces"]
+                if _key(item) == key
+            ]:
+                raise ValueError("published tenant metadata cannot change")
+
+
 async def _review_retry(
     db,
     manifest,
@@ -819,6 +853,7 @@ async def _review_retry(
     if _pending(manifest).exists():
         raise ValueError("pending tenant review must be recovered first")
     published, preserved = await _review_owners(db, manifest, eligible)
+    _validate_published_review(manifest, reviewed_report, published)
 
     arguments = (manifest, reviewed_report, preserved)
     if eligible is not None:
@@ -834,7 +869,12 @@ async def _review_retry(
     if (
         eligible is None
         and not manifest.data.get("in_place")
-        and current != reviewed_report
+        and (
+            _reviewed_source_evidence(current, preserved)
+            != _reviewed_source_evidence(reviewed_report, preserved)
+            if manifest.data.get("source_binding_storage") == "manifest-v1"
+            else current != reviewed_report
+        )
     ):
         raise ValueError(
             "review report differs from current complete discovery",
@@ -1013,6 +1053,9 @@ async def _commit_review(
             "version": 1,
             "migration_id": manifest.migration_id,
             "revision": revision,
+            "old_revision": json.loads(job["verification_text"] or "{}").get(
+                "tenant_review_revision",
+            ),
             "files": files,
             "old_source": old_source,
             "new_source": new_source,
@@ -1100,9 +1143,11 @@ async def _recover_pending_review(db, manifest):
             == pending["revision"]
         ):
             outcome = "new"
-        elif (
-            job["source_binding_text"] == pending["old_source"]
-            and verification.get("tenant_review_revision")
+        elif job["source_binding_text"] == pending["old_source"] and (
+            verification.get("tenant_review_revision")
+            == pending["old_revision"]
+            if "old_revision" in pending
+            else verification.get("tenant_review_revision")
             != pending["revision"]
         ):
             outcome = "old"
@@ -1142,10 +1187,9 @@ async def _recover_pending_review(db, manifest):
             raise ValueError("tenant review snapshot evidence differs")
         # A revision may repair either pre/post-commit manifest, never overwrite
         # unrelated later edits or a manifest belonging to another revision.
-        if _source(manifest.data) not in (
-            pending["old_source"],
-            pending["new_source"],
-        ):
+        if _digest(manifest.data) not in {
+            entry["sha256"] for entry in pending["files"].values()
+        }:
             raise ValueError("tenant review local manifest diverged")
         manifest.data = restored.data
         manifest._persist()

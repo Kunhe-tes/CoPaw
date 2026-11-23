@@ -1152,7 +1152,16 @@ def _message_batch_inputs(tmp_path, batches, *, substitute_body=False):
             BundleBlock(
                 "recovery",
                 "recovery",
-                json.dumps({"message_directory": recovery_directory}).encode(),
+                json.dumps(
+                    {
+                        "format": "swe-recovery-projection",
+                        "version": 1,
+                        "state": {},
+                        "lists": [],
+                        "turns": [],
+                        "message_directory": recovery_directory,
+                    },
+                ).encode(),
             ),
             BundleBlock(
                 "message_body_hashes",
@@ -1225,7 +1234,7 @@ def _message_batch_inputs(tmp_path, batches, *, substitute_body=False):
     return Database(), bundles, manifest
 
 
-async def _run_fast_message_batches(database, bundles, manifest):
+async def _run_fast_message_batches(database, bundles, manifest, **options):
     async with MigrationIO(2) as io:
         return await verify_fast_publications(
             database,
@@ -1238,7 +1247,66 @@ async def _run_fast_message_batches(database, bundles, manifest):
             io=io,
             io_workers=2,
             memory_bytes=16 * 1024 * 1024,
+            **options,
         )
+
+
+@pytest.mark.parametrize("damage", [None, "format", "body"])
+async def test_fast_legacy_bundle_requires_matching_frozen_bodies(
+    tmp_path,
+    monkeypatch,
+    damage,
+):
+    from hashlib import sha256
+    from swe.app.conversation_storage.message_bundle import encode_message_body
+
+    publish = BundleStore.publish
+    expected = []
+
+    def without_hashes(store, key, blocks, **kwargs):
+        retained = []
+        for block in blocks:
+            if block.name == "message_body_hashes":
+                expected.extend(json.loads(block.content))
+                continue
+            if damage == "format" and block.name == "recovery":
+                envelope = json.loads(block.content)
+                del envelope["format"]
+                block = BundleBlock(
+                    block.name,
+                    block.kind,
+                    json.dumps(envelope).encode(),
+                )
+            retained.append(block)
+        return publish(store, key, retained, **kwargs)
+
+    monkeypatch.setattr(BundleStore, "publish", without_hashes)
+    batches = {
+        "session/messages:0": [
+            {"sequence": 1, "source_occurrence": 0, "source_occurrence_no": 0},
+        ],
+    }
+    database, bundles, manifest = _message_batch_inputs(tmp_path, batches)
+    if damage == "body":
+        expected[:] = [
+            sha256(encode_message_body({"id": "different"})).hexdigest(),
+        ]
+    verify = _run_fast_message_batches(
+        database,
+        bundles,
+        manifest,
+        frozen_hashes=lambda _: expected,
+    )
+    if damage:
+        with pytest.raises(
+            IntegrityError,
+            match="projection envelope|batch body differs",
+        ):
+            await verify
+    else:
+        assert (await verify)["publications"] == 2
+        with pytest.raises(IntegrityError, match="frozen source evidence"):
+            await _run_fast_message_batches(database, bundles, manifest)
 
 
 async def test_fast_session_message_batches_accept_global_occurrences(

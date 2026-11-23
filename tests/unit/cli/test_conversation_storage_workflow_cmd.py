@@ -220,10 +220,13 @@ def test_migrate_forwards_resources_without_splitting_workflow(
         "--memory-budget-mib",
         "256",
     ] + (["--apply"] if apply else [])
+    if apply:
+        args.append("--full-audit")
     result = CliRunner().invoke(command(), args)
     assert result.exit_code == 0, result.output
     assert execute.call_args.args == ("migrate", str(inputs["manifest"]))
     assert execute.call_args.kwargs["apply"] is apply
+    assert execute.call_args.kwargs["full_audit"] is apply
     assert execute.call_args.kwargs["workers"] == 3
     assert execute.call_args.kwargs["io_workers"] == 2
     assert execute.call_args.kwargs["memory_budget_mib"] == 256

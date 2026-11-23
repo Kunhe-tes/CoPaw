@@ -1,5 +1,7 @@
 # Conversation MySQL/NAS 离线切换
 
+`migrate --apply --full-audit` 在来源发布前先做快速校验，再执行完整语义审计。单独运行 `verify --full-audit` 时，查看报告的 `full_audit.executed`、`passed` 和 `skipped`；有未覆盖来源时退出码为 2。已发布来源的历史完整审计摘要可出现在 `previous_full_audit`。重审中断后，下一次带 `--apply` 的命令在作业锁内对账待恢复修订。招乎的活动指针使用 SQL 的 Console Session 身份，业务目标仍按招乎 Chat 的用户和来源匹配。[功能修复方案](../../docs/superpowers/specs/2026-11-23-conversation-migration-correctness-followup.md)
+
 ## 当前迁移入口
 
 新版会话存储使用 Chat、Session、Turn、Publication 和 Retention 五张 MySQL 元数据表。恢复快照和归档 bundle 保存在 NAS；消息正文、顺序、可见性及重复消息 ID 的出现位置由 bundle 记录。备份与回收沿发布指针和依赖记录追踪文件。

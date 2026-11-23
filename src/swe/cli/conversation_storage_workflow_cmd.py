@@ -135,6 +135,7 @@ def register_workflow_commands(group):
         type=click.Path(exists=True, dir_okay=False),
     )
     @click.option("--apply", is_flag=True)
+    @click.option("--full-audit", is_flag=True)
     def migrate_command(manifest, **options):
         try:
             run_v3_and_echo("migrate", manifest, **options)

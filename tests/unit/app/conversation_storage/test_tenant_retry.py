@@ -83,11 +83,13 @@ async def test_review_excludes_old_share_publications_for_new_manifests():
 
 @pytest.mark.parametrize("outcome", ["old", "new", "unknown"])
 @pytest.mark.parametrize("new_state", ["discovered", "failed"])
+@pytest.mark.parametrize("shared_binding", [False, True])
 async def test_recovery_requires_matching_sql_evidence_and_retains_unknown(
     tmp_path,
     monkeypatch,
     outcome,
     new_state,
+    shared_binding,
 ):
     old, new = {"migration_id": JOB, "version": 3, "source": "old"}, {
         "migration_id": JOB,
@@ -103,6 +105,8 @@ async def test_recovery_requires_matching_sql_evidence_and_retains_unknown(
             "reason": retry._REVIEW_REASONS["tenant_boundary_invalid"],
         },
     ]
+    if shared_binding:
+        new["source"] = old["source"]
     monkeypatch.setattr(retry, "_source", lambda data: data["source"])
     snapshots = {}
     for label, data in (("old", old), ("new", new)):
@@ -118,8 +122,8 @@ async def test_recovery_requires_matching_sql_evidence_and_retains_unknown(
     pending = {
         "migration_id": JOB,
         "revision": "revision",
-        "old_source": "old",
-        "new_source": "new",
+        "old_source": old["source"],
+        "new_source": new["source"],
         "files": snapshots,
         "tenants": [
             {
@@ -132,6 +136,8 @@ async def test_recovery_requires_matching_sql_evidence_and_retains_unknown(
             },
         ],
     }
+    if shared_binding:
+        pending["old_revision"] = "previous"
     retry._write(retry._pending(manifest), pending)
 
     @asynccontextmanager
@@ -141,12 +147,20 @@ async def test_recovery_requires_matching_sql_evidence_and_retains_unknown(
     async def fetch(query, params):
         if "migration_jobs" in query:
             return {
-                "source_binding_text": outcome,
+                "source_binding_text": (
+                    old["source"] if shared_binding else outcome
+                ),
                 "verification_text": json.dumps(
                     (
                         {"tenant_review_revision": "revision"}
                         if outcome == "new"
-                        else {}
+                        else {
+                            "tenant_review_revision": (
+                                "previous"
+                                if outcome == "old"
+                                else "unexpected"
+                            ),
+                        }
                     ),
                 ),
             }
@@ -174,7 +188,7 @@ async def test_recovery_requires_matching_sql_evidence_and_retains_unknown(
         assert recovered["failures"] == (
             new["tenant_review_failures"] if outcome == "new" else []
         )
-        assert manifest.data["source"] == outcome
+        assert manifest.data == (new if outcome == "new" else old)
         assert not retry._pending(manifest).exists()
         assert list(tmp_path.glob("*.audit.json"))
 
@@ -427,9 +441,12 @@ def test_retention_and_share_tickets_have_explicit_verified_owners():
         retry._ticket_owner(share)
 
 
+@pytest.mark.parametrize("manifest_binding", [False, True])
+# pylint: disable-next=too-many-statements
 async def test_in_place_review_repairs_b_without_reading_live_a(
     tmp_path,
     monkeypatch,
+    manifest_binding,
 ):
     from pathlib import Path
     from swe.app.conversation_storage.migration.discovery import (
@@ -468,15 +485,35 @@ async def test_in_place_review_repairs_b_without_reading_live_a(
     for path in root.rglob("*"):
         path.chmod(0o555 if path.is_dir() else 0o444)
     root.chmod(0o555)
+    runtime = root
+    if manifest_binding:
+        runtime = tmp_path / "runtime"
+        runtime.mkdir()
     service = {
         "service_unit_id": "svc",
         "source_root": str(root),
         "config_root": str(root),
         "snapshot_root": str(root),
-        "original_root": str(root),
+        "original_root": str(runtime),
         "nas_root": str(nas),
     }
-    report = discover_services([service], tenant_isolation=True, in_place=True)
+    options = {
+        "tenant_isolation": True,
+        "in_place": not manifest_binding,
+        "source_isolation": manifest_binding,
+        "source_binding_storage": "manifest-v1" if manifest_binding else None,
+        "semantic_inventory": not manifest_binding,
+    }
+    if manifest_binding:
+        for tenant, config in configs.items():
+            config.chmod(0o644)
+            if tenant == "alice":
+                config.write_text(
+                    config.read_text().replace(str(root), str(runtime)),
+                )
+            config.chmod(0o444)
+        good_b = good_b.replace(str(root), str(runtime))
+    report = discover_services([service], **options)
     data = {
         **report,
         "migration_id": JOB,
@@ -500,12 +537,16 @@ async def test_in_place_review_repairs_b_without_reading_live_a(
         "tenant_id": "alice",
         "reason": "reviewed exceptional session path",
     }
-    data["overrides"] = report["overrides"] = [published_override]
+    if not manifest_binding:
+        data["overrides"] = report["overrides"] = [published_override]
     for tenant in ("alice", "bob"):
         configs[tenant].chmod(0o644)
-    configs["alice"].write_text("live mutated config cannot be parsed")
+    if not manifest_binding:
+        configs["alice"].write_text("live mutated config cannot be parsed")
     configs["bob"].write_text(good_b)
     configs["bob"].chmod(0o444)
+    if manifest_binding:
+        report = discover_services([service], **options)
     original_read = Path.read_bytes
 
     def forbid_a(path):
@@ -520,10 +561,13 @@ async def test_in_place_review_repairs_b_without_reading_live_a(
         migration_id=JOB,
     )
 
-    async def get(_self, service, tenant, **kwargs):
+    async def get(_self, service, tenant, *args, **kwargs):
         return {"state": "published" if tenant == "alice" else "failed"}
 
     monkeypatch.setattr(retry.TenantState, "get", get)
+    from swe.app.conversation_storage.migration.source_state import SourceState
+
+    monkeypatch.setattr(SourceState, "get", get)
     monkeypatch.setattr(retry, "_no_data", AsyncMock())
     committed = AsyncMock()
     monkeypatch.setattr(retry, "_commit_review", committed)
@@ -540,16 +584,20 @@ async def test_in_place_review_repairs_b_without_reading_live_a(
         ]
         == "discovered"
     )
-    assert new_data["overrides"] == [published_override]
-    assert retry._evidence(new_data, ("svc", "alice")) == retry._evidence(
-        data,
-        ("svc", "alice"),
+    assert new_data["overrides"] == (
+        [] if manifest_binding else [published_override]
     )
+    assert [
+        w for w in new_data["workspaces"] if w["tenant_id"] == "alice"
+    ] == [w for w in data["workspaces"] if w["tenant_id"] == "alice"]
     root.chmod(0o755)
     unknown = root / encode_scope_id("charlie", "SRC")
     unknown.mkdir()
     (unknown / "config.json").write_text('{"agents":{"profiles":{}}}')
-    with pytest.raises(ValueError, match="add or remove tenants"):
+    with pytest.raises(
+        ValueError,
+        match="add or remove tenants|differs from current complete discovery",
+    ):
         await retry.review_retry(None, manifest, report)
 
 

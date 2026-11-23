@@ -2,6 +2,7 @@
 """Tenant-isolated direct migration, retaining the original job and SQL tickets."""
 
 from contextlib import nullcontext, asynccontextmanager
+import asyncio
 import json
 from pathlib import Path
 import shutil
@@ -386,6 +387,26 @@ async def _verify(
 
 async def _final_source_check(view, inventory, base, resources):
     if _manifest_source_binding(view.data):
+        from swe.app.conversation_storage.migration.inventory import (
+            verify_active_session_pointers,
+        )
+        from swe.app.conversation_storage.migration.source_inputs import (
+            SourceInputInvalid,
+        )
+
+        try:
+            io = resources.get("_shared_io")
+            if io is None:
+                await asyncio.to_thread(
+                    verify_active_session_pointers,
+                    inventory,
+                )
+            else:
+                await io.call(verify_active_session_pointers, inventory)
+        except (SourceInputInvalid, FileNotFoundError) as error:
+            raise TenantFailure(
+                "Zhaohu active Session changed during migration",
+            ) from error
         return
     if view.data.get("freshness_protocol"):
         from swe.app.conversation_storage.migration.tenant_inputs import (
@@ -401,6 +422,48 @@ async def _final_source_check(view, inventory, base, resources):
         except TenantInputError as error:
             raise TenantFailure(str(error)) from error
         return
+
+
+async def _verify_for_operation(
+    operation,
+    db,
+    bundles,
+    view,
+    inventory,
+    target,
+    resources,
+    guard,
+    states,
+):
+    verification_level = resources.get("_verification_level", "fast")
+    _stage("verify")
+    if operation == "migrate" and verification_level == "full":
+        fast_result = await _verify(
+            db,
+            bundles,
+            view,
+            inventory,
+            target,
+            resources,
+            guard,
+        )
+        await states.record_verification(*view.key, fast_result)
+    audit = resources.get("_full_audit")
+    if audit is not None:
+        audit["executed"].append(list(view.key))
+    verification_result = await _verify(
+        db,
+        bundles,
+        view,
+        inventory,
+        target,
+        resources,
+        guard,
+        verification_level=verification_level,
+    )
+    if audit is not None:
+        audit["passed"].append(list(view.key))
+    return verification_result
 
 
 async def _one_tenant(operation, view, db, states, guard, base, resources):
@@ -424,7 +487,6 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
         )
         for s in view.data["services"]
     }
-    verification_level = resources.get("_verification_level", "fast")
     verification_result = None
     with _spool(base, view.data) as spool:
         _stage("inventory")
@@ -455,8 +517,8 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
             await journal.hydrate(persist=False)
             await journal.validate_ownership()
         if operation in ("verify", "finalize", "migrate"):
-            _stage("verify")
-            verification_result = await _verify(
+            verification_result = await _verify_for_operation(
+                operation,
                 db,
                 bundles,
                 view,
@@ -464,7 +526,7 @@ async def _one_tenant(operation, view, db, states, guard, base, resources):
                 target,
                 resources,
                 guard,
-                verification_level=verification_level,
+                states,
             )
         _stage("final_source_check")
         await _final_source_check(view, inventory, base, resources)
@@ -718,10 +780,7 @@ async def run_tenants(
                 review_retry,
             )
 
-            if not (
-                _manifest_source_binding(manifest.data)
-                or manifest.data.get("freshness_protocol")
-            ):
+            if apply:
                 await recover_pending_review(db, manifest)
             # Fix cutoffs under the same lock before first recording SQL binding.
             if (
@@ -892,6 +951,30 @@ async def _select_registered_tenants(
         tenant = next(iterator)
         if row["state"] == "published":
             published += 1
+            if "_full_audit" in resources:
+                published_row = await states.get(*key)
+                previous = json.loads(
+                    published_row.get("verification_text") or "{}",
+                )
+                historical = previous.get("verification_results", {}).get(
+                    "full",
+                )
+                if historical:
+                    historical = {
+                        "passed": historical.get("passed"),
+                        "checked_count": historical.get("checked_count"),
+                    }
+                resources["_full_audit"]["skipped"].append(
+                    {
+                        "source": list(key),
+                        "reason": "already_published",
+                        **(
+                            {"previous_full_audit": historical}
+                            if historical
+                            else {}
+                        ),
+                    },
+                )
             continue
         if tenant["state"] == "failed" and key not in resources.get(
             "_retained_attempts",
@@ -908,6 +991,42 @@ async def _select_registered_tenants(
             continue
         selected.append(tenant)
     return selected, failures, published
+
+
+def _complete_audit(audit, source_count):
+    skip_keys = {tuple(item["source"]) for item in audit["skipped"]}
+    executed = {tuple(key) for key in audit["executed"]}
+    audit["skipped"].extend(
+        {"source": key, "reason": "audit_not_reached"}
+        for key in audit["requested"]
+        if tuple(key) not in skip_keys | executed
+    )
+    return not executed or len(audit["passed"]) != source_count
+
+
+async def _completion_state(db, manifest, published, source_count, failures):
+    # A job may remain partial while the runtime admits individually published tenants.
+    pending_schema = False
+    if published == source_count and not failures:
+        share_column = await db.fetch_one(
+            "SELECT IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() "
+            "AND TABLE_NAME='swe_chat_shares' AND COLUMN_NAME='service_unit_key'",
+        )
+        pending_schema = (
+            not share_column or share_column["IS_NULLABLE"] != "NO"
+        )
+        if not pending_schema:
+            await check_schema(
+                db,
+                manifest.data["offline"]["application_schema"],
+                finalized=True,
+            )
+    state = (
+        "ready"
+        if published == source_count and not failures and not pending_schema
+        else "partial_success"
+    )
+    return state, pending_schema
 
 
 async def _run_registered(
@@ -930,6 +1049,19 @@ async def _run_registered(
     else:
         await _register_tenants(db, manifest, states, guard)
     failures, published, completed = [], 0, 0
+    full_audit = resources.get("_verification_level") == "full"
+    audit = {
+        "requested": [],
+        "executed": [],
+        "passed": [],
+        "failed": [],
+        "skipped": [],
+    }
+    if full_audit:
+        resources = {**resources, "_full_audit": audit}
+        audit["requested"] = [
+            list(unit_key(manifest.data, item)) for item in tenants
+        ]
     resources = {
         **resources,
         "_journal_recovery": JournalRecovery(db, manifest),
@@ -975,6 +1107,10 @@ async def _run_registered(
                 TenantInputError,
                 MigrationCapacityError,
             ) as error:
+                if full_audit:
+                    key = list(view.key)
+                    if key in audit["executed"] and key not in audit["passed"]:
+                        audit["failed"].append(key)
                 # A failed source may have committed SQL before mirroring it.
                 # Reconcile durable tickets before processing the next source.
                 resources["_journal_recovery"].confirmed = None
@@ -990,26 +1126,15 @@ async def _run_registered(
                 completed += 1
                 if operation in ("finalize", "migrate"):
                     published += 1
-    # A job may remain partial while the runtime admits individually published tenants.
-    pending_schema = False
-    if published == len(tenants) and not failures:
-        share_column = await db.fetch_one(
-            "SELECT IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() "
-            "AND TABLE_NAME='swe_chat_shares' AND COLUMN_NAME='service_unit_key'",
-        )
-        pending_schema = (
-            not share_column or share_column["IS_NULLABLE"] != "NO"
-        )
-        if not pending_schema:
-            await check_schema(
-                db,
-                manifest.data["offline"]["application_schema"],
-                finalized=True,
-            )
-    state = (
-        "ready"
-        if published == len(tenants) and not failures and not pending_schema
-        else "partial_success"
+    state, pending_schema = await _completion_state(
+        db,
+        manifest,
+        published,
+        len(tenants),
+        failures,
+    )
+    incomplete_audit = (
+        _complete_audit(audit, len(tenants)) if full_audit else False
     )
     changed = await db.execute(
         "UPDATE "
@@ -1030,7 +1155,11 @@ async def _run_registered(
             else {}
         ),
         "status": (
-            "partial_success" if failures or pending_schema else "success"
+            "partial_success"
+            if failures
+            or incomplete_audit
+            or (pending_schema and not (full_audit and operation == "verify"))
+            else "success"
         ),
         "state": state,
         "tenants": len(tenants),
@@ -1039,6 +1168,7 @@ async def _run_registered(
         "failed": len(failures),
         "pending_schema_finalize": pending_schema,
         "failure_report": _write_failures(manifest, operation, failures),
+        **({"full_audit": audit} if full_audit else {}),
         **(
             {
                 "verification_level": resources.get(

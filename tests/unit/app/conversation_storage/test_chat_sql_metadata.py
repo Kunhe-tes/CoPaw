@@ -276,10 +276,14 @@ async def test_sql_metadata_checks_pending_publication_after_locks(tmp_path):
     assert any("FOR UPDATE" in q for q, _ in db.queries)
 
 
+@pytest.mark.parametrize("draft", [False, True])
 async def test_sql_rebind_copies_target_session_and_resets_display_status(
     tmp_path,
+    draft,
 ):
     db = MetadataDatabase(chat_row(status="running"))
+    if draft:
+        db.session["draft_chat_id"] = db.chat["id"]
     source = deepcopy(db.session)
     source["id"] = 2
     source["external_session_key"] = b"target"
@@ -296,6 +300,11 @@ async def test_sql_rebind_copies_target_session_and_resets_display_status(
         return await fetch_one(query, params)
 
     db.fetch_one = target_row
+    if draft:
+        with pytest.raises(ConflictError, match="designated draft"):
+            await repo.update_chat_if_exists(spec(session_id="target"))
+        assert db.chat["session_id"] == db.session["id"]
+        return
     result = await repo.update_chat_if_exists(spec(session_id="target"))
     assert result.session_id == "target"
     assert db.chat["session_id"] == 2

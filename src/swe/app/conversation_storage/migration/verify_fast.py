@@ -20,6 +20,7 @@ from ..message_bundle import (
     validate_runtime_occurrences,
 )
 from ..reference_queries import iter_reference_rows
+from ..session_projection import validate_projection_structure
 from .archive_verification import (
     PUBLICATION_FIELDS,
     fetch_publications,
@@ -63,6 +64,35 @@ def _publication_identity(row, assignment):
         row,
     ):
         raise IntegrityError("committed publication source ownership differs")
+
+
+def _read_recovery_hashes(reader, memory_allowance):
+    hashes_extent = reader.index.blocks.get("message_body_hashes")
+    if (
+        hashes_extent is not None
+        and hashes_extent.kind != "message_body_hashes"
+    ):
+        raise IntegrityError(
+            "session recovery message body hashes are missing",
+        )
+    body_hashes = (
+        None
+        if hashes_extent is None
+        else load_metadata_json(
+            _read_checked(reader, hashes_extent, memory_allowance),
+        )
+    )
+    if hashes_extent is not None and (
+        not isinstance(body_hashes, list)
+        or any(
+            not isinstance(value, str) or len(value) != 64
+            for value in body_hashes
+        )
+    ):
+        raise IntegrityError(
+            "session recovery message body hashes are invalid",
+        )
+    return body_hashes
 
 
 def _read_publication_plan(
@@ -156,29 +186,13 @@ def _read_publication_plan(
             envelope = load_metadata_json(
                 _read_checked(reader, extent, memory_allowance),
             )
+            validate_projection_structure(envelope, named_references=True)
             directory = envelope.get("message_directory")
             if not isinstance(directory, list):
                 raise IntegrityError(
                     "session recovery message directory is missing",
                 )
-            hashes_extent = reader.index.blocks.get("message_body_hashes")
-            if (
-                hashes_extent is None
-                or hashes_extent.kind != "message_body_hashes"
-            ):
-                raise IntegrityError(
-                    "session recovery message body hashes are missing",
-                )
-            body_hashes = load_metadata_json(
-                _read_checked(reader, hashes_extent, memory_allowance),
-            )
-            if not isinstance(body_hashes, list) or any(
-                not isinstance(value, str) or len(value) != 64
-                for value in body_hashes
-            ):
-                raise IntegrityError(
-                    "session recovery message body hashes are invalid",
-                )
+            body_hashes = _read_recovery_hashes(reader, memory_allowance)
             recovery = (
                 updates[0]["history_high"],
                 _directory_hashes(
@@ -515,7 +529,12 @@ def _directory_hashes(entries):
     ]
 
 
-def _validate_message_batch_spans(spans, recoveries, sessions):
+def _validate_message_batch_spans(
+    spans,
+    recoveries,
+    sessions,
+    frozen_hashes=None,
+):
     for position in sessions:
         if position not in recoveries:
             raise IntegrityError("session recovery evidence is missing")
@@ -537,6 +556,12 @@ def _validate_message_batch_spans(spans, recoveries, sessions):
             raise IntegrityError(
                 "session message batch recovery directory differs",
             )
+        if body_hashes is None:
+            if frozen_hashes is None:
+                raise IntegrityError(
+                    "old session recovery requires frozen source evidence",
+                )
+            body_hashes = frozen_hashes(position)
         if actual_body_hashes != body_hashes:
             raise IntegrityError(
                 "session message batch body differs from recovery",
@@ -571,6 +596,7 @@ async def verify_fast_publications(
     io_workers,
     memory_bytes,
     expected_scopes=None,
+    frozen_hashes=None,
 ):
     publications, session_assignments, relevant_batches = (
         _verification_tickets(
@@ -767,7 +793,12 @@ async def verify_fast_publications(
                 checked_records += len(expected)
                 batch_records += len(expected)
         verified_publications += len(chunk)
-    _validate_message_batch_spans(message_spans, recoveries, sessions)
+    _validate_message_batch_spans(
+        message_spans,
+        recoveries,
+        sessions,
+        frozen_hashes,
+    )
     return {
         "publications": verified_publications,
         "planned_rows": checked_rows,

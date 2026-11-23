@@ -176,13 +176,15 @@ def _workspace_path(value, config_path, service):
 
 
 def _profiles(service, report):
+    from .in_place_review import skipped
+
     workspaces = []
     config_root = Path(service["config_root"])
     configs = config_candidates(service["config_root"])
     for config in configs:
         # The service-root config is project bootstrap state. It has no
         # tenant/source ownership and is never a conversation input.
-        if config == config_root / "config.json":
+        if config == config_root / "config.json" or skipped(config):
             continue
         component = config.parent.relative_to(config_root).parts[0]
         if _is_default_scope_encoding(component):

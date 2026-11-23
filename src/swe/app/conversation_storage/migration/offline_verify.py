@@ -235,6 +235,13 @@ class OfflineVerifyStages:
                     )
                 recoveries = []
                 for expected in ticket.blocks:
+                    if (
+                        expected.name == expected.kind == "message_body_hashes"
+                        and "recovery" in expected_blocks
+                        and expected.name not in index.blocks
+                    ):
+                        del expected_blocks[expected.name]
+                        continue
                     raw = block(expected.name, expected.kind)
                     if raw == expected.content:
                         continue

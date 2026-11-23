@@ -62,6 +62,8 @@ async def _verify_fast_level(
 ):
     from .verify_fast import verify_fast_publications
 
+    frozen_hashes = _frozen_session_hashes(inventory)
+
     try:
         expected_scopes = None
         if manifest.data.get("tenant_isolation"):
@@ -82,6 +84,7 @@ async def _verify_fast_level(
                     io_workers=io_workers,
                     memory_bytes=memory_bytes // max(1, workers),
                     expected_scopes=expected_scopes,
+                    frozen_hashes=frozen_hashes,
                 )
         else:
             summary = await verify_fast_publications(
@@ -93,6 +96,7 @@ async def _verify_fast_level(
                 io_workers=io_workers,
                 memory_bytes=memory_bytes // max(1, workers),
                 expected_scopes=expected_scopes,
+                frozen_hashes=frozen_hashes,
             )
         report["checked"] = [
             {"position": "publications", "count": summary["publications"]},
@@ -104,6 +108,37 @@ async def _verify_fast_level(
             {"position": "source", "detail": str(error)},
         )
     report["passed"] = not report["blockers"]
+
+
+def _frozen_session_hashes(inventory):
+    from hashlib import sha256
+    from ..message_bundle import encode_message_body
+
+    sessions = None
+
+    def hashes(position):
+        nonlocal sessions
+        if sessions is None:
+            sessions = {
+                session["position"]: (workspace_index, session_index)
+                for workspace_index, workspace in enumerate(
+                    inventory["workspaces"],
+                )
+                for session_index, session in enumerate(workspace["sessions"])
+            }
+        if position not in sessions:
+            raise ValueError(
+                "old session recovery requires frozen source evidence",
+            )
+        workspace_index, session_index = sessions[position]
+        workspace = inventory["workspaces"][workspace_index]
+        session = workspace["sessions"][session_index]
+        return [
+            sha256(encode_message_body(message["payload"])).hexdigest()
+            for message in _expected_session_messages(workspace, session)
+        ]
+
+    return hashes
 
 
 async def _verification_context(
@@ -679,6 +714,24 @@ async def _verify_turns(adapter, identity, expected):
                 raise ValueError("runtime cold Turn state differs")
 
 
+def _expected_session_messages(workspace, session):
+    identity = session["identity"]
+    expected = session["legacy"]["state"]
+    from .importer import prepare_session_messages
+
+    return prepare_session_messages(
+        expected,
+        context_epoch=expected.get("context_epoch", 0),
+        task_projection=any(
+            item["spec"]["meta"].get("session_kind") == "task"
+            for item in workspace["chats"]
+            if item["spec"]["session_id"] == identity[6]
+            and item["spec"]["user_id"] == identity[4]
+            and item["spec"]["channel"] == identity[5]
+        ),
+    )
+
+
 async def _verify_session_messages(
     database,
     bundles,
@@ -690,8 +743,6 @@ async def _verify_session_messages(
     io=None,
     io_workers=4,
 ):
-    identity = session["identity"]
-    expected = session["legacy"]["state"]
     from ..message_bundle import (
         decode_message_bodies,
         decode_message_directory,
@@ -699,19 +750,7 @@ async def _verify_session_messages(
     )
     from ..bundle import BundleStore
 
-    from .importer import prepare_session_messages
-
-    messages = prepare_session_messages(
-        expected,
-        context_epoch=expected.get("context_epoch", 0),
-        task_projection=any(
-            item["spec"]["meta"].get("session_kind") == "task"
-            for item in workspace["chats"]
-            if item["spec"]["session_id"] == identity[6]
-            and item["spec"]["user_id"] == identity[4]
-            and item["spec"]["channel"] == identity[5]
-        ),
-    )
+    messages = _expected_session_messages(workspace, session)
     assignments = manifest.data["assignments"].get("publication", {})
     scope = WorkspaceScope.from_values(workspace["scope"])
     prefix = session["position"] + "/messages:"

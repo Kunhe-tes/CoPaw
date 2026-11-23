@@ -204,12 +204,19 @@ async def install_chat_metadata(
         raise ConflictError("Chat was deleted")
     if chat["external_chat_key"] != chat_key_bytes(plan.external_chat_key):
         raise IntegrityError("Chat metadata external identity mismatch")
-    _validate_rebind(plan, session, target)
+    _validate_rebind(plan, session, target, chat)
     return await _update_chat(db, request, plan, locator, chat, target)
 
 
-def _validate_rebind(plan, session, target):
+def _validate_rebind(plan, session, target, chat):
     if plan.target_session_id is not None:
+        if (
+            target["id"] != session["id"]
+            and session.get("draft_chat_id") == chat["id"]
+        ):
+            raise ConflictError(
+                "cannot rebind the Session's designated draft Chat",
+            )
         for associated in (session, target):
             if associated["active_turn_id"] is not None:
                 raise ConflictError("cannot rebind a busy Session")

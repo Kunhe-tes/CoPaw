@@ -237,6 +237,61 @@ async def test_published_a_skips_all_old_input_b_failure_does_not_stop_c(
     assert failures[0]["tenant_id"] == "b" and "bad input" not in str(failures)
 
 
+async def test_full_audit_reports_no_coverage_for_published_sources(
+    monkeypatch,
+    orchestration,
+):
+    fixture = orchestration
+    for row in fixture.rows.values():
+        row["state"] = "published"
+    fixture.manifest.data["offline"] = {"application_schema": "test"}
+    fixture.db.fetch_one = AsyncMock(return_value={"IS_NULLABLE": "NO"})
+    monkeypatch.setattr(cli, "check_schema", AsyncMock())
+    work = AsyncMock()
+    monkeypatch.setattr(cli, "_one_tenant", work)
+    result = await cli._run_registered(
+        "verify",
+        fixture.manifest,
+        fixture.base,
+        fixture.db,
+        fixture.guard,
+        fixture.base,
+        {"_verification_level": "full"},
+    )
+    assert result["status"] == "partial_success"
+    assert result["state"] == "ready"
+    assert result["full_audit"]["executed"] == []
+    assert len(result["full_audit"]["skipped"]) == 3
+    work.assert_not_awaited()
+
+
+async def test_migrate_records_fast_evidence_before_full_audit_fails(
+    monkeypatch,
+):
+    fast = {"verification_level": "fast", "passed": True}
+    full = {"verification_level": "full", "passed": False}
+    verify = AsyncMock(side_effect=[fast, cli.VerificationFailure(full)])
+    monkeypatch.setattr(cli, "_verify", verify)
+    states = SimpleNamespace(record_verification=AsyncMock())
+    view = SimpleNamespace(key=("svc", "tenant", "source"))
+    audit = {"executed": [], "passed": []}
+    with pytest.raises(cli.VerificationFailure):
+        await cli._verify_for_operation(
+            "migrate",
+            None,
+            None,
+            view,
+            None,
+            None,
+            {"_verification_level": "full", "_full_audit": audit},
+            None,
+            states,
+        )
+    states.record_verification.assert_awaited_once_with(*view.key, fast)
+    assert verify.await_args.kwargs == {"verification_level": "full"}
+    assert audit == {"executed": [list(view.key)], "passed": []}
+
+
 async def test_source_failure_invalidates_owner_recovery(
     monkeypatch,
     orchestration,
