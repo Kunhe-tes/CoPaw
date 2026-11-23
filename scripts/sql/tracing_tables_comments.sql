@@ -40,7 +40,7 @@ ALTER TABLE `swe_tracing_spans`
     MODIFY COLUMN `trace_id` VARCHAR(36) NOT NULL COMMENT '所属追踪ID，关联 swe_tracing_traces.trace_id',
     MODIFY COLUMN `source_id` VARCHAR(64) NOT NULL COMMENT '数据源标识，用于多租户数据隔离',
     MODIFY COLUMN `parent_span_id` VARCHAR(36) DEFAULT NULL COMMENT '父SpanID，用于构建嵌套调用层级',
-    MODIFY COLUMN `name` VARCHAR(128) DEFAULT NULL COMMENT 'Span名称/操作名称，如工具名或事件描述',
+    MODIFY COLUMN `name` VARCHAR(256) DEFAULT NULL COMMENT 'Span名称/操作名称，如工具名或事件描述',
     MODIFY COLUMN `event_type` VARCHAR(32) NOT NULL COMMENT '事件类型：llm_input/llm_output/tool_call_start/tool_call_end/skill_invocation',
     MODIFY COLUMN `start_time` DATETIME NOT NULL COMMENT 'Span开始时间',
     MODIFY COLUMN `end_time` DATETIME DEFAULT NULL COMMENT 'Span结束时间',

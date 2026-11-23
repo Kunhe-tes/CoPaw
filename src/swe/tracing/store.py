@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 # 需要从统计中排除的 source_id（测试平台等）
 EXCLUDED_SOURCE_IDS = ["default"]
+_SPAN_NAME_MAX_CHARS = 256  # swe_tracing_spans.name VARCHAR(256)
 _ERROR_MAX_BYTES = 4096
 
 
@@ -75,7 +76,7 @@ def _span_insert_rows(spans):
             span.span_id,
             span.trace_id,
             span.source_id,
-            span.name,
+            span.name[:_SPAN_NAME_MAX_CHARS],
             (
                 span.event_type.value
                 if isinstance(span.event_type, EventType)
@@ -426,7 +427,7 @@ class TraceStore:
             span.span_id,
             span.trace_id,
             span.source_id,
-            span.name,
+            span.name[:_SPAN_NAME_MAX_CHARS],
             (
                 span.event_type.value
                 if isinstance(span.event_type, EventType)

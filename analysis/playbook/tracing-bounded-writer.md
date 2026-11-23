@@ -4,7 +4,7 @@
 
 ## 确认边界
 
-`emit_span` / `update_span` 成功返回表示该版本已被 writer 接纳；队列满时等待容量，可以取消。它们不等待数据库提交。单个 writer 持有排队、正在写入和待重试的数据，写入成功之前不释放容量。
+`emit_span` / `update_span` 成功返回表示该版本已被 writer 接纳。队列满时，生产者等待容量，可以取消。单个 writer 持有排队、正在写入和待重试的数据，写入确认或放弃后释放容量。
 
 `end_trace` 捕获该 trace 已接纳的版本，包括正在 INSERT 的 Span 及其后续更新；只有这些版本确认后才更新 trace 状态。超时或数据库失败不会把 active trace 标为完成。调用者取消 flush 等待不会取消共享 writer。屏障之后才接纳的新版本不属于该次屏障，调用方仍需按先写 Span、后结束 trace 的顺序使用。
 
@@ -28,13 +28,15 @@ close 停止接纳、唤醒等待容量的生产者，然后等待排空。manag
 
 ## 日志与排查顺序
 
-1. `Tracing write failed; retaining batch`：检查后续数据库异常；writer 按 0.1 秒到 5 秒的封顶退避重试，不静默丢弃数据。
-2. `Tracing writes remain unconfirmed`：确认屏障超时；检查数据库可用性、超大 payload 和前方失败批次。超时不等于数据库一定未提交。
+单条和批量插入都按 `VARCHAR(256)` 保留 Span 名称的前 256 个字符。旧库若仍使用 `VARCHAR(128)`，部署前需将该列扩到至少 256 个字符。
+
+1. 旧版本出现 `Tracing write failed; retaining batch` 时，失败批次会被放回队首并持续退避重试。若底层为 `1406 (22001): Data too long for column 'name'`，核对 Pod 镜像、`swe_tracing_spans.name` 的实际列定义及 Span 名称长度。队列写满后，其他请求可能在调用模型前等待 Span 接纳。
+2. 当前版本出现 `Tracing batch failed; isolating individual writes` 时，writer 将批次拆为单条写入。单条写入失败三次后记录 `Dropping tracing span after ... failed write attempts`，释放该条容量并标记对应 trace 未确认。`Tracing writes remain unconfirmed` 可能来自等待超时，也可能来自丢弃。
 3. `Tracing shutdown timed out: ... unconfirmed spans`：排空未完成，关闭向上抛出 `TimeoutError`；不要把此日志解释为正常落库完成。
 4. `Database transaction rollback failed` / `Database background operation failed`：数据库取消后的回滚或清理失败。适配器保留原始异常/取消，无法确认的连接隔离，清理实际完成前仍占容量；检查随后是否出现 `Database pool close left ... unconfirmed connection(s)`。shutdown 失败的连接保留隔离槽位，同一对象拒绝重连，需排查驱动/网络并按进程生命周期回收。
 5. `Tracing writer failed during cancellation cleanup`：writer 在取消宽限期内以异常退出。close 会读取任务异常并记录原 traceback，最终仍向调用方报告关闭超时及未确认数量；不能只调用 `asyncio.wait` 而不消费完成任务的异常。宽限期之后退出的异常由 manager 的延后关闭任务记录。
 
-持续非法 payload 或永久数据库错误会阻塞后续批次并最终触发背压/超时；本轮没有新增丢弃、死信或磁盘补偿策略。JSON 构造、深拷贝、UTF-8 与官方驱动二进制编码仍消耗 loop CPU，分块只限制普通批次工作量；单条超大数据仍可能产生长停顿。核心驱动现使用 mysql.connector.aio，Span prepared 路径不再做 SQL 参数转义。见 [核心驱动设计](../../docs/superpowers/specs/2026-10-16-mysql-driver-migration-design.md) 和 [数据库接入](../../docs/database-access.md)。prepared 缓存按物理连接最多4种形状，数据不进入 SQL；包限制错误会保留未确认批次并产生既有重试/背压，不静默丢弃。
+持续出现非法 payload 或数据库故障时，重试仍可能降低队列吞吐并触发背压。JSON 构造、深拷贝、UTF-8 与官方驱动二进制编码仍消耗 loop CPU，分块只限制普通批次工作量；单条超大数据仍可能产生长停顿。核心驱动现使用 mysql.connector.aio，Span prepared 路径不再做 SQL 参数转义。见 [核心驱动设计](../../docs/superpowers/specs/2026-10-16-mysql-driver-migration-design.md) 和 [数据库接入](../../docs/database-access.md)。prepared 缓存按物理连接最多4种形状，数据不进入 SQL。
 
 ## 验证
 
