@@ -33,6 +33,7 @@ MEMBER_FROM = (
 FAILED = "(r.status='error' OR r.settled_status='error')"
 DONE = "(r.status IN ('error','skipped','cancelled') OR (r.status='success' AND r.settled_status IN ('success','error')))"
 ACTIVE = "(r.status IN ('dispatching','accepted','running') OR (r.status='success' AND r.settled_status IS NULL))"
+TEXT_RUN = "(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.spec_json,'$.task_type')),'')='text')"
 MANIFEST_IDENTITY = " AND ".join(
     f"JSON_UNQUOTE(JSON_EXTRACT(c.members_json,CONCAT('$[',m.dispatch_order,'].identity[{index}]'))) COLLATE utf8mb4_bin=m.{name}"
     for index, name in enumerate(KEYS)
