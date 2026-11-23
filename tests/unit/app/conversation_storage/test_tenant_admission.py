@@ -237,6 +237,52 @@ async def test_cached_adapter_checks_each_query_and_never_swallows_db_failure():
         await guarded.execute("UPDATE business")
 
 
+@pytest.mark.parametrize("entrypoint", ["fetch_one", "acquire", "transaction"])
+async def test_admission_denial_returns_healthy_connection(
+    monkeypatch,
+    entrypoint,
+):
+    from swe.database import DatabaseConfig, DatabaseConnection
+    from swe.database import connection as connection_module
+    from swe.database.session import DatabaseSession
+    from tests.unit.database.test_connection import Connection
+
+    monkeypatch.setattr(Connection, "instances", [])
+    monkeypatch.setattr(connection_module, "MySQLConnection", Connection)
+    db = DatabaseConnection(
+        DatabaseConfig(min_connections=0, max_connections=1),
+    )
+    _, admission = database("published", source_mode=True)
+    admission._validated = True
+    admission.source_binding = {"source_isolation": True}
+    admission_query = AsyncMock(return_value=None)
+    monkeypatch.setattr(DatabaseSession, "fetch_one", admission_query)
+    guarded = TenantDatabase(db, admission, "alice", "SRC")
+
+    async def attempt():
+        if entrypoint == "fetch_one":
+            await guarded.fetch_one("SELECT business")
+        else:
+            async with getattr(guarded, entrypoint)():
+                pytest.fail("unpublished source reached business operation")
+
+    await db.connect()
+    try:
+        for state in (None, {"state": "failed"}):
+            admission_query.return_value = state
+            with pytest.raises(TenantNotPublished):
+                await attempt()
+            (connection,) = Connection.instances
+            assert not connection.closed
+        assert admission_query.await_count == 2
+        admission_query.side_effect = ConnectionError("offline")
+        with pytest.raises(ConnectionError, match="offline"):
+            await attempt()
+        assert connection.closed
+    finally:
+        await db.close()
+
+
 async def test_validated_proof_cache_still_checks_published_state():
     from hashlib import sha256
 

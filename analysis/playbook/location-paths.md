@@ -5,6 +5,7 @@
 - 来源注册查看 `migration/source_state.py::SourceState.register` 的批量锁读和插入。快速校验查看 `migration/verify_fast.py::_verification_tickets` 及 `DiskMap.grouped_items` 的来源分组和磁盘预算。
 - 历史与答复轮次查看 `history.py::_snapshot`、`_turn_snapshot` 及 `archive_reader.py::session_messages`。排查时分别记录短事务、NAS 读取耗时和 reader pin 释放。
 - 来源准入查看 `tenant_admission.py::TenantAdmission.require`。区分证明缓存命中、SQL 发布状态查询和连接池排队。Session 筛选的索引效果以目标 MySQL 执行计划为准。[性能方案](../../docs/superpowers/specs/2026-11-23-conversation-storage-performance-followup.md)
+- 排查未发布来源导致的频繁建连时，检查 `TenantDatabase._admitted_lease`。准入拒绝在连接租约正常归还后抛出，SQL 执行失败继续走连接淘汰逻辑。
 
 ## 会话离线迁移关联锁与旧计划续跑
 

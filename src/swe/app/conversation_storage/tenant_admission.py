@@ -191,6 +191,21 @@ class TenantDatabase:
                 proof=False,
             )
 
+    @asynccontextmanager
+    async def _admitted_lease(self, lease):
+        async with lease as session:
+            try:
+                await self.require(
+                    session if hasattr(session, "_entry") else None,
+                )
+            except TenantNotPublished as error:
+                denial = error
+            else:
+                yield session
+                return
+        # Finish returning the healthy connection before reporting the denial.
+        raise denial
+
     def __getattr__(self, name):
         member = getattr(self.database, name)
         if name not in {
@@ -214,16 +229,16 @@ class TenantDatabase:
             ):
                 await self.require()
                 return await member(*args, **kwargs)
-            async with self.database.acquire() as session:
-                await self.require(session)
+            async with self._admitted_lease(self.database.acquire()):
                 return await member(*args, **kwargs)
 
         return guarded
 
     @asynccontextmanager
     async def acquire(self, *args, **kwargs):
-        async with self.database.acquire(*args, **kwargs) as session:
-            await self.require(session if hasattr(session, "_entry") else None)
+        async with self._admitted_lease(
+            self.database.acquire(*args, **kwargs),
+        ) as session:
             yield TenantDatabase(
                 session,
                 self.admission,
@@ -237,8 +252,9 @@ class TenantDatabase:
         if _ADMITTED_TRANSACTION.get() == key:
             yield self
             return
-        async with self.database.transaction(*args, **kwargs) as session:
-            await self.require(session if hasattr(session, "_entry") else None)
+        async with self._admitted_lease(
+            self.database.transaction(*args, **kwargs),
+        ):
             token = _ADMITTED_TRANSACTION.set(key)
             try:
                 yield self
