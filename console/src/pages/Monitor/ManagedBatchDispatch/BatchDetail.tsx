@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import { validate as isUuid } from "uuid";
 import {
   Alert,
   Button,
@@ -16,8 +17,10 @@ import type { ColumnsType } from "antd/es/table";
 import {
   managedBatchBoard,
   type ManagedBatch,
+  type ManagedBatchEvent,
   type ManagedBatchMember,
   type ManagedRetryResult,
+  type ManagedSkippedMember,
 } from "../../../api/modules/managedBatchBoard";
 import styles from "../CronBatchDispatch/index.module.less";
 import { labels, statusTag, settledStatusTag, timeText } from "./format";
@@ -28,7 +31,59 @@ import PriorityOrder from "./PriorityOrder";
 import MemberAttempts from "./MemberAttempts";
 import { getBbkDisplayName } from "../../../constants/bbk";
 
-const memberColumns = (source: string, batchId: string): ColumnsType<ManagedBatchMember> => [
+const skipReasonLabels: Record<string, string> = {
+  auto_unread_threshold: "未读过多自动暂停",
+  manual: "手动停用",
+  job_disabled: "任务未启用",
+  job_paused: "任务已暂停",
+  batch_paused: "批调度已暂停",
+  job_deleted: "任务已删除",
+  job_not_ready: "任务管理状态未就绪",
+  job_not_in_batch_mode: "任务未开启批调度",
+  date_before_start: "尚未到任务开始日期",
+  date_expired: "已超过任务结束日期",
+  date_configuration_invalid: "任务执行日期配置不完整",
+};
+
+const skippedColumns: ColumnsType<ManagedSkippedMember> = [
+  {
+    title: "角色 / 用户",
+    width: 160,
+    ellipsis: true,
+    render: (_, item) =>
+      `${item.member_role === "parent" ? "父任务" : "子任务"} · ${
+        item.tenant_id
+      }`,
+  },
+  {
+    title: "任务",
+    ellipsis: true,
+    render: (_, item) => (
+      <Tooltip title={`${item.job_name || item.job_id} · ${item.job_id}`}>
+        <span>{item.job_name || item.job_id}</span>
+      </Tooltip>
+    ),
+  },
+  {
+    title: "跳过原因",
+    width: 178,
+    render: (_, item) => skipReasonLabels[item.reason] ?? "其他原因",
+  },
+];
+
+function eventLabel(event: ManagedBatchEvent) {
+  if (event.event_type === "auto_retry_blocked") {
+    if (event.details.reason === "manual") return "手动停用，重试未入队";
+    if (event.details.reason === "auto_unread_threshold")
+      return "未读暂停，重试未入队";
+  }
+  return event.event_type;
+}
+
+const memberColumns = (
+  source: string,
+  batchId: string,
+): ColumnsType<ManagedBatchMember> => [
   {
     title: "顺位",
     dataIndex: "member_order",
@@ -59,8 +114,13 @@ const memberColumns = (source: string, batchId: string): ColumnsType<ManagedBatc
         <Tooltip title={`定时任务 ID：${item.job_id}`}>
           <span>{item.job_id}</span>
         </Tooltip>
+        <Tooltip title={item.execution_id} trigger={["hover", "focus"]}>
+          <span tabIndex={0}>执行 ID：{item.execution_id || "-"}</span>
+        </Tooltip>
         <MemberAttempts
-          source={source} batchId={batchId} memberId={item.member_id}
+          source={source}
+          batchId={batchId}
+          memberId={item.member_id}
           count={Math.max(0, item.business_attempt - 1)}
         />
       </div>
@@ -96,6 +156,15 @@ const memberColumns = (source: string, batchId: string): ColumnsType<ManagedBatc
         <span>最早 {timeText(item.not_before_at)}</span>
         <span>开始 {timeText(item.started_at)}</span>
         <span>完成 {timeText(item.finished_at)}</span>
+        <span title="Scheduler 确认子任务状态的时间">
+          子任务{" "}
+          {timeText(
+            item.status === "success" &&
+              item.settled_error_code !== "cron_async_subtasks_timeout"
+              ? item.settled_at
+              : null,
+          )}
+        </span>
       </div>
     ),
   },
@@ -149,23 +218,60 @@ export default function BatchDetail({
     member_page: 1,
     member_limit: 50,
     member_status: "",
+    subtask_status: "",
     member_role: "",
     member_query: "",
     event_page: 1,
     event_limit: 50,
-    event_type: "",
+    event_query: "",
   });
   const load = useCallback(
     (signal: AbortSignal) => {
       void refresh;
-      return managedBatchBoard.detail(source, batch.batch_id, filters, signal);
+      const { event_query, ...params } = filters;
+      const query = event_query.trim();
+      const eventFilter = isUuid(query)
+        ? { event_execution_id: query.toLowerCase() }
+        : { event_type: query };
+      return managedBatchBoard.detail(
+        source,
+        batch.batch_id,
+        { ...params, ...eventFilter },
+        signal,
+      );
     },
     [source, batch.batch_id, filters, refresh],
   );
   const [pausing, setPausing] = useState(false);
   const detail = useBoardResource(load);
   const data = detail.value;
+  const skipped = data?.skipped_members;
   const current = data?.batch || batch;
+  const emptyBatchDetail = data && current.member_count === 0 && (
+    <Alert
+      type="info"
+      showIcon
+      message={skipped ? "无可执行成员" : "该批次未记录跳过明细"}
+    />
+  );
+  const skippedTab = skipped?.length
+    ? {
+        key: "skipped",
+        label: `入队前跳过 (${skipped.length})`,
+        children: (
+          <Table
+            size="small"
+            rowKey={(item) =>
+              JSON.stringify([item.tenant_id, item.agent_id, item.job_id])
+            }
+            columns={skippedColumns}
+            dataSource={skipped}
+            pagination={false}
+            scroll={{ x: 510, y: 320 }}
+          />
+        ),
+      }
+    : null;
   return (
     <div className={styles.detailContent}>
       <div className={styles.detailHead}>
@@ -237,7 +343,7 @@ export default function BatchDetail({
           {
             key: "members",
             label: `执行成员 (${data?.member_total ?? batch.member_count})`,
-            children: (
+            children: emptyBatchDetail || (
               <div className={styles.intentTab}>
                 <div className={styles.intentFilters}>
                   <Input
@@ -293,6 +399,26 @@ export default function BatchDetail({
                       })
                     }
                   />
+                  <Select
+                    aria-label="批次内子任务状态"
+                    value={filters.subtask_status}
+                    options={[
+                      { value: "", label: "全部子任务状态" },
+                      { value: "waiting_subtasks", label: "等待子任务完成" },
+                      { value: "success", label: "子任务成功" },
+                      { value: "error", label: "子任务失败" },
+                      { value: "skipped", label: "子任务已跳过" },
+                      { value: "cancelled", label: "子任务已取消" },
+                      { value: "unconfirmed", label: "子任务状态未确认" },
+                    ]}
+                    onChange={(value) =>
+                      setFilters({
+                        ...filters,
+                        subtask_status: value,
+                        member_page: 1,
+                      })
+                    }
+                  />
                   <strong>{data?.member_total ?? "-"} 条匹配结果</strong>
                 </div>
                 <Table
@@ -334,19 +460,23 @@ export default function BatchDetail({
               </div>
             ),
           },
+          ...(skippedTab ? [skippedTab] : []),
           {
             key: "events",
             label: `调度事件 (${data?.event_total ?? "-"})`,
             children: (
               <>
                 <Input
-                  aria-label="筛选新版事件类型"
-                  placeholder="事件类型，如 running、retry_accepted"
-                  value={filters.event_type}
+                  allowClear
+                  aria-label="筛选调度事件"
+                  maxLength={64}
+                  placeholder="输入事件类型或完整执行 ID"
+                  style={{ maxWidth: 360, marginBottom: 8 }}
+                  value={filters.event_query}
                   onChange={(event) =>
                     setFilters({
                       ...filters,
-                      event_type: event.target.value,
+                      event_query: event.target.value,
                       event_page: 1,
                     })
                   }
@@ -356,17 +486,33 @@ export default function BatchDetail({
                     {data?.events.map((event) => (
                       <div className={styles.eventItem} key={event.event_id}>
                         <time>{timeText(event.occurred_at)}</time>
-                        <strong>{event.event_type}</strong>
+                        <strong title={event.event_type}>
+                          {eventLabel(event)}
+                        </strong>
                         <Tooltip title={event.execution_id}>
                           <p>
                             执行 {event.execution_id || "-"} · 操作者{" "}
                             {event.actor_id}
                           </p>
                         </Tooltip>
-                        <Tooltip trigger={["hover", "focus"]} placement="topRight"
-                          overlayStyle={{ maxWidth: "min(640px, calc(100vw - 32px))" }}
-                          title={<pre className={hoverStyles.eventTooltip} aria-label="完整事件详情">{JSON.stringify(event.details, null, 2)}</pre>}>
-                          <em tabIndex={0} aria-label="查看完整事件详情">{JSON.stringify(event.details)}</em>
+                        <Tooltip
+                          trigger={["hover", "focus"]}
+                          placement="topRight"
+                          overlayStyle={{
+                            maxWidth: "min(640px, calc(100vw - 32px))",
+                          }}
+                          title={
+                            <pre
+                              className={hoverStyles.eventTooltip}
+                              aria-label="完整事件详情"
+                            >
+                              {JSON.stringify(event.details, null, 2)}
+                            </pre>
+                          }
+                        >
+                          <em tabIndex={0} aria-label="查看完整事件详情">
+                            {JSON.stringify(event.details)}
+                          </em>
                         </Tooltip>
                       </div>
                     ))}

@@ -5,7 +5,7 @@ from datetime import timezone
 
 from .executions import RUN_TABLE
 from .operations import IDENTITY_FIELDS
-from .settlement import ExecutionSettlement, PROTOCOL
+from .settlement import ExecutionSettlement, WORKER_RUN
 from .run_accounting import occupied_run_sql
 from .failure_policy import worker_history_join_sql, worker_model_failure_sql
 
@@ -15,6 +15,8 @@ METRICS = (
     "running_count",
     "success_count",
     "failure_count",
+    "subtask_success_count",
+    "subtask_failure_count",
 )
 
 
@@ -37,7 +39,7 @@ def _scope_filter(scope):
 class ManagedCapacityFeedback:
     def __init__(self, db):
         self.db = db
-        self.settlement = ExecutionSettlement(db)
+        self.settlement = ExecutionSettlement(db, worker_only=True)
 
     async def tick(self):
         return await self.settlement.tick()
@@ -58,7 +60,7 @@ class ManagedCapacityFeedback:
         return await self.db.fetch_all(
             "SELECT DISTINCT r.source_id,r.provider_id,r.model_id "
             f"FROM {RUN_TABLE} r JOIN swe_cron_jobs_v2 d ON {joins} "
-            f"WHERE d.management_owner='scheduler' AND {PROTOCOL} "
+            f"WHERE d.management_owner='scheduler' AND {WORKER_RUN} "
             "AND ((r.status IN ('queued','dispatch_failed') "
             "AND (r.not_before_at IS NULL OR r.not_before_at<=%s)) "
             f"OR {occupied_run_sql('r')}) "
@@ -67,26 +69,74 @@ class ManagedCapacityFeedback:
             params,
         )
 
-    async def summarize(self, *, since, now_utc, scope=None):
+    async def summarize(
+        self,
+        *,
+        since,
+        now_utc,
+        scope=None,
+        unused_only=False,
+    ):
         clause, params = _scope_filter(scope)
         start, now = _utc_text(since), _utc_text(now_utc)
-        model_failure = worker_model_failure_sql()
-        row = await self.db.fetch_one(
+        state = await self.db.fetch_one(
             "SELECT SUM(CASE WHEN r.status IN ('queued','dispatch_failed') "
             "AND (r.not_before_at IS NULL OR r.not_before_at<=%s) THEN 1 ELSE 0 END) AS pending_count, "
             "SUM(CASE WHEN r.status='dispatching' THEN 1 ELSE 0 END) AS claimed_count, "
             "SUM(CASE WHEN r.status IN ('accepted','running') OR "
-            "(r.status='success' AND r.settled_status IS NULL) THEN 1 ELSE 0 END) AS running_count, "
-            f"SUM(CASE WHEN (r.settled_status='success' OR (r.settled_status='error' AND NOT {model_failure})) AND r.settled_at>=%s "
-            "AND r.settled_at<=%s THEN 1 ELSE 0 END) AS success_count, "
-            f"SUM(CASE WHEN r.settled_status='error' AND {model_failure} AND r.settled_at>=%s "
-            "AND r.settled_at<=%s THEN 1 ELSE 0 END) AS failure_count "
-            f"FROM {RUN_TABLE} r LEFT JOIN swe_cron_executions h ON {worker_history_join_sql()} WHERE {PROTOCOL} "
+            "(r.status='success' AND r.settled_status IS NULL) THEN 1 ELSE 0 END) AS running_count "
+            f"FROM {RUN_TABLE} r WHERE {WORKER_RUN} "
             f"AND (r.settled_status IS NULL OR r.settled_at>=%s){clause}",
-            (now, start, now, start, now, start, *params),
+            (now, start, *params),
+        )
+        model_failure = worker_model_failure_sql()
+        main_sample = (
+            "r.subtask_success_count IS NULL "
+            "AND COALESCE(r.settled_error_code,'')<>'cron_async_subtasks_timeout'"
+        )
+        expressions = {
+            "success_count": (
+                f"CASE WHEN {main_sample} AND "
+                "(r.settled_status='success' OR "
+                f"(r.settled_status='error' AND NOT {model_failure})) "
+                "THEN 1 ELSE 0 END"
+            ),
+            "failure_count": (
+                f"CASE WHEN {main_sample} AND r.settled_status='error' "
+                f"AND {model_failure} THEN 1 ELSE 0 END"
+            ),
+            "subtask_success_count": "r.subtask_success_count",
+            "subtask_failure_count": "r.subtask_failure_count",
+        }
+        fields = [
+            (
+                f"{expression} AS {name}"
+                if unused_only
+                else f"SUM({expression}) AS {name}"
+            )
+            for name, expression in expressions.items()
+        ]
+        if unused_only:
+            fields.insert(0, "r.execution_id")
+        unused = " AND r.worker_feedback_used=0" if unused_only else ""
+        rows = await self.db.fetch_all(
+            f"SELECT {', '.join(fields)} FROM {RUN_TABLE} r "
+            f"LEFT JOIN swe_cron_executions h ON {worker_history_join_sql()} "
+            f"WHERE {WORKER_RUN} AND r.settled_at BETWEEN %s AND %s{unused}{clause}",
+            (start, now, *params),
         )
         # 跳过的未开始工作、未知 HTTP 回执不伪装成模型执行失败。
+        counts = {name: int((state or {}).get(name) or 0) for name in METRICS}
+        samples = []
+        for row in rows:
+            for name in expressions:
+                counts[name] += int(row[name] or 0)
+            if unused_only and any(row[name] for name in expressions):
+                samples.append(row["execution_id"])
+        counts["success_count"] += counts["subtask_success_count"]
+        counts["failure_count"] += counts["subtask_failure_count"]
         return {
-            **{name: int((row or {}).get(name) or 0) for name in METRICS},
+            **counts,
             "latency_p95_ms": 0,
+            "feedback_samples": {"managed_runs": samples},
         }

@@ -352,6 +352,8 @@ export interface CronDispatchCapacityItem {
   running_count: number;
   success_count: number;
   failure_count: number;
+  subtask_success_count?: number | null;
+  subtask_failure_count?: number | null;
   error_rate: number;
   matched_rule: Record<string, unknown> | null;
   avg_latency_ms: number;

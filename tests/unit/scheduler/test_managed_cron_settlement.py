@@ -12,9 +12,15 @@ from tests.unit.scheduler.test_managed_cron_executions import (
 )
 
 
-async def completed(execution_setup, async_status=None, *, status="success"):
+async def completed(
+    execution_setup,
+    async_status=None,
+    *,
+    status="success",
+    kind="ordinary",
+):
     db, _, _ = execution_setup
-    row, _ = await enqueue(execution_setup)
+    row, _ = await enqueue(execution_setup, kind=kind)
     metadata = {
         "management_owner": "scheduler",
         "managed_execution_id": row["execution_id"],
@@ -211,7 +217,7 @@ async def test_async_pending_keeps_the_shared_model_slot(
     )
 
     db, _, _ = execution_setup
-    _, history = await completed(execution_setup)
+    _, history = await completed(execution_setup, kind="batch")
     now = utc_now()
     configure_pool(db, now)
     monkeypatch.setattr(capacity_claim, "MANAGED_CAPACITY_ACCOUNTING", True)
@@ -329,12 +335,12 @@ async def test_same_job_waits_for_async_result_in_query_and_atomic_claim(
     )
 
     db, caller, _ = execution_setup
-    first, history = await completed(execution_setup)
+    first, history = await completed(execution_setup, kind="batch")
     second, _ = await ExecutionStore(db).enqueue(
         caller,
         first["job_id"],
         ExecutionRequest(
-            "ordinary",
+            "batch",
             "next-period",
             scheduled_at=datetime.now(timezone.utc),
         ),

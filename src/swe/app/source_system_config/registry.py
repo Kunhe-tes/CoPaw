@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -544,6 +545,35 @@ def get_system_prompt_injections(config: Any | None) -> list[str]:
     )
 
 
+def _normalize_cron_pause_branches(config):
+    section = config.get("cron_unread_auto_pause")
+    if not isinstance(section, dict) or "by_branch" not in section:
+        return
+    rules = section["by_branch"]
+    if not isinstance(rules, dict):
+        raise ValueError("未读暂停分行配置必须是对象")
+    for branch, rule in rules.items():
+        if not isinstance(branch, str) or not re.fullmatch(
+            r"[A-Za-z0-9_-]{1,64}",
+            branch,
+        ):
+            raise ValueError("未读暂停分行代码无效")
+        if not isinstance(rule, dict) or set(rule) - {"enabled", "threshold"}:
+            raise ValueError(f"分行 {branch} 的未读暂停规则无效")
+        if "enabled" in rule:
+            rule["enabled"] = _coerce_registered_boolean_value(
+                f"cron_unread_auto_pause.by_branch.{branch}.enabled",
+                rule["enabled"],
+                default=True,
+                strict=True,
+            )
+        if "threshold" in rule:
+            rule["threshold"] = _coerce_registered_int_value(
+                CRON_UNREAD_AUTO_PAUSE_THRESHOLD_SETTING,
+                rule["threshold"],
+            )
+
+
 def normalize_registered_setting_values(
     raw_config: dict[str, Any],
     *,
@@ -600,6 +630,7 @@ def normalize_registered_setting_values(
                     string_value,
                 )
             _set_nested_value(normalized, setting.path, string_value)
+    _normalize_cron_pause_branches(normalized)
     if validate_cross_ranges:
         _validate_explicit_tool_result_compact_ranges(raw_config, normalized)
         _validate_explicit_query_retry_ranges(raw_config, normalized)

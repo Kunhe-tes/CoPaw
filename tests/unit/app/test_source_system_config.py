@@ -1671,6 +1671,62 @@ class TestSourceSystemConfigRuntime:
         assert result.enabled is False
         assert result.threshold == 12
 
+    def test_cron_unread_auto_pause_runtime_prefers_branch_override(self):
+        config = {
+            "cron_unread_auto_pause": {
+                "enabled": True,
+                "threshold": 8,
+                "by_branch": {
+                    "110": {"threshold": 3},
+                    "755": {"enabled": False},
+                },
+            },
+        }
+        assert (
+            resolve_cron_unread_auto_pause_config(config, "110").threshold == 3
+        )
+        assert not resolve_cron_unread_auto_pause_config(config, "755").enabled
+        assert (
+            resolve_cron_unread_auto_pause_config(config, "999").threshold == 8
+        )
+
+    @pytest.mark.asyncio
+    async def test_cron_unread_branch_reads_target_profiles_source_scope(
+        self,
+        monkeypatch,
+    ):
+        from unittest.mock import AsyncMock
+        from swe.app.source_system_config.runtime import (
+            read_cron_unread_auto_pause_branch,
+        )
+        from swe.app.workspace import tenant_init_source_store
+
+        lookup = AsyncMock(return_value={"bbk_id": "110"})
+        store = type("ProfileStore", (), {})()
+        store.get_tenant_source_info = lookup
+        monkeypatch.setattr(
+            tenant_init_source_store,
+            "get_tenant_init_source_store",
+            lambda: store,
+        )
+        config = {
+            "cron_unread_auto_pause": {"by_branch": {"110": {"threshold": 2}}},
+        }
+        assert (
+            await read_cron_unread_auto_pause_branch(
+                config,
+                "receiver",
+                "bank",
+            )
+            == "110"
+        )
+        lookup.assert_awaited_once_with("receiver", "bank")
+        assert (
+            await read_cron_unread_auto_pause_branch({}, "receiver", "bank")
+            is None
+        )
+        assert lookup.await_count == 1
+
     def test_cron_task_session_cleanup_runtime_uses_defaults(self):
         result = resolve_cron_task_session_cleanup_config(None)
 

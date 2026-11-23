@@ -34,7 +34,7 @@ function History({ source, batchId, memberId }: Target) {
       { title: "错误类型", render: (_, row) => row.error_type || "—" },
       { title: "错误详情", render: (_, row) => row.error_message || "—" },
     ]}
-    pagination={{ pageSize: 10, hideOnSinglePage: true }}
+    pagination={{ defaultPageSize: 10, hideOnSinglePage: true }}
   />;
 }
 

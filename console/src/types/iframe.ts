@@ -75,6 +75,8 @@ export interface IframeUserDataMessage {
     auth?: AuthHeaderItem[];
     /** 分行ID */
     bbkId?: string;
+    /** 分行名称 */
+    branchName?: string;
     /** 其他任意参数 */
     [key: string]: unknown;
     bbkOrgId?: string;

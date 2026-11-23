@@ -7037,11 +7037,10 @@ class AgentRunner(Runner):
         retry_state_snapshot: dict[str, Any] | None = None,
     ) -> bool:
         current_prompt = getattr(agent, "_sys_prompt", None)
-        result = await session_lifecycle.get_state_loaded(
+        await session_lifecycle.restore_session_state(
             self,
             agent,
             session_id,
-            session_state_loaded,
             skip_history,
             user_id,
             coerce_session_id=_coerce_session_storage_id,
@@ -7051,7 +7050,7 @@ class AgentRunner(Runner):
         )
         if isinstance(current_prompt, str):
             agent._sys_prompt = current_prompt
-        return result
+        return True
 
     async def _save_cron_session_state(
         self,

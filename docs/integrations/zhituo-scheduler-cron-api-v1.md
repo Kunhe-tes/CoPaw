@@ -19,6 +19,7 @@
 | 7 | 查看分发子任务列表 | Scheduler | GET /api/scheduler/cron/jobs/{job_id}/broadcast/children | 已实现本地查询 |
 | 8 | 按 skill_id 查询 Workflow 绑定 | SWE | GET /api/cron/workflow-bindings/{skill_id} | 存量接口，保留原实现 |
 | 9 | 批量删除分发子任务（异步） | Scheduler | POST /api/scheduler/cron/jobs/{job_id}/broadcast/children/batch-delete | 202受理，后台处理，支持查询和恢复 |
+| 10 | 手动触发整批 | Scheduler | POST /api/scheduler/external/cron/batch/run | 202受理，返回批次 ID |
 
 第 5、6 项及其配套查询已注册到本地代码，后台处理器也已实现；后台已接入正常应用生命周期，但仍须全部必需表列、既有连接地址和平台配置就绪，提交受理不等于部署环境已经验收。“本地已实现”不代表预发布已部署。新版普通/批回调已开发，实际平台和数据库联调尚未完成，现在不要创建启用中的真实定时器做完整执行验收。
 
@@ -217,8 +218,10 @@ expected_definition_version 必须来自最近一次 GET 详情。接口同步�
 
 ### 5.2 业务限制
 
-- 源任务仍有未删除子任务时，禁止修改源内容；停用但未删除的子任务也算存在。
-- 分发尚未结束时也不修改源内容。子任务全部逻辑删除且分发结束后，才可再次修改源内容。
+- 未传 `sync_children` 时，沿用原规则，有未删除子任务的父任务拒绝正文更新。传 `false` 保存父任务基本配置，修改 Cron 表达式或时区时将相应变更登记为后台子任务同步。传 `true` 同步所有本次修改的基本配置。更新范围包括已停用、未删除的子任务。
+- 两种显式保存方式修改或清空可执行日期时，父子日期在定义发布事务中一起保存。可以传详情中的 `expected_management_version`，用于检测其他日期配置或管理操作造成的版本变化。
+- 同步基本配置时只应用本次变更字段，保留接收方身份、会话、启停、运行历史及散列偏移规则。`operation.broadcast_task_id` 存在时，用分发任务查询接口查看子任务逐项结果。操作完成表示父任务已发布、子任务同步已受理。
+- 分发或子任务同步进行期间，父任务正文更新返回冲突。
 - PUT 不用于启停任务、切换批模式或重新分发；内容更新保留任务自身的启停状态。
 - 更新期间新触发按已定规则暂缓且不补跑；已入队、运行中的执行使用原快照继续。
 - 必要准备和平台同步完成后才发布新定义。失败时保留原生效定义与操作进度，通过附录的 retry 续办。
@@ -531,7 +534,7 @@ POST {SchedulerBaseUrl}/api/scheduler/cron/jobs/{job_id}/broadcast
 | --- | --- | --- |
 | request_id | string | 必填，一轮分发的稳定请求 ID |
 | expected_definition_version | integer | 必填，GET 源任务详情取得 |
-| targets | array | 必填，0～1000 个显式接收方 |
+| targets | array | 必填，显式接收方列表，可提交超过 1000 项或传空数组 |
 | targets[].tenant_id | string | 必填，接收方逻辑 tenant |
 | targets[].tenant_name、bbk_id | string | 展示和目标身份辅助信息，不作为授权凭据 |
 | targets[].agent_id | string | 可选，省略沿用源 Agent |
@@ -637,7 +640,7 @@ current 指按创建顺序最近一轮，不仅查询正在执行的一轮；不
 - 未在本轮 targets 中的历史子任务不删除、不顺带重新初始化；模式切换另算整组范围。
 - 失败对象通过新 request_id 发起新一轮处理，不提供旧轮失败项续办接口。
 - targets=[] 不新建、不删除，仅对源任务下全部未删除子任务重算散列排程，包含停用对象但不恢复启用，不改正文/模型/技能。
-- 0 人模式中的 tenant_count 是实际纳入调整的既有对象数，不是“新增了多少人”。历史多轮累计对象数可大于本轮显式 targets 的 1000 人输入限制。
+- `targets=[]` 时，`tenant_count` 统计实际纳入排程调整的既有子任务数。
 - 散列沿用在窗口内均匀提前的算法，不是用户 ID 哈希；新一轮人数或顺序不同，偏移可能变化。
 - Cron 无法安全平移时回退原排程、实际偏移记 0 并告警，不默默声称已散列。
 - Agent 分发到目标环境时，指定模型不可用按既有规则回退目标默认模型并告警；必要 Workflow/技能配置缺失则该对象失败。普通单任务创建不因此获得“任何配置错误都自动回退”的语义。
@@ -872,6 +875,10 @@ GET {SweBaseUrl}/api/cron/workflow-bindings/{skill_id}
 正式联调前确认：目标版本已部署、分发和模式接口已完成；网关正确路由 Scheduler 与 SWE；身份 Header 来源可信；共享表人工 DDL 已对齐；使用真实 source/技能/Workflow 绑定；新执行入口与回调配置已完成。本文不表示这些条件已经在当前环境满足。
 
 请求端应允许响应增加字段，不把未知管理状态字符串当作 ready，也不要把管理 operation、分发 task 和执行 batch 的状态混为同一种状态。
+
+## 十五 手动触发整批
+
+请求体只传父任务 `jobId`。受理返回 `202` 和新批次 ID，已有未结束批次时返回 `409` 和现有批次 ID。完整参数、授权和错误响应见 [Scheduler 整批触发接口](scheduler-external-batch-run.md)。
 
 ## 附录 Postman 文件
 

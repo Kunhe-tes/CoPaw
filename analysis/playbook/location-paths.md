@@ -13,6 +13,13 @@
 - 消息声明入口：`migration/importer.py::_session`；长会话每批只锁实际 Chat/Turn，避免全部 Turn × 批次的锁查询。
 - MySQL 锁验收：`tests/integrated/conversation_storage/test_migration_association_locks_mysql.py`；假数据库计数不代表真实 InnoDB 锁验收。
 
+## HTML 批注入口隐藏与报告意见空壳
+
+- 聊天 HTML 批注主体在 `console/src/components/agentscope-chat/HtmlAnnotations/` 和 `FilePreviewModal/index.tsx`；先检查 `pages/Chat/index.tsx` 的 `FileManager enableSessionAnnotations` 与 `FilePreviewDrawer/index.tsx` 的 `enableAnnotations`，当前均显式为 false。2026-10-09 的 `0e7c6a8c7`（hide annotations function）主动隐藏入口，代码保留不代表用户可见。
+- 请求链路为 Chat 上传原始 HTML、`/console/chat` 的 `_append_document_annotation_context`、`src/swe/app/document_annotations.py` 校验，再由请求级 `publish_annotated_html` 发布独立的新文件。进度清单见 `openspec/changes/add-html-drawer-annotations/tasks.md`，未勾选项应结合实际代码与测试复核，不能直接当作缺失实现。
+- `pages/ReportView/annotation/` 是另一套报告意见占位代码：Hook 仅返回模式状态，工具栏和列表为空，ReportView 未引用；`api/modules/reportAnnotation.ts` 的 `/report/note/rework` 声明不能证明该流程已经接通。
+- 回归入口：`tests/unit/app/test_document_annotations.py`、`tests/unit/agents/tools/test_publish_annotated_html.py`、前端 `HtmlAnnotations/*.test.*` 与 `FilePreviewModal/index.test.tsx`。2026-11-23 本地核查后端 29 项通过，前端上述范围 48 项中 46 项通过，失败项为 HTML URL 切换和原始字节保留（收到 `[object Blob]`）；尚未验证真实 Chromium 108、嵌入场景及模型端到端产物。
+
 ## 只暂停当前执行批次
 
 - 看板详情的“暂停本批／恢复本批”通过批次级接口修改回执的 `batch_paused`，不会修改任务启停或批入口模式。
@@ -23,7 +30,9 @@
 ## 批调度子任务错误类型与模型反馈
 
 - 执行历史 `swe_cron_executions.error_type` 保留原始值；子任务 `async_status=error` 且原值包含大小写敏感的 `Prompt` 时才按模型失败处理。逗号分隔文本和包含该词的 JSON 字符串均命中。
-- 新版统一分类入口为 `scheduler/src/scheduler/app/services/cron/managed/failure_policy.py`，用于自动、每日和人工业务重试及模型池反馈。非模型失败保留业务失败状态，但计入 worker 成功样本。
+- 新版 `scheduler/src/scheduler/app/services/cron/managed/failure_policy.py` 用于自动重试、每日补跑和模型池反馈。非模型失败保留业务失败状态，但计入 worker 成功样本。
+- 排查同一结果是否重复参与 Worker 决策时，核对新版执行和旧版重试事件的 `worker_feedback_used`，以及旧版意图的 `worker_feedback_attempt`。标记与容量记录同事务提交，窗口重叠时也只采样一次。
+- 新版看板人工重跑按当前失败状态受理，支持所有失败类型。结果不明、超时及其他错误仍需确认旧执行已停止。
 - 当前尝试关联的原始错误类型在看板成员及失败预览中显示，空值显示 `-`。
 - 数据库列由外部预先新增；不会自动对已有库执行 ALTER。终态 `async_status` 和 `error_type` 应在一次提交中写入。
 
@@ -64,6 +73,12 @@
 - `GET /user-info/tenants/by-source` 位于 `src/swe/app/routers/user_info.py::list_tenants_by_source`；`source_id` 未传时沿用请求头来源，查询包含模板条目。
 - 可选 Query 参数 `bbk_id` 通过 `TenantInitSourceStore.get_by_source` 下推 SQL 精确匹配；不传时返回该来源全部条目，无匹配时返回空列表。回归入口：`tests/unit/routers/test_user_info_tenant_source.py`、`tests/unit/workspace/test_tenant_init_source.py`。
 - 在 `migrate_tenant_init_source_bbk.sql` 之后执行 `scripts/sql/migrate_tenant_init_source_source_bbk_index.sql`，为新旧数据库补充 `idx_source_bbk (source_id, bbk_id)` 联合索引；脚本检查当前数据库索引是否存在，可重复执行。
+
+## 新版定时任务保存与子任务同步
+
+- 控制台入口在 `ManagedJobEditor.tsx` 的基本配置页签。有分发子任务时，修改 Cron 表达式、时区或可执行日期会在普通保存前提示确认。「保存并同步子任务」直接提交。两种方式都同步这三个字段的变更，其他字段随「保存并同步子任务」同步。
+- Scheduler 在 `operations.py` 发布父任务定义时同步日期，并由 `definition_sync.py` 登记子任务更新。通过返回的 `broadcast_task_id` 查逐项结果，父任务保存状态和子任务同步状态分别查询。
+- 整组暂停由 `pause_group.py` 受理。分发结束后，创建或更新失败的子任务可随父任务停用，后台关闭已有定时器，原失败记录保留。补发失败目标仍需在父任务上用新 `request_id` 发起分发。分发尚在进行或有其他未完成管理操作时，暂停仍会返回冲突。
 
 ## 定时任务第一阶段全量快照迁移
 
@@ -384,31 +399,31 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 ### 财富规划分发目标
 
 - 角色分流入口：`components/TargetPicker.tsx`。支行行长沿用原有平铺卡片和 `distributeTargets.ts::fetchDistributeTargets`，POST `/zt/wealth/wmadm/getUserPostionByBrn`，参数取登录机构 `orgCode/orgLvl`。本次机构树改造仅适用于分行中台。
-- 中台勾选机构时同步切换人员视图，连续勾选展示最后一个机构，缓存命中直接展示；点击名称仅查看，不改变选择。取消全选或待选保留当前视图及搜索，待选取消后如仍需查看该机构则继续查询，但返回结果不重新选中。勾选切换机构会清空原人员搜索，并移除尚未发送且不再需要的旧纯查看请求，仍遵循同一批量队列。
+- 中台勾选机构时同步切换人员视图，连续勾选展示最后一个机构，缓存命中直接展示；点击名称仅查看，不改变选择。取消全选或待选保留当前视图及搜索，待选取消后如仍需查看该机构则继续查询，但返回结果不重新选中。勾选切换机构会清空原人员搜索，并移除尚未发送且不再需要的旧纯查看请求，仍遵循同一人员查询队列。
 - 零人机构的明确选择通过 `DistributionSession.emptyInstitutions` 保存，与人员 ID 分开；统一用 `isInstitutionSelected` 判定勾选状态。成功空名单勾选后显示“全部 0 人”，纯查看不选中，取消待选后的空响应不恢复勾选；取消、移除、清空及表单重建清理相应状态。发布只发送实际人员，不增加虚假目标；新上级名单使该机构变为非空时，清理零人标记且不隐式选中新增人员。
-- 中台界面：`components/MiddleTargetPicker.tsx` 和同名 Less；左侧完整机构树不显示人数，右侧紧凑人员卡片，下方按机构汇总，父级覆盖子级时合并卡片。卡片最多每行五列，按容器宽度减少列数；人员区域使用 `@tanstack/react-virtual` 按行虚拟滚动，搜索和全选基于完整名单。方向键、Home/End 可在虚拟卡片之间移动焦点；边界位置不登记延迟聚焦，离开列表或搜索名单变化时清空待聚焦，防止搜索输入被卡片抢走焦点。
+- 中台界面：`components/MiddleTargetPicker.tsx` 和同名 Less；左侧完整机构树不显示人数，右侧紧凑人员卡片只显示姓名和用户 ID，并按这两项搜索；查询机构名称由机构树提供，显示在右侧标题中。下方按机构汇总，父级覆盖子级时合并卡片。卡片最多每行五列，按容器宽度减少列数；人员区域使用 `@tanstack/react-virtual` 按行虚拟滚动，搜索和全选基于完整名单。方向键、Home/End 可在虚拟卡片之间移动焦点；边界位置不登记延迟聚焦，离开列表或搜索名单变化时清空待聚焦，防止搜索输入被卡片抢走焦点。
 - 机构栏宽度在 `MiddleTargetPicker.module.less::.orgPane` 调整：桌面 300px，760px 及以下 220px，540px 及以下纵向占满宽度。人员列数由 `useCardColumns` 根据右侧实际容器宽度计算，不必为左侧加宽另写固定列数；布局验收需同时检查普通工作台和 `hideMenu=true&hideLogo=true` 嵌入页面。
 - 人员卡片的 Tab 入口：原焦点卡片仍在渲染范围内时保留原入口；滚动卸载该卡片后，使用实际可见行的首张卡片作为唯一入口，不使用顶部缓冲行、不主动移动焦点。排查滚动后无法用键盘选择人员时，检查可见区域是否存在 `tabIndex=0` 的卡片，并验证 Tab、方向键、空格选择及返回顶部后的入口恢复。回归入口为 `MiddleTargetPicker.keyboard.test.tsx`，实际虚拟滚动还需浏览器验证。
 - 新接口适配：`distribution/api.ts`，统一 request POST `/zt/wealth/wmadm/bbkTree`（完整树）和 `/zt/wealth/wmadm/orgSaps`（人员），最终路径为 `{API base}/api/zt/wealth/wmadm/*`；复用统一鉴权、上下文请求头、401 刷新和 60 秒取消超时。前端不提供服务凭证，不再调用 Python `/api/user-info/*/by-branch` 代理。
 - 机构请求：`mmOrgCode=当前业务分行编码`、`mmOrgName=BBK_ID_MAP 对应名称`、`mmOrgLvl=Number(orgLvl)`、`sysId=登录上下文 sysId`。仓库分行映射仅为示例，部署环境需要完整映射。普通模式沿用登录上下文机构级别，运维模式根级别传数字 30，编码和名称均使用所选目标分行。
 - 机构成功响应 `code="200"`，`data` 是根机构对象，以 `children` 递归展开；`mOrgLvl` 兼容数字与数字字符串。校验返回根编码与请求分行一致，末级依据 `children`，不依赖 `leaf`，中台不再使用 `121516` 例外或按“停用/私人银行/信贷部”名称过滤，由后端过滤可选机构。
 - 人员请求：`{orgList:[{bbkOrgId,mmOrgCode,mmOrgLvl}]}`；`distribution/api.ts` 将每个未缓存的查询范围展开为本级和全部后代，并按机构编码去重，不能只传父机构。`bbkOrgId` 为当前业务分行，其他字段取各节点自身；分行根查询包含整棵树，父级查询包含完整子树，均为一次 POST、完整联合名单、无分页。`code="200"` 表示整批成功，任一机构失败则整批失败；非数组响应不能冒充空名单。
-- 人员字段：`sapID` 保留前导零，`userName` 为姓名，`subBranchName` 优先于 `branchName`；`branchID` 为分行，实际机构优先取 `subBranchID`，无支行编码的分行本级人员使用 `branchID`。不额外按岗位或本地租户过滤，发布仍使用既有人员 targets 入参，最终去重由后端负责。
+- 人员字段：`sapID` 保留前导零，`userName` 为姓名，`subBranchName` 优先于 `branchName`；`branchID` 为分行，人员记录的机构编码优先取 `subBranchID`，缺失时使用 `branchID`。这些字段作为兼容发布入参的元数据保留。不额外按岗位或本地租户过滤，发布仍使用既有人员 targets 入参，最终去重由后端负责。
 - 机构预加载与缓存：工作台 `index.tsx` 的 `useInstitutionPreload` 在身份就绪且角色为中台时异步加载，机构缓存可跨计划复用；缓存标识包含 `contextVersion`，即使同一批更新发生 A→B→A，也会重新加载，不会因为最终分行编码相同而复用旧树。新建计划只变更表单代次，不改变此缓存标识。运维模式必须先选分行；切分行、身份或上下文变化立即清空旧树、人员缓存、选择与在途请求回写权限；切回原分行也重新查询，不能显示旧结果兜底。
-- 人员队列与缓存：`distribution/session.ts` 每份新建/编辑计划独立维护。已有完整上级缓存时通过 `distribution/tree.ts` 的机构索引筛出下级，不能反向把下级缓存当作完整上级。成功空名单也缓存，失败不缓存；切换计划销毁队列和人员缓存，但保留同身份分行的机构树。
-- 人员查询成功不能重放已完成的全选意图：`pendingSelections` 只跟踪尚未完成的选择，纯查看结果仅更新缓存和已选人员信息，不扩大发布名单。上级完整名单成功返回后，先清除其本级与下级旧缓存，再写入新名单；下级按需从新上级缓存重新派生，避免“分行已查到新员工、支行全选仍漏人”。
-- 批量合并：500 毫秒固定窗口，后续点击不延长；同一时间只发一个人员请求，新增查询排队。下一批的排队时间计入窗口，前一请求结束后已满 500 毫秒则直接发送；发送前移除被完整范围缓存覆盖或已取消的需求，合并父子重叠范围后仍由接口层展开完整子树，`orgList` 包含所有相应节点而非只有祖先。
-- 父子勾选联动覆盖零人子树：完整名单成功后按最新选择意图标记所有空后代；加载期间对子级取消会排除该子树，响应不补回。取消零人子级也使祖先半选，补全父级可从缓存恢复，纯查看新名单不隐式全选。全选状态同时检查人员和零人后代，汇总在人数相同但机构未全选时显示“部分选择”。
-- 机构汇总只记录实际完成的选择，等待或失败的全选不合并已有支行卡片；取消待选保留原分组，逐人或按搜索结果清空机构后清理对应分组。未匹配历史人员独立展示，不维持已清空机构的分组记录。
+- 人员队列与缓存：`distribution/session.ts` 每份新建/编辑计划独立维护。右侧名单只使用当前机构及其子树对应的接口响应，保留所有有效 `sapID` 记录，不按 `subBranchID` 过滤。只有上级缓存时，切到下级需查询该下级；未独立查询的下级可从已查上级继承全选。取消整个子机构时，其兄弟子树保留原有勾选；有未能通过机构名单确定范围的单人取消时，未查询的下级停止继承，按需查看下级名单，不自动发请求。成功空名单也缓存，失败不缓存；切换计划销毁队列和人员缓存，但保留同身份分行的机构树。
+- 人员查询成功不能重放已完成的全选意图：`pendingSelections` 只跟踪尚未完成的选择，纯查看结果仅更新缓存和已选人员信息，不扩大发布名单。上级响应只写入对应查询范围的缓存，下级保留自己的独立查询结果。
+- 人员查询按机构排队，每个请求只查一个机构及其完整子树，避免把多个机构的平铺响应混作当前名单。请求等待窗口为 500 毫秒，后续点击不延长已有请求的等待；同一时间只发一个人员请求，排队时间计入等待窗口。
+- 父子勾选联动覆盖零人子树：已查询的下级按自己的名单判断全选或半选，未独立查询的上级可根据已缓存子级名单中的已选人员显示半选，已确认的零人子级仍支持单独取消。主动取消已勾选的零人子级使祖先半选，补全父级可从缓存恢复。仅查看零人子级不会改变祖先的全选状态。非空子级重新选齐人员后，上级可以恢复全选。全选状态同时检查人员和零人后代，汇总在人数相同但机构未全选时显示“部分选择”。
+- 机构勾选、取消和汇总使用选择来源和各机构独立查询的人员 ID，不依据人员的归属字段。机构汇总只记录实际完成的选择，等待或失败的全选不合并已有支行卡片；取消待选保留原分组，逐人或按搜索结果清空机构后清理对应分组。未匹配历史人员独立展示，不维持已清空机构的分组记录。
 - 选择和失败：未选或半选点击补全，全选点击清空；全选失败后的半选点击重新排队查询，保留原有已选人员。等待或加载期间再次点击取消待选，保留已有选择，取消待选不会被旧响应重新勾上。某批失败不阻塞后续批次，失败机构支持手动重试或取消待选操作，保留已有选择。`distributionBlocked` 同时约束创建页发布按钮和 store 发布入口：等待、查询中及未解决的全选失败都阻止发布，单纯查看失败不永久阻止发布。
-- 编辑回显：保留历史人员及机构编码；完整名单尚未加载前显示“已选 N 人”和半选，查询后再判断全部/部分。不在当前机构树的历史人员归入“未匹配机构”，只能由用户明确移除，不能自动丢弃。
+- 编辑回显：保留历史人员及机构编码；历史人员先归入“未匹配机构”，取得独立名单后才按其中的人员 ID 匹配并判断全部或部分选择。上级名单确认历史人员已经全选后，未查询的下级也可继承勾选，无需重新全选上级。未匹配人员只能由用户明确移除，移除按人员 ID 从整份规划的已选名单生效。
 - 旧的 `branchTreeInfo`、`fetchDistributeBranches` 及 Python 代理仅保留兼容，不用于新中台组件。部署网关需将两个新路径转发到原机构人员服务，服务端凭证和 Cookie 处理沿用既有部署约定。
 - 回归入口：`distribution/api.test.ts`、`distribution/session.test.ts`、`TargetPicker.branches.test.tsx`、`TargetPicker.edit.test.tsx`、`Create/draftLifecycle.test.tsx`、`operations.switching.test.tsx` 和 `store.test.ts`。完整设计约定见 [分发目标选择器设计](../../docs/superpowers/specs/2026-11-03-wealth-distribution-target-picker-design.md)。
 
 ### Excel 名单分发
 
 - 独立前端白名单 `wealthExcelDistributionUsers` 默认关闭，匹配真实登录 SAP 用户 ID。排查入口缺失时检查白名单和当前角色的选人权限，运维白名单不授予 Excel 分发权限。
-- `distribution/api.ts::importExcelPeople` 通过统一请求上传原始 Excel，外部智拓服务解析并返回人员及异常行。前端校验 5 MB 文件上限、映射人员信息并按 ID 处理追加去重。联调时核对路径、上传字段、响应和授权规则。
+- `distribution/api.ts::importExcelPeople` 通过统一请求上传原始 Excel，外部智拓服务解析并返回人员及异常行。前端校验 5 MB 文件上限、映射人员信息并按 ID 处理追加去重。接口为 `POST /agent/workspace/claw-customer-list/parse`，`file` 上传文件，`data.successList` 返回人员。发布分行取 `frsBbkOrgId`，机构按 `brnOrgId → cprhBrnOrgId → bbkOrgId → frsBbkOrgId` 取首个有效编码和对应名称。模板 ID 和姓名均为必填，后端通过 `failedRows` 数字行号数组返回错误行，前端提示对应行核对 ID 和姓名。联调时核对授权规则。
 - `Create/index.tsx` 隔离 Excel 和机构选人，发布时只取当前方式。外部服务的白名单授权和跨分行下发需要实测后启用。回归入口为 `Create/draftLifecycle.test.tsx` 和 `distribution/api.test.ts`。
 
 ## 财富任务列表后台刷新显示
@@ -495,6 +510,8 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 - `hideLogo: true`（兼容字符串 `"true"`）隐藏头部、播报与侧栏，内部导航持续生效，不补 URL 参数。身份和布局由消息提供；接口鉴权仍使用现有登录 Cookie，消息传参并不替代登录态。
 - 子页面在注册监听器时清除该入口残留的 iframe 上下文，收到父窗口的有效 USER_DATA 消息后才挂载工作台并加载业务数据。不查询用户信息、不初始化 Agent、不同步 cron-auth、不启动客户信息定时刷新。未收到有效消息时保持等待；每次 iframe 加载后由父应用发送一次初始化消息；切换用户或岗位时重新加载 iframe 后再发送。
 - 规划创建/更新请求体的 `sourceId` 使用消息传入的渠道（例如 `RCZT`）。原 `origin=Y` 财富入口继续使用 Cookie 初始化及 `RMASSIST` 来源，其他已有页面的 USER_DATA 行为不变。
+- 财富 iframe 消息入口收到有效 `USER_DATA` 后，所有嵌入渠道均使用 `appName: "智拓财富工作台"`，每次 iframe 加载初始化一次。W+ 的 `origin=Y` 财富入口使用同一配置，包括 `hideLogo=true` 时的 Cookie 快速初始化。W+ 聊天和通用消息入口沿用原 MMJ 配置，统一使用 `businessId: "LQ1303CMBSWE"`。
+- 智拓 MMJ 配置的 `userName` 取消息或 W+ 当前用户的 `username` Cookie，`orgId` 取消息的 `bbkId`（兼容 `bbkOrgId`）或 W+ 初始化后的分行 ID。`org` 优先取消息中的 `branchName`，缺省时查分行映射。无法取到的字段传空字符串。`routers` 配置看板、今日任务、待触达客户、创建规划和已完成任务的路径与名称。
 - 代码入口：`console/src/utils/iframeMessage.ts`、`console/src/main.tsx`、`console/src/pages/WealthWorkbench/index.tsx`。回归入口：`iframeMessage.test.ts`、财富 `index.test.tsx`、`planGateway.test.ts`。
 
 父应用示例（监听器先注册，再设置 iframe 地址）：
@@ -532,6 +549,14 @@ document.body.appendChild(frame);
 - “有会话卡片但无正文”先核对 Monitor 的 session_id 是否存在对应 ChatSpec，再核对目标 source/user/Agent 工作区和共享存储。映射缺失、详情失败和正常空内容使用不同反馈；归档失败保留当前消息和游标，可重试。Kubernetes 各实例必须访问同一持久化会话与 dialog 存档；已清理的文件不能通过本接口恢复。
 - 回归：`tests/unit/routers/test_tracing_chat_history_parity.py` 固定存档对比两个入口的普通/任务/失败/v3 分轮消息和连续归档页；前端 `ReadOnlySessionChat.test.tsx` 覆盖归档、重试、去重和切换隔离。
 
+
+## 财富规划场景来源分组
+
+- 入口为 `console/src/pages/WealthWorkbench/Create/index.tsx` 的第一步，场景来源取 `api.ts` 将接口 `skillBbkLabel` 映射出的 `Scene.source`。
+- 来源导航默认选中“分行自建”，下方可切换“总行预置”（兼容“总部预置”标签）。右侧只展示当前来源，组内保留接口顺序。空来源与未识别标签放入“其他来源”，避免旧数据被丢弃。
+- 产品大类筛选继续使用原接口的 `category` 参数，导航数量按当前筛选结果计算，空来源隐藏。当前来源无匹配时展示首个有结果的来源。切换分类或来源保留已选场景，第二步沿用原配置逻辑。
+- 场景卡片按右侧容器可用宽度自动换列，最小列宽为 340px，四列需要 1390px（包含三个 10px 间距）。少量卡片保留空列。
+- 分组回归入口为 `console/src/pages/WealthWorkbench/Create/index.test.tsx`。
 
 ## 财富工作台运维模式
 
@@ -579,6 +604,13 @@ NODE_OPTIONS=--max-old-space-size=8192 npm run build
 - 常驻任务列表 `console/src/pages/Chat/components/ChatTaskList/index.tsx` 和侧栏展开面板 `console/src/pages/Chat/components/ChatSidebar/ExpandablePanel/index.tsx` 共用 `TaskTitle.tsx`。
 - 标题保留各自的单行省略样式，仅在 `scrollWidth > clientWidth` 时提供完整内容 Tooltip；初次渲染、内容变化及 ResizeObserver 通知时测量，悬停不重复测量，不能用标题字符数判断是否省略。
 - 回归入口：`console/src/pages/Chat/components/TaskTitle.test.tsx`，覆盖完整显示、宽度相等、溢出提示、尺寸及内容变化和点击透传。DOM 测量单测不替代真实 Chromium 108 与嵌入模式验收。
+
+
+## 聊天文件管理器排序
+
+- 目录列表排序入口为 `src/swe/app/file_manager.py` 的 `_entry_sort_key`：文件夹优先且按名称自然升序；其余条目按文件系统 `st_mtime_ns` 倒序，同时间按名称自然升序兜底。
+- 完整目录先排序再建立分页快照，前端 `FileColumn.tsx` 按接口返回顺序显示；不要仅在前端对当前页排序。刷新重新读取修改时间，翻页沿用同一快照。回收站仍按归档时间倒序。
+- 回归入口：`venv/bin/python -m pytest tests/unit/app/test_file_manager.py -q`。名称排序与分页容量测试应显式固定文件修改时间，避免依赖创建文件时的时钟精度。
 
 - 跟踪表单下拉统一使用 `InsuranceTracking/TrackingSelect.tsx`（Ant Design Select），选项浮层挂载到当前 dialog，枚举保持 number，经营场景保持字符串 ID。日期浮层宽度随输入框变化；列表保存保留禁用与失败反馈，不展示“保存中”；新增计划／记录使用浅蓝底按钮，执行按钮紧凑单行。弹窗仅保留 1000 字计数与到达上限提示。
 

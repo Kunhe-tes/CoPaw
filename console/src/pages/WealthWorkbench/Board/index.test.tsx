@@ -449,7 +449,7 @@ describe("Board", () => {
             name: "督办策略",
           }),
         ).toBeInTheDocument();
-        expect(detail.container).toHaveTextContent("监控周期：T+7日内");
+        expect(detail.container).toHaveTextContent("监控周期：7日内");
         expect(detail.container).toHaveTextContent("12:30");
         expect(detail.container).toHaveTextContent("预期完成率：80%");
       } else {

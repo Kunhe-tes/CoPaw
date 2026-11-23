@@ -176,18 +176,32 @@ class DispatchStateStore:
         return operation_id
 
     @staticmethod
-    async def _exclusive(tx, key):
+    async def _exclusive(tx, key, *, allow_failed_broadcast_child=False):
         active = request_hash(key)
         if await tx.fetch_one(
             f"SELECT task_id FROM {TASKS} WHERE active_key=%s",
             (active,),
         ):
             raise ManagementConflict("cron_broadcast_in_progress")
-        if await tx.fetch_one(
+        operation = await tx.fetch_one(
             f"SELECT operation_id FROM {JOURNAL} WHERE active_key=%s",
             (active,),
-        ):
-            raise ManagementConflict("cron_management_in_progress")
+        )
+        if operation is None:
+            return False
+        if allow_failed_broadcast_child:
+            # 锁定已找到的记录，确认分发失败操作仍占用管理操作槽位。
+            failed = await tx.fetch_one(
+                f"SELECT payload_json FROM {JOURNAL} WHERE operation_id=%s "
+                "AND active_key=%s AND status='failed' "
+                "AND action IN ('create','update') FOR UPDATE",
+                (operation["operation_id"], active),
+            )
+            if failed and json.loads(failed["payload_json"]).get(
+                "broadcast_context",
+            ):
+                return True
+        raise ManagementConflict("cron_management_in_progress")
 
     @staticmethod
     def _operation(caller, root, payload, operation_id, fingerprint):

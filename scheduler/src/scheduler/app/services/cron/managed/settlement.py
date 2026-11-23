@@ -8,6 +8,7 @@ from .executions import RUN_TABLE
 from .operations import utc_now
 from .storage import transaction, update
 from .dispatch_events import append_run_event
+from .run_accounting import standalone_direct_sql
 
 logger = logging.getLogger(__name__)
 TERMINAL = ("success", "error", "skipped", "cancelled")
@@ -15,6 +16,8 @@ PROTOCOL = (
     "JSON_UNQUOTE(JSON_EXTRACT(r.dispatch_meta_json,'$.protocol'))="
     "'scheduler_managed_v1'"
 )
+WORKER_RUN = f"{PROTOCOL} AND NOT {standalone_direct_sql('r')}"
+SUBTASK_TERMINAL = "('SUC','FAIL','PART_SUC','TIMEOUT')"
 
 
 def _history_matches(run, history):
@@ -40,12 +43,13 @@ def _history_matches(run, history):
 
 
 class ExecutionSettlement:
-    def __init__(self, db, *, limit=32, clock=None):
+    def __init__(self, db, *, limit=32, clock=None, worker_only=False):
         if type(limit) is not int or not 1 <= limit <= 200:
             raise ValueError("invalid_cron_settlement_limit")
         self.db = db
         self.limit = limit
         self.clock = clock or utc_now
+        self.run_filter = WORKER_RUN if worker_only else PROTOCOL
         # 仅是巡检位置；不缓存权威状态，重启仍从共库重新观察。
         self.after = 0
 
@@ -68,15 +72,19 @@ class ExecutionSettlement:
             "WHERE r.settled_status IS NULL AND r.queue_order>%s "
             "AND (r.status IN ('error','skipped','cancelled') OR "
             "(r.status='success' AND (e.id IS NULL OR e.async_status IN ('success','error')))) "
-            f"AND {PROTOCOL} ORDER BY r.queue_order LIMIT %s",
+            f"AND {self.run_filter} ORDER BY r.queue_order LIMIT %s",
             (after, self.limit),
         )
 
     async def _outcome(self, tx, run):
         if run["status"] != "success":
-            return run["status"], run.get("error_code")
+            return {
+                "settled_status": run["status"],
+                "settled_error_code": run.get("error_code"),
+            }
         history = await tx.fetch_one(
-            "SELECT job_id,tenant_id,status,async_status,meta FROM swe_cron_executions WHERE id=%s",
+            "SELECT job_id,tenant_id,status,async_status,trace_id,meta "
+            "FROM swe_cron_executions WHERE id=%s",
             (run["history_execution_id"],),
         )
         if not _history_matches(run, history):
@@ -85,16 +93,35 @@ class ExecutionSettlement:
                 run["execution_id"],
             )
             return None
-        if history["async_status"] == "error":
-            return "error", "cron_async_subtasks_failed"
-        if history["async_status"] == "success":
-            return "success", None
-        return None
+        status = history["async_status"]
+        if status not in ("success", "error"):
+            return None
+        outcome = {
+            "settled_status": status,
+            "settled_error_code": (
+                "cron_async_subtasks_failed" if status == "error" else None
+            ),
+        }
+        if history["trace_id"]:
+            counts = await tx.fetch_one(
+                "SELECT COUNT(*) AS total, "
+                "COUNT(CASE WHEN status<>'SUC' AND "
+                "INSTR(COALESCE(error_type,'') COLLATE utf8mb4_bin,'Prompt')>0 "
+                "THEN 1 END) AS failures FROM swe_cron_subtasks "
+                f"WHERE trace_id=%s AND status IN {SUBTASK_TERMINAL}",
+                (history["trace_id"],),
+            )
+            if counts["total"]:
+                outcome["subtask_success_count"] = (
+                    counts["total"] - counts["failures"]
+                )
+                outcome["subtask_failure_count"] = counts["failures"]
+        return outcome
 
     async def _settle(self, execution_id):
         async with transaction(self.db) as tx:
             run = await tx.fetch_one(
-                f"SELECT r.* FROM {RUN_TABLE} r WHERE execution_id=%s AND {PROTOCOL} FOR UPDATE",
+                f"SELECT r.* FROM {RUN_TABLE} r WHERE execution_id=%s AND {self.run_filter} FOR UPDATE",
                 (execution_id,),
             )
             if run is None or run["settled_status"] is not None:
@@ -106,8 +133,7 @@ class ExecutionSettlement:
                 return False
             observed = self.clock()
             values = {
-                "settled_status": outcome[0],
-                "settled_error_code": outcome[1],
+                **outcome,
                 "settled_at": observed,
                 "updated_at": observed,
                 "version": run["version"] + 1,
@@ -125,6 +151,6 @@ class ExecutionSettlement:
             logger.info(
                 "执行派发已收敛 execution_id=%s settled_status=%s",
                 execution_id,
-                outcome[0],
+                outcome["settled_status"],
             )
         return bool(changed)

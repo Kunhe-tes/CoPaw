@@ -28,8 +28,9 @@ vi.mock("@/api", () => ({
   },
 }));
 vi.mock("@/hooks/useAppMessage", () => ({
-  useAppMessage: () => ({ message: { success: vi.fn(), error: vi.fn() } }),
+  useAppMessage: () => ({ message: { success: showSuccess, error: vi.fn() } }),
 }));
+const { showSuccess } = vi.hoisted(() => ({ showSuccess: vi.fn() }));
 vi.mock("@/hooks/useExecutionModelOptions", async (original) => ({
   ...(await original<object>()),
   useExecutionModelOptions: () => ({
@@ -115,16 +116,25 @@ it("编辑读取最新详情后同步列表排程，不保留旧列表10点而�
   expect(screen.getByText(/ 09:00$/)).toBeInTheDocument();
 });
 
-it("已删除任务筛选位于页头操作区且可以开启和关闭", async () => {
+it("页头在任务导航上方，任务列表操作区可开启和关闭已删除任务筛选", async () => {
   render(<SchedulerCronJobsPage />);
   await screen.findByText("新版任务");
   const header = screen.getByRole("banner");
-  const filter = within(header).getByRole("button", {
+  const tabList = screen.getByRole("tablist");
+  expect(
+    header.compareDocumentPosition(tabList) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  const actions = screen.getByRole("group", { name: "定时任务操作" });
+  const filter = within(actions).getByRole("button", {
     name: "包含已删除任务（查看清理进度）",
   });
-  expect(within(header).getByRole("button", { name: /刷\s*新/ })).toBeVisible();
   expect(
-    within(header).getByRole("button", { name: /cronJobs.createJob|创建任务/ }),
+    within(actions).getByRole("button", { name: /刷\s*新/ }),
+  ).toBeVisible();
+  expect(
+    within(actions).getByRole("button", {
+      name: /cronJobs.createJob|创建任务/,
+    }),
   ).toBeVisible();
   expect(filter).toHaveAttribute("aria-pressed", "false");
   filter.focus();
@@ -184,7 +194,85 @@ it("已停用任务不能直接执行，但可以单独编辑、分发及查看�
   await screen.findByText("分发");
   expect(screen.queryByText("调度方式 / 批调度配置")).toBeNull();
   expect(screen.getByText("任务设置")).toBeInTheDocument();
+  expect(screen.queryByRole("menuitem", { name: "运行整批" })).toBeNull();
 });
+
+it.each([false, true])(
+  "父任务确认后复用外部整批接口，已有批次冲突 %s",
+  async (active) => {
+    const confirm = Modal.confirm;
+    vi.spyOn(Modal, "confirm").mockImplementation((options) =>
+      confirm({ ...options, transitionName: "", maskTransitionName: "" }),
+    );
+    const path = "/scheduler/external/cron/batch/run";
+    const parent = {
+      ...job,
+      dispatch_state: "batch_enabled",
+      has_distributed_children: true,
+      tenant_id: "parent-owner",
+      agent_id: "parent-agent",
+    };
+    vi.mocked(request).mockImplementation(async (url) => {
+      if (url !== path) return { items: [parent], next_cursor: null };
+      if (active) {
+        throw Object.assign(new Error("Conflict"), {
+          data: {
+            detail: {
+              code: "cron_batch_already_active",
+              batch_id: "in-flight",
+            },
+          },
+        });
+      }
+      return { batch_id: "batch-1", enqueued_intents: 2 };
+    });
+    const openConfirmation = async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: "更多操作 新版任务" }),
+      );
+      fireEvent.click(
+        await screen.findByRole("menuitem", { name: "运行整批" }),
+      );
+      return screen.findByRole("dialog", { name: /运行.*整批/ });
+    };
+    const sent = () =>
+      vi.mocked(request).mock.calls.filter(([url]) => url === path);
+    render(<SchedulerCronJobsPage />);
+    await screen.findByText("新版任务");
+    const confirmation = await openConfirmation();
+    expect(sent()).toHaveLength(0);
+    fireEvent.click(
+      within(confirmation).getByRole("button", {
+        name: /取\s*消|cronJobs.cancelText/,
+      }),
+    );
+    await waitFor(() => expect(confirmation).not.toBeInTheDocument());
+    expect(sent()).toHaveLength(0);
+    const next = await openConfirmation();
+    fireEvent.click(within(next).getByRole("button", { name: "运行整批" }));
+    await waitFor(() => expect(sent()).toHaveLength(1));
+    const [, options] = sent()[0];
+    expect(options?.method).toBe("POST");
+    expect(JSON.parse(String(options?.body))).toEqual({ jobId: job.id });
+    expect(options?.headers).toMatchObject({
+      "X-User-Id": "alice",
+      "X-Tenant-Id": "parent-owner",
+      "X-Agent-Id": "parent-agent",
+    });
+    if (active) {
+      expect(
+        await screen.findByText(/已有未结束批次.*in-flight/),
+      ).toBeVisible();
+      expect(showSuccess).not.toHaveBeenCalled();
+    } else {
+      await waitFor(() =>
+        expect(showSuccess).toHaveBeenCalledWith(
+          expect.stringContaining("2 条"),
+        ),
+      );
+    }
+  },
+);
 
 it("立即执行需确认，取消不发请求，确认仍按新版版本提交", async () => {
   const confirm = Modal.confirm;

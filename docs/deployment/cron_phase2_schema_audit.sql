@@ -271,6 +271,10 @@ FROM (
   UNION ALL
   SELECT 'swe_cron_execution_runs' AS table_name, 'settled_error_code' AS column_name
   UNION ALL
+  SELECT 'swe_cron_execution_runs' AS table_name, 'subtask_success_count' AS column_name
+  UNION ALL
+  SELECT 'swe_cron_execution_runs' AS table_name, 'subtask_failure_count' AS column_name
+  UNION ALL
   SELECT 'swe_cron_managed_broadcast_tasks' AS table_name, 'created_order' AS column_name
   UNION ALL
   SELECT 'swe_cron_managed_broadcast_tasks' AS table_name, 'task_id' AS column_name
@@ -588,6 +592,16 @@ FROM (
   SELECT 'swe_cron_dispatch_worker_capacity' AS table_name, 'success_count' AS column_name
   UNION ALL
   SELECT 'swe_cron_dispatch_worker_capacity' AS table_name, 'failure_count' AS column_name
+  UNION ALL
+  SELECT 'swe_cron_dispatch_worker_capacity' AS table_name, 'subtask_success_count' AS column_name
+  UNION ALL
+  SELECT 'swe_cron_dispatch_worker_capacity' AS table_name, 'subtask_failure_count' AS column_name
+  UNION ALL
+  SELECT 'swe_cron_subtasks' AS table_name, 'trace_id' AS column_name
+  UNION ALL
+  SELECT 'swe_cron_subtasks' AS table_name, 'status' AS column_name
+  UNION ALL
+  SELECT 'swe_cron_subtasks' AS table_name, 'error_type' AS column_name
   UNION ALL
   SELECT 'swe_cron_dispatch_worker_capacity' AS table_name, 'error_rate' AS column_name
   UNION ALL

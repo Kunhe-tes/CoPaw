@@ -237,8 +237,9 @@ def resolve_llm_rate_limiter_config(
 
 def resolve_cron_unread_auto_pause_config(
     source_config: Any | None = None,
+    bbk_id: str | None = None,
 ) -> CronUnreadAutoPauseConfig:
-    """解析当前 source 的定时任务未读自动暂停配置。"""
+    """分行覆盖规则优先，其余字段沿用当前渠道配置。"""
     raw_config = _extract_config_payload(source_config)
     merged = merge_source_system_config_with_defaults(raw_config)
     raw_section = merged.get("cron_unread_auto_pause")
@@ -249,6 +250,12 @@ def resolve_cron_unread_auto_pause_config(
     normalized_section = normalized.get("cron_unread_auto_pause")
     if not isinstance(normalized_section, dict):
         normalized_section = {}
+    if bbk_id:
+        override = normalized_section.get("by_branch", {}).get(
+            str(bbk_id).strip(),
+            {},
+        )
+        normalized_section = {**normalized_section, **override}
     return CronUnreadAutoPauseConfig(
         enabled=bool(
             normalized_section.get(
@@ -263,6 +270,35 @@ def resolve_cron_unread_auto_pause_config(
             ),
         ),
     )
+
+
+async def read_cron_unread_auto_pause_branch(
+    source_config,
+    tenant_id,
+    source_id,
+):
+    """仅在渠道配置了分行规则时，读取任务所属用户的本地个人资料。"""
+    section = _extract_config_payload(source_config).get(
+        "cron_unread_auto_pause",
+    )
+    if (
+        not isinstance(section, dict)
+        or not section.get("by_branch")
+        or not tenant_id
+        or not source_id
+    ):
+        return None
+    from ..workspace.tenant_init_source_store import (
+        get_tenant_init_source_store,
+    )
+
+    store = get_tenant_init_source_store()
+    profile = (
+        await store.get_tenant_source_info(tenant_id, source_id)
+        if store
+        else None
+    )
+    return str((profile or {}).get("bbk_id") or "").strip() or None
 
 
 def resolve_cron_task_session_cleanup_config(

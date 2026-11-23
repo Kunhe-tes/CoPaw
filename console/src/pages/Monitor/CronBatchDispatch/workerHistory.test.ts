@@ -70,3 +70,35 @@ it("does not return a partial history after a page fails", async () => {
     ),
   ).rejects.toThrow("page failed");
 });
+
+it("plots observed occupancy and leaves baseline placeholders as gaps", () => {
+  const samples = [
+    { decision_reason: "initial_capacity", claimed_count: 0, running_count: 0 },
+    {
+      decision_reason: "success_70_90_add_1",
+      claimed_count: 2,
+      running_count: 4,
+    },
+    {
+      decision_reason: "no_terminal_feedback",
+      claimed_count: 0,
+      running_count: 0,
+    },
+    { decision_reason: "idle_reset", claimed_count: 0, running_count: 0 },
+  ].map((sample, index) => ({
+    ...row(index + 1, "p", "2026-09-09T08:00:00", 5),
+    ...sample,
+  }));
+  const series = buildWorkerSeries(samples, true);
+  expect(series.map((item) => item.name)).toEqual([
+    "有效 Worker",
+    "占用 Worker",
+  ]);
+  expect(series[1].data.map((point) => point.value[1])).toEqual([
+    null,
+    6,
+    0,
+    null,
+  ]);
+  expect(buildWorkerSeries(samples)).toHaveLength(1);
+});

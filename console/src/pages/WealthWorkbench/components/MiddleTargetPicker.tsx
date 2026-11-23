@@ -95,10 +95,16 @@ function InstitutionPicker({ root }: { root: Institution }) {
   const [orgKeyword, setOrgKeyword] = useState("");
   const [keyword, setKeyword] = useState("");
   const [expanded, setExpanded] = useState(() => new Set([root.mOrgCode]));
-  const selectedIds = useMemo(
-    () => new Set(snapshot.selected.map((u) => u.sapId)),
-    [snapshot.selected],
-  );
+  const selectedIds = useMemo(() => {
+    const code = snapshot.current;
+    return new Set(
+      code
+        ? snapshot.selected
+            .filter((user) => session.isPersonSelectedIn(code, user))
+            .map((user) => user.sapId)
+        : [],
+    );
+  }, [session, snapshot]);
   const selectView = (code: string) => {
     setKeyword("");
     session.view(code);
@@ -132,7 +138,7 @@ function InstitutionPicker({ root }: { root: Institution }) {
   const visible = useMemo(() => {
     const kw = keyword.trim().toLowerCase();
     return (snapshot.people ?? []).filter((u) =>
-      `${u.name} ${u.sapId} ${u.orgName}`.toLowerCase().includes(kw),
+      `${u.name} ${u.sapId}`.toLowerCase().includes(kw),
     );
   }, [keyword, snapshot.people]);
   const full = Boolean(
@@ -163,13 +169,10 @@ function InstitutionPicker({ root }: { root: Institution }) {
             {rows.length ? (
               rows.map(({ node, depth }) => {
                 const code = node.mOrgCode;
-                const count = snapshot.selected.filter((u) =>
-                  session.index.includes(code, u),
-                ).length;
                 const checked = session.isInstitutionSelected(code);
                 const mixed =
                   !checked &&
-                  (count > 0 ||
+                  (session.hasSelectedPeopleInSubtree(code) ||
                     session.isPendingSelection(code) ||
                     snapshot.emptyInstitutions.some((empty) =>
                       session.index.contains(code, empty),
@@ -298,7 +301,7 @@ function InstitutionPicker({ root }: { root: Institution }) {
             <input
               className={styles.search}
               aria-label="搜索分发目标"
-              placeholder="搜索当前机构姓名 / 用户 ID / 机构"
+              placeholder="搜索姓名 / 用户 ID"
               value={keyword}
               disabled={!snapshot.people}
               onChange={(e) => setKeyword(e.target.value)}
@@ -444,7 +447,7 @@ function InstitutionPicker({ root }: { root: Institution }) {
                       key={user.sapId}
                       type="button"
                       aria-label={`移除${user.name}`}
-                      onClick={() => session.togglePerson(user)}
+                      onClick={() => session.removeRecipients([user])}
                     >
                       {user.name} ×
                     </button>
@@ -502,12 +505,12 @@ function groupSelection(
   const anchors = snapshot.anchors.filter(
     (code) =>
       snapshot.emptyInstitutions.includes(code) ||
-      snapshot.selected.some((u) => session.index.includes(code, u)),
+      snapshot.selected.some((u) => session.isPersonSelectedIn(code, u)),
   );
   const groups = new Map<string, DistributeTarget[]>();
   for (const user of snapshot.selected) {
     const candidates = anchors.filter((code) =>
-      session.index.includes(code, user),
+      session.isPersonSelectedIn(code, user),
     );
     const anchor = candidates.find(
       (code) =>
@@ -515,9 +518,8 @@ function groupSelection(
           (other) => other !== code && session.index.contains(other, code),
         ),
     );
-    const code = session.index.nodes.has(user.bbkOrgId ?? "")
-      ? anchor ?? session.index.branchOf(user) ?? "unmatched"
-      : "unmatched";
+    const code =
+      anchor ?? session.matchedInstitution(user.sapId) ?? "unmatched";
     const list = groups.get(code) ?? [];
     list.push(user);
     groups.set(code, list);
@@ -671,7 +673,7 @@ function PersonnelCards({
                   }}
                   aria-pressed={selected.has(user.sapId)}
                   aria-label={`${user.name} ${user.sapId}`}
-                  title={`${user.name} · ${user.sapId} · ${user.orgName}`}
+                  title={`${user.name} · ${user.sapId}`}
                   onClick={() => onToggle(user)}
                 >
                   <span className={styles.check} aria-hidden="true">
@@ -682,9 +684,7 @@ function PersonnelCards({
                   </span>
                   <span className={styles.personInfo}>
                     <strong>{user.name}</strong>
-                    <small>
-                      {user.sapId} · {user.orgName || "未提供机构名称"}
-                    </small>
+                    <small>{user.sapId}</small>
                   </span>
                 </button>
               ))}

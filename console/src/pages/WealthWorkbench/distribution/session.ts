@@ -7,6 +7,7 @@ type RequestStatus = "waiting" | "loading" | "error";
 interface Intent {
   selected: boolean;
   order: number;
+  excludesEmpty?: boolean;
 }
 export interface DistributionSnapshot {
   current: string | null;
@@ -26,10 +27,14 @@ type QueryPeople = (
 /** One form owns its queue/cache. The tree cache has a separate, longer lifetime. */
 export class DistributionSession {
   readonly index: InstitutionIndex;
+  private queriedIds = new Map<string, Set<string>>();
   private cache = new Map<string, DistributeTarget[]>();
   private selected = new Map<string, DistributeTarget>();
+  // Keep the institutions used to select each recipient separate from API metadata.
+  private selectionScopes = new Map<string, Set<string>>();
   private intents = new Map<string, Intent>();
   private pendingSelections = new Set<string>();
+  private pendingExclusions = new Set<string>();
   private personIntents = new Map<string, Intent>();
   private anchors = new Set<string>();
   private emptyInstitutions = new Set<string>();
@@ -68,13 +73,18 @@ export class DistributionSession {
     this.listeners.clear();
   }
   people(code: string): DistributeTarget[] | undefined {
-    if (this.cache.has(code)) return this.cache.get(code);
-    for (const [ancestor, users] of this.cache) {
-      if (!this.index.contains(ancestor, code)) continue;
-      const result = users.filter((user) => this.index.includes(code, user));
-      this.cache.set(code, result);
-      return result;
+    return this.cache.get(code);
+  }
+  matchedInstitution(sapId: string) {
+    let matched: string | undefined;
+    for (const [code, ids] of this.queriedIds) {
+      if (
+        ids.has(sapId) &&
+        (matched === undefined || this.index.contains(matched, code))
+      )
+        matched = code;
     }
+    return matched;
   }
   private orgIntent(code: string): Intent | undefined {
     let latest: Intent | undefined;
@@ -88,26 +98,84 @@ export class DistributionSession {
     return latest;
   }
   isPendingSelection(code: string) {
-    return (
-      this.wants(code) &&
-      [...this.pendingSelections].some((scope) =>
-        this.index.contains(scope, code),
-      )
-    );
+    return this.pendingSelections.has(code);
   }
-  private hasUnselectedEmptyDescendant(code: string) {
+  private hasExcludedEmptyDescendant(code: string) {
     return [...(this.index.descendants.get(code) ?? [])].some(
       (scope) =>
-        this.people(scope)?.length === 0 && !this.emptyInstitutions.has(scope),
+        this.people(scope)?.length === 0 &&
+        this.orgIntent(scope)?.excludesEmpty === true,
     );
   }
   isInstitutionSelected(code: string) {
     const people = this.people(code);
-    if (!people) return false;
+    if (!people) {
+      const intent = this.orgIntent(code);
+      if (this.hasExcludedDescendant(code)) return false;
+      if (
+        intent?.selected === false &&
+        [...this.intents].some(
+          ([scope, selection]) =>
+            selection === intent && this.isExcluded(scope),
+        )
+      )
+        return false;
+      if (this.pendingSelections.has(code))
+        return this.statuses.get(code) !== "error";
+
+      let parent = this.index.parents.get(code);
+      while (parent !== undefined) {
+        const parentPeople = this.people(parent);
+        if (parentPeople)
+          return this.inheritsSelection(code, parent, parentPeople);
+        parent = this.index.parents.get(parent);
+      }
+      return false;
+    }
     if (!people.length && !this.emptyInstitutions.has(code)) return false;
     return (
-      people.every((user) => this.selected.has(user.sapId)) &&
-      !this.hasUnselectedEmptyDescendant(code)
+      people.every((user) => this.isPersonSelectedIn(code, user)) &&
+      !this.hasExcludedDescendant(code)
+    );
+  }
+  private inheritsSelection(
+    code: string,
+    parent: string,
+    people: DistributeTarget[],
+  ) {
+    if (this.isInstitutionSelected(parent)) return true;
+
+    // A whole-institution exclusion only affects its own subtree.
+    const otherExclusions = [...this.intents.keys()].filter(
+      (scope) =>
+        this.index.contains(parent, scope) &&
+        !this.index.contains(scope, code) &&
+        !this.index.contains(code, scope) &&
+        this.isExcluded(scope),
+    );
+    return (
+      otherExclusions.length > 0 &&
+      people.every(
+        (user) =>
+          this.isPersonSelectedIn(parent, user) ||
+          otherExclusions.some((scope) => this.includesPerson(scope, user)),
+      )
+    );
+  }
+  private hasExcludedDescendant(code: string) {
+    return [...(this.index.descendants.get(code) ?? [])].some(
+      (scope) => scope !== code && this.isExcluded(scope),
+    );
+  }
+  private isExcluded(code: string) {
+    const intent = this.intents.get(code);
+    if (intent?.selected !== false || this.orgIntent(code) !== intent)
+      return false;
+
+    const people = this.people(code);
+    return (
+      !people?.length ||
+      people.some((user) => !this.isPersonSelectedIn(code, user))
     );
   }
   cancelPending(code: string) {
@@ -115,7 +183,7 @@ export class DistributionSession {
     this.clearPendingSelections(code);
     // Cancelling a failed bulk operation must preserve recipients selected before it.
     for (const user of this.selected.values()) {
-      if (this.index.includes(code, user))
+      if (this.isPersonSelectedIn(code, user))
         this.personIntents.set(user.sapId, {
           selected: true,
           order: ++this.order,
@@ -128,35 +196,97 @@ export class DistributionSession {
   private wants(code: string) {
     return this.orgIntent(code)?.selected === true;
   }
+  private includesPerson(code: string, user: DistributeTarget) {
+    return this.queriedIds.get(code)?.has(user.sapId) ?? false;
+  }
+  isPersonSelectedIn(code: string, user: DistributeTarget) {
+    const selected = this.selected.get(user.sapId);
+    if (!selected) return false;
+    const scopes = this.selectionScopes.get(user.sapId);
+    if (!scopes) {
+      return this.includesPerson(code, user);
+    }
+    return [...scopes].some((scope) =>
+      this.selectionCovers(code, scope, selected),
+    );
+  }
+  hasSelectedPeopleInSubtree(code: string) {
+    for (const user of this.selected.values()) {
+      if (this.isPersonSelectedIn(code, user)) return true;
+    }
+    for (const [scope, people] of this.cache) {
+      if (
+        scope !== code &&
+        this.index.contains(code, scope) &&
+        people.some((user) => this.isPersonSelectedIn(scope, user))
+      )
+        return true;
+    }
+    return false;
+  }
+  private selectionCovers(code: string, scope: string, user: DistributeTarget) {
+    return (
+      this.index.contains(code, scope) ||
+      (this.index.contains(scope, code) && this.includesPerson(code, user))
+    );
+  }
+  private selectPerson(user: DistributeTarget, scope: string | null) {
+    this.selected.set(user.sapId, user);
+    if (scope !== null) {
+      const scopes = this.selectionScopes.get(user.sapId) ?? new Set<string>();
+      scopes.add(scope);
+      this.selectionScopes.set(user.sapId, scopes);
+    }
+  }
+  private deselectPerson(user: DistributeTarget, code?: string | null) {
+    const scopes = this.selectionScopes.get(user.sapId);
+    if (code && scopes) {
+      for (const scope of scopes) {
+        if (this.selectionCovers(code, scope, user)) scopes.delete(scope);
+      }
+      if (scopes.size) return;
+    }
+    this.selected.delete(user.sapId);
+    this.selectionScopes.delete(user.sapId);
+  }
   private applyIntents(users: DistributeTarget[], scopes: string[]) {
     for (const user of users) {
       // Lookup results may refresh metadata, but only unfinished choices add recipients.
-      if (!scopes.some((code) => this.index.includes(code, user))) {
+      const selectionScope = scopes.find((code) =>
+        this.includesPerson(code, user),
+      );
+      if (selectionScope === undefined) {
         if (this.selected.has(user.sapId)) this.selected.set(user.sapId, user);
         continue;
       }
       let latest = this.personIntents.get(user.sapId);
       for (const [scope, intent] of this.intents) {
         if (
-          this.index.includes(scope, user) &&
+          this.selectionCovers(scope, selectionScope, user) &&
           (!latest || latest.order < intent.order)
         )
           latest = intent;
       }
       if (latest?.selected || (!latest && this.selected.has(user.sapId)))
-        this.selected.set(user.sapId, user);
-      else if (latest) this.selected.delete(user.sapId);
+        this.selectPerson(user, selectionScope);
+      else if (latest && this.isPersonSelectedIn(selectionScope, user))
+        this.deselectPerson(user, selectionScope);
     }
   }
   private buildSnapshot(): DistributionSnapshot {
     const blocked = [...this.statuses].some(
       ([code, status]) =>
-        status !== "error" || (this.wants(code) && !this.people(code)),
+        status !== "error" ||
+        (this.wants(code) && this.pendingSelections.has(code)) ||
+        this.pendingExclusions.has(code),
     );
     return {
       current: this.current,
       selected: [...this.selected.values()],
-      people: this.current ? this.people(this.current) : undefined,
+      people:
+        this.current && this.queriedIds.has(this.current)
+          ? this.cache.get(this.current)
+          : undefined,
       statuses: new Map(this.statuses),
       errors: new Map(this.errors),
       anchors: [...this.anchors],
@@ -166,17 +296,16 @@ export class DistributionSession {
   }
   private emit() {
     if (this.disposed) return;
-    const selected = [...this.selected.values()].filter((user) =>
-      this.index.nodes.has(user.bbkOrgId ?? ""),
-    );
     for (const code of this.emptyInstitutions) {
-      if (this.people(code)?.length || this.hasUnselectedEmptyDescendant(code))
+      if (this.people(code)?.length || this.hasExcludedEmptyDescendant(code))
         this.emptyInstitutions.delete(code);
     }
     for (const anchor of this.anchors) {
       if (
         !this.emptyInstitutions.has(anchor) &&
-        !selected.some((user) => this.index.includes(anchor, user))
+        ![...this.selected.values()].some((user) =>
+          this.isPersonSelectedIn(anchor, user),
+        )
       )
         this.anchors.delete(anchor);
     }
@@ -192,16 +321,11 @@ export class DistributionSession {
     this.schedule();
   }
   toggleInstitution(code: string) {
-    const people = this.people(code);
+    const people = this.queriedIds.has(code) ? this.cache.get(code) : undefined;
+    const status = this.statuses.get(code);
     const pending =
-      this.wants(code) &&
-      [...this.pendingSelections].some((scope) => {
-        const status = this.statuses.get(scope);
-        return (
-          this.index.contains(scope, code) &&
-          (status === "waiting" || status === "loading")
-        );
-      });
+      this.isPendingSelection(code) &&
+      (status === "waiting" || status === "loading");
     const full = this.isInstitutionSelected(code);
     if (pending && !full) {
       this.cancelPending(code);
@@ -213,26 +337,48 @@ export class DistributionSession {
     }
     this.current = code;
     this.intents.set(code, { selected: true, order: ++this.order });
+    this.clearPendingExclusions(code);
     if (people) {
       this.applyIntents(people, [code]);
       this.addSelectionAnchor(code);
     } else {
       this.pendingSelections.add(code);
-      this.enqueue(code);
     }
+    this.enqueue(code);
     this.prune();
     this.emit();
     this.schedule();
   }
   removeInstitution(code: string) {
-    this.intents.set(code, { selected: false, order: ++this.order });
+    const needsLookup =
+      code !== this.index.root.mOrgCode &&
+      !this.queriedIds.has(code) &&
+      this.isInstitutionSelected(code);
+    const excludesEmpty = [...this.emptyInstitutions].some((scope) =>
+      this.index.contains(code, scope),
+    );
+    this.intents.set(code, {
+      selected: false,
+      order: ++this.order,
+      excludesEmpty,
+    });
     this.clearPendingSelections(code);
+    this.clearPendingExclusions(code);
+    if (needsLookup) {
+      this.pendingExclusions.add(code);
+      this.enqueue(code);
+    }
     for (const empty of this.emptyInstitutions) {
       if (this.index.contains(code, empty) || this.index.contains(empty, code))
         this.emptyInstitutions.delete(empty);
     }
-    for (const [id, user] of this.selected) {
-      if (this.index.includes(code, user)) this.selected.delete(id);
+    for (const user of this.selected.values()) {
+      if (
+        !needsLookup &&
+        (code === this.index.root.mOrgCode ||
+          this.isPersonSelectedIn(code, user))
+      )
+        this.deselectPerson(user, code);
     }
     for (const anchor of this.anchors) {
       if (this.index.contains(code, anchor)) this.anchors.delete(anchor);
@@ -242,33 +388,48 @@ export class DistributionSession {
     this.schedule();
   }
   togglePerson(user: DistributeTarget) {
-    const selected = !this.selected.has(user.sapId);
+    const selected = this.current
+      ? !this.isPersonSelectedIn(this.current, user)
+      : !this.selected.has(user.sapId);
     this.personIntents.set(user.sapId, { selected, order: ++this.order });
     if (selected) {
-      this.selected.set(user.sapId, user);
+      this.selectPerson(user, this.current);
       if (this.current) this.anchors.add(this.current);
-    } else this.selected.delete(user.sapId);
+    } else this.deselectPerson(user, this.current);
     this.emit();
   }
   selectPeople(users: DistributeTarget[]) {
-    const selected = !users.every((user) => this.selected.has(user.sapId));
+    const current = this.current;
+    const selected = !users.every((user) =>
+      current
+        ? this.isPersonSelectedIn(current, user)
+        : this.selected.has(user.sapId),
+    );
     const order = ++this.order;
     for (const user of users) {
       this.personIntents.set(user.sapId, { selected, order });
-      if (selected) this.selected.set(user.sapId, user);
-      else this.selected.delete(user.sapId);
+      if (selected) this.selectPerson(user, this.current);
+      else this.deselectPerson(user, this.current);
     }
     if (selected && this.current) this.anchors.add(this.current);
     this.emit();
   }
-  removeUnknown() {
-    for (const [id, user] of this.selected) {
-      if (!this.index.nodes.has(user.bbkOrgId ?? "")) {
-        this.selected.delete(id);
-        this.personIntents.set(id, { selected: false, order: ++this.order });
-      }
+  removeRecipients(users: DistributeTarget[]) {
+    const order = ++this.order;
+    for (const user of users) {
+      this.deselectPerson(user);
+      this.personIntents.set(user.sapId, { selected: false, order });
     }
     this.emit();
+  }
+  removeUnknown() {
+    this.removeRecipients(
+      [...this.selected.values()].filter(
+        ({ sapId }) =>
+          !this.selectionScopes.has(sapId) &&
+          this.matchedInstitution(sapId) === undefined,
+      ),
+    );
   }
   clear() {
     this.removeInstitution(this.index.root.mOrgCode);
@@ -284,6 +445,12 @@ export class DistributionSession {
         this.pendingSelections.delete(pending);
     }
   }
+  private clearPendingExclusions(code: string) {
+    for (const pending of this.pendingExclusions) {
+      if (this.index.contains(code, pending))
+        this.pendingExclusions.delete(pending);
+    }
+  }
   private addSelectionAnchor(code: string) {
     for (const scope of this.index.descendants.get(code) ?? []) {
       if (this.people(scope)?.length === 0 && this.wants(scope))
@@ -294,31 +461,16 @@ export class DistributionSession {
       return;
     }
     // Pending bulk choices must not regroup recipients already selected elsewhere.
-    if (
-      this.people(code)?.some(
-        (user) =>
-          this.index.nodes.has(user.bbkOrgId ?? "") &&
-          this.selected.has(user.sapId),
-      )
-    )
+    if (this.people(code)?.some((user) => this.isPersonSelectedIn(code, user)))
       this.anchors.add(code);
   }
-  private cachePeople(codes: string[], users: DistributeTarget[]) {
-    // A newer complete ancestor result supersedes exact and derived descendant caches.
-    for (const cached of this.cache.keys()) {
-      if (codes.some((code) => this.index.contains(code, cached)))
-        this.cache.delete(cached);
-    }
-    codes.forEach((code) =>
-      this.cache.set(
-        code,
-        users.filter((user) => this.index.includes(code, user)),
-      ),
-    );
+  private cachePeople(code: string, users: DistributeTarget[]) {
+    this.cache.set(code, users);
+    this.queriedIds.set(code, new Set(users.map(({ sapId }) => sapId)));
   }
   private enqueue(code: string) {
     if (
-      this.people(code) ||
+      this.queriedIds.has(code) ||
       this.statuses.get(code) === "loading" ||
       this.queue.has(code)
     )
@@ -330,7 +482,12 @@ export class DistributionSession {
   private prune() {
     for (const [code, status] of this.statuses) {
       if (status === "loading") continue;
-      if (this.people(code) || (!this.wants(code) && this.current !== code)) {
+      if (
+        this.queriedIds.has(code) ||
+        (!this.wants(code) &&
+          !this.pendingExclusions.has(code) &&
+          this.current !== code)
+      ) {
         this.statuses.delete(code);
         this.errors.delete(code);
         this.queue.delete(code);
@@ -353,53 +510,44 @@ export class DistributionSession {
     this.timer = null;
     if (this.disposed || this.active) return;
     this.prune();
-    // The API adapter expands each retained scope into all of its descendant orgList entries.
-    const codes = [...this.queue.keys()].filter(
-      (code, _, all) =>
-        !all.some(
-          (other) => other !== code && this.index.contains(other, code),
-        ),
-    );
-    if (!codes.length) {
+    // Each scope needs its own flat response, including for queued selections.
+    const code = this.queue.keys().next().value;
+    if (code === undefined) {
       this.emit();
       return;
     }
-    const batch = [...this.queue.keys()];
-    batch.forEach((code) => {
-      this.queue.delete(code);
-      this.statuses.set(code, "loading");
-    });
+    this.queue.delete(code);
+    this.statuses.set(code, "loading");
     const controller = new AbortController();
     this.active = controller;
     this.emit();
     try {
       const users = await this.query(
-        codes.map((code) => this.index.nodes.get(code)!),
+        [this.index.nodes.get(code)!],
         controller.signal,
       );
       if (this.disposed) return;
-      this.cachePeople(codes, users);
-      const completed = [...this.pendingSelections].filter(
-        (code) => this.people(code) !== undefined,
+      this.cachePeople(code, users);
+      if (this.pendingExclusions.delete(code)) this.applyIntents(users, [code]);
+      const completed = [...this.pendingSelections].filter((code) =>
+        this.queriedIds.has(code),
       );
       this.applyIntents(users, completed);
       completed.forEach((code) => {
         this.addSelectionAnchor(code);
         this.pendingSelections.delete(code);
       });
-      batch.forEach((code) => {
-        this.statuses.delete(code);
-        this.errors.delete(code);
-      });
+      this.statuses.delete(code);
+      this.errors.delete(code);
+      if (this.current && !this.statuses.has(this.current))
+        this.enqueue(this.current);
       this.prune();
     } catch (error) {
       if (this.disposed) return;
       const message =
         error instanceof Error ? error.message : "人员查询失败，请重试";
-      batch.forEach((code) => {
-        this.statuses.set(code, "error");
-        this.errors.set(code, message);
-      });
+      this.statuses.set(code, "error");
+      this.errors.set(code, message);
       this.prune();
     } finally {
       this.active = null;

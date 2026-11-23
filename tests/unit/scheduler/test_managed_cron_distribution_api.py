@@ -15,8 +15,10 @@ HEADERS = {"X-User-Id": "alice", "X-Tenant-Id": "alice", "X-Source-Id": "bank"}
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("count", [2, 1001])
 async def test_broadcast_http_acceptance_pagination_current_and_schema_validation(
     distribution_setup,
+    count,
 ):
     from scheduler.app.routers import managed_cron_broadcast
 
@@ -35,15 +37,21 @@ async def test_broadcast_http_acceptance_pagination_current_and_schema_validatio
         assert (
             await client.get(path + "/tasks/current", headers=HEADERS)
         ).json() == {"task": None}
-        accepted = await client.post(path, headers=HEADERS, json=payload())
+        targets = [{"tenant_id": f"user-{index}"} for index in range(count)]
+        accepted = await client.post(
+            path,
+            headers=HEADERS,
+            json=payload(targets=targets),
+        )
         assert accepted.status_code == 202
+        assert accepted.json()["pending_count"] == count
         task_id = accepted.json()["task_id"]
         page = await client.get(
             path + "/tasks/" + task_id + "?limit=1",
             headers=HEADERS,
         )
         assert page.status_code == 200
-        assert page.json()["tenant_count"] == 2
+        assert page.json()["tenant_count"] == count
         assert len(page.json()["results"]) == 1
         current = await client.get(path + "/tasks/current", headers=HEADERS)
         assert current.json()["task"]["task_id"] == task_id

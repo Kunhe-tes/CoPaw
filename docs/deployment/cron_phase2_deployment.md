@@ -31,6 +31,12 @@
 
 SQL 为人工交付文件，应用不会读取执行。执行前由数据库负责人核对 MySQL 版本、InnoDB、utf8mb4、索引最大长度及行格式；四段身份组合索引需支持相应字节长度。不要在旧表上盲目整体改字符集或排序规则。不存在生产实测证据时不能宣称数据库验证通过。
 
+Worker 调整按子任务采样前，在共库核对并补齐 [反馈统计列](../../scripts/sql/cron_worker_subtask_feedback.sql)，再部署 Scheduler、Monitor 和 Console。历史调整记录保留原合计，未保存的主任务和子任务明细显示为「—」。
+
+普通定时任务直接派发需部署 SWE、Scheduler 和 Monitor。先更新 SWE 的同任务启动保护，再更新 Scheduler 的派发与反馈口径及 Monitor 的占用明细。复用现有表结构。验证时填满一个批模型池，再触发该池的普通任务、普通任务整点补跑和单任务「立即执行」。核对三种入口都可以直接派发，执行及结果均从批 Worker 的当前占用和新增调整中排除。同一任务已有执行在跑时，普通自动触发记为 `skipped`，手动请求返回冲突。
+
+升级 Worker 反馈去重前，先在共库补齐 [反馈使用标记](../../scripts/sql/cron_worker_feedback_consumption.sql)，再切换所有 Scheduler 实例。升级前的容量记录只有汇总数量。首次使用新逻辑时，仍在反馈窗口内的旧结果可能被计入一次，随后按标记跳过。
+
 ## 表的分工
 
 | 表 | 用途及主要写入者 |
@@ -79,7 +85,7 @@ SQL 为人工交付文件，应用不会读取执行。执行前由数据库负�
 ## 第二轮：分发与三态
 
 1. POST `/{job_id}/broadcast` 选择 1～2 个真实授权测试接收人，携带散列字段，不带调度模式。202 只代表受理，保存 task_id。
-2. GET `/{job_id}/broadcast/tasks/current` 找最近一轮，再 GET `/{job_id}/broadcast/tasks/{task_id}` 查询进度和全部结果游标。终态后查询 children，确认真实接收人身份、固定子 ID/资源、实际散列；存在未删除子任务时源正文修改应冲突。
+2. GET `/{job_id}/broadcast/tasks/current` 找最近一轮，再 GET `/{job_id}/broadcast/tasks/{task_id}` 查询进度和全部结果游标。终态后查询 children，确认真实接收人身份、固定子 ID/资源和实际散列。已有子任务的父任务修改 Cron 表达式、时区或可执行日期时，普通保存提示确认后提交，「保存并同步子任务」直接提交。两种方式均同步相应变更，其他字段随「保存并同步子任务」同步。
 3. 再发同样接收人且使用新请求号，子任务正常复用 ID/资源；真正失败在新一轮处理。用 targets=[] 验证只调整全部未删除既有子任务排程，包括停用任务，不改正文/模型/启停，不重新准备资源。
 4. PUT `/{job_id}/dispatch-state` 设 batch_enabled，用 GET 返回的 version；查询目标、生效方式、逐项计数。切换中不得换目标，失败可对原 operation retry，不能把 sync_status=failed 当作全组不能触发。
 5. 在可控预发布故障中令一个对象平台操作失败，验证 effective_state=mixed：已生效批对象走新批入口，未切换普通对象仍走普通入口。每次到达的新回调独立受理，不再以同逻辑期合并普通/批执行。失败提示保留，修复平台后人工 retry。

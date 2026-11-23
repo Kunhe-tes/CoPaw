@@ -1652,11 +1652,10 @@ async def test_scheduled_retry_restores_in_memory_snapshot_without_loading_histo
     retry_agent = Agent()
     retry_snapshot = {"memory_entries": ["retry notice"]}
 
-    await session_lifecycle.get_state_loaded(
+    await session_lifecycle.restore_session_state(
         owner,
         retry_agent,
         "session-1",
-        session_state_loaded=False,
         skip_history=True,
         user_id="user-1",
         coerce_session_id=lambda value: value,
@@ -1670,11 +1669,10 @@ async def test_scheduled_retry_restores_in_memory_snapshot_without_loading_histo
     owner.session.load_session_state.assert_not_awaited()
 
     first_attempt_agent = Agent()
-    await session_lifecycle.get_state_loaded(
+    await session_lifecycle.restore_session_state(
         owner,
         first_attempt_agent,
         "session-1",
-        session_state_loaded=False,
         skip_history=True,
         user_id="user-1",
         coerce_session_id=lambda value: value,

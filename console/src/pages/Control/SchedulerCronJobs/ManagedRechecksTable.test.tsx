@@ -54,8 +54,10 @@ it("loads active records, uses the next cursor and refreshes history separately"
   expect(screen.getByText("待执行")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "下一页" }));
   expect(await screen.findByText("暂无回检任务")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("tab", { name: "历史记录" }));
+  expect(screen.getByRole("radio", { name: "当前任务" })).toBeChecked();
+  fireEvent.click(screen.getByRole("radio", { name: "历史记录" }));
   expect(await screen.findByText("历史任务")).toBeInTheDocument();
+  expect(screen.getByRole("radio", { name: "历史记录" })).toBeChecked();
   expect(screen.getByRole("link", { name: "查看原会话" })).toHaveAttribute(
     "href",
     "/chat/chat-1",
@@ -63,7 +65,12 @@ it("loads active records, uses the next cursor and refreshes history separately"
   const previousCalls = vi.mocked(request).mock.calls.length;
   fireEvent.click(screen.getByRole("button", { name: "刷新" }));
   await waitFor(() => expect(request).toHaveBeenCalledTimes(previousCalls + 1));
-  expect(vi.mocked(request).mock.lastCall?.[0]).toContain("view=history&limit=20");
+  expect(vi.mocked(request).mock.lastCall?.[0]).toContain(
+    "view=history&limit=20",
+  );
+  fireEvent.click(screen.getByRole("radio", { name: "当前任务" }));
+  expect(await screen.findByText("当前任务 A")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "上一页" })).toBeDisabled();
 });
 
 it("shows a failed request separately from an empty result", async () => {

@@ -105,6 +105,24 @@ class AutoBatchRetry:
             row = rows[0]
             if not self._current(row, candidate):
                 return False
+            # 单任务暂停也会作废队列版本，先记录本次重试被拦截的原因。
+            pause_reason = row["current_pause_reason"]
+            if pause_reason in {"auto_unread_threshold", "manual"}:
+                if await self._eligible(tx, row):
+                    await append_run_event(
+                        tx,
+                        {**row, "updated_at": self.clock()},
+                        "auto_retry_blocked",
+                        {
+                            "reason": pause_reason,
+                            "business_attempt": row["business_attempt"],
+                        },
+                    )
+                return False
+            if row["enqueued_state_version"] < (
+                row.get("current_queue_invalidation_version") or 0
+            ):
+                return False
             timed_out = await self._expire_subtasks(tx, row)
             if not await self._eligible(tx, row):
                 return False
@@ -122,8 +140,6 @@ class AutoBatchRetry:
         return (
             row["execution_id"] == candidate["current_execution_id"]
             and row["definition_version"] == row["current_definition_version"]
-            and row["enqueued_state_version"]
-            >= (row.get("current_queue_invalidation_version") or 0)
         )
 
     async def _expire_subtasks(self, tx, row):

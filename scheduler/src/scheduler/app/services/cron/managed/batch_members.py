@@ -5,6 +5,8 @@ import json
 from datetime import timezone
 
 from .operations import IDENTITY_FIELDS, utc_now
+from .repository import _identity_terms
+from .run_accounting import occupied_run_sql
 from .storage import insert
 
 MEMBERS = "swe_cron_managed_batch_members"
@@ -13,6 +15,22 @@ RECEIPTS = "swe_cron_managed_trigger_receipts"
 
 class BatchRelationUnavailable(RuntimeError):
     """批次关系缺失或身份不一致，不能伪造完整的监控数据。"""
+
+
+async def active_batch_id(db, parent_key):
+    """按当前成员尝试查找该父任务最早的未结束批次。"""
+    clauses, params = _identity_terms(IDENTITY_FIELDS, parent_key)
+    row = await db.fetch_one(
+        f"SELECT d.batch_id FROM {RECEIPTS} d "
+        f"WHERE {' AND '.join(clauses)} AND d.kind='batch' AND d.status='accepted' "
+        f"AND EXISTS (SELECT 1 FROM {MEMBERS} m "
+        "JOIN swe_cron_execution_runs r ON r.execution_id=m.current_execution_id "
+        "WHERE m.batch_id=d.batch_id AND m.source_id=d.source_id "
+        f"AND (r.status IN ('queued','dispatch_failed') OR {occupied_run_sql('r')})) "
+        "ORDER BY d.created_at,d.batch_id LIMIT 1",
+        tuple(params),
+    )
+    return row["batch_id"] if row else None
 
 
 def _key(row):

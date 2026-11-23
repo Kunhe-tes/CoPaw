@@ -261,6 +261,7 @@ def test_listing_sorts_directories_first_with_case_insensitive_natural_order(
         (tmp_path / name).mkdir()
     for name in ("item10.txt", "Item2.txt", "alpha.txt"):
         (tmp_path / name).write_text(name, encoding="utf-8")
+        os.utime(tmp_path / name, ns=(1_700_000_000_000_000_000,) * 2)
 
     listing = _service(tmp_path).list_directory(FileManagerRoot.WORKING)
 
@@ -281,6 +282,7 @@ def test_natural_sort_handles_leading_numeric_and_alphabetic_names(
 ) -> None:
     for name in ("alpha.txt", "10.txt", "2.txt"):
         (tmp_path / name).write_text(name, encoding="utf-8")
+        os.utime(tmp_path / name, ns=(1_700_000_000_000_000_000,) * 2)
 
     listing = _service(tmp_path).list_directory(FileManagerRoot.WORKING)
 
@@ -289,6 +291,40 @@ def test_natural_sort_handles_leading_numeric_and_alphabetic_names(
         "10.txt",
         "alpha.txt",
     ]
+
+
+@pytest.mark.parametrize("query", [None, "item"])
+def test_listing_sorts_files_by_mtime_before_paginating(
+    tmp_path: Path,
+    query: str | None,
+) -> None:
+    for name in ("item10", "item2"):
+        (tmp_path / name).mkdir()
+    count = FILE_MANAGER_PAGE_SIZE + 2
+    for index in range(count):
+        path = tmp_path / f"item{index:03d}.txt"
+        path.write_text("x", encoding="utf-8")
+        timestamp = 1_700_000_000_000_000_000 + index * 1_000_000_000
+        os.utime(path, ns=(timestamp, timestamp))
+
+    service = _service(tmp_path)
+    first = service.list_directory("working", query=query)
+    second = service.list_directory(
+        "working",
+        query=query,
+        cursor=first.next_cursor,
+    )
+    expected = ["item2", "item10"] + [
+        f"item{index:03d}.txt" for index in reversed(range(count))
+    ]
+    assert [item.name for item in first.items + second.items] == expected
+    assert second.next_cursor is None
+
+    # A fresh listing reflects a file edit, while pagination uses its snapshot.
+    oldest = tmp_path / "item000.txt"
+    os.utime(oldest, ns=(1_800_000_000_000_000_000,) * 2)
+    refreshed = service.list_directory("working", query=query)
+    assert refreshed.items[2].name == "item000.txt"
 
 
 def test_listing_reports_no_child_directory_state(tmp_path: Path) -> None:
@@ -303,6 +339,10 @@ def test_listing_reports_no_child_directory_state(tmp_path: Path) -> None:
 def test_listing_uses_stable_100_item_cursor_pages(tmp_path: Path) -> None:
     for index in range(FILE_MANAGER_PAGE_SIZE + 2):
         (tmp_path / f"item{index:03d}.txt").write_text("x", encoding="utf-8")
+        os.utime(
+            tmp_path / f"item{index:03d}.txt",
+            ns=(1_700_000_000_000_000_000,) * 2,
+        )
 
     service = _service(tmp_path)
     first_page = service.list_directory(FileManagerRoot.WORKING)
@@ -326,6 +366,10 @@ def test_directory_cursor_reuses_snapshot_and_rejects_changed_directory(
 ) -> None:
     for index in range(FILE_MANAGER_PAGE_SIZE + 2):
         (tmp_path / f"item{index:03d}.txt").write_text("x", encoding="utf-8")
+        os.utime(
+            tmp_path / f"item{index:03d}.txt",
+            ns=(1_700_000_000_000_000_000,) * 2,
+        )
     service = _service(tmp_path)
     original_candidates = service._directory_candidates
     calls = 0
@@ -357,6 +401,10 @@ def test_directory_cursor_uses_the_30_second_snapshot_window(
 ) -> None:
     for index in range(FILE_MANAGER_PAGE_SIZE + 1):
         (tmp_path / f"item{index:03d}.txt").write_text("x", encoding="utf-8")
+        os.utime(
+            tmp_path / f"item{index:03d}.txt",
+            ns=(1_700_000_000_000_000_000,) * 2,
+        )
     file_manager._DIRECTORY_SNAPSHOTS.clear()
     clock = [0.0]
     monkeypatch.setattr(file_manager.time, "monotonic", lambda: clock[0])
@@ -393,6 +441,10 @@ def test_snapshot_workspace_quota_retains_sixteen_directories(
                 (directory / f"item{item_index:03d}.txt").write_text(
                     "x",
                     encoding="utf-8",
+                )
+                os.utime(
+                    directory / f"item{item_index:03d}.txt",
+                    ns=(1_700_000_000_000_000_000,) * 2,
                 )
             listing = service.list_directory(
                 "working",
@@ -452,6 +504,10 @@ def test_snapshot_workspace_quota_preserves_other_workspace_page(
                 "x",
                 encoding="utf-8",
             )
+            os.utime(
+                workspace / f"item{index:03d}.txt",
+                ns=(1_700_000_000_000_000_000,) * 2,
+            )
 
     first_service = _service(first_workspace)
     second_service = _service(second_workspace)
@@ -486,6 +542,10 @@ def test_listing_allows_more_than_ten_thousand_items_with_cursor(
 ) -> None:
     for index in range(10_001):
         (tmp_path / f"item{index:05d}.txt").write_text("x", encoding="utf-8")
+        os.utime(
+            tmp_path / f"item{index:05d}.txt",
+            ns=(1_700_000_000_000_000_000,) * 2,
+        )
 
     listing = _service(tmp_path).list_directory(FileManagerRoot.WORKING)
 
@@ -498,6 +558,10 @@ def test_listing_allows_more_than_ten_thousand_items_with_cursor(
 def test_cursor_rejects_forgery_and_context_mismatches(tmp_path: Path) -> None:
     for index in range(FILE_MANAGER_PAGE_SIZE + 1):
         (tmp_path / f"item{index:03d}.txt").write_text("x", encoding="utf-8")
+        os.utime(
+            tmp_path / f"item{index:03d}.txt",
+            ns=(1_700_000_000_000_000_000,) * 2,
+        )
     (tmp_path / "media").mkdir()
     (tmp_path / "folder").mkdir()
     service = _service(tmp_path)
@@ -526,6 +590,10 @@ def test_missing_root_validates_a_cross_context_cursor_before_returning_empty(
 ) -> None:
     for index in range(FILE_MANAGER_PAGE_SIZE + 1):
         (tmp_path / f"item{index:03d}.txt").write_text("x", encoding="utf-8")
+        os.utime(
+            tmp_path / f"item{index:03d}.txt",
+            ns=(1_700_000_000_000_000_000,) * 2,
+        )
     service = _service(tmp_path)
     cursor = service.list_directory(FileManagerRoot.WORKING).next_cursor
     assert cursor is not None
@@ -873,6 +941,7 @@ def test_directory_listing_has_no_hard_scan_limit(
 ) -> None:
     for name in ("one.txt", "two.txt", "three.txt"):
         (tmp_path / name).write_text(name, encoding="utf-8")
+        os.utime(tmp_path / name, ns=(1_700_000_000_000_000_000,) * 2)
 
     listing = _service(tmp_path).list_directory(FileManagerRoot.WORKING)
 

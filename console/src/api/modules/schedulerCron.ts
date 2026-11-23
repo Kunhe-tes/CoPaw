@@ -166,11 +166,16 @@ export const schedulerCronApi = {
     spec: ManagedCronSpec,
     version: number,
     requestId: string,
+    group?: {
+      sync_children: boolean;
+      expected_management_version?: number;
+    },
   ) =>
     write<{ operation: ManagedOperation }>(context, jobPath(id), "PUT", {
       request_id: requestId,
       expected_definition_version: version,
       spec: definitionOnly(spec),
+      ...group,
     }),
   remove: (
     context: ManagedCronContext,
@@ -213,6 +218,13 @@ export const schedulerCronApi = {
       `${jobPath(id)}/run`,
       "POST",
       { request_id: requestId, expected_definition_version: version },
+    ),
+  runBatch: (context: ManagedCronContext, id: string) =>
+    write<{ batch_id: string; enqueued_intents: number }>(
+      context,
+      "/scheduler/external/cron/batch/run",
+      "POST",
+      { jobId: id },
     ),
   execution: (context: ManagedCronContext, id: string, executionId: string) =>
     call<ManagedExecution>(

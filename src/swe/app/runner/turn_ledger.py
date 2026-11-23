@@ -105,6 +105,88 @@ def terminal_fingerprints(state: dict) -> dict[str, str]:
     }
 
 
+def _reference_directories(root: Path) -> Iterator[Path]:
+    with os.scandir(root) as prefixes:
+        for prefix in prefixes:
+            with os.scandir(prefix.path) as identities:
+                for identity in identities:
+                    yield Path(identity.path)
+
+
+def _newest_turn(
+    best: tuple[tuple[str, dict] | None, int],
+    turn_id: str,
+    turn: dict | None,
+    chat_id: str,
+) -> tuple[tuple[str, dict] | None, int]:
+    if (
+        not turn
+        or turn.get("chat_id") not in (None, chat_id)
+        or turn.get("status") not in (TERMINAL | {"admitted"})
+    ):
+        return best
+    order = turn.get(ORDER, 0)
+    if order >= best[1]:
+        return (turn_id, turn), order
+    return best
+
+
+def _valid_intent_path(parts: tuple[str, ...]) -> bool:
+    if len(parts) == 4 and parts[0] in ("turns", "references"):
+        if len(parts[1]) != 2 or parts[1] != parts[2][:2]:
+            return False
+        key = parts[2]
+    elif len(parts) == 3 and parts[0] == "latest":
+        key = parts[1]
+    else:
+        return False
+    return len(key) == 64 and all(c in "0123456789abcdef" for c in key)
+
+
+def _intent_paths(directory: Path, intent: dict) -> list[Path]:
+    paths = []
+    for relative in intent["files"]:
+        parts = Path(relative).parts
+        path = directory / relative
+        if (
+            not _valid_intent_path(parts)
+            or parts[-1] != f"{intent['target_revision']}.json"
+            or not path.resolve().is_relative_to(directory.resolve())
+        ):
+            raise ValueError("Invalid ledger intent path")
+        paths.append(path)
+    return paths
+
+
+def _turns_to_archive(
+    hot: dict,
+    baseline: dict[str, str],
+    deleted: tuple[str, ...],
+) -> list[tuple[str, dict, bool]]:
+    eligible = sorted(
+        (
+            (key, value)
+            for key, value in hot.items()
+            if value.get("status") in TERMINAL and key not in deleted
+        ),
+        key=lambda pair: pair[1][ORDER],
+    )
+    count = len(eligible)
+    size = sum(_size({key: value}) for key, value in eligible)
+    moving = []
+    for key, value in eligible:
+        if count <= HOT_TURNS and size <= HOT_BYTES:
+            break
+        if baseline.get(key) != _digest(value):
+            continue
+        moving.append((key, value, False))
+        count -= 1
+        size -= _size({key: value})
+        if len(moving) >= 64 - len(deleted):
+            break
+    return moving
+
+
 def observe_hot_turns(state: dict, baseline: dict[str, str]) -> None:
     """Observe one published hot snapshot; never retain or load cold turns."""
     try:
@@ -253,27 +335,22 @@ class TurnLedger:
                 raise ValueError("Missing committed terminal turn references")
             return
         count = 0
-        with os.scandir(root) as prefixes:
-            for prefix in prefixes:
-                with os.scandir(prefix.path) as identities:
-                    for identity in identities:
-                        path = self._version(
-                            Path(identity.path),
-                            state["revision"],
-                        )
-                        if path is not None:
-                            count += 1
-                            ref = self._read_reference(state, path)
-                            turn_id = ref["turn_id"]
-                            payload = (
-                                self._turn_directory(state, turn_id)
-                                / f"{ref['revision']}.json"
-                            )
-                            value = self._read_turn(state, payload, turn_id)
-                            if not value.get("deleted") and value[
-                                "turn_id"
-                            ] not in state.get("turn_states", {}):
-                                yield value["turn_id"], value["turn"]
+        for identity in _reference_directories(root):
+            path = self._version(identity, state["revision"])
+            if path is None:
+                continue
+            count += 1
+            ref = self._read_reference(state, path)
+            turn_id = ref["turn_id"]
+            payload = self._turn_directory(state, turn_id) / (
+                f"{ref['revision']}.json"
+            )
+            value = self._read_turn(state, payload, turn_id)
+            if not value.get("deleted") and value["turn_id"] not in state.get(
+                "turn_states",
+                {},
+            ):
+                yield value["turn_id"], value["turn"]
         if count != state.get("cold_turn_count", 0):
             raise ValueError("Missing committed terminal turn references")
         self.validate_latest(state)
@@ -294,38 +371,33 @@ class TurnLedger:
         )
 
     def latest(self, state: dict, chat_id: str) -> tuple[str, dict] | None:
-        best = None
+        best_turn = None
         best_order = -1
-
-        def consider(turn_id, turn):
-            nonlocal best, best_order
-            if (
-                turn
-                and turn.get("chat_id") in (None, chat_id)
-                and turn.get("status") in (TERMINAL | {"admitted"})
-            ):
-                if turn.get(ORDER, 0) >= best_order:
-                    best = turn_id, turn
-                    best_order = turn.get(ORDER, 0)
-
         for turn_id, turn in state.get("turn_states", {}).items():
-            consider(turn_id, turn)
-        if state.get("schema_version") != 3:
-            return best
-        self.validate(state)
-        for bucket in (chat_id, ""):
-            key = self._key(bucket)
-            head = state.get("ledger_latest", {}).get(key)
-            for value in self._latest_nodes(state, key, head):
-                for candidate in value["candidates"]:
-                    if candidate["order"] >= best_order:
-                        consider(
-                            candidate["turn_id"],
-                            self.get_turn(state, candidate["turn_id"]),
-                        )
-                if best_order > value["max_order"]:
-                    break
-        return best
+            best_turn, best_order = _newest_turn(
+                (best_turn, best_order),
+                turn_id,
+                turn,
+                chat_id,
+            )
+        if state.get("schema_version") == 3:
+            self.validate(state)
+            for bucket in (chat_id, ""):
+                key = self._key(bucket)
+                head = state.get("ledger_latest", {}).get(key)
+                for value in self._latest_nodes(state, key, head):
+                    for candidate in value["candidates"]:
+                        if candidate["order"] >= best_order:
+                            turn_id = candidate["turn_id"]
+                            best_turn, best_order = _newest_turn(
+                                (best_turn, best_order),
+                                turn_id,
+                                self.get_turn(state, turn_id),
+                                chat_id,
+                            )
+                    if best_order > value["max_order"]:
+                        break
+        return best_turn
 
     def _latest_nodes(self, state, bucket, head):
         ceiling = state["revision"] + 1
@@ -379,30 +451,7 @@ class TurnLedger:
             ),
         ):
             raise ValueError("Invalid ledger intent")
-        paths = []
-        for relative in intent["files"]:
-            parts = Path(relative).parts
-            valid = (
-                len(parts) == 4
-                and parts[0] in ("turns", "references")
-                and len(parts[1]) == 2
-                and len(parts[2]) == 64
-                and parts[1] == parts[2][:2]
-                and all(c in "0123456789abcdef" for c in parts[2])
-            ) or (
-                len(parts) == 3
-                and parts[0] == "latest"
-                and len(parts[1]) == 64
-                and all(c in "0123456789abcdef" for c in parts[1])
-            )
-            path = directory / relative
-            if (
-                not valid
-                or parts[-1] != f"{intent['target_revision']}.json"
-                or not path.resolve().is_relative_to(directory.resolve())
-            ):
-                raise ValueError("Invalid ledger intent path")
-            paths.append(path)
+        paths = _intent_paths(directory, intent)
         committed = (
             state["revision"] == intent["target_revision"]
             and state.get("ledger_nonce") == intent["nonce"]
@@ -483,27 +532,7 @@ class TurnLedger:
         result["next_admission_order"] = next_order
         result["turn_states"] = hot
         result["ledger_latest"] = dict(state.get("ledger_latest", {}))
-        eligible = sorted(
-            (
-                (key, value)
-                for key, value in hot.items()
-                if value.get("status") in TERMINAL and key not in deleted
-            ),
-            key=lambda pair: pair[1][ORDER],
-        )
-        count = len(eligible)
-        size = sum(_size({key: value}) for key, value in eligible)
-        moving = []
-        for key, value in eligible:
-            if count <= HOT_TURNS and size <= HOT_BYTES:
-                break
-            if baseline.get(key) != _digest(value):
-                continue
-            moving.append((key, value, False))
-            count -= 1
-            size -= _size({key: value})
-            if len(moving) >= 64 - len(deleted):
-                break
+        moving = _turns_to_archive(hot, baseline, deleted)
         for key in deleted:
             previous = self.get_turn(state, key)
             if previous is not None:

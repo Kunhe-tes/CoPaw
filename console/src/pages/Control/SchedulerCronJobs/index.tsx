@@ -11,7 +11,11 @@ import { useAgentStore } from "@/stores/agentStore";
 import { useIframeStore } from "@/stores/iframeStore";
 import { DEFAULT_SOURCE_ID } from "@/constants/identity";
 import { getUserId } from "@/utils/identity";
-import { createManagedColumns, type ManagedJobPanel } from "./columns";
+import {
+  createManagedColumns,
+  type ManagedJobAction,
+  type ManagedJobPanel,
+} from "./columns";
 import { useManagedCronJobs } from "./useManagedCronJobs";
 import { ManagedJobEditor } from "./ManagedJobEditor";
 import { ManagedBroadcastModal } from "./ManagedBroadcastModal";
@@ -20,8 +24,13 @@ import { ManagedProgressModal } from "./ManagedProgressModal";
 import { ManagedRechecksTable } from "./ManagedRechecksTable";
 import { failureMessage, RequestIdentity } from "./helpers";
 import styles from "../CronJobs/index.module.less";
+import managementStyles from "./management.module.less";
 
-type Panel = ManagedJobPanel | { kind: "create" } | null;
+type Panel =
+  | ManagedJobPanel
+  | { kind: "create" }
+  | { kind: "sync-progress"; job: ManagedJob; taskId: string }
+  | null;
 
 function SchedulerCronWorkspace({ context }: { context: ManagedCronContext }) {
   const { t } = useTranslation();
@@ -34,14 +43,19 @@ function SchedulerCronWorkspace({ context }: { context: ManagedCronContext }) {
   const requests = useRef(new Map<string, RequestIdentity>());
   const refresh = () => void data.reload();
   const close = () => setPanel(null);
-  const perform = async (
-    kind: "toggle" | "remove" | "run" | "pause",
-    job: ManagedJob,
-  ) => {
+  const perform = async (kind: ManagedJobAction, job: ManagedJob) => {
+    setActionError(null);
+    if (kind === "runBatch") {
+      const result = await data.runBatch(job);
+      if (result)
+        message.success(
+          `整批运行已受理，已登记 ${result.enqueued_intents} 条执行`,
+        );
+      return;
+    }
     const key = `${kind}:${job.tenant_id}:${job.source_id}:${job.agent_id}:${job.id}`;
     const identity = requests.current.get(key) ?? new RequestIdentity();
     requests.current.set(key, identity);
-    setActionError(null);
     try {
       const result = await data[kind](
         job,
@@ -74,31 +88,33 @@ function SchedulerCronWorkspace({ context }: { context: ManagedCronContext }) {
     [context, panel],
   );
   return (
-    <div className={styles.cronJobsPage}>
-      <PageHeader
-        items={[{ title: t("nav.runCenter") }, { title: "定时任务（新）" }]}
-        extra={
-          <Space>
-            <Button
-              type={includeDeleted ? "primary" : "default"}
-              aria-pressed={includeDeleted}
-              onClick={() => setIncludeDeleted((current) => !current)}
-            >
-              包含已删除任务（查看清理进度）
-            </Button>
-            <Button onClick={refresh} loading={data.loading}>
-              刷新
-            </Button>
-            <Button
-              type="primary"
-              disabled={data.busy}
-              onClick={() => setPanel({ kind: "create" })}
-            >
-              + {t("cronJobs.createJob")}
-            </Button>
-          </Space>
-        }
-      />
+    <>
+      <div className={managementStyles.listToolbar}>
+        <Space
+          className={managementStyles.toolbarActions}
+          role="group"
+          aria-label="定时任务操作"
+          wrap
+        >
+          <Button
+            type={includeDeleted ? "primary" : "default"}
+            aria-pressed={includeDeleted}
+            onClick={() => setIncludeDeleted((current) => !current)}
+          >
+            包含已删除任务（查看清理进度）
+          </Button>
+          <Button onClick={refresh} loading={data.loading}>
+            刷新
+          </Button>
+          <Button
+            type="primary"
+            disabled={data.busy}
+            onClick={() => setPanel({ kind: "create" })}
+          >
+            + {t("cronJobs.createJob")}
+          </Button>
+        </Space>
+      </div>
       {(data.error || actionError) && (
         <Alert type="error" showIcon message={actionError || data.error} />
       )}
@@ -138,16 +154,22 @@ function SchedulerCronWorkspace({ context }: { context: ManagedCronContext }) {
           onLoaded={data.reconcileJob}
           onClose={close}
           onChanged={refresh}
-          onSave={(job, spec, id) =>
-            job ? data.update(job, spec, id) : data.create(spec, id)
+          onSave={(job, spec, id, syncChildren) =>
+            job
+              ? data.update(job, spec, id, syncChildren)
+              : data.create(spec, id)
+          }
+          onSyncStarted={(job, taskId) =>
+            setPanel({ kind: "sync-progress", job, taskId })
           }
         />
       )}
-      {panel?.kind === "broadcast" && (
+      {(panel?.kind === "broadcast" || panel?.kind === "sync-progress") && (
         <ManagedBroadcastModal
           context={target}
           job={panel.job}
           onClose={close}
+          syncTaskId={panel.kind === "sync-progress" ? panel.taskId : undefined}
         />
       )}
       {panel?.kind === "children" && (
@@ -174,7 +196,7 @@ function SchedulerCronWorkspace({ context }: { context: ManagedCronContext }) {
           }
         />
       )}
-    </div>
+    </>
   );
 }
 
@@ -197,29 +219,30 @@ export default function SchedulerCronJobsPage() {
     [actor, source, agent],
   );
   return (
-    <Tabs
-      key={JSON.stringify([context, manager, admin])}
-      defaultActiveKey="jobs"
-      destroyOnHidden
-      items={[
-        {
-          key: "jobs",
-          label: "定时任务",
-          children: <SchedulerCronWorkspace context={context} />,
-        },
-        {
-          key: "rechecks",
-          label: "回检任务",
-          children: (
-            <div className={styles.cronJobsPage}>
-              <PageHeader
-                items={[{ title: t("nav.runCenter") }, { title: "定时任务（新）" }]}
-              />
-              <ManagedRechecksTable context={context} />
-            </div>
-          ),
-        },
-      ]}
-    />
+    <div className={styles.cronJobsPage}>
+      <PageHeader
+        items={[{ title: t("nav.runCenter") }, { title: "定时任务（新）" }]}
+      />
+      <Tabs
+        key={JSON.stringify([context, manager, admin])}
+        className={managementStyles.workspaceTabs}
+        size="small"
+        tabBarStyle={{ marginBottom: 12 }}
+        defaultActiveKey="jobs"
+        destroyOnHidden
+        items={[
+          {
+            key: "jobs",
+            label: "定时任务",
+            children: <SchedulerCronWorkspace context={context} />,
+          },
+          {
+            key: "rechecks",
+            label: "回检任务",
+            children: <ManagedRechecksTable context={context} />,
+          },
+        ]}
+      />
+    </div>
   );
 }

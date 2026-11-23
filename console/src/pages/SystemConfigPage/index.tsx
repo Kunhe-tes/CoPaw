@@ -68,6 +68,7 @@ import {
   SystemPromptSegments,
 } from "./components";
 import { SourceToolLibrary } from "./SourceToolLibrary";
+import { CronUnreadPauseBranches } from "./CronUnreadPauseBranches";
 import {
   addPromptSegment,
   buildCapabilitySummaries,
@@ -587,6 +588,18 @@ export default function SystemConfigPage() {
   };
 
   const cronUnreadAutoPauseConfig = readCronUnreadAutoPauseConfig(draftConfig);
+  const cronBranchOverrides = (
+    <CronUnreadPauseBranches
+      config={cronUnreadAutoPauseConfig}
+      disabled={formDisabled}
+      onChange={(rules) => {
+        setValidationError(null);
+        setDraftConfig((previous) =>
+          writeCronUnreadAutoPauseValue(previous, "by_branch", rules),
+        );
+      }}
+    />
+  );
   const cronNotificationConfig = readCronNotificationConfig(draftConfig);
   const cronTaskSessionCleanupConfig =
     readCronTaskSessionCleanupConfig(draftConfig);
@@ -847,6 +860,7 @@ export default function SystemConfigPage() {
               />
             </label>
           </details>
+          {cronBranchOverrides}
         </section>
         <section className={styles.toolOutputSection}>
           <div className={styles.switchRow}>
@@ -1468,6 +1482,7 @@ export default function SystemConfigPage() {
                       />
                     </label>
                   </div>
+                  {cronBranchOverrides}
                 </section>
                 <section className={styles.scheduledTaskSection}>
                   <div className={styles.switchRow}>

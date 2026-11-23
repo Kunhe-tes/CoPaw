@@ -54,7 +54,11 @@ class ManagedRecoveryWorker:
         self.work = ManagedWorkQuery(db, limit)
         self.auto_pause = AutoPauseController(db, platform, limit=limit)
         self.settlement = ExecutionSettlement(db, limit=limit)
-        self.daily_retry = DailyFailureRetry(db, page_size=min(limit, 100))
+        self.daily_retry = DailyFailureRetry(
+            db,
+            page_size=min(limit, 100),
+            dispatch_ordinary=self.dispatcher.dispatch_registered,
+        )
         self.auto_retry = AutoBatchRetry(db, limit=limit)
         self.pause_groups = PauseGroupService(db, platform)
         self.rechecks = (
@@ -81,6 +85,7 @@ class ManagedRecoveryWorker:
                 self._isolated("modes", self._modes),
                 self._isolated("cleanup", self._cleanup),
                 self._isolated("dispatched", self._dispatch),
+                self._isolated("direct_dispatched", self._dispatch_direct),
                 self._isolated("recovered", self._recover),
                 self._isolated("daily_failure_retry", self.daily_retry.tick),
                 *rechecks,
@@ -211,6 +216,12 @@ class ManagedRecoveryWorker:
             await self.dispatcher.recover_registered(row["execution_id"])
         return len(rows)
 
+    async def _dispatch_direct(self):
+        rows = await self.work.rows(running=False, direct=True)
+        for row in rows:
+            await self.dispatcher.dispatch_registered(row["execution_id"])
+        return len(rows)
+
     async def run_loop(self, *, stop_event, interval_seconds=2):
         """各恢复工作域独立循环，长分发不阻塞执行派发和结果恢复。"""
         if interval_seconds <= 0:
@@ -225,6 +236,7 @@ class ManagedRecoveryWorker:
             self._modes,
             self._cleanup,
             self._dispatch,
+            self._dispatch_direct,
             self._recover,
             self.daily_retry.tick,
         )

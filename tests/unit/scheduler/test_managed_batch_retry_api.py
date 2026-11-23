@@ -21,7 +21,7 @@ async def test_batch_operations_headers_idempotency_and_strict_body(
         BatchRetryService,
     )
 
-    caller, batch = await failed_batch(callback_setup)
+    caller, batch = await failed_batch(callback_setup, category="auth_expired")
     service = BatchRetryService(callback_setup[0])
     app = FastAPI()
     app.include_router(api.router, prefix="/api")
@@ -76,3 +76,64 @@ async def test_batch_operations_headers_idempotency_and_strict_body(
                 json={**command, "confirm_stopped": True},
             )
         ).status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_failure_preview_can_read_past_200(callback_setup, monkeypatch):
+    from scheduler.app.routers import managed_batch_operations as api
+    from scheduler.app.services.cron.managed import batch_failures
+
+    db = callback_setup[0]
+    caller, batch = await failed_batch(callback_setup, category="auth_expired")
+    receipt = await batch_failures.read_batch(db, caller, batch)
+    (original,) = await batch_failures.member_rows(db, receipt)
+
+    async def many_members(*_):
+        return [
+            {
+                **original,
+                "member_id": "different-category",
+                "result_json": '{"failure_type": "configuration"}',
+            },
+            *(
+                {**original, "member_id": f"member-{number}"}
+                for number in range(1, 202)
+            ),
+        ]
+
+    monkeypatch.setattr(batch_failures, "member_rows", many_members)
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[api.batch_service] = (
+        lambda: api.BatchRetryService(db)
+    )
+    headers = {
+        "X-User-Id": caller.actor_id,
+        "X-Source-Id": caller.source_id,
+        "X-User-Role": "manager",
+    }
+    path = f"/scheduler/cron/managed-dispatch/batches/{batch}/failures"
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        first = (await client.get(path, headers=headers)).json()
+        last_response = await client.get(
+            path,
+            headers=headers,
+            params={"offset": 200, "types": "auth_expired"},
+        )
+        assert last_response.status_code == 200
+        last = last_response.json()
+        assert (
+            await client.get(path, headers=headers, params={"offset": -1})
+        ).status_code == 422
+
+    assert len(first["items"]) == 200
+    assert first["has_more"]
+    assert last["offset"] == 200
+    assert [item["member_id"] for item in last["items"]] == ["member-201"]
+    assert last["counts"] == first["counts"]
+    assert first["matched_count"] == 202
+    assert last["matched_count"] == 201
+    assert not last["has_more"]

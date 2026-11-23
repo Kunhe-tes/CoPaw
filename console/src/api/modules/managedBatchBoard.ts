@@ -68,6 +68,14 @@ export interface ManagedBatchEvent {
   occurred_at: string;
   details: Record<string, unknown>;
 }
+export interface ManagedSkippedMember {
+  tenant_id: string;
+  agent_id: string;
+  job_id: string;
+  job_name: string | null;
+  member_role: "parent" | "child";
+  reason: string;
+}
 export interface ManagedBatchList {
   items: ManagedBatch[];
   total: number;
@@ -84,6 +92,7 @@ export interface ManagedBatchList {
 export interface ManagedBatchDetail {
   batch: ManagedBatch;
   members: ManagedBatchMember[];
+  skipped_members?: ManagedSkippedMember[] | null;
   member_total: number;
   member_page: number;
   member_page_size: number;
@@ -96,6 +105,7 @@ export type ManagedFailureFilters = {
   start_time?: string;
   end_time?: string;
   status?: string;
+  child_status?: string;
   query?: string;
 };
 export interface ManagedFailureSummary {
@@ -145,6 +155,7 @@ export interface ManagedFailurePreview {
   items: FailureMember[];
   matched_count: number;
   has_more: boolean;
+  offset?: number;
 }
 export interface ManagedRetryBody {
   request_id: string;
@@ -163,6 +174,44 @@ export interface ManagedRetryResult {
     transport_only?: boolean;
   }[];
 }
+export interface ManagedWorkerPool {
+  provider_id: string;
+  model_id: string;
+}
+
+export interface ManagedWorkerOccupant extends ManagedWorkerPool {
+  id: string;
+  tenant_id: string;
+  tenant_name: string | null;
+  job_id: string;
+  job_name: string | null;
+  started_at: string | null;
+  status: string;
+  execution_type: string;
+}
+
+export interface ManagedWorkerOccupancy {
+  total: number;
+  page: number;
+  page_size: number;
+  sampled_at: string;
+  items: ManagedWorkerOccupant[];
+}
+
+export interface ManagedWorkerTrendPoint {
+  at: string;
+  total: number;
+  success: number;
+  failed: number;
+  requests: number;
+  retries: number;
+}
+
+export interface ManagedWorkerTrends {
+  bucket_seconds: number;
+  points: ManagedWorkerTrendPoint[];
+}
+
 type Filters = Record<string, string | number | undefined>;
 const MONITOR = "/monitor/cron/managed-dispatch";
 const SCHEDULER = "/scheduler/cron/managed-dispatch/batches";
@@ -220,18 +269,37 @@ export const managedBatchBoard = {
       filters,
       signal,
     ),
-  failures: (
+  workerOccupants: (source: string, filters: Filters, signal?: AbortSignal) =>
+    call<ManagedWorkerOccupancy>(
+      source,
+      `${MONITOR}/workers/occupants`,
+      filters,
+      signal,
+    ),
+  workerTrends: (source: string, filters: Filters, signal?: AbortSignal) =>
+    call<ManagedWorkerTrends>(
+      source,
+      `${MONITOR}/workers/trends`,
+      filters,
+      signal,
+    ),
+  failures: async (
     source: string,
     batch: string,
     types: string[],
     signal?: AbortSignal,
+    offset = 0,
   ) => {
     const params = new URLSearchParams();
     types.forEach((type) => params.append("types", type));
-    return request<ManagedFailurePreview>(
+    if (offset > 0) params.set("offset", String(offset));
+    const result = await request<ManagedFailurePreview>(
       `${SCHEDULER}/${idPath(batch)}/failures?${params}`,
       { headers: { "X-Source-Id": source }, signal },
     );
+    if (offset > 0 && result.offset !== offset)
+      throw new Error("接口未返回请求的失败成员范围，请刷新后重试。");
+    return result;
   },
   retry: (source: string, batch: string, body: ManagedRetryBody) =>
     request<ManagedRetryResult>(`${SCHEDULER}/${idPath(batch)}/retry`, {

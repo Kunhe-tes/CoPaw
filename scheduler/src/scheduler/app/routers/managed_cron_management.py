@@ -66,6 +66,16 @@ class UpdateRequest(OperationRequest):
         ge=1,
         description="最近一次详情返回的 definition_version，不是操作进度版本",
     )
+    expected_management_version: int | None = Field(
+        default=None,
+        ge=1,
+        description="详情返回的管理版本，用于检测日期等管理配置的并发修改",
+    )
+    sync_children: bool | None = Field(
+        default=None,
+        strict=True,
+        description="父任务保存范围。两种方式均同步修改后的 Cron 表达式、时区和可执行日期，true 还同步其他基本配置变更",
+    )
 
 
 class DeleteRequest(OperationRequest):
@@ -184,12 +194,16 @@ async def update_job(
     """按 expected_definition_version 完整替换业务定义，保留任务身份、资源绑定和运行结果。
 
     身份沿用可信网关 Header：X-User-Id、X-Source-Id 必填，tenant、Agent 和 scope 按现有约定解析。
-    不通过本接口启停、切换模式或重新分发；源仍有未删除子任务时拒绝正文更新。成功返回 operation，失败按原操作查询和续办。
+    父任务可用 sync_children 选择是否同步其他基本配置。两种方式均同步修改后的 Cron 表达式、时区和可执行日期。成功返回 operation，若有后台同步则附带 broadcast_task_id。
     """
     require_recheck_runtime(request, body.spec)
     try:
         return _response(
-            await service.update(caller, job_id, body.model_dump()),
+            await service.update(
+                caller,
+                job_id,
+                body.model_dump(exclude_none=True),
+            ),
         )
     except Exception as exc:
         raise _error(exc) from exc

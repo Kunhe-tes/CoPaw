@@ -64,7 +64,38 @@ def operation_summary(row):
         )
     }
     result["logical_delete_applied"] = row["action"] == "delete"
+    if row["action"] == "update" and row.get("progress_json"):
+        task_id = json.loads(row["progress_json"]).get("broadcast_task_id")
+        if task_id:
+            result["broadcast_task_id"] = task_id
     return result
+
+
+def _group_update(payload, current, spec, action):
+    if (
+        action != "update"
+        or current.get("parent_job_id")
+        or payload.get("sync_children") is None
+    ):
+        return {}
+    from .definition_sync import changed_fields
+
+    previous = json.loads(current["spec_json"])
+    if payload["sync_children"]:
+        changes = changed_fields(previous, spec)
+    else:
+        schedule = {
+            key: spec["schedule"][key]
+            for key in ("cron", "timezone")
+            if spec["schedule"][key] != previous["schedule"].get(key)
+        }
+        changes = {"schedule": schedule} if schedule else {}
+    return {
+        "group_update": True,
+        "group_date_changed": previous.get("run_date_range")
+        != spec.get("run_date_range"),
+        "child_definition_changes": changes,
+    }
 
 
 class ManagementStore:
@@ -162,6 +193,7 @@ class ManagementStore:
             )
             if self.grant is not None:
                 spec = await self.grant.rewrite_spec(tx, spec, current)
+            group_update = _group_update(payload, current, spec, action)
             now = utc_now()
             operation = {
                 "operation_id": op_id,
@@ -177,6 +209,7 @@ class ManagementStore:
                 "payload_json": canonical(
                     {
                         "spec": spec,
+                        **group_update,
                         "actor_is_manager": caller.is_manager,
                         "dispatch_state": (
                             payload.get("dispatch_state", "ordinary")
@@ -322,15 +355,33 @@ class ManagementStore:
         if active_broadcast:
             raise ManagementConflict("cron_broadcast_in_progress")
         if action == "update":
+            await self._check_update_scope(
+                tx,
+                caller.job_key(job_id),
+                row,
+                payload,
+            )
+        return row
+
+    @staticmethod
+    async def _check_update_scope(tx, key, row, payload):
+        sync_children = payload.get("sync_children")
+        if sync_children is None:
             children = await tx.fetch_one(
                 "SELECT job_id FROM swe_cron_jobs_v2 WHERE parent_tenant_id=%s "
                 "AND parent_source_id=%s AND parent_agent_id=%s AND parent_job_id=%s "
                 "AND deleted_at IS NULL LIMIT 1",
-                caller.job_key(job_id),
+                key,
             )
             if children:
                 raise ManagementConflict("cron_source_has_children")
-        return row
+        if sync_children and row.get("parent_job_id"):
+            raise ManagementConflict("cron_sync_requires_parent")
+        management_version = payload.get("expected_management_version")
+        if management_version is not None and management_version != row.get(
+            "state_management_version",
+        ):
+            raise ManagementConflict("cron_management_version_conflict")
 
     async def _insert_job(self, tx, caller, spec, payload, now):
         key = dict(zip(IDENTITY_FIELDS, caller.job_key(spec["id"])))
@@ -594,6 +645,7 @@ class ManagementStore:
             key = tuple(operation[name] for name in IDENTITY_FIELDS)
             if operation["action"] != "delete":
                 spec = progress["prepared"]["spec"]
+                payload = json.loads(operation["payload_json"])
                 version = operation["expected_version"] + (
                     operation["action"] == "update"
                 )
@@ -636,6 +688,10 @@ class ManagementStore:
                     f"SELECT * FROM swe_cron_job_states WHERE {WHERE_JOB}",
                     key,
                 )
+                if payload.get("group_date_changed"):
+                    from .date_ranges import publish_group_range
+
+                    state = await publish_group_range(tx, key, spec, state)
                 await write_projection(
                     tx,
                     spec,
@@ -643,11 +699,23 @@ class ManagementStore:
                     operation["agent_id"],
                     utc_now(),
                     expect_new=operation["action"] == "create"
-                    or json.loads(operation["payload_json"]).get(
+                    or payload.get(
                         "projection_expect_new",
                         False,
                     ),
                 )
+                if payload.get("child_definition_changes"):
+                    from .definition_sync import enqueue_child_sync
+
+                    task_id = await enqueue_child_sync(
+                        tx,
+                        operation,
+                        version,
+                        state,
+                        spec,
+                    )
+                    if task_id:
+                        progress["broadcast_task_id"] = task_id
             else:
                 await self._state(
                     tx,

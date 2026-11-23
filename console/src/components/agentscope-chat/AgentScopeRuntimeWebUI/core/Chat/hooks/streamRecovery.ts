@@ -12,10 +12,31 @@ interface StreamOptions {
 }
 
 export class StreamRecoveryError extends Error {
-  constructor() {
-    super("实时连接暂不可用，后台任务可能仍在运行。请刷新会话查看最新状态。");
+  constructor(message?: string) {
+    super(
+      message ||
+        "实时连接暂不可用，后台任务可能仍在运行。请刷新会话查看最新状态。",
+    );
     this.name = "StreamRecoveryError";
   }
+}
+
+function unavailableReplayMessage(data?: string): string | undefined {
+  if (!data) return undefined;
+  try {
+    const payload: unknown = JSON.parse(data);
+    if (
+      payload &&
+      typeof payload === "object" &&
+      "reason" in payload &&
+      payload.reason === "Stream frame exceeds replay capacity"
+    ) {
+      return "本次回答内容过大，暂时无法继续显示。请缩小请求范围后重试。";
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
 }
 
 function cursor(value: string) {
@@ -47,7 +68,8 @@ export async function* readChatStream(
         if (isReplaced()) return;
         const event = frame.event?.trim();
         if (event === "stream.end") return;
-        if (event === "stream.unavailable") throw new StreamRecoveryError();
+        if (event === "stream.unavailable")
+          throw new StreamRecoveryError(unavailableReplayMessage(frame.data));
         if (event === "stream.recover") {
           break;
         }

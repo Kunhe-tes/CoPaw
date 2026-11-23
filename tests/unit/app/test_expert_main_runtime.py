@@ -653,9 +653,8 @@ async def test_expert_main_history_load_preserves_current_expert_prompt(
 
     async def restore(*args, **kwargs):
         agent._sys_prompt = "OLD DEFAULT PROFILE"
-        return True
 
-    monkeypatch.setattr(session_lifecycle, "get_state_loaded", restore)
+    monkeypatch.setattr(session_lifecycle, "restore_session_state", restore)
     assert await runner.get_state_loaded(
         agent,
         "session",

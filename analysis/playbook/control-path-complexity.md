@@ -32,3 +32,9 @@ venv/bin/python -m pytest tests/unit/subagents/test_react_agent_and_guard_integr
 ```
 
 2026-10-27 修改生产代码前，完整 SubAgent 集成测试中的 `test_subagent_toolkit_filters_builtins_and_excludes_delegate` 已失败：实际工具列表比断言多 `emit_wplus_sop_event`。本次只处理复杂度，不修改工具注册或该断言；报告验证结果时应单独列出该基线失败。
+
+## 会话账本、Checkpoint 与 SSE 回放
+
+- `TurnLedger.iter_cold` 将目录遍历拆为惰性迭代。恢复会先校验全部意图路径，再验证已提交数据或回滚未提交文件。归档筛选仍依据热记录数量、UTF-8 字节预算及基线摘要。
+- `restore_session_state` 通过正常返回表示恢复步骤结束。Runner 在此后设置会话状态加载标志，继续支持 Cron 跳过历史和优先加载重试快照。
+- Checkpoint 根的引用校验仍使用原有隔离逻辑。SSE 帧的读取和解码都在日志锁内执行，待写记录先取得全局内存额度再入队。

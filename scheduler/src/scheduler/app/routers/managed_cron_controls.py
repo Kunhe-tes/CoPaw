@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from starlette.background import BackgroundTask
 
 from .managed_cron import caller_identity
 from .managed_cron_management import (
@@ -269,10 +270,11 @@ async def mark_job_read(
 async def run_job_now(
     job_id: str,
     body: RunRequest,
+    request: Request,
     caller: CallerIdentity = Depends(caller_identity),
     db=Depends(management_database),
 ):
-    """持久保存一次手动执行身份及定义快照后返回 202，由后台派发，不代表已经开始或成功。
+    """持久保存手动执行身份及定义快照，返回 202 后直接派发给 SWE。
 
     身份沿用可信网关 Header：X-User-Id、X-Source-Id 必填，tenant、Agent 和 scope 按现有约定解析。
     使用 request_id 和 expected_definition_version；停用或运行中拒绝新请求，已有未开始手动请求则复用原 execution_id。
@@ -287,6 +289,13 @@ async def run_job_now(
                 expected_definition_version=body.expected_definition_version,
             ),
         )
+        worker = getattr(request.app.state, "managed_cron_worker", None)
+        dispatch = None
+        if worker is not None and row["status"] == "queued":
+            dispatch = BackgroundTask(
+                worker.dispatcher.dispatch_registered,
+                row["execution_id"],
+            )
         return JSONResponse(
             status_code=202,
             content=jsonable_encoder(
@@ -295,6 +304,7 @@ async def run_job_now(
                     "reused": reused,
                 },
             ),
+            background=dispatch,
         )
     except Exception as exc:
         raise control_error(exc) from exc

@@ -143,7 +143,7 @@ location ^~ /api/zt/wealth/plans/ {
 
 `targets[]` 每项增加 `bbkId` 和 `bbkOrgId`：分别取接收人的人员接口 `branchID`、`subBranchID`，跨机构接收人各自取值，不能复用创建人机构。客户经理分发给本人时使用本人的登录上下文。规划查询返回的 `targets[]` 也需包含这两个同名字段，以便编辑后重新发布保留原接收人机构编码；均按字符串传递，保留前导零。
 
-仅 `role=president` 时，`scenes[]` 增加 `schedule`（1当日、2 T+7日内）、`monitorTimeCron`（与执行频率一致的五段cron）和 `finishRate`（整数百分比，80代表80%）。新场景默认值分别为1、`0 9 * * *`、60。客户经理和分行中台的场景项不发送这三个字段。
+仅 `role=president` 时，`scenes[]` 增加 `schedule`（1当日、2 7日内）、`monitorTimeCron`（与执行频率一致的五段cron）和 `finishRate`（整数百分比，80代表80%）。新场景默认值分别为1、`0 17 * * *`、60。客户经理和分行中台的场景项不发送这三个字段。
 
 `GET /zt/wealth/plans` 的 `scenes[]` 需返回同名字段，前端据此回填编辑页和行长工作任务详情。未返回字段的存量规划，在详情中显示未设置策略；编辑时使用默认值。取消编辑不会写入，提交成功后以服务端查询结果为准。
 

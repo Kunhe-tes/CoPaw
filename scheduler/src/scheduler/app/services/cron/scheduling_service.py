@@ -363,12 +363,15 @@ class CronSchedulingService:
         since: datetime,
         now: datetime,
         scope: WorkerScope,
+        *,
+        unused_only: bool = False,
     ) -> dict[str, Any]:
         old_request = (
             self._dispatch_store.summarize_recent_completion_feedback(
                 since=since,
                 now_utc=now,
                 scope=scope.model_dump(),
+                unused_only=unused_only,
             )
         )
         if self._managed_feedback is None:
@@ -381,6 +384,7 @@ class CronSchedulingService:
                     since=since,
                     now_utc=now,
                     scope=scope.model_dump(),
+                    unused_only=unused_only,
                 ),
             ),
         ]
@@ -398,6 +402,8 @@ class CronSchedulingService:
             "running_count",
             "success_count",
             "failure_count",
+            "subtask_success_count",
+            "subtask_failure_count",
         )
         return {
             **{
@@ -405,6 +411,10 @@ class CronSchedulingService:
                 for name in names
             },
             "latency_p95_ms": int(old.get("latency_p95_ms") or 0),
+            "feedback_samples": {
+                **old.get("feedback_samples", {}),
+                **new.get("feedback_samples", {}),
+            },
         }
 
     async def handle_parent_callback(
@@ -861,7 +871,12 @@ class CronSchedulingService:
             return False
         previous = _capacity_effective_workers(latest, strategy)
         since = now - timedelta(seconds=strategy.feedback_window_seconds)
-        feedback = await self._capacity_feedback(since, now, scope)
+        feedback = await self._capacity_feedback(
+            since,
+            now,
+            scope,
+            unused_only=True,
+        )
         success_count = _worker_count(feedback, "success_count")
         failure_count = _worker_count(feedback, "failure_count")
         terminal_count = success_count + failure_count
@@ -911,11 +926,20 @@ class CronSchedulingService:
             running_count=_worker_count(feedback, "running_count"),
             success_count=success_count,
             failure_count=failure_count,
+            subtask_success_count=_worker_count(
+                feedback,
+                "subtask_success_count",
+            ),
+            subtask_failure_count=_worker_count(
+                feedback,
+                "subtask_failure_count",
+            ),
             error_rate=error_rate,
             matched_rule=matched_rule,
             avg_latency_ms=_worker_count(feedback, "latency_p95_ms"),
             decision_reason=reason,
             recorded_at=now,
+            feedback_samples=feedback.get("feedback_samples"),
         )
         self._last_effective_workers = next_workers
         return True
@@ -1113,6 +1137,8 @@ class CronSchedulingService:
             running_count=0,
             success_count=0,
             failure_count=0,
+            subtask_success_count=0,
+            subtask_failure_count=0,
             error_rate=0,
             matched_rule={},
             avg_latency_ms=0,

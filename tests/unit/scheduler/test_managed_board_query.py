@@ -11,6 +11,64 @@ from tests.unit.scheduler.test_managed_batch_retry import (
 )
 
 
+@pytest.mark.asyncio
+async def test_batch_detail_filters_by_subtask_settlement(callback_setup):
+    from monitor.app.services.cron.managed_board import ManagedBoardQuery
+
+    db = callback_setup[0]
+    await failed_batch(callback_setup)
+    db.conn.execute(
+        "UPDATE swe_cron_execution_runs SET status='success',settled_status=NULL",
+    )
+    service = ManagedBoardQuery(db)
+    batch = (await service.batches("bank"))["items"][0]["batch_id"]
+    waiting = await service.detail(
+        "bank",
+        batch,
+        BoardDetailQuery(subtask_status="waiting_subtasks"),
+    )
+    assert waiting["member_total"] == 1
+    assert waiting["members"][0]["member_role"] == "parent"
+    failed = BoardDetailQuery(subtask_status="error")
+    assert (await service.detail("bank", batch, failed))["member_total"] == 0
+    db.conn.execute(
+        "UPDATE swe_cron_execution_runs SET settled_status='error'",
+    )
+    assert (await service.detail("bank", batch, failed))["member_total"] == 1
+    assert (
+        await service.detail(
+            "bank",
+            batch,
+            BoardDetailQuery(subtask_status="error", member_role="child"),
+        )
+    )["member_total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_board_filters_by_child_status_not_parent(callback_setup):
+    from monitor.app.services.cron.managed_board import ManagedBoardQuery
+
+    db = callback_setup[0]
+    await failed_batch(callback_setup)
+    service = ManagedBoardQuery(db)
+    assert (await service.batches("bank", child_status="error"))["total"] == 0
+    assert (await service.failure_summary("bank", child_status="error"))[
+        "total"
+    ] == 0
+    db.conn.execute(
+        "UPDATE swe_cron_managed_batch_members SET member_role='child'",
+    )
+    result = await service.batches("bank", child_status="error")
+    assert result["total"] == 1
+    assert result["stats"]["failed_members"] == 1
+    assert (await service.failure_summary("bank", child_status="error"))[
+        "total"
+    ] == 1
+    assert (await service.batches("bank", child_status="running"))[
+        "total"
+    ] == 0
+
+
 @pytest.mark.parametrize("query", ["report", "model-in-one-member"])
 @pytest.mark.asyncio
 async def test_board_combines_time_status_and_global_keyword(
@@ -172,6 +230,10 @@ async def test_board_counts_current_member_without_growing_after_retry(
 
     db = callback_setup[0]
     caller, batch = await failed_batch(callback_setup)
+    db.conn.execute(
+        "UPDATE swe_cron_execution_runs "
+        "SET dispatch_meta_json=JSON_SET(dispatch_meta_json,'$.viewer_heat_score',6)",
+    )
     service = ManagedBoardQuery(db)
     first = await service.batches("bank", page_size=1)
     assert (
@@ -196,6 +258,7 @@ async def test_board_counts_current_member_without_growing_after_retry(
     assert detail["batch"]["status"] == "pending"
     assert detail["members"][0]["business_attempt"] == 2
     member = detail["members"][0]
+    assert member["viewer_heat_score"] == 6
     history = await service.member_attempts("bank", batch, member["member_id"])
     assert [
         (row["business_attempt"], row["current"]) for row in history["items"]
@@ -289,6 +352,9 @@ async def test_zero_member_batch_is_received_but_invalid_manifest_is_unavailable
     db, caller, _ = callback_setup
     created = await create_source(callback_setup, "batch_enabled")
     db.conn.execute("UPDATE swe_cron_jobs_v2 SET enabled=0")
+    db.conn.execute(
+        "UPDATE swe_cron_job_states SET pause_reason='auto_unread_threshold'",
+    )
     accepted = await ManagedSchedulingService(
         db,
         clock=lambda: datetime(2026, 10, 16, 1, tzinfo=timezone.utc),
@@ -299,6 +365,29 @@ async def test_zero_member_batch_is_received_but_invalid_manifest_is_unavailable
     assert row["status"] == "received"
     assert row["member_count"] == 0
     assert row["completion_rate"] is None
+    assert "skipped_members" not in accepted
+    # 恢复任务后仍展示受理时的原因。
+    db.conn.execute("UPDATE swe_cron_jobs_v2 SET enabled=1")
+    db.conn.execute("UPDATE swe_cron_job_states SET pause_reason=NULL")
+    detail = await service.detail("bank", accepted["batch_id"])
+    assert detail["members"] == []
+    assert detail["event_total"] == 0
+    assert detail["skipped_members"] == [
+        {
+            "tenant_id": "alice",
+            "agent_id": "default",
+            "job_id": created["job_id"],
+            "job_name": "report",
+            "member_role": "parent",
+            "reason": "auto_unread_threshold",
+        },
+    ]
+    db.conn.execute(
+        "UPDATE swe_cron_managed_trigger_receipts SET response_json='{}'",
+    )
+    assert (await service.detail("bank", accepted["batch_id"]))[
+        "skipped_members"
+    ] is None
     db.conn.execute(
         "UPDATE swe_cron_managed_trigger_receipts SET members_json='{}'",
     )

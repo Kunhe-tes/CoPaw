@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """持久分页补跑工作域，异常不阻断其他调用或已有任务派发。"""
 
+import asyncio
 import logging
 from datetime import timedelta
 from uuid import uuid4
@@ -23,13 +24,22 @@ logger = logging.getLogger(__name__)
 
 
 class DailyFailureRetry:
-    def __init__(self, db, *, clock=None, page_size=100):
+
+    def __init__(
+        self,
+        db,
+        *,
+        clock=None,
+        page_size=100,
+        dispatch_ordinary=None,
+    ):
         if type(page_size) is not int or not 1 <= page_size <= 200:
             raise ValueError("invalid_cron_daily_retry_page_size")
         self.db = db
         self.clock = clock or utc_now
         self.calls = DailyRetryCalls(db, clock=self.clock)
         self.page_size = page_size
+        self.dispatch_ordinary = dispatch_ordinary
         self.next_probe = None
 
     async def detail(self, source, call_id, *, after=0, limit=50):
@@ -98,13 +108,31 @@ class DailyFailureRetry:
             (call_id,),
         )
         page = await candidates(self.db, row, self.page_size)
+        ordinary = []
         for candidate in page:
-            await self._process_one(call_id, owner, candidate)
+            execution_id = await self._process_one(call_id, owner, candidate)
+            if execution_id is not None:
+                ordinary.append(execution_id)
         await self.calls.release(
             call_id,
             owner,
             complete=len(page) < self.page_size,
         )
+        if self.dispatch_ordinary and ordinary:
+            results = await asyncio.gather(
+                *(
+                    self.dispatch_ordinary(execution_id)
+                    for execution_id in ordinary
+                ),
+                return_exceptions=True,
+            )
+            for execution_id, result in zip(ordinary, results):
+                if isinstance(result, Exception):
+                    logger.warning(
+                        "普通补跑派发待恢复 execution_id=%s error_type=%s",
+                        execution_id,
+                        type(result).__name__,
+                    )
         return len(page)
 
     async def _process_one(self, call_id, owner, row):
@@ -153,6 +181,8 @@ class DailyFailureRetry:
                     decision,
                     reason,
                 )
+            if decision == "queued" and result["kind"] == "ordinary":
+                return result["execution_id"]
         except ExecutionConflict as error:
             await self._decision(call_id, owner, row, "skipped", str(error))
         except Exception as error:

@@ -54,6 +54,7 @@ def batch_item(row):
 def member_item(row):
     spec = json.loads(row["spec_json"])
     meta = json.loads(row["dispatch_meta_json"])
+    initial_meta = json.loads(row["initial_dispatch_meta_json"] or "{}")
     names = (
         *sql.KEYS,
         "member_id",
@@ -93,7 +94,7 @@ def member_item(row):
             "job_name": spec.get("name"),
             "bbk_id": spec.get("bbk_id"),
             "dispatch_priority": meta.get("dispatch_priority"),
-            "viewer_heat_score": meta.get("viewer_heat_score"),
+            "viewer_heat_score": initial_meta.get("viewer_heat_score"),
             "error_message": member_error_message(row),
             "error_type": row.get("history_error_type"),
         },
@@ -150,6 +151,7 @@ class ManagedBoardQuery:
         end=None,
         status=None,
         query=None,
+        child_status=None,
     ):
         from .managed_board_failures import failure_summary
 
@@ -161,6 +163,7 @@ class ManagedBoardQuery:
             end,
             status,
             query,
+            child_status=child_status,
         )
 
     async def batches(
@@ -173,9 +176,16 @@ class ManagedBoardQuery:
         query=None,
         page=1,
         page_size=20,
+        child_status=None,
     ):
         await self._ready()
-        where, params = sql.batch_where(source, start, end, query)
+        where, params = sql.batch_where(
+            source,
+            start,
+            end,
+            query,
+            child_status=child_status,
+        )
         bound = (*params, status, status) if status else params
         rows = await self.db.fetch_all(
             sql.list_query(where, bool(status)),
@@ -210,24 +220,23 @@ class ManagedBoardQuery:
         if row is None:
             raise LookupError("cron_batch_not_found")
         batch = batch_item(row)
-        members, total = await self._members(
-            batch_id,
-            query.member_page,
-            query.member_limit,
-            query.member_status,
-            query.member_role,
-            query.member_query,
+        skipped_members = await self._skipped_members(
+            row["receipt_id"],
+            source,
         )
+        members, total = await self._members(source, batch_id, query)
         events, event_total = await self._events(
             source,
             batch_id,
             query.event_page,
             query.event_limit,
             query.event_type,
+            query.event_execution_id,
         )
         return {
             "batch": batch,
             "members": members,
+            "skipped_members": skipped_members,
             "member_total": total,
             "member_page": query.member_page,
             "member_page_size": query.member_limit,
@@ -237,32 +246,75 @@ class ManagedBoardQuery:
             "event_page_size": query.event_limit,
         }
 
-    async def _members(self, batch_id, page, limit, status, role, query):
-        clauses, params = ["m.batch_id=%s"], [batch_id]
-        for name, value in (("r.status", status), ("m.member_role", role)):
+    async def _skipped_members(self, receipt_id, source):
+        row = await self.db.fetch_one(
+            f"SELECT response_json FROM {sql.RECEIPTS} "
+            "WHERE receipt_id=%s AND source_id COLLATE utf8mb4_bin=%s",
+            (receipt_id, source),
+        )
+        if row is None:
+            return None
+        try:
+            response = json.loads(row["response_json"])
+        except (TypeError, ValueError):
+            return None
+        skipped = (
+            response.get("skipped_members")
+            if isinstance(response, dict)
+            else None
+        )
+        return skipped if isinstance(skipped, list) else None
+
+    async def _members(self, source, batch_id, query: BoardDetailQuery):
+        clauses = ["m.batch_id=%s", "m.source_id COLLATE utf8mb4_bin=%s"]
+        params = [batch_id, source]
+        for name, value in (
+            ("r.status", query.member_status),
+            ("m.member_role", query.member_role),
+        ):
             if value:
                 clauses.append(f"{name}=%s")
                 params.append(value)
-        if query:
+        if query.subtask_status:
+            clauses.append(
+                "(CASE WHEN NULLIF(r.settled_status,'') IS NOT NULL THEN r.settled_status "
+                "WHEN r.status='success' THEN 'waiting_subtasks' ELSE 'unconfirmed' END)=%s",
+            )
+            params.append(query.subtask_status)
+        if query.member_query:
             clauses.append(
                 "(m.tenant_id LIKE %s ESCAPE '!' OR m.job_id LIKE %s ESCAPE '!' OR JSON_UNQUOTE(JSON_EXTRACT(r.spec_json,'$.name')) LIKE %s ESCAPE '!')",
             )
-            params.extend([sql.like_text(query)] * 3)
+            params.extend([sql.like_text(query.member_query)] * 3)
         where = " AND ".join(clauses)
         count = await self.db.fetch_one(
             f"SELECT COUNT(*) AS total {sql.MEMBER_FROM} WHERE {where}",
             tuple(params),
         )
         rows = await self.db.fetch_all(
-            "SELECT r.*,h.error_type AS history_error_type,h.error_message AS history_error_message,m.member_id,m.business_attempt,m.member_role,m.dispatch_order AS member_order,d.definition_version AS current_definition_version,s.management_status,s.dispatch_state "
+            "SELECT r.*,i.dispatch_meta_json AS initial_dispatch_meta_json,"
+            "h.error_type AS history_error_type,h.error_message AS history_error_message,m.member_id,m.business_attempt,m.member_role,m.dispatch_order AS member_order,d.definition_version AS current_definition_version,s.management_status,s.dispatch_state "
             + sql.MEMBER_FROM
+            + f"LEFT JOIN {sql.RUNS} i ON m.initial_execution_id=i.execution_id AND {sql.identity_join('m', 'i')} "
             + "LEFT JOIN swe_cron_executions h ON h.id=r.history_execution_id AND h.tenant_id=r.tenant_id AND h.tenant_id COLLATE utf8mb4_bin=r.tenant_id AND h.job_id=r.job_id AND h.job_id COLLATE utf8mb4_bin=r.job_id "
             + f" WHERE {where} ORDER BY m.dispatch_order,m.member_id LIMIT %s OFFSET %s",
-            (*params, limit, (page - 1) * limit),
+            (
+                *params,
+                query.member_limit,
+                (query.member_page - 1) * query.member_limit,
+            ),
         )
         return [member_item(row) for row in rows], int(count["total"])
 
-    async def _events(self, source, batch_id, page, limit, event_type):
+    async def _events(
+        self,
+        source,
+        batch_id,
+        page,
+        limit,
+        event_type,
+        execution_id,
+    ):
         # 普通入口先受理的首轮运行也属于批成员，不靠运行 kind 或元数据漏掉事实。
         selection, params = sql.event_selection(source, batch_id)
         joined = f"FROM ({selection}) selected JOIN {sql.EVENTS} e ON e.event_id=selected.event_id"
@@ -270,6 +322,9 @@ class ManagedBoardQuery:
         if event_type:
             where += " AND e.event_type=%s"
             params += (event_type,)
+        if execution_id:
+            where += " AND e.execution_id=%s AND e.execution_id COLLATE utf8mb4_bin=%s"
+            params += (execution_id, execution_id)
         count = await self.db.fetch_one(
             f"SELECT COUNT(*) AS total {joined} WHERE {where}",
             params,

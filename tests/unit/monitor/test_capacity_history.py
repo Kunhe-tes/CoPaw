@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import sqlite3
 from datetime import datetime, timedelta
 
@@ -10,7 +11,7 @@ class HistoryDb:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute(
             "CREATE TABLE swe_cron_dispatch_worker_capacity "
-            "(id INTEGER PRIMARY KEY, source_id TEXT, created_at TEXT)"
+            "(id INTEGER PRIMARY KEY, source_id TEXT, created_at TEXT)",
         )
         for name in (
             "worker_id",
@@ -27,6 +28,8 @@ class HistoryDb:
             "running_count",
             "success_count",
             "failure_count",
+            "subtask_success_count",
+            "subtask_failure_count",
             "error_rate",
             "matched_rule",
             "avg_latency_ms",
@@ -34,7 +37,7 @@ class HistoryDb:
         ):
             self.conn.execute(
                 "ALTER TABLE swe_cron_dispatch_worker_capacity "
-                f"ADD COLUMN {name} TEXT"
+                f"ADD COLUMN {name} TEXT",
             )
 
     async def fetch_one(self, sql, params):
@@ -73,18 +76,25 @@ async def test_pages_return_every_record_once_with_fixed_snapshot():
         )
     db.conn.execute(
         "INSERT INTO swe_cron_dispatch_worker_capacity "
-        "(id,source_id,created_at) VALUES (999,'other','2026-09-09T08:00:00')"
+        "(id,source_id,created_at) VALUES (999,'other','2026-09-09T08:00:00')",
+    )
+    db.conn.execute(
+        "UPDATE swe_cron_dispatch_worker_capacity "
+        "SET subtask_success_count=5, subtask_failure_count=2 WHERE id=205",
     )
     page, cursor = await read_capacity_page(db, "s", None, None)
     assert len(page) == 100
     assert [r["id"] for r in page[:2]] == [205, 204]
+    assert page[0]["subtask_success_count"] == "5"
+    assert page[0]["subtask_failure_count"] == "2"
+    assert page[1]["subtask_success_count"] is None
     with pytest.raises(ValueError):
         await read_capacity_page(db, "other", None, None, cursor)
     with pytest.raises(ValueError):
         await read_capacity_page(db, "s", datetime(2026, 9, 9), None, cursor)
     db.conn.execute(
         "INSERT INTO swe_cron_dispatch_worker_capacity "
-        "(id,source_id,created_at) VALUES (1000,'s','2026-09-09T08:00:00')"
+        "(id,source_id,created_at) VALUES (1000,'s','2026-09-09T08:00:00')",
     )
     all_ids = [r["id"] for r in page]
     while cursor:
@@ -101,7 +111,7 @@ async def test_time_range_and_cursor_validation():
     db = HistoryDb()
     db.conn.execute(
         "INSERT INTO swe_cron_dispatch_worker_capacity "
-        "(id,source_id,created_at) VALUES (1,'s','2026-09-09T08:00:00')"
+        "(id,source_id,created_at) VALUES (1,'s','2026-09-09T08:00:00')",
     )
     start = datetime(2026, 9, 9, 9)
     end = datetime(2026, 9, 9, 10)

@@ -25,6 +25,131 @@ from fastapi import HTTPException
 NOW = datetime(2026, 9, 4, 12, 0)
 
 
+@pytest.mark.asyncio
+async def test_capacity_decision_consumes_feedback_across_overlapping_windows(
+    monkeypatch,
+):
+    from datetime import timezone
+
+    from scheduler.app.services.cron.managed.feedback import (
+        ManagedCapacityFeedback,
+    )
+    from scheduler.app.services.cron.scheduling_service import WorkerScope
+
+    db = _SqliteDb()
+    monkeypatch.setattr(intent_module, "get_db_connection", lambda: db)
+    db.connection.executescript("""
+        CREATE TABLE swe_cron_dispatch_scope_leases (
+            source_id TEXT, provider_id TEXT, model_id TEXT,
+            lock_owner TEXT, lease_expires_at TEXT
+        );
+        CREATE TABLE swe_cron_dispatch_worker_capacity (
+            id INTEGER PRIMARY KEY, worker_id TEXT, source_id TEXT,
+            provider_id TEXT, model_id TEXT, strategy_id TEXT,
+            previous_workers INTEGER, baseline_workers INTEGER, min_workers INTEGER,
+            max_workers INTEGER, effective_workers INTEGER, pending_count INTEGER,
+            claimed_count INTEGER, running_count INTEGER, success_count INTEGER,
+            failure_count INTEGER, subtask_success_count INTEGER,
+            subtask_failure_count INTEGER, error_rate REAL, matched_rule TEXT,
+            avg_latency_ms INTEGER, decision_reason TEXT, created_at TEXT
+        );
+        ALTER TABLE swe_cron_executions ADD COLUMN meta TEXT;
+        CREATE TABLE swe_cron_execution_runs (
+            execution_id TEXT PRIMARY KEY, source_id TEXT, provider_id TEXT, model_id TEXT,
+            status TEXT, not_before_at TEXT, settled_status TEXT, settled_at TEXT,
+            subtask_success_count INTEGER, subtask_failure_count INTEGER,
+            error_code TEXT, settled_error_code TEXT, result_json TEXT,
+            history_execution_id INTEGER, job_id TEXT, tenant_id TEXT, agent_id TEXT,
+            dispatch_meta_json TEXT, worker_feedback_used INTEGER NOT NULL DEFAULT 0
+        );
+    """)
+    db.connection.create_function("JSON_UNQUOTE", 1, lambda value: value)
+    db.add_intent(id=1, status="completed", completed_at=NOW)
+    db.add_intent(id=2, status="pending")
+    db.insert(
+        "swe_cron_dispatch_events",
+        id=1,
+        intent_id=2,
+        event_type="retry_scheduled",
+        created_at=NOW,
+        details='{"model_failure": 1}',
+    )
+    db.insert(
+        "swe_cron_dispatch_scope_leases",
+        source_id="source-a",
+        provider_id="default",
+        model_id="default",
+        lock_owner="worker-1",
+        lease_expires_at=NOW + timedelta(hours=1),
+    )
+    now = (NOW - timedelta(hours=8)).replace(tzinfo=timezone.utc)
+    db.insert(
+        "swe_cron_execution_runs",
+        execution_id="run-1",
+        source_id="source-a",
+        provider_id="default",
+        model_id="default",
+        status="success",
+        settled_status="success",
+        settled_at=now.replace(tzinfo=None),
+        subtask_success_count=3,
+        subtask_failure_count=1,
+        dispatch_meta_json='{"protocol": "scheduler_managed_v1"}',
+    )
+    store = CronDispatchIntentService()
+    runtime = CronSchedulingService(dispatch_store=store, worker_id="worker-1")
+    strategy = runtime._fallback_strategy.model_copy(
+        update={
+            "baseline_workers": 8,
+            "max_workers": 10,
+            "adjust_interval_seconds": 60,
+        },
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_resolve_worker_strategy",
+        AsyncMock(return_value=strategy),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_acquire_scope_lease",
+        AsyncMock(return_value=True),
+    )
+    scope = WorkerScope(
+        source_id="source-a",
+        provider_id="default",
+        model_id="default",
+    )
+    runtime.bind_managed_feedback(ManagedCapacityFeedback(db))
+
+    db.run("""
+        CREATE TRIGGER reject_capacity BEFORE INSERT ON swe_cron_dispatch_worker_capacity
+        BEGIN SELECT RAISE(ABORT, 'capacity write failed'); END
+    """)
+    with pytest.raises(sqlite3.IntegrityError, match="capacity write failed"):
+        await runtime._adjust_worker_scope(scope, now)
+    db.run("DROP TRIGGER reject_capacity")
+    assert await runtime._adjust_worker_scope(scope, now)
+    assert await runtime._adjust_worker_scope(
+        scope,
+        now + timedelta(minutes=1),
+    )
+    db.run("UPDATE swe_cron_dispatch_intents SET attempt_count=2 WHERE id=1")
+    assert await runtime._adjust_worker_scope(
+        scope,
+        now + timedelta(minutes=2),
+    )
+    assert await db.fetch_all(
+        "SELECT success_count, failure_count, effective_workers "
+        "FROM swe_cron_dispatch_worker_capacity ORDER BY id",
+    ) == [
+        {"success_count": 4, "failure_count": 2, "effective_workers": 4},
+        {"success_count": 0, "failure_count": 0, "effective_workers": 4},
+        {"success_count": 1, "failure_count": 0, "effective_workers": 5},
+    ]
+    db.connection.close()
+
+
 class _Cursor:
     def __init__(self, db):
         self.db = db
@@ -41,6 +166,11 @@ class _Cursor:
         cursor = self.db.run(sql, params)
         self.rowcount = cursor.rowcount
         self.rows = [dict(row) for row in cursor.fetchall()]
+        for row in self.rows:
+            if row.get("lease_expires_at"):
+                row["lease_expires_at"] = datetime.fromisoformat(
+                    row["lease_expires_at"],
+                )
 
     async def fetchall(self):
         return self.rows
@@ -65,7 +195,8 @@ class _SqliteDb:
                 status TEXT, attempt_count INTEGER, max_attempts INTEGER,
                 due_at TEXT, locked_at TEXT, lock_owner TEXT,
                 completed_at TEXT, updated_at TEXT, error_message TEXT,
-                dispatch_order INTEGER, claim_token TEXT DEFAULT ''
+                dispatch_order INTEGER, claim_token TEXT DEFAULT '',
+                worker_feedback_attempt INTEGER
             );
             CREATE TABLE swe_cron_executions (
                 id INTEGER PRIMARY KEY, job_id TEXT, tenant_id TEXT,
@@ -75,7 +206,8 @@ class _SqliteDb:
             );
             CREATE TABLE swe_cron_dispatch_events (
                 id INTEGER PRIMARY KEY, intent_id INTEGER, event_type TEXT,
-                created_at TEXT, details TEXT
+                created_at TEXT, details TEXT,
+                worker_feedback_used INTEGER NOT NULL DEFAULT 0
             );
             """,
         )

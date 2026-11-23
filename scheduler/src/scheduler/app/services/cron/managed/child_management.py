@@ -86,7 +86,10 @@ class ChildGrant:
         ):
             if profile.get(source) is not None:
                 result[key] = profile[source]
-        source = json.loads(self.task["payload_json"])["source_spec"]
+        task_payload = json.loads(self.task["payload_json"])
+        source = task_payload["source_spec"]
+        changes = task_payload.get("definition_changes")
+        original_schedule = _original_schedule(plan, result["meta"], changes)
         result["meta"].update(
             {
                 "broadcast_source_job_id": self.task["job_id"],
@@ -94,8 +97,7 @@ class ChildGrant:
                 "broadcast_source_source_id": self.task["source_id"],
                 "broadcast_source_agent_id": self.task["agent_id"],
                 "broadcast_source_job_name": source["name"],
-                "broadcast_original_cron": plan["original_cron_expr"],
-                "broadcast_original_timezone": plan["original_timezone"],
+                **original_schedule,
                 "broadcast_offset_minutes": self.item["offset_minutes"],
                 "broadcast_notification_policy": "original_schedule",
             },
@@ -116,11 +118,15 @@ class ChildGrant:
         return row is not None
 
     async def operation_payload(self, tx):
-        policy = (
-            "retime_existing"
-            if json.loads(self.item["plan_json"])["retime_only"]
-            else "broadcast"
+        changes = json.loads(self.task["payload_json"]).get(
+            "definition_changes",
         )
+        if json.loads(self.item["plan_json"])["retime_only"]:
+            policy = "retime_existing"
+        elif changes and not {"task_type", "model_slot"}.intersection(changes):
+            policy = "update"
+        else:
+            policy = "broadcast"
         return {
             "broadcast_context": {
                 "task_id": self.task_id,
@@ -139,29 +145,63 @@ class ChildGrant:
             "source_definition_version": self.task[
                 "source_definition_version"
             ],
-            "enable_offset": payload["enable_offset"],
-            "offset_window_hours": payload["offset_window_hours"],
+            "enable_offset": plan.get(
+                "enable_offset",
+                payload["enable_offset"],
+            ),
+            "offset_window_hours": plan.get(
+                "offset_window_hours",
+                payload["offset_window_hours"],
+            ),
             "offset_minutes": self.item["offset_minutes"],
             "original_cron_expr": plan["original_cron_expr"],
         }
 
 
+def _original_schedule(plan, meta, changes):
+    values = {
+        "broadcast_original_cron": plan["original_cron_expr"],
+        "broadcast_original_timezone": plan["original_timezone"],
+    }
+    if changes:
+        schedule = changes.get("schedule", {})
+        for field in ("cron", "timezone"):
+            name = f"broadcast_original_{field}"
+            if field not in schedule and name in meta:
+                values[name] = meta[name]
+    return values
+
+
 def child_payload(task, item, current_spec=None):
-    source = json.loads(task["payload_json"])["source_spec"]
+    task_payload = json.loads(task["payload_json"])
+    source = task_payload["source_spec"]
     spec = copy.deepcopy(current_spec if current_spec is not None else source)
+    changes = task_payload.get("definition_changes")
+    if changes:
+        if {"task_type", "skill_ids"}.intersection(changes):
+            spec.pop("workflow_binding_id", None)
+        for name, value in changes.items():
+            if isinstance(value, dict) and (
+                name in {"schedule", "dispatch", "runtime", "meta"}
+                or (name == "request" and "task_type" not in changes)
+            ):
+                spec[name] = {**(spec.get(name) or {}), **value}
+            else:
+                spec[name] = value
     spec.update(
         id=item["job_id"],
         tenant_id=item["tenant_id"],
         source_id=item["source_id"],
         scope_id=encode_scope(item["tenant_id"], item["source_id"]),
     )
-    spec["meta"] = {
-        key: value
-        for key, value in source.get("meta", {}).items()
-        if not key.startswith(
-            ("task_", "broadcast_", "batch_dispatch_", "_scheduler"),
-        )
-    }
+    if not changes:
+        spec["meta"] = {
+            key: value
+            for key, value in source.get("meta", {}).items()
+            if not key.startswith(
+                ("task_", "broadcast_", "batch_dispatch_", "_scheduler"),
+            )
+        }
     spec["schedule"] = {
         "type": "cron",
         "cron": item["cron_expr"],
@@ -174,7 +214,7 @@ def child_payload(task, item, current_spec=None):
     payload = {
         "request_id": f"{task['task_id']}:{item['index_no']}",
         "spec": spec,
-        "dispatch_state": json.loads(task["payload_json"])["dispatch_state"],
+        "dispatch_state": task_payload["dispatch_state"],
     }
     if item["expected_definition_version"] is not None:
         payload["expected_definition_version"] = item[

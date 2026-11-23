@@ -1006,6 +1006,8 @@ class CronDispatchCapacityItem(BaseModel):
     running_count: int = Field(default=0)
     success_count: int = Field(default=0)
     failure_count: int = Field(default=0)
+    subtask_success_count: Optional[int] = Field(default=None)
+    subtask_failure_count: Optional[int] = Field(default=None)
     error_rate: float = Field(default=0.0)
     matched_rule: Optional[Dict[str, Any]] = Field(default=None)
     avg_latency_ms: int = Field(default=0)

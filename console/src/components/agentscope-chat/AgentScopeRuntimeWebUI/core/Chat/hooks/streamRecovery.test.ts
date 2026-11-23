@@ -127,6 +127,30 @@ describe("cursor stream recovery", () => {
     expect((await obsolete.next()).done).toBe(true);
   });
 
+  it("explains when a replay frame exceeds the supported size", async () => {
+    const decode = async function* () {
+      yield {
+        event: "stream.unavailable",
+        data: JSON.stringify({
+          object: "stream_recovery",
+          reason: "Stream frame exceeds replay capacity",
+          retryable: false,
+        }),
+      };
+    };
+    const iterator = readChatStream({
+      response: response(),
+      owner: owner(),
+      decode,
+      isActive: () => true,
+    });
+
+    await expect(iterator.next()).rejects.toMatchObject({
+      name: "StreamRecoveryError",
+      message: "本次回答内容过大，暂时无法继续显示。请缩小请求范围后重试。",
+    });
+  });
+
   it("keeps consuming a completed stream until it is replaced", async () => {
     const decode = async function* () {
       yield {

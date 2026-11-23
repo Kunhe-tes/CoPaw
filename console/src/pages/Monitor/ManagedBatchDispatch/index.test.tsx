@@ -1,5 +1,6 @@
 import {
   cleanup,
+  fireEvent,
   render,
   screen,
   waitFor,
@@ -12,6 +13,9 @@ const api = vi.hoisted(() => ({
   batches: vi.fn(),
   detail: vi.fn(),
   workers: vi.fn(),
+  workerOccupants: vi.fn(),
+  workerTrends: vi.fn(),
+  failureSummary: vi.fn(),
   failures: vi.fn(),
 }));
 const context = vi.hoisted(() => ({
@@ -27,11 +31,18 @@ vi.mock("../../../stores/iframeStore", () => ({
   useIframeStore: (selector: (state: typeof context) => unknown) =>
     selector(context),
 }));
-vi.mock("../CronBatchDispatch/WorkerHistoryChart", () => ({
+vi.mock("echarts-for-react", () => ({
   default: () => <div>测试容量曲线</div>,
 }));
 beforeEach(() => {
   vi.clearAllMocks();
+  api.workerOccupants.mockResolvedValue({
+    total: 0,
+    page: 1,
+    page_size: 10,
+    sampled_at: "2026-11-12T01:00:00Z",
+    items: [],
+  });
   context.manager = true;
   api.batches.mockResolvedValue({
     items: [],
@@ -53,12 +64,123 @@ beforeEach(() => {
   });
 });
 afterEach(cleanup);
+
+it("点模型后在浮层发起模型池趋势查询", async () => {
+  api.workers.mockResolvedValue({
+    source_id: "bank",
+    policies: [],
+    capacity_events: [],
+    current_capacity: [
+      {
+        id: 1,
+        provider_id: "p",
+        model_id: "m",
+        effective_workers: 4,
+        max_workers: 8,
+      },
+    ],
+  });
+  api.workerTrends.mockResolvedValue({
+    bucket_seconds: 600,
+    points: [
+      {
+        at: "2026-11-20T03:00:00Z",
+        total: 2,
+        success: 1,
+        failed: 0,
+        requests: 3,
+        retries: 1,
+      },
+    ],
+  });
+  render(<ManagedBatchDispatchPage />);
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "查看 p / m 的 Worker 调整过程",
+    }),
+  );
+  const dialog = await screen.findByRole("dialog");
+  const chart = await within(dialog).findByText("测试容量曲线");
+  expect(chart).toBeInTheDocument();
+  expect(api.workerTrends).toHaveBeenCalledWith(
+    "bank",
+    expect.objectContaining({ provider_id: "p", model_id: "m" }),
+    expect.any(AbortSignal),
+  );
+});
+
+it("顶栏子任务状态筛选传给批次列表和失败汇总", async () => {
+  api.failureSummary.mockResolvedValue({
+    total: 0,
+    groups: [],
+    queried_at: "2026-11-20T03:00:00Z",
+  });
+  render(<ManagedBatchDispatchPage />);
+  fireEvent.mouseDown(screen.getByRole("combobox", { name: "子任务状态" }));
+  fireEvent.click(await screen.findByText("等待子任务", { exact: true }));
+  await waitFor(() =>
+    expect(api.batches).toHaveBeenLastCalledWith(
+      "bank",
+      expect.objectContaining({ child_status: "waiting_subtasks", page: 1 }),
+      expect.any(AbortSignal),
+    ),
+  );
+  fireEvent.click(
+    await screen.findByRole("button", { name: /查看失败类型及详情/ }),
+  );
+  await waitFor(() =>
+    expect(api.failureSummary).toHaveBeenCalledWith(
+      "bank",
+      expect.objectContaining({ child_status: "waiting_subtasks" }),
+      expect.any(AbortSignal),
+    ),
+  );
+});
 it("非管理员不加载跨用户看板数据", () => {
   context.manager = false;
   render(<ManagedBatchDispatchPage />);
   expect(screen.getByText("仅管理员可访问批调度看板（新）")).toBeTruthy();
   expect(api.batches).not.toHaveBeenCalled();
   expect(api.workers).not.toHaveBeenCalled();
+  expect(api.workerOccupants).not.toHaveBeenCalled();
+});
+
+it("当前 Worker 占用独立查询并展示任务明细", async () => {
+  api.workerOccupants.mockResolvedValue({
+    total: 1,
+    page: 1,
+    page_size: 10,
+    sampled_at: "2026-11-12T01:00:00Z",
+    items: [
+      {
+        id: "managed:one",
+        provider_id: "provider",
+        model_id: "model",
+        tenant_id: "80074361",
+        tenant_name: "测试人员",
+        job_id: "worker-job",
+        job_name: "日报定时任务",
+        started_at: null,
+        status: "accepted",
+        execution_type: "daily_failure_retry",
+      },
+    ],
+  });
+  render(<ManagedBatchDispatchPage />);
+  expect(
+    await screen.findByRole("heading", { name: "当前 Worker 占用（1）" }),
+  ).toBeVisible();
+  expect(screen.getByText("测试人员")).toBeInTheDocument();
+  expect(screen.getByText("80074361")).toBeInTheDocument();
+  expect(screen.getByText("日报定时任务")).toBeInTheDocument();
+  expect(screen.getByText("worker-job")).toBeInTheDocument();
+  expect(screen.getByText("尚未开始")).toBeInTheDocument();
+  expect(screen.getByText("整点补跑")).toBeInTheDocument();
+  expect(api.workerOccupants).toHaveBeenCalledWith(
+    "bank",
+    { page: 1, page_size: 10 },
+    expect.any(AbortSignal),
+  );
 });
 it("零成员不伪造百分之百完成率，空数据没有旧接口回退", async () => {
   render(<ManagedBatchDispatchPage />);

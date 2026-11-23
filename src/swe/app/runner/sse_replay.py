@@ -330,30 +330,37 @@ class ReplayLog:
             data = self.file.read(end_offset - start_offset)
             if len(data) != end_offset - start_offset:
                 raise ReplayUnavailable("Incomplete stream replay record")
-            result = []
-            position = 0
-            for sequence in range(first, stop + 1):
-                if position + _HEADER.size > len(data):
-                    raise ReplayUnavailable("Incomplete stream replay record")
-                length = _HEADER.unpack_from(data, position)[0]
-                position += _HEADER.size
-                if length > MAX_FRAME_BYTES or position + length > len(data):
-                    raise ReplayUnavailable("Invalid stream replay record")
-                if position + length != (
-                    self.offsets[sequence] - start_offset
-                    if sequence < self.count
-                    else self.data_end - start_offset
-                ):
-                    raise ReplayUnavailable("Invalid stream replay record")
-                result.append(
-                    (
-                        sequence,
-                        data[position : position + length].decode("utf-8"),
-                    ),
-                )
-                position += length
+            result = self._decode_records(data, first, stop, start_offset)
             self.budget.record("read_bytes", len(data))
             return result
+
+    def _decode_records(
+        self,
+        data: bytes,
+        first: int,
+        stop: int,
+        start_offset: int,
+    ) -> list[tuple[int, str]]:
+        result = []
+        position = 0
+        for sequence in range(first, stop + 1):
+            if position + _HEADER.size > len(data):
+                raise ReplayUnavailable("Incomplete stream replay record")
+            length = _HEADER.unpack_from(data, position)[0]
+            position += _HEADER.size
+            end = position + length
+            if length > MAX_FRAME_BYTES or end > len(data):
+                raise ReplayUnavailable("Invalid stream replay record")
+            expected_end = (
+                self.offsets[sequence]
+                if sequence < self.count
+                else self.data_end
+            )
+            if start_offset + end != expected_end:
+                raise ReplayUnavailable("Invalid stream replay record")
+            result.append((sequence, data[position:end].decode("utf-8")))
+            position = end
+        return result
 
     async def read(
         self,
@@ -440,7 +447,7 @@ class ReplayStream:
         started = time.monotonic()
         if self.writer is not None and self.writer.done():
             self._writer_done(self.writer)
-        if self.closing or self.ended or self.closed or self.error:
+        if self._admission_closed():
             return None
         if len(text) > MAX_FRAME_BYTES:
             self.error = "Stream frame exceeds replay capacity"
@@ -448,31 +455,37 @@ class ReplayStream:
             self._notify_subscribers()
             return None
         cost = sys.getsizeof(text) + sys.getsizeof((text, 0, 0.0)) + 64
-        while not (self.closing or self.ended or self.closed or self.error):
+        while not self._admission_closed():
             fits = self.pending_count < PENDING_RECORDS and (
                 self.pending_bytes + cost <= PENDING_BYTES
                 or self.pending_count == 0
             )
             if fits and self.log.budget.try_reserve_pending(cost):
-                self.accepted += 1
-                accepted_at = time.monotonic()
-                self.pending.append((text, cost, accepted_at))
-                record_stream_timing("admission", accepted_at - started)
-                self.pending_bytes += cost
-                self.pending_count += 1
-                if self.writer is None or self.writer.done():
-                    self.writer = asyncio.create_task(self._write_pending())
-                    self.writer.add_done_callback(self._writer_done)
-                if (
-                    len(self.pending) >= WRITE_BATCH_RECORDS
-                    or self.pending_bytes >= READ_BATCH_BYTES
-                ):
-                    self.writer_wake.set()
+                self._accept_pending(text, cost, started)
                 return self.accepted
             # No tracker/file lock is held while waiting for local/global space.
             self.writer_wake.set()
             await asyncio.sleep(WRITE_DELAY_SECONDS)
         return None
+
+    def _admission_closed(self) -> bool:
+        return self.closing or self.ended or self.closed or bool(self.error)
+
+    def _accept_pending(self, text: str, cost: int, started: float) -> None:
+        self.accepted += 1
+        accepted_at = time.monotonic()
+        self.pending.append((text, cost, accepted_at))
+        record_stream_timing("admission", accepted_at - started)
+        self.pending_bytes += cost
+        self.pending_count += 1
+        if self.writer is None or self.writer.done():
+            self.writer = asyncio.create_task(self._write_pending())
+            self.writer.add_done_callback(self._writer_done)
+        if (
+            len(self.pending) >= WRITE_BATCH_RECORDS
+            or self.pending_bytes >= READ_BATCH_BYTES
+        ):
+            self.writer_wake.set()
 
     async def flush(self, through_sequence: int | None = None) -> None:
         target = (

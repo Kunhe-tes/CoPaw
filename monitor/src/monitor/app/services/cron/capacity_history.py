@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Bounded keyset pages over an immutable capacity-history ID boundary."""
 
 import base64
@@ -13,7 +14,8 @@ CAPACITY_COLUMNS = """
     id, worker_id, source_id, provider_id, model_id, strategy_id,
     previous_workers, baseline_workers, min_workers, max_workers,
     effective_workers, pending_count, claimed_count, running_count,
-    success_count, failure_count, error_rate, matched_rule,
+    success_count, failure_count, subtask_success_count, subtask_failure_count,
+    error_rate, matched_rule,
     avg_latency_ms, decision_reason, created_at
 """
 
@@ -21,19 +23,20 @@ CAPACITY_COLUMNS = """
 def _db_time(value: datetime | None) -> datetime | None:
     if value is not None and value.tzinfo is not None:
         return value.astimezone(timezone(timedelta(hours=8))).replace(
-            tzinfo=None
+            tzinfo=None,
         )
     return value
 
 
 def _decode_cursor(
-    token: str, scope: list[str | None]
+    token: str,
+    scope: list[str | None],
 ) -> tuple[int, datetime, int]:
     try:
         if len(token) > 2048:
             raise ValueError
         data = json.loads(
-            base64.b64decode(token, altchars=b"-_", validate=True)
+            base64.b64decode(token, altchars=b"-_", validate=True),
         )
         if data["scope"] != scope:
             raise ValueError
@@ -111,6 +114,6 @@ async def read_capacity_page(
                     "id": int(last["id"]),
                 },
                 separators=(",", ":"),
-            ).encode()
+            ).encode(),
         ).decode()
     return rows[:PAGE_SIZE], next_cursor

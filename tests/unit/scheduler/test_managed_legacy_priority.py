@@ -187,7 +187,7 @@ async def test_same_job_waiters_only_reserve_its_remaining_concurrency(
         caller,
         first["job_id"],
         ExecutionRequest(
-            "ordinary",
+            "batch",
             "second",
             scheduled_at=priority_pool[1].replace(tzinfo=timezone.utc),
         ),
@@ -224,7 +224,7 @@ async def test_frozen_concurrency_is_simulated_in_existing_queue_order(
             caller,
             first["job_id"],
             ExecutionRequest(
-                "ordinary",
+                "batch",
                 f"next-{index}",
                 scheduled_at=(
                     priority_pool[1] + timedelta(minutes=index)

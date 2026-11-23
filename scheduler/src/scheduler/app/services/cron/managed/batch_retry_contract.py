@@ -3,6 +3,8 @@
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
+MAX_RETRY_CANDIDATES = 200
+
 
 class BatchRetryConflict(ValueError):
     """同一幂等请求不能改动候选或人工确认。"""
@@ -26,7 +28,10 @@ class ManagedBatchRetryRequest(BaseModel):
         pattern=r"^[A-Za-z0-9_-]+$",
     )
     confirm_stopped: StrictBool = False
-    candidates: list[RetryCandidate] = Field(min_length=1, max_length=200)
+    candidates: list[RetryCandidate] = Field(
+        min_length=1,
+        max_length=MAX_RETRY_CANDIDATES,
+    )
 
     @model_validator(mode="after")
     def unique_candidates(self):

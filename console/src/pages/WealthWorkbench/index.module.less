@@ -856,27 +856,142 @@
     font-size: 13px;
     min-width: 66px;
   }
+  .sceneBrowser {
+    display: grid;
+    grid-template-columns: 200px minmax(0, 1fr);
+    gap: 16px;
+    border-top: 1px solid var(--line);
+    padding-top: 16px;
+  }
+  .sceneSourceNav {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    border-right: 1px solid var(--line);
+    padding-right: 16px;
+    strong {
+      margin-bottom: 4px;
+    }
+    button {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 8px 12px 8px 24px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--ink);
+      text-align: left;
+    }
+    button[aria-pressed="true"] {
+      background: var(--wash);
+      border-color: var(--line);
+      color: var(--blue);
+      font-weight: 600;
+    }
+  }
+  .sceneSourceLink {
+    display: block;
+    margin: 12px 0 0 auto;
+    padding: 4px 0;
+    border: 0;
+    background: transparent;
+    color: var(--blue);
+  }
+  .sceneSourceLabel {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    .icon {
+      width: 16px;
+      height: 16px;
+      flex-shrink: 0;
+    }
+  }
+  .sceneSourceNav button:focus-visible,
+  .sceneSourceLink:focus-visible {
+    outline: 2px solid var(--blue);
+    outline-offset: 2px;
+  }
+  @media (max-width: 760px) {
+    .sceneBrowser {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .sceneSourceNav {
+      flex-direction: row;
+      flex-wrap: wrap;
+      align-items: center;
+      border-right: 0;
+      padding-right: 0;
+      strong {
+        margin: 0 6px 0 0;
+      }
+    }
+  }
+  .sceneGroup {
+    min-width: 0;
+  }
+  .sceneSourceNav button[aria-pressed="true"]::before,
+  .sceneGroupHeading::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 5px;
+    width: 6px;
+    height: 26px;
+    border-radius: 3px;
+    background: var(--blue);
+    transform: translateY(-50%);
+  }
+  .sceneGroupHeading {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    min-height: 40px;
+    padding: 6px 14px 6px 24px;
+    margin-bottom: 14px;
+    border-radius: 8px;
+    position: relative;
+    background: var(--wash);
+    span {
+      color: var(--text);
+      font-size: 13px;
+    }
+    h4 {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 600;
+    }
+  }
+  .sceneContent {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .scene:focus-visible {
+    outline: 2px solid var(--blue);
+    outline-offset: 2px;
+  }
   .scenes {
     display: grid;
-    grid-template-columns: repeat(12, 1fr);
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));
     gap: 10px;
   }
   .scene {
     position: relative;
-    grid-column: span 3;
+    min-width: 0;
     display: flex;
     gap: 15px;
     align-items: center;
     text-align: left;
     border: 1px solid var(--line);
     border-radius: 6px;
-    background: linear-gradient(120deg, #fff, #fbfdff);
+    background: #fff;
     min-height: 109px;
     padding: 14px;
     color: var(--ink);
-  }
-  .scene.featured {
-    grid-column: span 4;
   }
   .scene.selected {
     border-color: var(--blue);
@@ -892,11 +1007,20 @@
     background: #eceff3;
   }
   .sceneTitle {
+    display: flex;
+    align-items: center;
     font-weight: 600;
     font-size: 15px;
-    padding-right: 9px;
+    padding-right: 15px;
+  }
+  .sceneName {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .scene .tag {
+    flex-shrink: 0;
     font-size: 11px;
     padding: 1px 9px;
     margin-left: 6px;
@@ -1925,9 +2049,6 @@
     .selectedList {
       overflow: auto;
     }
-    .scene {
-      grid-column: span 6 !important;
-    }
     .stat {
       gap: 10px;
       padding: 15px 11px;
@@ -2134,7 +2255,6 @@
       gap: 8px;
     }
     .scene {
-      grid-column: span 12 !important;
       min-height: 95px;
     }
     .scene .bubble {

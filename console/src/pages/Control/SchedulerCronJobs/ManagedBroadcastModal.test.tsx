@@ -12,7 +12,16 @@ import { ManagedBroadcastModal } from "./ManagedBroadcastModal";
 import type { ManagedJob } from "@/api/types/schedulerCron";
 
 vi.mock("@/components/TenantSelector", () => ({
-  TenantSelector: () => <div>接收人</div>,
+  TenantSelector: ({ onChange }: { onChange: (ids: string[]) => void }) => (
+    <button
+      type="button"
+      onClick={() =>
+        onChange(Array.from({ length: 1001 }, (_, index) => `user-${index}`))
+      }
+    >
+      选择 1001 个接收人
+    </button>
+  ),
 }));
 vi.mock("@/api/modules/schedulerCron", () => ({
   schedulerCronApi: {
@@ -65,7 +74,7 @@ it("刷新旧轮进度期间不能开启新轮，避免迟到结果覆盖新轮"
   expect(nextRound).toBeInTheDocument();
 });
 
-it("零人分发只提交散列配置，不携带调度模式", async () => {
+it.each([0, 1001])("提交 %i 个分发目标与散列配置", async (count) => {
   vi.mocked(schedulerCronApi.broadcast).mockResolvedValue({
     task_id: "task",
     status: "queued",
@@ -74,6 +83,9 @@ it("零人分发只提交散列配置，不携带调度模式", async () => {
   render(
     <ManagedBroadcastModal context={context} job={job} onClose={() => {}} />,
   );
+  if (count) {
+    fireEvent.click(screen.getByRole("button", { name: "选择 1001 个接收人" }));
+  }
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "开始分发" })).not.toBeDisabled(),
   );
@@ -81,7 +93,10 @@ it("零人分发只提交散列配置，不携带调度模式", async () => {
   await waitFor(() => expect(schedulerCronApi.broadcast).toHaveBeenCalled());
   const body = vi.mocked(schedulerCronApi.broadcast).mock.calls[0][2];
   expect(body).toMatchObject({
-    targets: [],
+    targets: Array.from({ length: count }, (_, index) => ({
+      tenant_id: `user-${index}`,
+      agent_id: context.agent_id,
+    })),
     expected_definition_version: 1,
     enable_offset: true,
     offset_window_hours: 4,

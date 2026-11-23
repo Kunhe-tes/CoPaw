@@ -56,40 +56,170 @@ afterEach(() => {
 });
 
 describe("分发人员批量队列", () => {
-  it("父级全选联动非空和空子级，取消空子级使父级半选，补全父级恢复联动", async () => {
-    const { session } = setup(vi.fn().mockResolvedValue([users[0], users[2]]));
+  it("未查询子级继承父级勾选，查询后以实际名单为准", async () => {
+    const mismatched = user("01", "b");
+    const query = vi.fn(async ([scope]: Institution[]) =>
+      scope.mOrgCode === "root" ? [mismatched] : [],
+    );
+    const { session } = setup(query);
     session.toggleInstitution("root");
-    expect(session.isPendingSelection("a1")).toBe(true);
+    expect(session.isPendingSelection("b")).toBe(false);
     await vi.advanceTimersByTimeAsync(500);
-    for (const code of ["root", "a", "a1", "b", "c"])
-      expect(session.isInstitutionSelected(code)).toBe(true);
-    session.toggleInstitution("a1");
-    expect(session.isInstitutionSelected("a1")).toBe(false);
+    expect(session.isInstitutionSelected("root")).toBe(true);
+    expect(session.isInstitutionSelected("b")).toBe(true);
+    session.view("b");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(session.isInstitutionSelected("b")).toBe(false);
+    expect(session.isInstitutionSelected("root")).toBe(true);
+    session.removeInstitution("b");
+    expect(session.isInstitutionSelected("root")).toBe(false);
+    expect(session.getSnapshot().selected).toEqual([mismatched]);
+  });
+  it("上级变半选时未查询子级停止继承全选，查看后按实际名单恢复状态", async () => {
+    const { session, query } = setup();
+    session.toggleInstitution("root");
+    expect(session.isInstitutionSelected("a")).toBe(false);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(session.isInstitutionSelected("a")).toBe(true);
+    expect(session.isInstitutionSelected("b")).toBe(true);
+
+    session.togglePerson(users[0]);
+    expect(session.isInstitutionSelected("root")).toBe(false);
+    expect(session.isInstitutionSelected("a")).toBe(false);
+    expect(session.isInstitutionSelected("b")).toBe(false);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(query).toHaveBeenCalledTimes(1);
+
+    session.view("b");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(session.isInstitutionSelected("b")).toBe(true);
+    expect(session.isInstitutionSelected("a")).toBe(false);
+    session.view("a");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(session.isInstitutionSelected("a")).toBe(false);
+    expect(session.isInstitutionSelected("b")).toBe(true);
+    expect(session.getSnapshot().selected).toEqual(users.slice(1));
+    expect(query).toHaveBeenCalledTimes(3);
+  });
+  it("取消一个子级只查询并移除该子级，未查询的兄弟保持全选", async () => {
+    const { session, query } = setup();
+    session.toggleInstitution("root");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(session.isInstitutionSelected("a")).toBe(true);
+    expect(session.isInstitutionSelected("a1")).toBe(true);
+    expect(session.isInstitutionSelected("b")).toBe(true);
+    session.toggleInstitution("a");
     expect(session.isInstitutionSelected("a")).toBe(false);
     expect(session.isInstitutionSelected("root")).toBe(false);
     expect(session.isInstitutionSelected("b")).toBe(true);
-    session.toggleInstitution("root");
-    expect(session.isInstitutionSelected("a1")).toBe(true);
-    session.toggleInstitution("root");
-    expect(session.getSnapshot().emptyInstitutions).toEqual([]);
-    expect(session.getSnapshot().selected).toEqual([]);
+    expect(session.isInstitutionSelected("c")).toBe(true);
+    expect(session.getSnapshot().blocked).toBe(true);
+    expect(session.getSnapshot().selected).toEqual(users);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(query.mock.calls.map(([nodes]) => nodes[0].mOrgCode)).toEqual([
+      "root",
+      "a",
+    ]);
+    expect(session.isInstitutionSelected("b")).toBe(true);
+    expect(session.isInstitutionSelected("c")).toBe(true);
+    expect(session.getSnapshot().selected.map(({ sapId }) => sapId)).toEqual([
+      "03",
+      "04",
+    ]);
+    session.toggleInstitution("a");
+    expect(session.getSnapshot().selected.map(({ sapId }) => sapId)).toEqual([
+      "03",
+      "04",
+      "01",
+      "02",
+    ]);
+    expect(
+      new Set(session.getSnapshot().selected.map(({ sapId }) => sapId)).size,
+    ).toBe(4);
   });
-  it("全空机构树父子联动，取消子级不影响兄弟，加载时排除子级后响应不补回", async () => {
-    const { session } = setup(vi.fn().mockResolvedValue([]));
+  it("整机构取消后在上级名单再取消单人，未查询的兄弟停止继承", async () => {
+    const { session, query } = setup();
     session.toggleInstitution("root");
+    await vi.advanceTimersByTimeAsync(500);
     session.toggleInstitution("a");
     await vi.advanceTimersByTimeAsync(500);
-    expect(session.isInstitutionSelected("a")).toBe(false);
-    expect(session.isInstitutionSelected("a1")).toBe(false);
     expect(session.isInstitutionSelected("b")).toBe(true);
+    expect(session.isInstitutionSelected("c")).toBe(true);
+
+    session.view("root");
+    session.togglePerson(users[2]);
+    expect(session.isInstitutionSelected("b")).toBe(false);
+    expect(session.isInstitutionSelected("c")).toBe(false);
+    expect(session.getSnapshot().selected).toEqual([users[3]]);
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+  it("重新选中已取消子级的全部人员后，上级恢复全选", async () => {
+    const { session, query } = setup();
+    session.toggleInstitution("root");
+    await vi.advanceTimersByTimeAsync(500);
+    session.toggleInstitution("a");
+    expect(session.isInstitutionSelected("root")).toBe(false);
+    await vi.advanceTimersByTimeAsync(500);
+
+    session.view("a");
+    session.togglePerson(users[0]);
+    expect(session.isInstitutionSelected("a")).toBe(false);
+    expect(session.isInstitutionSelected("root")).toBe(false);
+    session.togglePerson(users[1]);
+
+    expect(session.isInstitutionSelected("a")).toBe(true);
+    expect(session.isInstitutionSelected("root")).toBe(true);
+    expect(session.isInstitutionSelected("a1")).toBe(true);
+    expect(session.isInstitutionSelected("b")).toBe(true);
+    expect(
+      session
+        .getSnapshot()
+        .selected.map(({ sapId }) => sapId)
+        .sort(),
+    ).toEqual(users.map(({ sapId }) => sapId));
+    expect(query).toHaveBeenCalledTimes(2);
+
+    session.toggleInstitution("a1");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(
+      session
+        .getSnapshot()
+        .selected.map(({ sapId }) => sapId)
+        .sort(),
+    ).toEqual(["01", "03", "04"]);
+    expect(session.isInstitutionSelected("root")).toBe(false);
+    expect(query).toHaveBeenCalledTimes(3);
+  });
+  it("子级取消查询未完成时重新勾选，不让旧结果再次取消人员", async () => {
+    const pending = deferred<DistributeTarget[]>();
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce(users)
+      .mockReturnValueOnce(pending.promise);
+    const { session } = setup(query);
+    session.toggleInstitution("root");
+    await vi.advanceTimersByTimeAsync(500);
+    session.toggleInstitution("a");
+    await vi.advanceTimersByTimeAsync(500);
+    session.toggleInstitution("a");
+    pending.resolve(users.slice(0, 2));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(session.getSnapshot().selected).toEqual(users);
+    expect(session.getSnapshot().blocked).toBe(false);
+  });
+  it("父级全选联动已查询的零人子级，取消零人子级后父级变半选", async () => {
+    const { session } = setup(vi.fn().mockResolvedValue([]));
+    session.view("a1");
+    await vi.advanceTimersByTimeAsync(500);
+    session.toggleInstitution("root");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(session.isInstitutionSelected("a1")).toBe(true);
+    expect(session.isInstitutionSelected("b")).toBe(true);
+    session.toggleInstitution("a1");
     expect(session.isInstitutionSelected("root")).toBe(false);
     session.toggleInstitution("root");
-    expect(session.isInstitutionSelected("a1")).toBe(true);
     expect(session.isInstitutionSelected("root")).toBe(true);
-    session.toggleInstitution("a1");
-    expect(session.isInstitutionSelected("a")).toBe(false);
-    expect(session.isInstitutionSelected("root")).toBe(false);
-    expect(session.isInstitutionSelected("b")).toBe(true);
+    expect(session.isInstitutionSelected("a1")).toBe(true);
   });
   it("仅查看空机构不选中，明确勾选后保留零人机构，支持取消和缓存复用", async () => {
     const query = vi.fn().mockResolvedValue([]);
@@ -99,7 +229,7 @@ describe("分发人员批量队列", () => {
     expect(session.isInstitutionSelected("a")).toBe(false);
     session.toggleInstitution("a");
     expect(session.isInstitutionSelected("a")).toBe(true);
-    expect(session.getSnapshot().emptyInstitutions).toEqual(["a", "a1"]);
+    expect(session.getSnapshot().emptyInstitutions).toEqual(["a"]);
     expect(session.getSnapshot().anchors).toEqual(["a"]);
     expect(session.getSnapshot().selected).toEqual([]);
     expect(session.getSnapshot().blocked).toBe(false);
@@ -114,7 +244,7 @@ describe("分发人员批量队列", () => {
     session.toggleInstitution("a");
     session.toggleInstitution("b");
     await vi.advanceTimersByTimeAsync(500);
-    expect(session.getSnapshot().emptyInstitutions).toEqual(["a", "a1", "b"]);
+    expect(session.getSnapshot().emptyInstitutions).toEqual(["a", "b"]);
     session.removeInstitution("a");
     expect(session.getSnapshot().emptyInstitutions).toEqual(["b"]);
     expect(session.isInstitutionSelected("b")).toBe(true);
@@ -122,7 +252,7 @@ describe("分发人员批量队列", () => {
     expect(session.getSnapshot().emptyInstitutions).toEqual([]);
     expect(session.getSnapshot().anchors).toEqual([]);
   });
-  it("空机构出现新人员后不隐式选人，取消待选的空响应也不保留勾选", async () => {
+  it("上级新名单不覆盖下级空名单，取消待选的空响应不恢复勾选", async () => {
     const query = vi
       .fn()
       .mockResolvedValueOnce([])
@@ -132,8 +262,8 @@ describe("分发人员批量队列", () => {
     await vi.advanceTimersByTimeAsync(500);
     session.view("root");
     await vi.advanceTimersByTimeAsync(500);
-    expect(session.isInstitutionSelected("a")).toBe(false);
-    expect(session.getSnapshot().emptyInstitutions).toEqual([]);
+    expect(session.isInstitutionSelected("a")).toBe(true);
+    expect(session.getSnapshot().emptyInstitutions).toEqual(["a"]);
     expect(session.getSnapshot().selected).toEqual([]);
     const pending = deferred<DistributeTarget[]>();
     const { session: cancelled } = setup(
@@ -159,7 +289,7 @@ describe("分发人员批量队列", () => {
     expect(session.getSnapshot().people).toEqual([users[2]]);
     expect(session.getSnapshot().selected).toEqual([users[2]]);
   });
-  it("500ms 固定窗口，不因第二次点击延后，合并多机构请求", async () => {
+  it("500ms 固定窗口，不因第二次点击延后，按机构分别请求", async () => {
     const { session, query } = setup();
     session.toggleInstitution("a");
     await vi.advanceTimersByTimeAsync(300);
@@ -169,10 +299,12 @@ describe("分发人员批量队列", () => {
     expect(query).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(query).toHaveBeenCalledTimes(1);
-    expect(query.mock.calls[0][0].map((n: Institution) => n.mOrgCode)).toEqual([
-      "a",
-      "b",
-    ]);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(
+      query.mock.calls.map(([nodes]) => nodes.map((n) => n.mOrgCode)),
+    ).toEqual([["a"], ["b"]]);
+    expect(session.getSnapshot().people).toEqual([users[2]]);
     expect(session.getSnapshot().selected.map((u) => u.sapId)).toEqual([
       "01",
       "02",
@@ -237,22 +369,26 @@ describe("分发人员批量队列", () => {
     expect(session.getSnapshot().selected).toEqual(users.slice(0, 2));
     expect(query).toHaveBeenCalledTimes(2);
   });
-  it("已加载上级复用下级，但下级不冒充上级完整名单", async () => {
+  it("下级列表直接展示该机构接口返回的人员，即使归属编号不匹配", async () => {
+    const returned = [users[0], user("02", "other"), users[2], users[3]];
     const query = vi
       .fn()
-      .mockResolvedValueOnce([users[1]])
-      .mockResolvedValueOnce(users);
+      .mockResolvedValueOnce(users)
+      .mockResolvedValueOnce(returned);
     const { session } = setup(query);
-    session.view("a1");
-    await vi.advanceTimersByTimeAsync(500);
     session.view("root");
     await vi.advanceTimersByTimeAsync(500);
-    expect(query).toHaveBeenCalledTimes(2);
     session.view("a");
-    session.view("b");
+    expect(session.getSnapshot().people).toBeUndefined();
     await vi.advanceTimersByTimeAsync(500);
     expect(query).toHaveBeenCalledTimes(2);
-    expect(session.getSnapshot().people).toEqual([users[2]]);
+    expect(query.mock.calls[1][0]).toEqual([root.children[0]]);
+    expect(session.getSnapshot().people).toEqual(returned);
+    session.toggleInstitution("a");
+    expect(session.getSnapshot().selected).toEqual(returned);
+    session.toggleInstitution("a");
+    expect(session.getSnapshot().selected).toEqual([]);
+    expect(query).toHaveBeenCalledTimes(2);
   });
   it("半选补全、父级覆盖下级，取消单人保持其他机构选择", async () => {
     const { session } = setup();
@@ -261,6 +397,7 @@ describe("分发人员批量队列", () => {
     session.view("a1");
     session.togglePerson(users[1]);
     session.toggleInstitution("a");
+    await vi.advanceTimersByTimeAsync(500);
     expect(
       session
         .getSnapshot()
@@ -268,6 +405,8 @@ describe("分发人员批量队列", () => {
         .sort(),
     ).toEqual(["01", "02"]);
     session.toggleInstitution("b");
+    await vi.advanceTimersByTimeAsync(500);
+    session.view("a");
     session.togglePerson(users[1]);
     expect(
       session
@@ -329,25 +468,16 @@ describe("分发人员批量队列", () => {
     session.view("root");
     await vi.advanceTimersByTimeAsync(500);
     expect(session.getSnapshot().selected).toEqual([users[0]]);
-    expect(session.people("a")).toEqual([users[0], added]);
+    expect(session.people("a")).toEqual([users[0]]);
   });
-  it("取得上级新名单后替换过期下级缓存，全选使用更新后的完整名单", async () => {
-    const added = user("new-a", "a1");
-    const query = vi
-      .fn()
-      .mockResolvedValueOnce([users[0]])
-      .mockResolvedValueOnce([users[0], added, users[2]]);
-    const { session } = setup(query);
-    session.view("a");
+  it("上级响应不覆盖已独立查询的下级名单", async () => {
+    const { session, query } = setup();
+    session.view("a1");
     await vi.advanceTimersByTimeAsync(500);
-    expect(session.people("a1")).toEqual([]);
     session.view("root");
     await vi.advanceTimersByTimeAsync(500);
-    session.view("a");
-    expect(session.getSnapshot().people).toEqual([users[0], added]);
-    expect(session.people("a1")).toEqual([added]);
-    session.toggleInstitution("a");
-    expect(session.getSnapshot().selected).toEqual([users[0], added]);
+    session.view("a1");
+    expect(session.getSnapshot().people).toEqual([users[1]]);
     expect(query).toHaveBeenCalledTimes(2);
   });
   it("全选失败后的半选点击重试补全，保留原有人员直到查询成功", async () => {
@@ -374,7 +504,9 @@ describe("分发人员批量队列", () => {
   });
   it("未匹配历史人员不应使已清空的分行分组重新生效", async () => {
     const unknown = user("historical", "removed-org");
-    const session = new DistributionSession(root, [unknown], async () => users);
+    const session = new DistributionSession(root, [unknown], async ([scope]) =>
+      scope.mOrgCode === "a1" ? [users[1]] : users,
+    );
     sessions.push(session);
     session.toggleInstitution("root");
     await vi.advanceTimersByTimeAsync(500);
@@ -383,6 +515,7 @@ describe("分发人员批量队列", () => {
     expect(session.getSnapshot().selected).toEqual([unknown]);
     expect(session.getSnapshot().anchors).toEqual([]);
     session.toggleInstitution("a1");
+    await vi.advanceTimersByTimeAsync(500);
     expect(session.getSnapshot().anchors).toEqual(["a1"]);
     expect(session.getSnapshot().selected).toEqual([unknown, users[1]]);
   });

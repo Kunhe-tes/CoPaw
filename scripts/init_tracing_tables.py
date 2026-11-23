@@ -61,7 +61,7 @@ async def _create_spans_table(db: DatabaseConnection) -> None:
         `span_id` VARCHAR(36) NOT NULL COMMENT 'Span唯一标识',
         `trace_id` VARCHAR(36) NOT NULL COMMENT '所属追踪ID',
         `source_id` VARCHAR(64) NOT NULL COMMENT '数据源标识',
-        `name` VARCHAR(128) DEFAULT NULL COMMENT 'Span名称',
+        `name` VARCHAR(256) DEFAULT NULL COMMENT 'Span名称',
         `event_type` VARCHAR(32) NOT NULL COMMENT '事件类型',
         `start_time` DATETIME NOT NULL COMMENT '开始时间',
         `end_time` DATETIME DEFAULT NULL COMMENT '结束时间',
