@@ -37,7 +37,7 @@
 | --- | --- |
 | Workspace 和 W+ SOP | 给 `ChatManager` 装配独立的 SQL Chat 仓库，W+ SOP 使用同一个仓库解析入口。让 `workspace.conversation_storage` 继续表示现有 bundle 整套能力，使原 Runner、Console、历史、Tracing 和控制命令进入已存在的 NAS 分支。 |
 | Chat 仓库 | 从现有 MySQL 实现复用作用域过滤、稳定分页、锁序、标题 CAS、专家绑定、草稿竞争和墓碑。提取关联校验与 SQL 写入，解除对 `PublicationStore`、prepared publication 和 SQL active Turn 的依赖。详情与列表保留旧运行态投影。 |
-| NAS 执行 | 保留原问答准入、会话与归档文件锁、Session v1/v2/v3、checkpoint、停止与重启恢复。Console、渠道、任务和分享通过 SQL 确认 Chat 归属，再用原文件读写。Cron 选迁等直接读目录文件的旁路，按业务语义接入 SQL 或限定为明确的离线输入。已发布工作区的业务目录由 SQL 提供，严格 bootstrap 继续校验原 `chats.json`，因此保留该文件供引导使用。 |
+| NAS 执行 | 保留原问答准入、会话与归档文件锁、Session v1/v2/v3、checkpoint、停止与重启恢复。Console、渠道、任务和分享通过 SQL 确认 Chat 归属，再用原文件读写。Cron 选迁等直接读目录文件的旁路，按业务语义接入 SQL 或限定为明确的离线输入。已迁移工作区以 SQL 提供业务目录，`mysql-metadata` 模式的 bootstrap 跳过旧 `chats.json`。新登记工作区仍检查是否存在待迁移数据。 |
 | 删除与竞争 | SQL 事务核验归属与预期版本并提交墓碑。提交后按原归档锁和 Chat 私有资源边界清理，成功后记录完成。通过可重跑的清理入口处理失败和进程中断。运行中删除沿用原业务约束并复测晚到写入，保护共享 Session 文件及独立分享。场景创建竞争只回收失败一方的私有资源。 |
 | 分享与运维 | 复用现有分享索引和 JSON 快照路径，验证现有 token、权限和访问计数。文件维护入口按新模式纳入成套备份与恢复，保持原文件的校验和锁约束。 |
 

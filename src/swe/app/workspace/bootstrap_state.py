@@ -23,7 +23,6 @@ _REQUIRED_WORKSPACE_FILES = (
 )
 _REQUIRED_WORKSPACE_DIRECTORIES = ("sessions", "memory")
 _REQUIRED_WORKSPACE_JSON_FILES = (
-    "chats.json",
     "jobs.json",
     "token_usage.json",
 )
@@ -59,6 +58,11 @@ def inspect_bootstrap_readiness(
     expected_tenant_dir: Path | None = None,
 ) -> BootstrapReadiness:
     """Validate bootstrap artifacts without tolerant parsing or mutation."""
+    from ..conversation_storage.runtime import (
+        METADATA_AUTHORITY,
+        storage_authority,
+    )
+
     tenant_dir = Path(tenant_dir)
     workspace_dir = tenant_dir / "workspaces" / "default"
     expected_workspace_dir = (
@@ -115,7 +119,10 @@ def inspect_bootstrap_readiness(
         except Exception:
             invalid_json_paths.append(agent_path)
 
-    for file_name in _REQUIRED_WORKSPACE_JSON_FILES:
+    json_files = _REQUIRED_WORKSPACE_JSON_FILES
+    if storage_authority() != METADATA_AUTHORITY:
+        json_files = ("chats.json", *json_files)
+    for file_name in json_files:
         _read_json_object(
             workspace_dir / file_name,
             missing_paths,
