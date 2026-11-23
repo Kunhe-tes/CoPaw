@@ -63,8 +63,14 @@ async def _verify_fast_level(
     from .verify_fast import verify_fast_publications
 
     frozen_hashes = _frozen_session_hashes(inventory)
-
     try:
+        expected_sessions = {}
+        for workspace in inventory["workspaces"]:
+            for session in workspace["sessions"]:
+                position = session["position"]
+                if position in expected_sessions:
+                    raise ValueError("duplicate inventory session position")
+                expected_sessions[position] = tuple(workspace["scope"])
         expected_scopes = None
         if manifest.data.get("tenant_isolation"):
             expected_scopes = {
@@ -85,6 +91,7 @@ async def _verify_fast_level(
                     memory_bytes=memory_bytes // max(1, workers),
                     expected_scopes=expected_scopes,
                     frozen_hashes=frozen_hashes,
+                    expected_sessions=expected_sessions,
                 )
         else:
             summary = await verify_fast_publications(
@@ -97,6 +104,7 @@ async def _verify_fast_level(
                 memory_bytes=memory_bytes // max(1, workers),
                 expected_scopes=expected_scopes,
                 frozen_hashes=frozen_hashes,
+                expected_sessions=expected_sessions,
             )
         report["checked"] = [
             {"position": "publications", "count": summary["publications"]},

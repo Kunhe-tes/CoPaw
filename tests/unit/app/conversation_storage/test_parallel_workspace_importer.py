@@ -717,7 +717,17 @@ async def test_importer_message_batches_pass_fast_verification_at_128(
             return [rows[identity] for identity in params]
 
     async def reference_rows(_database, _query, expected, _service):
-        yield tuple(expected), expected
+        from swe.app.conversation_storage.reference_queries import (
+            ReferenceQuery,
+        )
+
+        if _query == ReferenceQuery.MIGRATION_SESSION_HIGH:
+            yield tuple(expected), {
+                identity: {"id": identity, "history_high": 129}
+                for identity in expected
+            }
+        else:
+            yield tuple(expected), expected
 
     monkeypatch.setattr(
         "swe.app.conversation_storage.migration.verify_fast.iter_reference_rows",

@@ -59,6 +59,11 @@ CHAT_CHECK_FIELDS = (
 class ReferenceQuery(Enum):
     """Only trusted table, column and lock shapes can reach the helper."""
 
+    MIGRATION_SESSION_HIGH = (
+        "sessions",
+        ("id", "service_unit_key", "history_high"),
+        "",
+    )
     OFFLINE_SESSION = (
         "sessions",
         (

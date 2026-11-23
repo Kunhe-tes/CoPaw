@@ -19,7 +19,7 @@ from ..message_bundle import (
     encode_message_body,
     validate_runtime_occurrences,
 )
-from ..reference_queries import iter_reference_rows
+from ..reference_queries import ReferenceQuery, iter_reference_rows
 from ..session_projection import validate_projection_structure
 from .archive_verification import (
     PUBLICATION_FIELDS,
@@ -524,7 +524,7 @@ def _directory_hashes(entries):
                 separators=(",", ":"),
                 ensure_ascii=False,
             ).encode(),
-        ).digest()
+        ).hexdigest()
         for entry in entries
     ]
 
@@ -597,6 +597,7 @@ async def verify_fast_publications(
     memory_bytes,
     expected_scopes=None,
     frozen_hashes=None,
+    expected_sessions=None,
 ):
     publications, session_assignments, relevant_batches = (
         _verification_tickets(
@@ -608,6 +609,19 @@ async def verify_fast_publications(
         position: assignment["target_id"]
         for position, assignment in session_assignments
     }
+    if len(set(sessions.values())) != len(sessions):
+        raise IntegrityError("duplicate session assignment identity")
+    if expected_sessions is not None:
+        if set(sessions) != set(expected_sessions):
+            raise IntegrityError(
+                "session assignment set differs from inventory",
+            )
+        for position, scope in expected_sessions.items():
+            positional = _position_scope(position)
+            if positional is not None and positional != tuple(scope):
+                raise IntegrityError(
+                    "session assignment scope differs from inventory",
+                )
     if any(
         state not in ("committed", "verified") for _, state in relevant_batches
     ):
@@ -619,8 +633,8 @@ async def verify_fast_publications(
     checked_updates = 0
     checked_records = 0
     seen_paths = set()
-    message_spans = {}
-    recoveries = {}
+    message_spans = DiskMap()
+    recoveries = DiskMap()
     # A valid message body block can be 8 MiB and decoded JSON needs headroom.
     # Limit concurrent decoders rather than rejecting valid importer output.
     verify_workers = max(
@@ -740,9 +754,10 @@ async def verify_fast_publications(
                 checked_updates += updates_count
                 if message_span is not None:
                     prefix, start, count, hashes, body_hashes = message_span
-                    message_spans.setdefault(prefix, []).append(
-                        (start, count, hashes, body_hashes),
-                    )
+                    message_spans[json.dumps([prefix, start])] = {
+                        "session": prefix,
+                        "span": [start, count, hashes, body_hashes],
+                    }
                 if recovery is not None:
                     recoveries[check[0][: -len("/recovery")]] = recovery
                 if archive is not None:
@@ -793,12 +808,62 @@ async def verify_fast_publications(
                 checked_records += len(expected)
                 batch_records += len(expected)
         verified_publications += len(chunk)
-    _validate_message_batch_spans(
-        message_spans,
-        recoveries,
-        sessions,
-        frozen_hashes,
-    )
+    sessions_by_service = {}
+    for position, identity in sessions.items():
+        assignment = selected.get(position + "/recovery")
+        if assignment is None:
+            raise IntegrityError("session recovery evidence is missing")
+        scope = tuple(assignment["scope"])
+        if expected_sessions is not None and scope != tuple(
+            expected_sessions[position],
+        ):
+            raise IntegrityError(
+                "session assignment scope differs from inventory",
+            )
+        sessions_by_service.setdefault(scope[0].encode(), {})[
+            identity
+        ] = position
+    for service, identities in sessions_by_service.items():
+        async for requested, rows in iter_reference_rows(
+            database,
+            ReferenceQuery.MIGRATION_SESSION_HIGH,
+            identities,
+            service,
+        ):
+            for identity in requested:
+                position = identities[identity]
+                row = rows.get(identity)
+                if (
+                    row is None
+                    or type(row.get("history_high")) is not int
+                    or position not in recoveries
+                    or row["history_high"] != recoveries[position][0]
+                ):
+                    raise IntegrityError(
+                        "session database history high differs",
+                    )
+    try:
+        for position, identity in sessions.items():
+            spans = [
+                value["span"]
+                for _, value in message_spans.grouped_items(
+                    [position],
+                    lambda _key, value: value["session"],
+                )
+            ]
+            _validate_message_batch_spans(
+                {position: spans},
+                (
+                    {position: recoveries[position]}
+                    if position in recoveries
+                    else {}
+                ),
+                {position: identity},
+                frozen_hashes,
+            )
+    finally:
+        message_spans.close()
+        recoveries.close()
     return {
         "publications": verified_publications,
         "planned_rows": checked_rows,

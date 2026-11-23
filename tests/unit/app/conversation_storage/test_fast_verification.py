@@ -1199,6 +1199,8 @@ def _message_batch_inputs(tmp_path, batches, *, substitute_body=False):
     class Database:
         publication_rows = rows
         max_allowed_packet = 16 * 1024 * 1024
+        actual_history_high = high
+        session_exists = True
 
         def acquire(self):
             return self
@@ -1211,10 +1213,12 @@ def _message_batch_inputs(tmp_path, batches, *, substitute_body=False):
 
         async def fetch_all(self, _query, params):
             if "swe_conversation_sessions" in _query:
+                if not self.session_exists:
+                    return []
                 return [
                     {
                         "id": 42,
-                        "history_high": high,
+                        "history_high": self.actual_history_high,
                         "service_unit_key": b"svc",
                     },
                 ]
@@ -1480,4 +1484,50 @@ async def test_fast_rejects_replaced_message_body_with_same_directory(
         substitute_body=True,
     )
     with pytest.raises(IntegrityError, match="body differs"):
+        await _run_fast_message_batches(database, bundles, manifest)
+
+
+@pytest.mark.parametrize("high", [0, 2])
+async def test_fast_rejects_database_history_high_mismatch(tmp_path, high):
+    batches = {
+        "session/messages:0": [
+            {
+                "sequence": 1,
+                "session_order": 1,
+                "source_occurrence": 0,
+                "source_occurrence_no": 0,
+            },
+        ],
+    }
+    database, bundles, manifest = _message_batch_inputs(tmp_path, batches)
+    database.actual_history_high = high
+    with pytest.raises(IntegrityError, match="history high"):
+        await _run_fast_message_batches(database, bundles, manifest)
+
+
+async def test_fast_rejects_missing_expected_session_assignment(tmp_path):
+    database, bundles, manifest = _message_batch_inputs(tmp_path, {})
+    del manifest.data["assignments"]["session"]["session"]
+    with pytest.raises(IntegrityError, match="session assignment"):
+        await _run_fast_message_batches(
+            database,
+            bundles,
+            manifest,
+            expected_sessions={
+                "session": ("svc", "tenant", "source", "agent"),
+            },
+        )
+
+
+async def test_fast_rejects_missing_database_session(tmp_path):
+    database, bundles, manifest = _message_batch_inputs(tmp_path, {})
+    database.session_exists = False
+    with pytest.raises(IntegrityError, match="sessions|history high"):
+        await _run_fast_message_batches(database, bundles, manifest)
+
+
+async def test_fast_rejects_duplicate_session_target(tmp_path):
+    database, bundles, manifest = _message_batch_inputs(tmp_path, {})
+    manifest.data["assignments"]["session"]["other"] = {"target_id": 42}
+    with pytest.raises(IntegrityError, match="duplicate session assignment"):
         await _run_fast_message_batches(database, bundles, manifest)
