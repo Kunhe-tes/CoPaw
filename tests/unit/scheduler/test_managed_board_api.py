@@ -32,7 +32,7 @@ async def test_worker_occupants_scopes_totals_and_current_attempt(
     db.conn.executescript("""
         UPDATE swe_cron_execution_runs
         SET kind='ordinary', status='success', settled_status=NULL,
-            spec_json=JSON_SET(spec_json,'$.tenant_name','Alice'),
+            spec_json=JSON_SET(spec_json,'$.tenant_name','Alice','$.task_type','agent'),
             dispatch_meta_json=JSON_SET(
                 dispatch_meta_json,'$.daily_failure_retry.call_id','call-one'
             );
@@ -102,7 +102,13 @@ async def test_worker_occupants_scopes_totals_and_current_attempt(
         db.conn.execute("UPDATE swe_cron_execution_runs SET status='queued'")
         pending = await client.get(path, headers=headers)
         assert pending.json()["total"] == 1
-        assert pending.json()["items"][0]["tenant_id"] == "bob"
+        db.conn.execute(
+            "UPDATE swe_cron_execution_runs SET status='running', "
+            "spec_json=JSON_SET(spec_json,'$.task_type','text')",
+        )
+        text_only = await client.get(path, headers=headers)
+        assert text_only.json()["total"] == 1
+        assert text_only.json()["items"][0]["tenant_id"] == "bob"
 
 
 @pytest.mark.asyncio
