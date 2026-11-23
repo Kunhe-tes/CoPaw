@@ -31,6 +31,7 @@ from .install_records import (
     VERIFY_QUERIES,
     OfflineImportStore,
 )
+from .disk_manifest import DiskMap
 
 MESSAGE_BATCH_MARKER = "/messages:"
 
@@ -398,10 +399,10 @@ def _position_scope(position):
     return None
 
 
-def _batch_scope(position, assignment_scopes):
+def _batch_scope(position, get_scope):
     scope = _position_scope(position)
     if scope is not None:
-        assigned = assignment_scopes.get(position)
+        assigned = get_scope(position)
         if assigned is not None and assigned != scope:
             raise IntegrityError(
                 "migration batch scope differs from publication assignment",
@@ -409,13 +410,70 @@ def _batch_scope(position, assignment_scopes):
         return scope
     candidate = position
     while candidate:
-        scope = assignment_scopes.get(candidate)
+        scope = get_scope(candidate)
         if scope is not None:
             return scope
         if "/" not in candidate:
             break
         candidate = candidate.rsplit("/", 1)[0]
     raise IntegrityError("migration batch position is invalid")
+
+
+def _assignment_scope(position, assignment):
+    return _position_scope(position) or tuple(assignment.get("scope", ()))
+
+
+def _publication_scope(publications, position):
+    assignment = publications.get(position)
+    return (
+        tuple(assignment.get("scope", ())) if assignment is not None else None
+    )
+
+
+def _verification_tickets(manifest, scopes):
+    assigned = manifest.data.get("assignments", {})
+    publications = assigned.get("publication", {})
+    sessions = assigned.get("session", {})
+    batches = manifest.data.get("batches", {})
+    if scopes is None:
+        return publications.items(), sessions.items(), batches.items()
+    if all(
+        isinstance(mapping, DiskMap) for mapping in (publications, batches)
+    ) and (isinstance(sessions, DiskMap) or not sessions):
+        get_scope = partial(_publication_scope, publications)
+        return (
+            publications.grouped_items(scopes, _assignment_scope),
+            (
+                sessions.grouped_items(scopes, _assignment_scope)
+                if isinstance(sessions, DiskMap)
+                else ()
+            ),
+            batches.grouped_items(
+                scopes,
+                lambda position, _: _batch_scope(position, get_scope),
+            ),
+        )
+    assignment_scopes = {
+        position: tuple(assignment.get("scope", ()))
+        for position, assignment in publications.items()
+    }
+    return (
+        (
+            (position, value)
+            for position, value in publications.items()
+            if _assignment_scope(position, value) in scopes
+        ),
+        (
+            (position, value)
+            for position, value in sessions.items()
+            if _position_scope(position) in scopes
+        ),
+        (
+            (position, state)
+            for position, state in batches.items()
+            if _batch_scope(position, assignment_scopes.get) in scopes
+        ),
+    )
 
 
 def _message_batch(position):
@@ -514,51 +572,16 @@ async def verify_fast_publications(
     memory_bytes,
     expected_scopes=None,
 ):
-    all_publication_assignments = manifest.data.get("assignments", {}).get(
-        "publication",
-        {},
-    )
-    assignment_scopes = {
-        position: tuple(assignment.get("scope", ()))
-        for position, assignment in all_publication_assignments.items()
-    }
-    publication_assignments = all_publication_assignments.items()
-    if expected_scopes is not None:
-        selected = []
-        for position, assignment in publication_assignments:
-            position_scope = _position_scope(position)
-            assignment_scope = tuple(assignment.get("scope", ()))
-            if position_scope is not None:
-                if position_scope not in expected_scopes:
-                    continue
-                if assignment_scope != position_scope:
-                    raise IntegrityError(
-                        "publication assignment scope differs from position",
-                    )
-            elif assignment_scope not in expected_scopes:
-                continue
-            selected.append((position, assignment))
-        publication_assignments = iter(selected)
-    session_assignments = manifest.data.get("assignments", {}).get(
-        "session",
-        {},
+    publications, session_assignments, relevant_batches = (
+        _verification_tickets(
+            manifest,
+            expected_scopes,
+        )
     )
     sessions = {
         position: assignment["target_id"]
-        for position, assignment in session_assignments.items()
-        if expected_scopes is None
-        or _position_scope(position) in expected_scopes
+        for position, assignment in session_assignments
     }
-    assignments = iter(publication_assignments)
-    batches = manifest.data.get("batches", {})
-    relevant_batches = batches.items()
-    if expected_scopes is not None:
-        scoped_batches = []
-        for position, state in batches.items():
-            scope = _batch_scope(position, assignment_scopes)
-            if scope in expected_scopes:
-                scoped_batches.append(state)
-        relevant_batches = ((None, state) for state in scoped_batches)
     if any(
         state not in ("committed", "verified") for _, state in relevant_batches
     ):
@@ -579,22 +602,31 @@ async def verify_fast_publications(
         min(io_workers, memory_bytes // (64 * 1024 * 1024)),
     )
     allowance = max(1, memory_bytes // verify_workers)
-    assignment_scopes_by_id = {
-        assignment["target_id"]: tuple(assignment.get("scope", ()))
-        for assignment in all_publication_assignments.values()
-    }
-    assignments_by_id = {
-        assignment["target_id"]: assignment
-        for assignment in all_publication_assignments.values()
-    }
+    selected = dict(publications)
+    assignments_by_id = {}
+    assignment_scopes_by_id = {}
+    for position, assignment in selected.items():
+        scope = tuple(assignment.get("scope", ()))
+        if (
+            expected_scopes is not None
+            and _assignment_scope(position, assignment) != scope
+        ):
+            raise IntegrityError(
+                "publication assignment scope differs from position",
+            )
+        path = assignment.get("relative_path")
+        if not isinstance(path, str) or path in seen_paths:
+            raise IntegrityError(
+                "migration bundle path is missing or duplicated",
+            )
+        seen_paths.add(path)
+        identity = assignment["target_id"]
+        if identity in assignments_by_id:
+            raise IntegrityError("duplicate committed publication identity")
+        assignments_by_id[identity] = assignment
+        assignment_scopes_by_id[identity] = scope
+    assignments = iter(selected.items())
     while chunk := list(islice(assignments, 128)):
-        for _position, assignment in chunk:
-            path = assignment.get("relative_path")
-            if not isinstance(path, str) or path in seen_paths:
-                raise IntegrityError(
-                    "migration bundle path is missing or duplicated",
-                )
-            seen_paths.add(path)
         ids = [assignment["target_id"] for _, assignment in chunk]
         found = await database.fetch_all(
             "SELECT "

@@ -881,9 +881,15 @@ class ConversationImporter:
         state = session["legacy"]["state"]
         epoch = state.get("context_epoch", 0)
         turns = state.get("turn_states", {})
+        positions = session.get("chat_positions")
+        session_chats = (
+            workspace["chats"]
+            if positions is None
+            else [workspace["chats"][index] for index in positions]
+        )
         chats = {
             item["spec"]["id"]: self.chat_ids[item["position"]]
-            for item in workspace["chats"]
+            for item in session_chats
             if item["position"] in self.chat_ids
             and item["spec"]["session_id"] == session["identity"][6]
             and item["spec"]["user_id"] == session["identity"][4]
@@ -910,7 +916,7 @@ class ConversationImporter:
             context_epoch=epoch,
             task_projection=any(
                 item["spec"]["meta"].get("session_kind") == "task"
-                for item in workspace["chats"]
+                for item in session_chats
                 if item["spec"]["id"] in chats
             ),
         )

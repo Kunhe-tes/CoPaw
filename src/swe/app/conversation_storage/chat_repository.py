@@ -44,7 +44,7 @@ from .chat_mutations import (
     split_metadata,
     validate_light_metadata,
 )
-from .bundle import BundleBlock, new_operation_key
+from .bundle import BlockExtent, BundleBlock, new_operation_key
 from .publications import CommitPlan, PublicationRequest, PublicationStore
 
 TABLE = "swe_conversation_chats"
@@ -159,19 +159,43 @@ class MySQLChatRepository(BaseChatRepository):
             for batch in batches
             for row in batch.publications
         }
-        result = []
+        groups = {}
         for row in rows:
-            content = {}
-            publication_id = row["content_meta_publication_id"]
-            if publication_id is not None:
-                publication, batch = publications[publication_id]
-                payload = await batch.read(
-                    self.bundles.read_extent,
-                    _text(publication["relative_path"]),
-                    row["content_meta_offset"],
-                    row["content_meta_length"],
-                    expected_length=publication["byte_length"],
+            if (
+                publication_id := row["content_meta_publication_id"]
+            ) is not None:
+                groups.setdefault(publication_id, []).append(row)
+        content_by_id = {}
+        for publication_id, members in groups.items():
+            publication, batch = publications[publication_id]
+            path = _text(publication["relative_path"])
+            expected_length = publication["byte_length"]
+            if len(members) == 1:
+                row = members[0]
+                payloads = (
+                    await batch.read(
+                        self.bundles.read_extent,
+                        path,
+                        row["content_meta_offset"],
+                        row["content_meta_length"],
+                        expected_length=expected_length,
+                    ),
                 )
+            else:
+                payloads = await batch.read(
+                    self.bundles.read_extents,
+                    path,
+                    tuple(
+                        BlockExtent(
+                            "content_meta",
+                            row["content_meta_offset"],
+                            row["content_meta_length"],
+                        )
+                        for row in members
+                    ),
+                    expected_length=expected_length,
+                )
+            for row, payload in zip(members, payloads, strict=True):
                 try:
                     content = json.loads(payload)
                     if not isinstance(content, dict):
@@ -180,8 +204,10 @@ class MySQLChatRepository(BaseChatRepository):
                     raise IntegrityError(
                         "Chat content metadata is invalid",
                     ) from error
-            result.append(self._spec(row, content))
-        return result
+                content_by_id[row["id"]] = content
+        return [
+            self._spec(row, content_by_id.get(row["id"], {})) for row in rows
+        ]
 
     async def _rows(self, where, params, suffix=""):
         async with self.db.transaction():
@@ -289,6 +315,14 @@ class MySQLChatRepository(BaseChatRepository):
             " ORDER BY c.registry_order ASC,c.id ASC",
         )
 
+    async def filter_chats_by_session(self, session_id, user_id, channel):
+        where, params = self._where(user_id=user_id, channel=channel)
+        return await self._rows(
+            where + " AND s.external_session_key=%s",
+            [*params, identity_bytes(session_id, 1024)],
+            " ORDER BY c.registry_order ASC,c.id ASC",
+        )
+
     async def get_chat(self, chat_id):
         where, params = self._where()
         rows = await self._rows(
@@ -345,7 +379,10 @@ class MySQLChatRepository(BaseChatRepository):
         validate_summary_page(page_size, cursor)
         where, params = self._where(user_id=user_id, channel=channel)
         if session_id is not None:
-            where += " AND c.external_session_key=%s"
+            where += (
+                " AND s.external_session_key=%s"
+                " AND c.external_session_key=s.external_session_key"
+            )
             params.append(identity_bytes(session_id, 1024))
         if cursor:
             version, (stamp, key) = self._decode_cursor(cursor)

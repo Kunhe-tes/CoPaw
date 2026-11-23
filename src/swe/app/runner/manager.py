@@ -146,6 +146,16 @@ class ChatManager:
         )
         return self._repo.sort_chats_by_recency(chats)
 
+    async def list_chats_by_session(self, session_id, user_id, channel):
+        lookup = getattr(self._repo, "filter_chats_by_session", None)
+        if lookup is not None:
+            return await lookup(session_id, user_id, channel)
+        return [
+            chat
+            for chat in await self.list_chats(user_id=user_id, channel=channel)
+            if chat.session_id == session_id
+        ]
+
     async def list_chats_page(
         self,
         *,

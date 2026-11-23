@@ -1,12 +1,23 @@
 # -*- coding: utf-8 -*-
 """Database-backed tenant publication admission; no negative cache or fallback."""
 
+import asyncio
+from collections import OrderedDict
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 import json
+from copy import deepcopy
 from uuid import UUID
 
 from .errors import IntegrityError, StorageUnavailable
 from .migration.authority import validate_source_verification
+
+_ADMITTED_TRANSACTION = ContextVar(
+    "conversation_admitted_transaction",
+    default=None,
+)
+_MAX_CACHED_PROOFS = 32
+_MAX_CACHED_PROOF_BYTES = 256 * 1024
 
 
 class TenantNotPublished(StorageUnavailable):
@@ -34,6 +45,7 @@ class TenantAdmission:
         self.db = database
         self.document = dict(document)
         self._validated = False
+        self._proofs = OrderedDict()
 
     async def validate(self):
         if self._validated:
@@ -68,35 +80,67 @@ class TenantAdmission:
             raise IntegrityError("partial migration authority binding differs")
         self._validated = True
 
-    async def require(self, tenant_id, source_id=None):
+    async def require(
+        self,
+        tenant_id,
+        source_id=None,
+        *,
+        session=None,
+        proof=True,
+    ):
         await self.validate()
         doc = self.document
         source_mode = self.source_binding.get("source_isolation", False)
         if source_mode and source_id is None:
             raise TenantNotPublished()
-        row = await self.db.fetch_one(
-            "SELECT state,verification_text FROM "
+        query = (
+            " FROM "
             + (
                 "swe_conversation_migration_sources"
                 if source_mode
                 else "swe_conversation_migration_tenants"
             )
             + " WHERE migration_id=%s AND service_unit_key=%s AND tenant_key=%s"
-            + (" AND source_key=%s" if source_mode else ""),
-            (
-                doc["migration_id"].encode(),
-                doc["service_unit_id"].encode(),
-                tenant_id.encode(),
-                *((source_id.encode(),) if source_mode else ()),
-            ),
+            + (" AND source_key=%s" if source_mode else "")
+        )
+        params = (
+            doc["migration_id"].encode(),
+            doc["service_unit_id"].encode(),
+            tenant_id.encode(),
+            *((source_id.encode(),) if source_mode else ()),
+        )
+        db = self.db if session is None else session
+        row = await db.fetch_one(
+            "SELECT state,SHA2(verification_text,256) AS proof_digest" + query,
+            params,
         )
         if row is None or row["state"] != "published":
             raise TenantNotPublished()
-        proof, _level = validate_source_verification(row["verification_text"])
-        service = proof["services"].get(doc["service_unit_id"])
+        digest = row.get("proof_digest")
+        key = tenant_id, source_id, digest
+        if digest is not None and key in self._proofs:
+            self._proofs.move_to_end(key)
+            cached = self._proofs[key]
+            if not proof:
+                return None
+            if cached is not None:
+                return deepcopy(cached)
+        if "verification_text" not in row:
+            row = await db.fetch_one(
+                "SELECT state,verification_text,SHA2(verification_text,256) AS proof_digest"
+                + query,
+                params,
+            )
+            if row is None or row["state"] != "published":
+                raise TenantNotPublished()
+            key = tenant_id, source_id, row["proof_digest"]
+        verified, _level = validate_source_verification(
+            row["verification_text"],
+        )
+        service = verified["services"].get(doc["service_unit_id"])
         if (
-            proof["migration_id"] != doc["migration_id"]
-            or set(proof["services"]) != {doc["service_unit_id"]}
+            verified["migration_id"] != doc["migration_id"]
+            or set(verified["services"]) != {doc["service_unit_id"]}
             or service is None
             or service["nas_root"] != doc["nas_root"]
             or any(
@@ -106,7 +150,17 @@ class TenantAdmission:
             )
         ):
             raise IntegrityError("tenant publication proof differs")
-        return service["workspaces"]
+        if key[2] is not None:
+            cacheable = (
+                len(row["verification_text"]) <= _MAX_CACHED_PROOF_BYTES
+            )
+            self._proofs[key] = (
+                deepcopy(service["workspaces"]) if cacheable else None
+            )
+            self._proofs.move_to_end(key)
+            if len(self._proofs) > _MAX_CACHED_PROOFS:
+                self._proofs.popitem(last=False)
+        return service["workspaces"] if proof else None
 
 
 class TenantDatabase:
@@ -119,6 +173,23 @@ class TenantDatabase:
             admission,
             tenant_id,
         )
+
+    def _transaction_key(self):
+        return (asyncio.current_task(), self, self.tenant_id, self.source_id)
+
+    async def require(self, session=None):
+        if _ADMITTED_TRANSACTION.get() == self._transaction_key():
+            return
+        if not isinstance(self.admission, TenantAdmission):
+            args = () if self.source_id is None else (self.source_id,)
+            await self.admission.require(self.tenant_id, *args)
+        else:
+            await self.admission.require(
+                self.tenant_id,
+                self.source_id,
+                session=session,
+                proof=False,
+            )
 
     def __getattr__(self, name):
         member = getattr(self.database, name)
@@ -135,15 +206,24 @@ class TenantDatabase:
             return member
 
         async def guarded(*args, **kwargs):
-            await self.admission.require(self.tenant_id, self.source_id)
-            return await member(*args, **kwargs)
+            if _ADMITTED_TRANSACTION.get() == self._transaction_key():
+                return await member(*args, **kwargs)
+            if (
+                getattr(self.database, "has_current_session", None)
+                is not False
+            ):
+                await self.require()
+                return await member(*args, **kwargs)
+            async with self.database.acquire() as session:
+                await self.require(session)
+                return await member(*args, **kwargs)
 
         return guarded
 
     @asynccontextmanager
     async def acquire(self, *args, **kwargs):
-        await self.admission.require(self.tenant_id, self.source_id)
         async with self.database.acquire(*args, **kwargs) as session:
+            await self.require(session if hasattr(session, "_entry") else None)
             yield TenantDatabase(
                 session,
                 self.admission,
@@ -153,9 +233,17 @@ class TenantDatabase:
 
     @asynccontextmanager
     async def transaction(self, *args, **kwargs):
-        await self.admission.require(self.tenant_id, self.source_id)
-        async with self.database.transaction(*args, **kwargs):
+        key = self._transaction_key()
+        if _ADMITTED_TRANSACTION.get() == key:
             yield self
+            return
+        async with self.database.transaction(*args, **kwargs) as session:
+            await self.require(session if hasattr(session, "_entry") else None)
+            token = _ADMITTED_TRANSACTION.set(key)
+            try:
+                yield self
+            finally:
+                _ADMITTED_TRANSACTION.reset(token)
 
 
 async def partial_jobs(database, service_unit_id=None):

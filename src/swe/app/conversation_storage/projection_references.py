@@ -4,6 +4,7 @@
 from dataclasses import dataclass, field
 import json
 
+from .bundle import BundleStore
 from .errors import IntegrityError
 from .message_bundle import decode_message_bodies, validate_runtime_occurrences
 from .retention import ReaderPins, RetentionStore
@@ -25,14 +26,18 @@ def ref_key(ref):
     return json.dumps(ref, sort_keys=True, separators=(",", ":"))
 
 
-def references(envelope):
-    refs = [
-        entry["ref"]
-        for series in envelope["lists"]
-        for entry in series["entries"]
-    ]
-    refs.extend(item["ref"] for item in envelope["turns"])
-    for item in envelope.get("message_directory", ()):
+def references(envelope, *, directory=None):
+    if directory is None:
+        directory = envelope.get("message_directory", ())
+        refs = [
+            entry["ref"]
+            for series in envelope["lists"]
+            for entry in series["entries"]
+        ]
+        refs.extend(item["ref"] for item in envelope["turns"])
+    else:
+        refs = []
+    for item in directory:
         locator = item["body"]
         if locator["publication_id"] == "self":
             locator = {
@@ -124,6 +129,69 @@ def _cached_bodies(request, envelope):
     return cached_bodies
 
 
+def _read_history_blocks(bundles, publication, names):
+    with bundles.open_reader(
+        BundleStore.validate_publication_locator(publication),
+        expected_length=publication["byte_length"],
+        expected_operation_key=_text(publication["operation_key"]),
+    ) as reader:
+        decoded = {}
+        for name in names:
+            extent = reader.index.blocks.get(name)
+            if extent is None:
+                raise IntegrityError("recovery reference block is invalid")
+            raw = reader.read_extents((extent,))[0]
+            decoded[name] = (
+                decode_message_bodies(raw)
+                if extent.kind == "message_bodies"
+                else json.loads(raw)
+            )
+        return decoded
+
+
+async def _load_history_blocks(service, request, snapshot, refs):
+    decoded = {}
+    external = {}
+    for ref in refs:
+        if "publication_id" in ref:
+            external.setdefault(ref["publication_id"], set()).add(
+                ref["block_name"],
+            )
+    for target, names in external.items():
+        publication = snapshot.publications[target]
+        if publication["session_id"] != request.session_id:
+            raise IntegrityError(
+                "recovery projection dependency Session differs",
+            )
+        blocks = await snapshot.batch.read(
+            _read_history_blocks,
+            service.bundles,
+            publication,
+            sorted(names),
+        )
+        decoded.update(
+            {(target, name): value for name, value in blocks.items()},
+        )
+    return decoded
+
+
+async def _pin_projection_refs(service, request, snapshot, refs, current_id):
+    async with service.db.transaction():
+        await _snapshot_rows(service, request, refs, snapshot)
+        ids = sorted(
+            {ref["publication_id"] for ref in refs if "publication_id" in ref},
+        )
+        if any(identity >= current_id for identity in ids):
+            raise IntegrityError(
+                "recovery dependencies must point to older publications",
+            )
+        if ids:
+            await snapshot.batch.pin(ids)
+            snapshot.publications = {
+                row["id"]: row for row in snapshot.batch.publications
+            }
+
+
 async def snapshot_projection(
     service,
     request,
@@ -132,42 +200,49 @@ async def snapshot_projection(
     *,
     current_id,
     retentions=None,
+    directory=None,
 ):
     snapshot = ProjectionReferences()
     if envelope is None:
         return snapshot
     if is_projection(envelope):
         validate_runtime_occurrences(envelope.get("message_directory", []))
-    refs = references(envelope)
-    cached_bodies = _cached_bodies(request, envelope)
+    refs = references(envelope, directory=directory)
+    cached_bodies = (
+        _cached_bodies(request, envelope) if directory is None else {}
+    )
     retentions = retentions or RetentionStore(service.db, request.scope)
     snapshot.batch = ReaderPins(retentions)
     try:
-        async with service.db.transaction():
-            await _snapshot_rows(service, request, refs, snapshot)
-            ids = sorted(
-                {
-                    ref["publication_id"]
-                    for ref in refs
-                    if "publication_id" in ref
-                },
-            )
-            if any(identity >= current_id for identity in ids):
-                raise IntegrityError(
-                    "recovery dependencies must point to older publications",
-                )
-            if ids:
-                await snapshot.batch.pin(ids)
-                snapshot.publications = {
-                    row["id"]: row for row in snapshot.batch.publications
-                }
+        await _pin_projection_refs(
+            service,
+            request,
+            snapshot,
+            refs,
+            current_id,
+        )
         decoded = {}
         indexes = {current_id: index}
+        if directory is not None:
+            decoded = await _load_history_blocks(
+                service,
+                request,
+                snapshot,
+                refs,
+            )
         for ref in refs:
             if ref_key(ref) in cached_bodies:
                 snapshot.payloads[ref_key(ref)] = cached_bodies[ref_key(ref)]
                 continue
             target = ref.get("publication_id", current_id)
+            name = ref["block_name"]
+            if directory is not None and target != current_id:
+                snapshot.payloads[ref_key(ref)] = _resolve_payload(
+                    decoded[target, name],
+                    ref,
+                    snapshot.turns,
+                )
+                continue
             if target != current_id:
                 publication = snapshot.publications[target]
                 if publication["session_id"] != request.session_id:
@@ -181,7 +256,6 @@ async def snapshot_projection(
                         expected_length=publication["byte_length"],
                     )
             target_index = indexes[target]
-            name = ref["block_name"]
             extent = target_index.blocks.get(name)
             if extent is None or ("turn_id" in ref and extent.kind != "turn"):
                 raise IntegrityError("recovery reference block is invalid")
@@ -213,7 +287,11 @@ async def snapshot_projection(
                 ref,
                 snapshot.turns,
             )
-        hydrate_state(envelope, lambda ref: snapshot.payloads[ref_key(ref)])
+        if directory is None:
+            hydrate_state(
+                envelope,
+                lambda ref: snapshot.payloads[ref_key(ref)],
+            )
         return snapshot
     except BaseException:
         await snapshot.finish(retentions)

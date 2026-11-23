@@ -129,6 +129,29 @@ class Database:
     async def fetch_one(self, query, params):
         return self.rows.get(params)
 
+    async def fetch_all(self, query, params):
+        assert query.endswith("FOR UPDATE")
+        result = []
+        for offset in range(1, len(params), 3):
+            scope = params[offset : offset + 3]
+            row = self.rows.get((params[0], *scope))
+            if row is not None:
+                result.append(
+                    dict(
+                        zip(
+                            ("service_unit_key", "tenant_key", "source_key"),
+                            scope,
+                        ),
+                    )
+                    | row,
+                )
+        return result
+
+    async def execute_many(self, query, batch):
+        for params in batch:
+            await self.execute(query, params)
+        return len(batch)
+
     async def execute(self, query, params):
         if query.startswith("INSERT"):
             self.rows[params[:4]] = {

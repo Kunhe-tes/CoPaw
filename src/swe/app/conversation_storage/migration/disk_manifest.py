@@ -12,7 +12,7 @@ import tempfile
 import threading
 
 from ..chat_mutations import _unique_fields, _reject_nonfinite
-from .spool import MigrationCapacityError
+from .spool import MigrationCapacityError, MigrationDiskCapacityError
 
 _INDEX_POLICY = ContextVar("migration_disk_index_policy", default=None)
 
@@ -98,6 +98,7 @@ class DiskMap(MutableMapping):
             dir=self._policy.directory if self._policy is not None else None,
         )
         self._lock = threading.RLock()
+        self._group_key = None
         self._db = sqlite3.connect(
             self._directory.name + "/index.sqlite",
             check_same_thread=False,
@@ -131,11 +132,18 @@ class DiskMap(MutableMapping):
         ):
             if self._policy is not None:
                 self._policy.limit(self)
+            group = (
+                self._group_key(key, value)
+                if self._group_key is not None
+                else None
+            )
             try:
                 self._db.execute(
                     "INSERT OR REPLACE INTO entries VALUES (?,?)",
                     (key, raw),
                 )
+                if self._group_key is not None:
+                    self._set_group(key, group)
             except sqlite3.OperationalError as error:
                 if "full" in str(error).lower():
                     raise MigrationCapacityError(
@@ -154,8 +162,62 @@ class DiskMap(MutableMapping):
                 "DELETE FROM entries WHERE key=?",
                 (key,),
             )
-        if not result.rowcount:
-            raise KeyError(key)
+            if not result.rowcount:
+                raise KeyError(key)
+            if self._group_key is not None:
+                self._db.execute("DELETE FROM groups WHERE key=?", (key,))
+
+    def _set_group(self, key, group):
+        self._db.execute(
+            "INSERT OR REPLACE INTO groups VALUES (?,?)",
+            (key, json.dumps(group)),
+        )
+
+    def grouped_items(self, groups, group_key):
+        """Index a mirror once and maintain group membership on updates."""
+        with self._lock, self._policy.lock if self._policy else self._lock:
+            if self._group_key is None:
+                try:
+                    if self._policy:
+                        self._policy.limit(self)
+                    self._db.execute(
+                        "CREATE TABLE groups (key TEXT PRIMARY KEY, name TEXT)",
+                    )
+                    self._db.execute(
+                        "CREATE INDEX group_members ON groups(name,key)",
+                    )
+                    for key in self:
+                        self._set_group(key, group_key(key, self[key]))
+                except BaseException as error:
+                    self._db.execute("DROP TABLE IF EXISTS groups")
+                    if (
+                        isinstance(error, sqlite3.OperationalError)
+                        and "full" in str(error).lower()
+                    ):
+                        raise MigrationDiskCapacityError(
+                            "migration control index disk budget exceeded",
+                        ) from error
+                    raise
+                self._group_key = group_key
+                if self._policy:
+                    self._policy.peak_bytes = max(
+                        self._policy.peak_bytes,
+                        self._policy.used_bytes(),
+                    )
+        for group in sorted(groups):
+            last = ""
+            while True:
+                with self._lock:
+                    rows = self._db.execute(
+                        "SELECT g.key,e.value FROM groups g JOIN entries e ON e.key=g.key "
+                        "WHERE g.name=? AND g.key>? ORDER BY g.key LIMIT 256",
+                        (json.dumps(group), last),
+                    ).fetchall()
+                if not rows:
+                    break
+                for key, raw in rows:
+                    yield key, json.loads(raw)
+                last = rows[-1][0]
 
     def __iter__(self):
         last = None

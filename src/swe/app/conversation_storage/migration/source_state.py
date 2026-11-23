@@ -54,7 +54,7 @@ class SourceState:
             self._keys(service, tenant, source),
         )
 
-    def get_many(self, keys):
+    def get_many(self, keys, *, locked=False):
         from .isolation import iter_states
 
         return iter_states(
@@ -62,6 +62,7 @@ class SourceState:
             keys,
             table=TENANTS,
             fields=("service_unit_key", "tenant_key", "source_key"),
+            locked=locked,
         )
 
     async def record_verification(self, service, tenant, source, result):
@@ -91,25 +92,44 @@ class SourceState:
 
     async def register(self, tenants):
         """Register exact frozen evidence; never replace existing evidence."""
+        expected = {}
+        for item in tenants:
+            key = (
+                item["service_unit_id"],
+                item["tenant_id"],
+                item["source_id"],
+            )
+            evidence = _json(item.get("evidence", item))
+            if expected.setdefault(key, evidence) != evidence:
+                raise ValueError("tenant frozen evidence changed")
+        insert = (
+            "INSERT INTO "
+            + TENANTS
+            + " (migration_id,service_unit_key,tenant_key,source_key,state,evidence_text,verification_text,failure_text,attempts,updated_at,published_at)"
+            + " VALUES (%s,%s,%s,%s,'discovered',%s,'{}',NULL,0,UTC_TIMESTAMP(6),NULL)"
+        )
         async with self.db.transaction():
-            for item in tenants:
-                service, tenant, source = (
-                    item[k]
-                    for k in ("service_unit_id", "tenant_id", "source_id")
-                )
-                evidence = _json(item.get("evidence", item))
-                current = await self.get(service, tenant, source, locked=True)
+            pending = []
+            pending_bytes = 0
+            async for key, current in self.get_many(
+                sorted(expected),
+                locked=True,
+            ):
+                evidence = expected[key]
                 if current is not None:
                     if current["evidence_text"] != evidence:
                         raise ValueError("tenant frozen evidence changed")
                     continue
-                await self.db.execute(
-                    "INSERT INTO "
-                    + TENANTS
-                    + " (migration_id,service_unit_key,tenant_key,source_key,state,evidence_text,verification_text,failure_text,attempts,updated_at,published_at)"
-                    + " VALUES (%s,%s,%s,%s,'discovered',%s,'{}',NULL,0,UTC_TIMESTAMP(6),NULL)",
-                    (*self._keys(service, tenant, source), evidence),
-                )
+                size = len(evidence.encode()) + 1024
+                if pending and (
+                    len(pending) == 128 or pending_bytes + size > 256 * 1024
+                ):
+                    await self.db.execute_many(insert, pending)
+                    pending, pending_bytes = [], 0
+                pending.append((*self._keys(*key), evidence))
+                pending_bytes += size
+            if pending:
+                await self.db.execute_many(insert, pending)
 
     async def transition(
         self,

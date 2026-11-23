@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -28,6 +29,44 @@ def history(tmp_path):
         BundleStore(tmp_path),
         cursor_secret=b"test-secret",
     )
+
+
+async def test_history_drains_pins_after_nas_failure_outside_transaction(
+    tmp_path,
+):
+    store = history(tmp_path)
+    in_transaction = False
+
+    @asynccontextmanager
+    async def transaction():
+        nonlocal in_transaction
+        in_transaction = True
+        try:
+            yield
+        finally:
+            in_transaction = False
+
+    async def read(*_args, **_kwargs):
+        assert not in_transaction
+        return []
+
+    async def suppress(*_args):
+        assert not in_transaction
+        raise OSError("NAS unavailable")
+
+    store.db = SimpleNamespace(
+        transaction=transaction,
+        fetch_one=AsyncMock(return_value={"history_high": 0}),
+    )
+    store._chat = AsyncMock(return_value={"session_id": 1})
+    store._pins = AsyncMock(return_value=["pin"])
+    store.reader.session_messages = read
+    store._suppress_anchors = suppress
+    store.chats._finish_batches = AsyncMock()
+
+    with pytest.raises(OSError, match="NAS unavailable"):
+        await store._snapshot("chat", layers=("memory",))
+    store.chats._finish_batches.assert_awaited_once_with(["pin"])
 
 
 def test_archive_cursor_binds_scope_chat_epoch_and_high(tmp_path):

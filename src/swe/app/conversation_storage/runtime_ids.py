@@ -44,10 +44,7 @@ async def runtime_identity(database):
     from .tenant_admission import TenantDatabase
 
     if isinstance(database, TenantDatabase):
-        await database.admission.require(
-            database.tenant_id,
-            *((database.source_id,) if database.source_id is not None else ()),
-        )
+        await database.require()
         return await runtime_identity(database.database)
     if isinstance(database, SharedIdDatabase):
         return await database.allocate_runtime_identity()

@@ -30,6 +30,35 @@ def test_manifest_mirrors_round_trip_on_disk(tmp_path):
     assert len(list(actual["assignments"]["session"])) == 12000
 
 
+def test_grouped_items_index_once_and_reflect_ticket_updates():
+    mapping = DiskMap()
+    calls = []
+
+    def group(key, value):
+        calls.append(key)
+        return (value["scope"],)
+
+    try:
+        mapping["a"] = {"scope": "one"}
+        mapping["b"] = {"scope": "two"}
+        assert [
+            key for key, _ in mapping.grouped_items({("one",)}, group)
+        ] == ["a"]
+        assert [
+            key for key, _ in mapping.grouped_items({("two",)}, group)
+        ] == ["b"]
+        assert calls == ["a", "b"]
+        mapping["b"] = {"scope": "one"}
+        mapping["c"] = {"scope": "two"}
+        del mapping["a"]
+        assert list(mapping.grouped_items({("one",)}, group)) == [
+            ("b", {"scope": "one"}),
+        ]
+        assert calls == ["a", "b", "b", "c"]
+    finally:
+        mapping.close()
+
+
 @pytest.mark.parametrize(
     "source",
     [

@@ -1,5 +1,11 @@
 # 定位路径
 
+## 会话迁移与历史读取性能
+
+- 来源注册查看 `migration/source_state.py::SourceState.register` 的批量锁读和插入。快速校验查看 `migration/verify_fast.py::_verification_tickets` 及 `DiskMap.grouped_items` 的来源分组和磁盘预算。
+- 历史与答复轮次查看 `history.py::_snapshot`、`_turn_snapshot` 及 `archive_reader.py::session_messages`。排查时分别记录短事务、NAS 读取耗时和 reader pin 释放。
+- 来源准入查看 `tenant_admission.py::TenantAdmission.require`。区分证明缓存命中、SQL 发布状态查询和连接池排队。Session 筛选的索引效果以目标 MySQL 执行计划为准。[性能方案](../../docs/superpowers/specs/2026-11-23-conversation-storage-performance-followup.md)
+
 ## 会话离线迁移关联锁与旧计划续跑
 
 - 锁入口：`conversation_storage/migration/install_records.py::_lock_associations`；固定 Session → Chat → Turn，参数化 ID 集合按行数与服务器 packet 分块，缺失行保留 None 并由原关系检查拒绝非法引用。

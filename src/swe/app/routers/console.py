@@ -2516,9 +2516,12 @@ async def _resolve_console_stop_chat_id(
 ) -> str | None:
     if requested_chat_id is not None or not session_id:
         return requested_chat_id
-    candidates = await workspace.chat_manager.list_chats(
-        user_id=user_id,
-        channel="console",
+    manager = workspace.chat_manager
+    lookup = getattr(manager, "list_chats_by_session", None)
+    candidates = (
+        await lookup(session_id, user_id, "console")
+        if lookup is not None
+        else await manager.list_chats(user_id=user_id, channel="console")
     )
     matches = [
         chat

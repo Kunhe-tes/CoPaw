@@ -7,13 +7,12 @@ from ...agents.memory.conversation_archive import (
 from .bundle import BundleStore
 from .chat_mutations import load_metadata_json, utc_datetime
 from .checkpoint_reader import CheckpointReads
-from .errors import IntegrityError
+from .errors import ConflictError, IntegrityError
 from .identity import chat_key_bytes
 from .message_bundle import (
     decode_message_directory,
     validate_runtime_occurrences,
 )
-import asyncio
 import json
 from .retention import RetentionStore
 
@@ -72,7 +71,15 @@ class ArchiveReader(CheckpointReads):
         )
         return load_metadata_json(raw)
 
-    async def session_messages(self, session_id, *, high=None, layers=None):
+    async def session_messages(
+        self,
+        session_id,
+        *,
+        high=None,
+        layers=None,
+        select=None,
+        snapshot=None,
+    ):
         """Resolve the active Session recovery directory into ordered messages."""
         from types import SimpleNamespace
         from .projection_publication import _text
@@ -86,6 +93,14 @@ class ArchiveReader(CheckpointReads):
                 "AND agent_key=%s",
                 (session_id, *self.scope.sql_values),
             )
+            if snapshot is not None and (
+                session is None
+                or any(
+                    session.get(key) != value
+                    for key, value in snapshot.items()
+                )
+            ):
+                raise ConflictError("Session history changed while reading")
             if (
                 session is None
                 or session.get("recovery_publication_id") is None
@@ -114,9 +129,37 @@ class ArchiveReader(CheckpointReads):
             envelope = load_metadata_json(root)
             if not is_projection(envelope):
                 return []
+            directory = decode_message_directory(
+                json.dumps(
+                    envelope.get("message_directory", []),
+                    separators=(",", ":"),
+                ).encode(),
+            )
+            validate_runtime_occurrences(directory)
+            selected = [
+                item
+                for item in directory
+                if (not layers or item.get("layer") in layers)
+                and item.get("visible", True)
+                and (
+                    high is None
+                    or item.get("session_order", item["sequence"]) <= high
+                )
+            ]
+            select_directory = select is not None and all(
+                item.get("role") for item in selected
+            )
+            if select_directory:
+                selected.sort(
+                    key=lambda item: item.get(
+                        "session_order",
+                        item["sequence"],
+                    ),
+                )
+                selected = select(selected)
 
             async def nas_io(_operation_key, function, *args, **kwargs):
-                return await asyncio.to_thread(function, *args, **kwargs)
+                return await batch.read(function, *args, **kwargs)
 
             service = SimpleNamespace(
                 db=self.db,
@@ -135,25 +178,13 @@ class ArchiveReader(CheckpointReads):
                 index,
                 current_id=publication["id"],
                 retentions=self.retentions,
+                directory=selected,
             )
             try:
-                directory = decode_message_directory(
-                    json.dumps(
-                        envelope.get("message_directory", []),
-                        separators=(",", ":"),
-                    ).encode(),
-                )
-                validate_runtime_occurrences(directory)
                 result = []
-                for item in directory:
+                for item in selected:
                     entry = dict(item)
-                    if layers and entry.get("layer") not in layers:
-                        continue
-                    if not entry.get("visible", True):
-                        continue
                     order = entry.get("session_order", entry["sequence"])
-                    if high is not None and order > high:
-                        continue
                     locator = dict(entry["body"])
                     if locator["publication_id"] == "self":
                         ref = {
@@ -224,7 +255,10 @@ class ArchiveReader(CheckpointReads):
                         "message": body,
                     }
                     result.append(occurrence)
-                return sorted(result, key=lambda value: value["session_order"])
+                result.sort(key=lambda value: value["session_order"])
+                if select is not None and not select_directory:
+                    return select(result)
+                return result
             finally:
                 await refs.finish(self.retentions)
         finally:

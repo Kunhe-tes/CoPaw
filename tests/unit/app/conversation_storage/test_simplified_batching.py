@@ -97,6 +97,12 @@ async def test_history_capture_does_not_lock_or_requery_messages(tmp_path):
         2,
         high=0,
         layers=None,
+        snapshot={
+            "history_high": 0,
+            "context_epoch": 0,
+            "state_revision": 1,
+            "recovery_publication_id": 8,
+        },
     )
     store.db.fetch_all.assert_not_awaited()
 

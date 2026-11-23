@@ -237,6 +237,56 @@ async def test_cached_adapter_checks_each_query_and_never_swallows_db_failure():
         await guarded.execute("UPDATE business")
 
 
+async def test_validated_proof_cache_still_checks_published_state():
+    from hashlib import sha256
+
+    db, admission = database("published", source_mode=True)
+    fetch = db.fetch_one.side_effect
+
+    async def fetch_with_digest(query, params=None):
+        row = await fetch(query, params)
+        if "migration_sources" in query:
+            raw = row["verification_text"]
+            row["proof_digest"] = sha256(raw.encode()).hexdigest()
+            if "state,verification_text" not in query:
+                del row["verification_text"]
+        return row
+
+    db.fetch_one.side_effect = fetch_with_digest
+    await admission.require("alice", "SRC", proof=False)
+    db.fetch_one.reset_mock()
+    await admission.require("alice", "SRC", proof=False)
+    assert db.fetch_one.await_count == 1
+    db.state = "failed"
+    with pytest.raises(TenantNotPublished):
+        await admission.require("alice", "SRC", proof=False)
+
+
+async def test_transaction_reuses_admission_until_exit():
+    from contextlib import asynccontextmanager
+
+    db, admission = database("published", source_mode=True)
+
+    @asynccontextmanager
+    async def transaction():
+        yield db
+
+    db.transaction = transaction
+    db.execute = AsyncMock(return_value=1)
+    guarded = TenantDatabase(db, admission, "alice", "SRC")
+    await admission.validate()
+    db.fetch_one.reset_mock()
+    async with guarded.transaction():
+        await guarded.execute("UPDATE first")
+        async with guarded.transaction():
+            await guarded.execute("UPDATE second")
+    assert db.fetch_one.await_count == 1
+    db.state = "failed"
+    with pytest.raises(TenantNotPublished):
+        await guarded.execute("UPDATE third")
+    assert db.execute.await_count == 2
+
+
 async def test_partial_backup_uses_published_scope_only(monkeypatch):
     from swe.app.conversation_storage.migration.authority import (
         backup_authority,

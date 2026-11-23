@@ -22,7 +22,7 @@ def state_store(database, manifest):
     return cls(database, manifest.migration_id)
 
 
-async def iter_states(states, keys, *, table, fields):
+async def iter_states(states, keys, *, table, fields, locked=False):
     """Read advisory states in bounded groups; transitions still lock SQL rows."""
     from itertools import islice
 
@@ -35,13 +35,14 @@ async def iter_states(states, keys, *, table, fields):
         rows = await states.db.fetch_all(
             "SELECT "
             + ",".join(fields)
-            + ",state FROM "
+            + (",state,evidence_text FROM " if locked else ",state FROM ")
             + table
             + " WHERE migration_id=%s AND ("
             + ",".join(fields)
             + ") IN ("
             + placeholders
-            + ")",
+            + ")"
+            + (" FOR UPDATE" if locked else ""),
             (
                 states.migration_id,
                 *(value for key in encoded for value in key),

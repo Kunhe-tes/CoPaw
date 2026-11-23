@@ -326,12 +326,17 @@ class HistoryStore:
                 else []
             )
             batches = await self._pins(chat, [], boundaries)
+        try:
             rows = await self.reader.session_messages(
                 chat["session_id"],
                 high=session["history_high"],
                 layers=layers,
+                snapshot=session,
             )
-        rows = await self._suppress_anchors(chat, rows)
+            rows = await self._suppress_anchors(chat, rows)
+        except BaseException:
+            await self.chats._finish_batches(batches)
+            raise
         return HistorySnapshot(
             chat,
             rows,
@@ -702,71 +707,80 @@ class HistoryStore:
             )
             if turn is not None and turn["chat_id"] != chat["id"]:
                 raise KeyError(msgid)
-            candidates = await self.reader.session_messages(
-                chat["session_id"],
-                high=None,
-            )
-            candidates = [
-                item
-                for item in candidates
-                if item["source_msg_key"] == key
-                and item["layer"] in ("memory", "task", "error", "anchor")
-            ]
-            if not candidates or _text(candidates[0]["role_key"]) != "user":
-                raise KeyError(msgid)
-            anchor = candidates[0]
-            if turn is not None and anchor["turn_id"] not in (
-                None,
-                turn["id"],
-            ):
-                raise IntegrityError(
-                    "question occurrence Turn association mismatch",
-                )
-            typed_turn = turn is not None and anchor["turn_id"] == turn["id"]
             high = await self.db.fetch_one(
                 "SELECT history_high,context_epoch,state_revision,"
                 "recovery_publication_id FROM swe_conversation_sessions "
                 "WHERE id=%s",
                 (chat["session_id"],),
             )
-            all_rows = await self.reader.session_messages(chat["session_id"])
-            next_user = next(
-                (
-                    item["session_order"]
-                    for item in all_rows
-                    if item["role_key"] == b"user"
-                    and item["session_order"] > anchor["session_order"]
-                ),
-                None,
+
+        def select(entries):
+            return self._turn_rows(entries, key, turn, high["history_high"])
+
+        rows = await self.reader.session_messages(
+            chat["session_id"],
+            select=select,
+            snapshot=high,
+        )
+        if not rows:
+            raise KeyError(msgid)
+        rows = await self._suppress_anchors(chat, rows)
+        snapshot = HistorySnapshot(
+            chat,
+            rows,
+            [],
+            [],
+            turn["history_status"] if turn else None,
+            context_epoch=high["context_epoch"],
+            state_revision=high["state_revision"],
+            recovery_publication_id=high["recovery_publication_id"],
+        )
+        async with self.db.transaction():
+            await self._validate_snapshot(snapshot)
+            snapshot.batches = await self._pins(chat, [], [])
+        return snapshot
+
+    @staticmethod
+    def _turn_rows(rows, key, turn, high):
+        message_id = key.decode()
+
+        def order(row):
+            return row.get("session_order", row.get("sequence"))
+
+        def role(row):
+            return _text(row.get("role_key", row.get("role")))
+
+        def message_key(row):
+            return _text(row.get("source_msg_key", row.get("raw_id")))
+
+        candidates = [
+            item
+            for item in rows
+            if message_key(item) == message_id
+            and item["layer"] in ("memory", "task", "error", "anchor")
+        ]
+        if not candidates or role(candidates[0]) != "user":
+            raise KeyError(key)
+        anchor = candidates[0]
+        if turn is not None and anchor.get("turn_id") not in (
+            None,
+            turn["id"],
+        ):
+            raise IntegrityError(
+                "question occurrence Turn association mismatch",
             )
-            end = (
-                next_user
-                if next_user is not None
-                else high["history_high"] + 1
-            )
-            # Recovery projection may repeat the admission question. It is
-            # not a new Turn boundary when the persisted Turn owns the slice.
-            rows = [
-                item
-                for item in all_rows
-                if (
-                    item.get("turn_id") == turn["id"]
-                    if typed_turn
-                    else anchor["session_order"] <= item["session_order"] < end
-                )
-            ]
-            rows = await self._suppress_anchors(chat, rows)
-            batches = await self._pins(chat, rows, [])
-            return HistorySnapshot(
-                chat,
-                rows,
-                [],
-                batches,
-                turn["history_status"] if turn else None,
-                context_epoch=high["context_epoch"],
-                state_revision=high["state_revision"],
-                recovery_publication_id=high["recovery_publication_id"],
-            )
+        if turn is not None and anchor.get("turn_id") == turn["id"]:
+            return [row for row in rows if row.get("turn_id") == turn["id"]]
+        first = order(anchor)
+        next_user = next(
+            (
+                order(item)
+                for item in rows
+                if role(item) == "user" and order(item) > first
+            ),
+            high + 1,
+        )
+        return [item for item in rows if first <= order(item) < next_user]
 
     async def answer_turn(
         self,

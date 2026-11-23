@@ -87,7 +87,7 @@ async def test_summary_cursor_uses_last_returned_row_and_session_filter(
     version, (stamp, key) = repo._decode_cursor(page.next_cursor)
     assert version == "v2" and key == "z"
     assert stamp == rows[0]["updated_at"].replace(tzinfo=timezone.utc)
-    assert "c.external_session_key=%s" in db.queries[0][0]
+    assert "s.external_session_key=%s" in db.queries[0][0]
     assert db.queries[0][1][-2:] == (b"session", 2)
     db.rows = [rows[1]]
     second = await repo.list_summaries(page_size=1, cursor=page.next_cursor)
