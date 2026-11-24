@@ -223,10 +223,24 @@ function SceneName({ name }: { name: string }) {
 }
 
 export function SceneDescription({ description }: { description: string }) {
+  const descriptionRef = useRef<HTMLParagraphElement>(null);
+  const [open, setOpen] = useState(false);
+
   return (
-    <p className={styles.sceneDescription} title={description}>
-      {description}
-    </p>
+    <Tooltip
+      title={description}
+      open={open}
+      onOpenChange={(visible) => {
+        const element = descriptionRef.current;
+        setOpen(
+          visible && !!element && element.scrollHeight > element.clientHeight,
+        );
+      }}
+    >
+      <p ref={descriptionRef} className={styles.sceneDescription}>
+        {description}
+      </p>
+    </Tooltip>
   );
 }
 
@@ -353,7 +367,7 @@ export function ScheduleEditor({
             ariaLabel={`${sceneName}${PUSH_TIME_LABEL}`}
           />
           {type === "weekdays" && (
-            <small className={styles.taskRangeLabel}>周一至周五</small>
+            <small className={styles.taskRangeLabel}>每周一至周五</small>
           )}
         </div>
       )}
