@@ -1083,50 +1083,69 @@ async def _insert_sessions(db, scope, identities):
     return sessions
 
 
-async def export(database, manifest, manifest_digest, destination):
-    root = Path(destination).resolve()
-    ready = []
+async def _export_bindings(database, manifest, manifest_digest):
+    if manifest is None:
+        service_key = service_unit_from_env().encode()
+        if await database.fetch_one(
+            f"SELECT 1 FROM {SOURCES} WHERE service_unit_key=%s "
+            "AND published=0 LIMIT 1",
+            (service_key,),
+        ):
+            raise ConflictError(
+                "full export requires all sources for this service unit to finish migration",
+            )
+        return await database.fetch_all(
+            f"SELECT * FROM {WORKSPACES} WHERE service_unit_key=%s "
+            "ORDER BY tenant_key,source_key,agent_key",
+            (service_key,),
+        )
+    bindings = []
     source_keys = sorted(
         {
             WorkspaceScope.from_values(item["scope"]).sql_values[:3]
             for item in manifest["workspaces"]
         },
     )
-    async with database.transaction():
-        for source_key in source_keys:
-            source = await database.fetch_one(
-                f"SELECT published,migration_id,manifest_digest FROM {SOURCES} WHERE "
-                + SOURCE_PREDICATE,
-                source_key,
+    for source_key in source_keys:
+        source = await database.fetch_one(
+            f"SELECT published,migration_id,manifest_digest FROM {SOURCES} WHERE "
+            + SOURCE_PREDICATE,
+            source_key,
+        )
+        if source is None or not source["published"]:
+            continue
+        if (
+            source["migration_id"] != manifest["migration_id"]
+            or source["manifest_digest"] != manifest_digest
+        ):
+            raise ConflictError(
+                "published source belongs to a different manifest",
             )
-            if source is None or not source["published"]:
-                continue
-            if (
-                source["migration_id"] != manifest["migration_id"]
-                or source["manifest_digest"] != manifest_digest
-            ):
-                raise ConflictError(
-                    "published source belongs to a different manifest",
-                )
-            bindings = await database.fetch_all(
+        bindings.extend(
+            await database.fetch_all(
                 f"SELECT * FROM {WORKSPACES} WHERE "
                 + SOURCE_PREDICATE
                 + " ORDER BY agent_key",
                 source_key,
-            )
-            for binding in bindings:
-                scope = WorkspaceScope.from_row(binding)
-                workspace_root = Path(
-                    bytes(binding["workspace_root"]).decode(),
-                )
-                if root.is_relative_to(workspace_root):
-                    raise ValueError(
-                        "export must be outside the live workspace",
-                    )
-                data = await MySQLMetadataRepository(database, scope).load()
-                ready.append((scope, workspace_root, data))
+            ),
+        )
+    return bindings
+
+
+async def export(database, manifest, manifest_digest, destination):
+    root = Path(destination).resolve()
+    ready = []
+    async with database.transaction():
+        bindings = await _export_bindings(database, manifest, manifest_digest)
+        for binding in bindings:
+            scope = WorkspaceScope.from_row(binding)
+            workspace_root = Path(bytes(binding["workspace_root"]).decode())
+            if root.is_relative_to(workspace_root):
+                raise ValueError("export must be outside the live workspace")
+            data = await MySQLMetadataRepository(database, scope).load()
+            ready.append((scope, workspace_root, data))
     if not ready:
-        raise ConflictError("no published directory is available for export")
+        raise ConflictError("no Chat directory is available for export")
     root.mkdir()
     exported = []
     for index, (scope, workspace_root, data) in enumerate(ready):

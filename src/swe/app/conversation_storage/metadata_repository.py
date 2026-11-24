@@ -139,11 +139,13 @@ class MySQLMetadataRepository(MetadataCatalog):
         )
         if row is None:
             raise IntegrityError("Chat workspace is not registered")
+        if not self.importing:
+            return
         source = await self.db.fetch_one(
             f"SELECT published FROM {SOURCES} WHERE " + SOURCE_PREDICATE,
             self.scope.sql_values[:3],
         )
-        if source is None or bool(source["published"]) == self.importing:
+        if source is None or source["published"]:
             raise ConflictError("Chat workspace publication state changed")
 
     def _spec(self, row, content=None):
@@ -201,21 +203,18 @@ class MySQLMetadataRepository(MetadataCatalog):
     async def ensure_session_path(self, session_id, user_id, channel):
         identity = SessionIdentity(self.scope, user_id, channel, session_id)
         name = session_filename_key(identity)
-        # Published sources stay published and Session filename mappings are
-        # immutable. Only a missing mapping needs the write transaction.
+        # Session filename mappings are immutable. Only a missing mapping
+        # needs the write transaction.
         row = await self.db.fetch_one(
             "SELECT nas_filename FROM swe_conversation_sessions "
             "WHERE "
             + SESSION_PREDICATE
             + f" AND EXISTS (SELECT 1 FROM {WORKSPACES} WHERE "
             + SCOPE_PREDICATE
-            + f") AND EXISTS (SELECT 1 FROM {SOURCES} WHERE "
-            + SOURCE_PREDICATE
-            + " AND published=1)",
+            + ")",
             (
                 *identity.sql_values,
                 *self.scope.sql_values,
-                *self.scope.sql_values[:3],
             ),
         )
         if row is None:

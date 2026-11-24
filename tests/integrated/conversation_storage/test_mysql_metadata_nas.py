@@ -14,7 +14,6 @@ from httpx import ASGITransport, AsyncClient
 from swe.app.conversation_storage import runtime
 from swe.agents.memory.conversation_archive import ConversationArchiveStore
 from swe.app.conversation_storage.errors import ConflictError
-from swe.app.conversation_storage.tenant_admission import TenantNotPublished
 from swe.app.conversation_storage.identity import WorkspaceScope
 from swe.app.conversation_storage.migration import metadata
 from swe.app.conversation_storage.metadata_repository import (
@@ -229,7 +228,6 @@ async def test_metadata_cutover_keeps_nas_as_the_online_content_store(
 
     monkeypatch.setenv(runtime.AUTHORITY_ENV, runtime.METADATA_AUTHORITY)
     monkeypatch.setenv("CMB_CAAS_SERVICEUNITID", scope.service_unit_id)
-    await runtime.configure_runtime(db)
     try:
         runner = SimpleNamespace(
             set_chat_manager=lambda manager: setattr(
@@ -245,10 +243,6 @@ async def test_metadata_cutover_keeps_nas_as_the_online_content_store(
             agent_id=scope.agent_id,
             _service_manager=SimpleNamespace(services={"runner": runner}),
         )
-        with pytest.raises(TenantNotPublished):
-            await runtime.require_tenant_published(workspace.tenant_id)
-        with pytest.raises(TenantNotPublished):
-            await runtime.workspace_metadata_repository(workspace)
         monkeypatch.setattr(metadata, "_import_batch", batch)
         for _ in range(2):
             assert (
@@ -266,7 +260,7 @@ async def test_metadata_cutover_keeps_nas_as_the_online_content_store(
             if path.is_file()
         } == snapshot
 
-        await runtime.require_tenant_published(workspace.tenant_id)
+        await runtime.configure_runtime(db)
         await create_chat_service(workspace, None)
         manager = runner.chat_manager
         repo = manager._repo
@@ -470,6 +464,50 @@ async def test_metadata_cli_uses_a_published_sql_registry(
     exported = json.loads((dest / "0" / "chats.json").read_text())
     assert ChatSpec.model_validate(exported["chats"][0]) == spec
     assert (root / "chats.json").read_text() == raw
+
+
+@pytest.mark.asyncio
+async def test_cutover_export_includes_new_tenant_without_source_record(
+    conversation_test_database,
+    tmp_path,
+    monkeypatch,
+):
+    db = conversation_test_database
+    await apply_sql_script(db, SQL_ROOT / "conversation_mysql_metadata.sql")
+    from swe.database import config
+
+    monkeypatch.setattr(config, "get_database_config", lambda: db.config)
+    new_root = tmp_path / "new-workspace"
+    new_root.mkdir()
+    monkeypatch.setenv(runtime.AUTHORITY_ENV, runtime.METADATA_AUTHORITY)
+    monkeypatch.setenv("CMB_CAAS_SERVICEUNITID", "service")
+    await runtime.configure_runtime(db)
+    try:
+        repo = await runtime.workspace_metadata_repository(
+            SimpleNamespace(
+                workspace_dir=new_root,
+                tenant_id=encode_scope_id("new", "source"),
+                agent_id="default",
+            ),
+        )
+        assert await repo.list_chats() == []
+        new_chat = ChatSpec(session_id="new-session", user_id="new")
+        await repo.upsert_chat(new_chat)
+        full_dest = tmp_path / "full-export"
+        result = await asyncio.to_thread(
+            CliRunner().invoke,
+            conversation_storage_group,
+            ["export-metadata", "--destination", str(full_dest)],
+        )
+        assert result.exit_code == 0, result.output
+        [exported] = json.loads(result.output)["workspaces"]
+        assert exported["root"] == str(new_root)
+        new_export = full_dest / exported["registry"]
+        assert (
+            json.loads(new_export.read_text())["chats"][0]["id"] == new_chat.id
+        )
+    finally:
+        runtime.reset_runtime()
 
 
 @pytest.mark.asyncio

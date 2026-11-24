@@ -6,7 +6,7 @@
 
 1. 为当前服务单元确认 NAS 工作目录根。普通租户使用 `<NAS 根>/<scope-id>/workspaces/default/chats.json`，其中 `scope-id` 使用线上采用的无前缀 scope 编码。source 系统级 `default` 用户使用 `<NAS 根>/default_<source-id>/workspaces/default/chats.json`。扫描会跳过该用户的编码目录，即使对应的未编码目录缺失。迁移进程和线上实例应看到同一个 workspace 绝对路径。
 2. 确认迁移镜像中 `swe conversation-storage prepare --help`、`migrate --help` 和 `export-metadata --help` 均能执行。将 `CMB_CAAS_SERVICEUNITID` 设置为当前服务单元真实标识，并按应用现有配置注入目标 MySQL 连接参数和凭据。核对 `SWE_DB_NAME`。
-3. 由 DBA 在目标应用库先安装基础会话表，再安装元数据模式扩展。已有会话表时，由 DBA 先核对结构，再应用缺失的 DDL。 [基础会话表](../../scripts/sql/conversation_metadata_tables.sql) · [元数据模式扩展](../../scripts/sql/conversation_mysql_metadata.sql)
+3. 由 DBA 按下文检查目标应用库并选择建表或升级脚本。
 4. 在正式迁移前停止会修改这些目录及会话的旧服务、任务和其他写入口，等在途写入完成。为数据库和 NAS 保留同一恢复点的备份，并记录旧镜像版本。可以提前运行扫描来检查范围，正式执行时必须保持扫描覆盖的 workspace 集合正确，并维持停写直至完成切换验收。
 
 完成后，目标库具备 Chat、Session 和迁移状态表，NAS 和数据库均有可用的恢复点。
@@ -20,6 +20,42 @@ NAS_ROOT='/nas/swe'
 AUDIT_DIR='/audit/conversation-migration'
 MANIFEST="$AUDIT_DIR/workspace-scan.json"
 ```
+
+### 数据库建表与升级
+
+以下命令在仓库根目录执行。将 `DBA_CNF` 指向供 MySQL 客户端使用的连接配置，确保它连接到迁移进程使用的同一 MySQL 实例。
+
+```bash
+DBA_CNF='/path/to/dba-client.cnf'
+mysql --defaults-extra-file="$DBA_CNF" --database="$SWE_DB_NAME" \
+  < scripts/sql/conversation_mysql_metadata_inspect.sql
+```
+
+| 现有表结构 | 执行的 SQL |
+| --- | --- |
+| 四张目标表均不存在，即使应用库里已有其他业务表 | 一次执行完整安装脚本，创建 Chat、Session、来源和 workspace 四张表，并建立查询索引。 [完整建表](../../scripts/sql/conversation_mysql_metadata_install.sql) |
+| 只有当前版本的基础 Session 和 Chat 两张表，尚未加元数据扩展 | 先执行元数据模式扩展，给已有表加列和 NAS 文件名唯一索引，并创建两张迁移状态表。再执行性能索引脚本。 [已有表升级](../../scripts/sql/conversation_mysql_metadata.sql) · [性能索引](../../scripts/sql/conversation_metadata_performance.sql) |
+| 元数据扩展已完成，两个性能索引均缺失 | 只执行性能索引脚本。 [性能索引](../../scripts/sql/conversation_metadata_performance.sql) |
+| 四张表及索引均已齐全 | 直接进入扫描。 |
+| 存在部分升级、仅缺一个索引，或已有表与当前基础定义不同 | 根据检查结果与当前定义比对，由 DBA 仅应用缺失且兼容的 DDL。已有 Chat 行需要先核对归属及迁移状态，因为导入器会拒绝覆盖同一 scope 下已存在的 Chat。 [结构检查](../../scripts/sql/conversation_mysql_metadata_inspect.sql) · [当前基础定义](../../scripts/sql/conversation_metadata_tables.sql) |
+
+全新安装和基础表升级二选一。四张目标表均不存在时，执行完整建表脚本。
+
+```bash
+mysql --defaults-extra-file="$DBA_CNF" --database="$SWE_DB_NAME" \
+  < scripts/sql/conversation_mysql_metadata_install.sql
+```
+
+已有两张基础表且尚未安装扩展和性能索引时，按顺序执行下面两份脚本。
+
+```bash
+mysql --defaults-extra-file="$DBA_CNF" --database="$SWE_DB_NAME" \
+  < scripts/sql/conversation_mysql_metadata.sql &&
+mysql --defaults-extra-file="$DBA_CNF" --database="$SWE_DB_NAME" \
+  < scripts/sql/conversation_metadata_performance.sql
+```
+
+执行完毕后再运行一次结构检查。DDL 逐条提交，失败后按实际结构补齐。分享索引 `swe_chat_shares` 由分享模块管理，独立于这四张会话迁移表。
 
 ## 2. 扫描 workspace
 
@@ -42,7 +78,9 @@ swe conversation-storage prepare \
 
 扫描结果文件必须是新文件。扫描范围只覆盖各 scope 的默认 Agent。扫描后如果新增了 workspace，在首次导入前重新扫描。默认 workspace 已存在、`chats.json` 缺失且 `sessions/` 和 `dialog/` 均为空时，工具按空工作区处理。
 
-## 3. 只读预览
+## 3. 只读预览（可选）
+
+完成数据库准备、停写备份和 `prepare` 后，可以直接执行第 4 步。正式导入会在写入前检查待导入的 workspace。
 
 ```bash
 swe conversation-storage migrate \
@@ -76,7 +114,18 @@ swe conversation-storage migrate \
 | `skipped_workspaces` | 进度回执与 SQL 记录匹配，本次跳过的 workspace。 |
 | `failed` | 失败来源、workspace 或 Session，可能已有部分批次提交。只要该来源存在失败，它就保持未发布。 |
 
-`ready` 且退出 0 表示本次清单中的来源已全部处理。退出 2 时查看结构化结果，确认是否为 `partial_success`。部分成功时，其他来源已经完成的发布有效。保留原始清单、命令输出以及生成的 `<清单文件名>.progress.json`。
+`ready` 且退出 0 表示本次清单中的来源已全部处理。退出 2 时查看结构化结果，确认是否为 `partial_success`。部分成功时保持停写，修复剩余失败并继续迁移。保留原始清单、命令输出以及生成的 `<清单文件名>.progress.json`。
+
+切流前，复制核验脚本到审计目录，将副本开头两个变量分别替换为 manifest 的 `migration_id` 和当次使用的 `CMB_CAAS_SERVICEUNITID`，再执行副本。核对 CLI 报告、预期迁移范围和实际 SQL 结果。 [迁移后核验 SQL](../../scripts/sql/conversation_mysql_metadata_verify.sql)
+
+```bash
+cp scripts/sql/conversation_mysql_metadata_verify.sql "$AUDIT_DIR/"
+# 编辑审计目录中的副本，再执行下方命令
+mysql --defaults-extra-file="$DBA_CNF" --database="$SWE_DB_NAME" \
+  < "$AUDIT_DIR/conversation_mysql_metadata_verify.sql"
+```
+
+`swe_conversation_metadata_sources.published=1` 表示来源已发布，`0` 表示已登记但尚未发布。扫描失败或在登记前失败的来源可能没有 SQL 记录，因此还要看 CLI 的 `failed`。在恢复写入前，对已发布的 workspace 核对 `imported_count` 与 `live_chat_count` 是否一致。多个 Chat 可以关联同一个 Session。
 
 ## 5. 续跑和失败处理
 
@@ -89,11 +138,11 @@ swe conversation-storage migrate \
 
 ## 6. 切换并验收
 
-在应用部署配置中设置 `SWE_CONVERSATION_STORAGE_AUTHORITY=mysql-metadata`，沿用匹配的 `CMB_CAAS_SERVICEUNITID`、目标 MySQL 和原 NAS 挂载路径。
+保持旧写入全部停止，核对所有计划迁移的历史 workspace 都已覆盖，且对应来源全部通过迁移和 SQL 核验。处理扫描和导入报告中的所有迁移范围内的失败项后，再统一配置 `SWE_CONVERSATION_STORAGE_AUTHORITY=mysql-metadata`，沿用匹配的 `CMB_CAAS_SERVICEUNITID`、目标 MySQL 和原 NAS 挂载路径。
 
-先启动受控实例，检查已发布来源的 Chat 列表、旧历史和续聊，确认新消息写到预期的原 NAS 路径，重启后能读回。核对未发布来源仍被拒绝。验证通过后，由现场恢复对应来源的写入与流量。
+先启动受控实例，检查 Chat 列表、旧历史和续聊，确认新消息写到预期的原 NAS 路径，重启后能读回。再验证全新租户可以初始化、打开空列表并开始首轮会话。全部实例完成切换后恢复写入和流量。
 
-完成后，Chat 目录以 MySQL 为准，应用继续用原 NAS 文件读写会话内容。切换后的版本应独占这些 workspace 的业务写入。
+完成后，Chat 目录以 MySQL 为准，应用继续用原 NAS 文件读写会话内容。`published` 供离线导入、续跑和核验使用。应用会为全新租户的空 workspace 自动登记路径，查询不到 Chat 时返回空列表。
 
 ## 7. 回退
 
@@ -101,10 +150,9 @@ swe conversation-storage migrate \
 
 ```bash
 swe conversation-storage export-metadata \
-  --manifest "$MANIFEST" \
   --destination "$AUDIT_DIR/rollback-export"
 ```
 
-导出目录必须尚不存在。结果含 `report.json` 和每个已发布 workspace 的旧格式 `chats.json`。若多个清单分别发布了互不重叠的来源，分别导出至独立目录，并按各自报告核对范围。若原清单包含曾通过 `--resume-from` 改绑并发布的来源，使用原清单导出会报绑定冲突，整次导出停止。遇到此情况，应在恢复窗口前核对各来源的发布绑定并准备逐来源恢复方案。
+导出目录必须尚不存在。命令按 `CMB_CAAS_SERVICEUNITID` 导出该服务单元已登记的 workspace，包括切换后新增的租户。如果该服务单元还有 `published=0` 的迁移来源，全量导出会停止，以免将部分导入的目录用于回退。导出成功后生成 `report.json` 和每个 workspace 的旧格式 `chats.json`。有多个服务单元时，分别设置环境变量并导出至独立目录。`--manifest` 仍可用于只导出指定迁移记录。
 
-根据报告，将导出目录与同一恢复点的 NAS 配套。未发布来源使用各自保留的旧目录。先验证旧版能读取历史并继续写入，再切换流量。
+根据报告，将导出目录与同一恢复点的 NAS 配套。先验证旧版能读取历史并继续写入，再切换流量。

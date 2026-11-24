@@ -23,7 +23,11 @@ async def _execute_metadata(
     from swe.database.connection import DatabaseConnection
 
     config = get_database_config()
-    manifest, digest = metadata.read_manifest(path, config.database)
+    manifest, digest = (
+        metadata.read_manifest(path, config.database)
+        if path is not None
+        else (None, None)
+    )
     if operation == "migrate" and not apply:
         return await metadata.migrate(
             None,
@@ -229,8 +233,8 @@ def register_workflow_commands(group):
     @group.command("export-metadata")
     @click.option(
         "--manifest",
-        required=True,
         type=click.Path(exists=True, dir_okay=False),
+        help="Limit export to a published migration. Omit after full cutover.",
     )
     @click.option(
         "--destination",
@@ -238,7 +242,7 @@ def register_workflow_commands(group):
         type=click.Path(file_okay=False),
     )
     def export_metadata_command(manifest, destination):
-        """Export a published SQL Chat directory in the legacy file format."""
+        """Export the SQL Chat directory in the legacy file format."""
         try:
             result = asyncio.run(
                 _execute_metadata("export", manifest, destination=destination),
