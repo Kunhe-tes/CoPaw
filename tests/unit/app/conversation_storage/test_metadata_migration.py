@@ -285,13 +285,13 @@ async def test_metadata_preview_reports_legacy_filename_collision(tmp_path):
     chats = [
         {
             "id": str(uuid4()),
-            "user_id": "u",
+            "user_id": "tenant",
             "channel": "console",
             "session_id": "x:y",
         },
         {
             "id": str(uuid4()),
-            "user_id": "u",
+            "user_id": "tenant",
             "channel": "console",
             "session_id": "x--y",
         },
@@ -340,7 +340,7 @@ async def test_full_audit_reports_malformed_archive_and_continues(tmp_path):
                     {
                         "id": chat_id,
                         "session_id": "session",
-                        "user_id": "user",
+                        "user_id": "tenant",
                         "channel": "console",
                     },
                 ],

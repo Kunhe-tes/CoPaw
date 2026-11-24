@@ -63,6 +63,8 @@ swe conversation-storage migrate \
 
 命令连接目标库并获取该库的迁移命名锁。每个 workspace 以执行时读取的 `chats.json` 为准，每批最多写入 100 条 Chat。SQL 业务数据和批次进度同事务提交。工作区首次导入时，摘要与首批写入同事务提交。全部批次完成后，程序读回 SQL 目录并核对源文件，再按 `(service_unit_id, tenant_id, source_id)` 发布。
 
+迁移只处理 `chat.user_id` 与清单租户 ID 相同的记录。若预检发现 Session 文件名冲突、会话记录格式有误或关联文件校验失败，报告会在 `failed` 中记录对应的 Chat 和 Session 信息。同一 workspace 中通过校验的 Session 继续入库，来源保持未发布。若整个 `chats.json` 无法解析，预检仍按 workspace 报错。
+
 `--full-audit` 为可选项，预览和正式导入都可以启用。默认导入仍会校验 `chats.json`、NAS 路径和文件类型，并读回 SQL 数据核对。额外审计会解析存在的 Session 和归档，增加 NAS 读取和解析时间。
 
 预览和导入默认最多并行处理 4 个独立来源，可用 `--workers` 调整。同一来源内的 workspace 及各自批次按顺序处理。正式导入并发还受进程环境变量 `SWE_DB_MAX_CONN` 限制，默认值为 10。在执行迁移的终端运行 `export SWE_DB_MAX_CONN=10`，或在运行迁移的容器中设置同名环境变量。`SWE_DB_MIN_CONN` 默认值为 2，须小于或等于连接池上限。为对比耗时，可在相同输入和数据库条件下分别使用 `--workers 1` 和 `--workers 4`。
@@ -72,7 +74,7 @@ swe conversation-storage migrate \
 | `published` | 本次导入、校验并发布的来源。 |
 | `already_published` | 同一清单下此前已发布的来源，本次直接跳过。 |
 | `skipped_workspaces` | 进度回执与 SQL 记录匹配，本次跳过的 workspace。 |
-| `failed` | 失败来源或 workspace，可能已有部分批次提交。只要该来源存在失败，它就保持未发布。 |
+| `failed` | 失败来源、workspace 或 Session，可能已有部分批次提交。只要该来源存在失败，它就保持未发布。 |
 
 `ready` 且退出 0 表示本次清单中的来源已全部处理。退出 2 时查看结构化结果，确认是否为 `partial_success`。部分成功时，其他来源已经完成的发布有效。保留原始清单、命令输出以及生成的 `<清单文件名>.progress.json`。
 

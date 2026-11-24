@@ -53,7 +53,7 @@ async def test_default_workspace_scan_imports_registry_changed_after_prepare(
     path = tmp_path / "scan.json"
     metadata.prepare_scan(nas, db.config.database, path)
 
-    chat = ChatSpec(session_id="session", user_id="user", channel="console")
+    chat = ChatSpec(session_id="session", user_id="tenant", channel="console")
     registry.write_text(
         json.dumps({"version": 1, "chats": [chat.model_dump(mode="json")]}),
     )
@@ -75,6 +75,78 @@ async def test_default_workspace_scan_imports_registry_changed_after_prepare(
         "SELECT external_chat_key FROM swe_conversation_chats",
     )
     assert row["external_chat_key"] == chat.id.encode()
+
+
+@pytest.mark.asyncio
+async def test_migration_filters_users_and_imports_past_session_failures(
+    conversation_test_database,
+    tmp_path,
+):
+    db = conversation_test_database
+    await apply_sql_script(db, SQL_ROOT / "conversation_mysql_metadata.sql")
+    scope = WorkspaceScope(
+        "tenant",
+        "source",
+        "default",
+        service_unit_id="svc",
+    )
+    root = tmp_path / "workspace"
+    root.mkdir()
+
+    def chat(session_id, *, user_id="tenant", **fields):
+        return (
+            ChatSpec(session_id=session_id, user_id=user_id).model_dump(
+                mode="json",
+            )
+            | fields
+        )
+
+    first, last = chat("first"), chat("last")
+    malformed = chat("malformed", name=42)
+    entries = [
+        first,
+        chat("foreign:session", user_id="foreign"),
+        chat("foreign--session", user_id="foreign"),
+        chat("collision:session"),
+        chat("collision--session"),
+        chat("malformed"),
+        malformed,
+        last,
+    ]
+    (root / "chats.json").write_text(
+        json.dumps({"version": 1, "chats": entries}),
+    )
+    path = tmp_path / "migration.json"
+    metadata.prepare(
+        [{"scope": scope.values, "root": str(root)}],
+        db.config.database,
+        path,
+    )
+    manifest = metadata.read_manifest(path, db.config.database)
+
+    preview = await metadata.migrate(None, *manifest, apply=False)
+    assert [error["session_id"] for error in preview["failed"]] == [
+        "collision--session",
+        "malformed",
+    ]
+    for _ in range(2):
+        report = await metadata.migrate(db, *manifest, apply=True)
+        assert report["status"] == "partial_success"
+        assert report["published"] == []
+        assert report["failed"] == preview["failed"]
+        assert await db.fetch_all(
+            "SELECT external_chat_key,external_session_key "
+            "FROM swe_conversation_chats ORDER BY registry_order",
+        ) == [
+            {
+                "external_chat_key": first["id"].encode(),
+                "external_session_key": b"first",
+            },
+            {
+                "external_chat_key": last["id"].encode(),
+                "external_session_key": b"last",
+            },
+        ]
 
 
 @pytest.mark.asyncio
@@ -100,14 +172,14 @@ async def test_metadata_cutover_keeps_nas_as_the_online_content_store(
     root.mkdir()
     state_dir = root / "sessions"
     state_dir.mkdir()
-    original = state_dir / "user_session.json"
+    original = state_dir / "tenant_session.json"
     original.write_text('{"schema_version":2,"revision":1,"example":"before"}')
     before = original.read_bytes()
     specs = [
         ChatSpec(
             id=str(uuid4()),
             session_id="session",
-            user_id="user",
+            user_id="tenant",
             channel="console",
             meta={
                 "task_job_id": "task",
@@ -210,14 +282,14 @@ async def test_metadata_cutover_keeps_nas_as_the_online_content_store(
             )
             await asyncio.wait_for(
                 db.create_independent_task(
-                    repo.ensure_session_path("session", "user", "console"),
+                    repo.ensure_session_path("session", "tenant", "console"),
                 ),
                 timeout=3,
             )
         with pytest.raises(ConflictError, match="filename"):
-            await repo.ensure_session_path("session", "user", "zhaohu")
+            await repo.ensure_session_path("session", "tenant", "zhaohu")
         session = SafeJSONSession(str(state_dir))
-        async with session.execution("session", "user") as state:
+        async with session.execution("session", "tenant") as state:
             assert state.state["example"] == "before"
             await state.commit_state({**state.state, "example": "after"})
         assert json.loads(original.read_text())["example"] == "after"
@@ -270,7 +342,7 @@ async def test_bulk_import_rolls_back_new_sessions_on_filename_conflict(
         ChatSpec(
             id=str(uuid4()),
             session_id=session_id,
-            user_id="user",
+            user_id="tenant",
             channel="console",
         )
         for session_id in ("new", "taken")
@@ -298,7 +370,7 @@ async def test_bulk_import_rolls_back_new_sessions_on_filename_conflict(
         root_key,
         registry_digest,
     ):
-        await repo.claim_session("taken", "user", "zhaohu")
+        await repo.claim_session("taken", "tenant", "zhaohu")
         return await batch(repo, registry, root_key, registry_digest)
 
     monkeypatch.setattr(metadata, "_import_batch", seed_conflicting_owner)
@@ -336,7 +408,7 @@ async def test_metadata_cli_uses_a_published_sql_registry(
     monkeypatch.setattr(config, "get_database_config", lambda: db.config)
     root = tmp_path / "workspace"
     root.mkdir()
-    spec = ChatSpec(id=str(uuid4()), session_id="legacy", user_id="user")
+    spec = ChatSpec(id=str(uuid4()), session_id="legacy", user_id="tenant")
     original = {"version": 1, "chats": [spec.model_dump(mode="json")]}
     raw = json.dumps(original)
     (root / "chats.json").write_text(raw)
@@ -444,7 +516,7 @@ async def test_workspace_sql_error_does_not_stop_later_imports(
                 else "ordinary"
             ),
             session_id=agent,
-            user_id="user",
+            user_id="tenant",
             channel="zhaohu",
             meta={"multi_agent_mode_enabled": True},
         )
@@ -582,7 +654,7 @@ async def test_resume_repaired_preflight_workspace_keeps_imported_rows(
     ]
     healthy = tmp_path / "healthy"
     healthy.mkdir()
-    spec = ChatSpec(session_id="session", user_id="user", channel="console")
+    spec = ChatSpec(session_id="session", user_id="tenant", channel="console")
     registry = healthy / "chats.json"
     original_registry = json.dumps(
         {"version": 1, "chats": [spec.model_dump(mode="json")]},

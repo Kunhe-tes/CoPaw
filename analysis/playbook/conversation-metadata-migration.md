@@ -16,6 +16,45 @@
 
 未发布来源如果有预检失败的 workspace 需要修正，保留原 manifest。用该来源的完整 workspace 列表重新执行 `prepare`，再执行 `migrate --manifest /audit/repaired.json --apply --resume-from /audit/manifest.json`。续跑会检查来源的 workspace 集合，以及所有已绑定 workspace 的路径和注册表摘要。已发布来源继续使用各自的原 manifest，续跑后发布的来源使用修正后的 manifest 导出。 保留原 manifest 旁的进度文件，续跑会复用匹配的记录。
 
+## 切换后 Chat 列表返回 `conversation_tenant_not_published`
+
+来源发布和 workspace 绑定检查先于 `/api/chats` 的分页逻辑。首屏和游标请求都可能返回同一个 HTTP 503。先用失败请求实际命中的实例配置及请求解析出的逻辑租户、来源和 Agent 查应用库。
+
+```sql
+SET @service_unit_id = '<CMB_CAAS_SERVICEUNITID>';
+SET @tenant_id = '<logical tenant ID>';
+SET @source_id = '<source ID>';
+SET @agent_id = '<agent ID>';
+
+SELECT DATABASE() AS application_schema;
+
+SELECT s.migration_id, s.published,
+       CONVERT(w.workspace_root USING utf8mb4) AS workspace_root
+FROM swe_conversation_metadata_sources AS s
+LEFT JOIN swe_conversation_metadata_workspaces AS w
+  ON w.service_unit_key = s.service_unit_key
+ AND w.tenant_key = s.tenant_key
+ AND w.source_key = s.source_key
+ AND w.agent_key = CAST(@agent_id AS BINARY)
+WHERE s.service_unit_key = CAST(@service_unit_id AS BINARY)
+  AND s.tenant_key = CAST(@tenant_id AS BINARY)
+  AND s.source_key = CAST(@source_id AS BINARY);
+```
+
+- 查不到来源行时，先核对线上实例与迁移进程的 MySQL 实例、库名和服务单元。配置一致时，检查原清单是否覆盖该来源以及 `migrate` 的 `failed` 是否有登记前失败。若扫描漏掉了来源，按实际 NAS 路径为遗漏范围准备清单。
+- `published=0` 时，按报告中的失败阶段修正并用原清单续跑 `migrate --apply`。由迁移命令完成校验和发布，避免直接更新 SQL 发布位。 [迁移续跑与失败处理](../../docs/deployment/conversation_nas_mysql_migration.md#5-续跑和失败处理)
+- `published=1` 且有 `workspace_root` 时，核对它与故障实例解析出的 workspace 真实绝对路径，特别是 Pod 的 NAS 挂载路径。若 `workspace_root` 为空，先确认 Agent 及其 workspace 是否在迁移范围内。运行时只会为已发布来源的空 workspace 自动创建绑定。
+- 若首屏成功而续页报 503，按两次请求实际命中的实例对照服务单元、数据库和 NAS 挂载，并核对解析出的租户、来源和 Agent。 [发布与绑定检查](../../src/swe/app/conversation_storage/runtime.py)
+
+## 清单中有 workspace，迁移报告出现 `phase=preflight`
+
+扫描可将含 `scan_error` 的 workspace 写入清单，正式导入会读取当前源文件重新校验。整个目录文件无法解析时，workspace 无法进入 SQL 导入。单个 Session 校验失败时，同一 workspace 中通过预检的 Session 继续入库，来源保持未发布。
+
+- `Expecting value`、`Unterminated string` 和 `Extra data` 分别指向缺少 JSON 值、字符串未闭合和完整 JSON 值之后存在额外内容。`UnicodeDecodeError` 指向非法编码字节。应先核对 `chats.json`。使用 `--full-audit` 时，错误也可能来自关联 Session 或归档，当前解析错误只报告 workspace 路径。
+- 在迁移容器内按报告中的绝对路径读取原始字节，记录文件大小和 SHA-256，并检查错误位置。JSON 行列以解码后的字符计数，UTF-8 解码错误的位置以字节计数。迁移读取整个 `chats.json`，扫描和预检分别读取文件，事后打开的内容可能来自另一个版本。
+- `multiple Session identities map to ...` 由 `chats.json` 中的 Chat 触发。对照冲突项的 `user_id`、`channel` 和 `session_id`。旧文件名只使用清理后的用户和 Session ID，可能因不同渠道或字符替换发生碰撞。多个 Chat 共用完全相同的 Session 身份可以通过预检。
+- 扫描从目录名解码租户和来源。迁移只处理 `user_id` 与清单租户 ID 相同的 Chat。排查冲突时，以记录自己的 `user_id` 和 `session_id` 计算旧文件名。
+
 ## 批量导入与性能验收
 
 - 导入按原 Chat 顺序每 100 条提交。每批查询一次 Chat 冲突和工作区排序上限，按完整 Session 身份去重，再批量写入 Session 和 Chat。Session 写入后按 NAS 文件名回读并校验完整身份。写入与进度同事务提交，旧版本已提交的前缀可用原 manifest 继续迁移。批量语句按行数、参数数和数据库包大小拆分，超过批量包安全预算的单条 Chat 沿用原参数化文本插入。

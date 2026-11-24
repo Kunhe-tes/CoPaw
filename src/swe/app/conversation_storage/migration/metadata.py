@@ -19,6 +19,7 @@ from mysql.connector.errors import (
     DataError,
     IntegrityError as SQLIntegrityError,
 )
+from pydantic import ValidationError
 
 from ....config.context import (
     canonicalize_scope_id,
@@ -29,7 +30,7 @@ from ...runner.expert_binding import (
     EXPERT_BINDING_META_KEY,
     read_expert_binding,
 )
-from ...runner.models import ChatsFile
+from ...runner.models import ChatSpec, ChatsFile
 from ...runner.session import session_filename
 from ...runner.turn_ledger import atomic_json
 from ..chat_mutations import (
@@ -101,12 +102,6 @@ def _registry_digest(raw):
     return EMPTY_REGISTRY_DIGEST if raw is None else sha256(raw).hexdigest()
 
 
-def _parse_registry(root, raw):
-    if raw is None:
-        return ChatsFile(version=1, chats=[])
-    return ChatsFile.model_validate(_registry_document(root, raw))
-
-
 def _registry_document(root, raw):
     document = load_metadata_json(raw)
     if (
@@ -120,32 +115,83 @@ def _registry_document(root, raw):
     return document
 
 
-def _validate_chats(scope, chats):
-    keys = set()
+def _validate_chat(chat):
+    if str(UUID(chat.id)) != chat.id:
+        raise ValueError(f"noncanonical Chat UUID {chat.id}")
+    chat_key_bytes(chat.id)
+    identity_bytes(session_filename(chat.session_id, chat.user_id), 255)
+    if len(chat.name.encode("utf-8")) > 65_535:
+        raise ValueError(f"Chat {chat.id} title exceeds the SQL TEXT size")
+    metadata_fields(chat.meta)
+    binding = read_expert_binding(chat)
+    if binding.expert_id is not None:
+        identity_bytes(binding.expert_id, 256)
+
+
+def _session_failure(fields, detail, **location):
+    return {
+        "chat_id": fields.get("id"),
+        "session_id": fields.get("session_id"),
+        "user_id": fields.get("user_id"),
+        "channel": fields.get("channel"),
+        "detail": detail,
+        **location,
+    }
+
+
+def _entry_identity(scope, fields):
+    channel = fields.get("channel", ChatSpec.model_fields["channel"].default)
+    session_id = fields.get("session_id")
+    if all(isinstance(value, str) for value in (channel, session_id)):
+        return SessionIdentity(scope, scope.tenant_id, channel, session_id)
+    return None
+
+
+def _select_chats(scope, entries):
+    keys = {}
     sessions = {}
-    for chat in chats:
-        if str(UUID(chat.id)) != chat.id:
-            raise ValueError(f"noncanonical Chat UUID {chat.id}")
-        key = chat_key_bytes(chat.id)
-        if key in keys:
-            raise ValueError(f"duplicate Chat identity {chat.id}")
-        keys.add(key)
-        session = SessionIdentity(
-            scope,
-            chat.user_id,
-            chat.channel,
-            chat.session_id,
-        )
-        filename = session_filename(chat.session_id, chat.user_id)
-        identity_bytes(filename, 255)
-        if sessions.setdefault(filename, session) != session:
-            raise ValueError(f"multiple Session identities map to {filename}")
-        if len(chat.name.encode("utf-8")) > 65_535:
-            raise ValueError(f"Chat {chat.id} title exceeds the SQL TEXT size")
-        metadata_fields(chat.meta)
-        binding = read_expert_binding(chat)
-        if binding.expert_id is not None:
-            identity_bytes(binding.expert_id, 256)
+    candidates, failures = [], []
+    invalid = set()
+    for index, entry in enumerate(entries):
+        fields = entry if isinstance(entry, dict) else {}
+        user_id = fields.get("user_id")
+        if isinstance(user_id, str) and user_id != scope.tenant_id:
+            continue
+        identity = None
+        try:
+            if user_id == scope.tenant_id:
+                identity = _entry_identity(scope, fields)
+            if identity is not None:
+                filename = session_filename(
+                    identity.session_id,
+                    identity.user_id,
+                )
+                owner = sessions.setdefault(filename, identity)
+                if owner != identity:
+                    invalid.add(owner)
+                    raise ValueError(
+                        f"multiple Session identities map to {filename}",
+                    )
+            if "id" not in fields:
+                raise ValueError("Chat ID is missing")
+            chat = ChatSpec.model_validate(entry)
+            if chat.id in keys:
+                invalid.add(keys[chat.id])
+                raise ValueError(f"duplicate Chat identity {chat.id}")
+            keys[chat.id] = identity
+            _validate_chat(chat)
+            candidates.append((identity, chat))
+        except (TypeError, ValueError, ConflictError) as error:
+            invalid.add(identity)
+            detail = (
+                str(error.errors(include_input=False, include_url=False))
+                if isinstance(error, ValidationError)
+                else str(error)
+            )
+            failures.append(
+                _session_failure(fields, detail, chat_index=index),
+            )
+    return candidates, invalid, failures
 
 
 def prepare(workspaces, schema, manifest):
@@ -310,7 +356,7 @@ def read_manifest(path, schema):
     return data, sha256(raw).digest()
 
 
-def _verify_nas(root, registry, *, full_audit=False):
+def _verify_nas(root, candidates, invalid, failures, *, full_audit=False):
     sessions, dialog = root / "sessions", root / "dialog"
     for directory in (sessions, dialog):
         if directory.is_symlink() or (
@@ -318,18 +364,35 @@ def _verify_nas(root, registry, *, full_audit=False):
         ):
             raise ValueError(f"invalid legacy storage directory {directory}")
     seen = set()
-    for chat in registry.chats:
+    audit_archives = full_audit and dialog.exists()
+    for identity, chat in candidates:
+        if identity in invalid:
+            continue
         session = sessions / session_filename(chat.session_id, chat.user_id)
-        if session not in seen:
-            seen.add(session)
-            if session.is_symlink() or (
-                session.exists() and not session.is_file()
-            ):
-                raise ValueError(f"invalid legacy Session file {session}")
-            if full_audit and session.exists():
-                _audit_legacy(read_session, session, trusted_root=root)
-        if full_audit and dialog.exists():
-            _audit_legacy(read_archive, dialog, chat.id, trusted_root=root)
+        try:
+            if session not in seen:
+                seen.add(session)
+                if session.is_symlink() or (
+                    session.exists() and not session.is_file()
+                ):
+                    raise ValueError(f"invalid legacy Session file {session}")
+                if full_audit and session.exists():
+                    _audit_legacy(read_session, session, trusted_root=root)
+            if audit_archives:
+                _audit_legacy(read_archive, dialog, chat.id, trusted_root=root)
+        except (OSError, ValueError, TypeError, ConflictError) as error:
+            invalid.add(identity)
+            failures.append(
+                _session_failure(
+                    {
+                        "id": chat.id,
+                        "session_id": chat.session_id,
+                        "user_id": chat.user_id,
+                        "channel": chat.channel,
+                    },
+                    str(error),
+                ),
+            )
 
 
 def _audit_legacy(reader, path, *args, trusted_root):
@@ -342,7 +405,7 @@ def _audit_legacy(reader, path, *args, trusted_root):
         ) from error
 
 
-def _frozen_registry(item, scope, root):
+def _frozen_bytes(item, root):
     raw = _registry_bytes(root)
     if (raw is None) != item.get("registry_missing", False) or (
         _registry_digest(raw) != item["registry_sha256"]
@@ -351,9 +414,7 @@ def _frozen_registry(item, scope, root):
             "migration started" if item.get("live_registry") else "preparation"
         )
         raise ConflictError(f"Chat registry changed after {stage} at {root}")
-    registry = _parse_registry(root, raw)
-    _validate_chats(scope, registry.chats)
-    return registry
+    return raw
 
 
 def _live_registries(workspaces):
@@ -375,8 +436,16 @@ def _verify_workspace(item, *, full_audit):
     if "prepare_error" in item:
         raise ValueError(item["prepare_error"])
     scope, root = _workspace(item)
-    registry = _frozen_registry(item, scope, root)
-    _verify_nas(root, registry, full_audit=full_audit)
+    raw = _frozen_bytes(item, root)
+    entries = (
+        [] if raw is None else _registry_document(root, raw).get("chats", [])
+    )
+    if not isinstance(entries, list):
+        raise ValueError("Chat registry must contain a chats list")
+    candidates, invalid, failures = _select_chats(scope, entries)
+    _verify_nas(root, candidates, invalid, failures, full_audit=full_audit)
+    chats = [chat for identity, chat in candidates if identity not in invalid]
+    return ChatsFile(chats=chats), failures
 
 
 class WorkspaceProgress:
@@ -387,6 +456,7 @@ class WorkspaceProgress:
         self.identity = {
             "manifest_sha256": digest.hex(),
             "database": [database.host, database.port, database.database],
+            "tenant_filtered_registry": True,
         }
         self.completed = self._read(self.path, self.identity)
         self.previous = previous.completed if previous is not None else {}
@@ -721,7 +791,7 @@ async def _migrate_source(
                 )
                 skipped_workspaces.append(tuple(item["scope"]))
                 continue
-            await asyncio.to_thread(
+            registry, session_failures = await asyncio.to_thread(
                 _verify_workspace,
                 item,
                 full_audit=full_audit,
@@ -729,7 +799,15 @@ async def _migrate_source(
         except WORKSPACE_ERRORS as error:
             failures.append(_workspace_failure(item, "preflight", error))
         else:
-            eligible.append(item)
+            failures.extend(
+                {
+                    **_workspace_failure(item, "preflight", failure["detail"]),
+                    **failure,
+                }
+                for failure in session_failures
+            )
+            if registry.chats or not session_failures:
+                eligible.append((item, registry, session_failures))
     if not apply or (not eligible and not completed):
         return ("failed" if failures else "ready"), failures
 
@@ -748,11 +826,13 @@ async def _migrate_source(
         )
         if changed != 1:
             raise ConflictError("source binding changed during resume")
-    for item in eligible:
+    for item, registry, session_failures in eligible:
         try:
             await _import_verified_workspace(
                 database,
                 item,
+                registry,
+                session_failures,
                 progress,
                 full_audit=full_audit,
             )
@@ -764,30 +844,49 @@ async def _migrate_source(
             failures.append(_workspace_failure(item, "import", error))
     if failures:
         return "failed", failures
-    changed = await database.execute(
-        f"UPDATE {SOURCES} SET published=1 WHERE "
-        + SOURCE_PREDICATE
-        + " AND migration_id=%s AND manifest_digest=%s AND published=0",
-        (*source_key, migration_id, digest),
-    )
-    if changed != 1:
+    if (
+        await database.execute(
+            f"UPDATE {SOURCES} SET published=1 WHERE "
+            + SOURCE_PREDICATE
+            + " AND migration_id=%s AND manifest_digest=%s AND published=0",
+            (*source_key, migration_id, digest),
+        )
+        != 1
+    ):
         raise ConflictError("source binding changed before publication")
     return "ready", []
 
 
-async def _import_verified_workspace(database, item, progress, *, full_audit):
-    chat_count = await _import_workspace(database, item)
-    await asyncio.to_thread(_verify_workspace, item, full_audit=full_audit)
-    if progress is not None:
+async def _import_verified_workspace(
+    database,
+    item,
+    registry,
+    session_failures,
+    progress,
+    *,
+    full_audit,
+):
+    chat_count = await _import_workspace(database, item, registry)
+    verified, current_failures = await asyncio.to_thread(
+        _verify_workspace,
+        item,
+        full_audit=full_audit,
+    )
+    if [chat.id for chat in verified.chats] != [
+        chat.id for chat in registry.chats
+    ] or current_failures != session_failures:
+        raise ConflictError("Session validation changed during migration")
+    if progress is not None and not session_failures:
         progress.record(item, chat_count, full_audit=full_audit)
 
 
-async def _import_workspace(database, item):
+async def _import_workspace(database, item, registry):
     scope, root = _workspace(item)
-    registry = await asyncio.to_thread(_frozen_registry, item, scope, root)
+    await asyncio.to_thread(_frozen_bytes, item, root)
     root_key = identity_bytes(str(root), 1024)
     digest = bytes.fromhex(item["registry_sha256"])
     repo = MySQLMetadataRepository(database, scope, importing=True)
+    await _verify_resume_prefix(repo, registry.chats)
     if item.get("live_registry"):
         more = await _import_batch(
             repo,
@@ -806,6 +905,20 @@ async def _import_workspace(database, item):
             f"SQL Chat registry verification failed for {root}",
         )
     return len(registry.chats)
+
+
+async def _verify_resume_prefix(repo, chats):
+    binding = await repo.db.fetch_one(
+        f"SELECT imported_count FROM {WORKSPACES} WHERE " + SCOPE_PREDICATE,
+        repo.scope.sql_values,
+    )
+    if not binding or not binding["imported_count"]:
+        return
+    count = binding["imported_count"]
+    if count > len(chats) or not await _verify_import(repo, chats[:count]):
+        raise ConflictError(
+            "committed Chats differ from the selected registry prefix",
+        )
 
 
 def _normalized_chat(chat):
