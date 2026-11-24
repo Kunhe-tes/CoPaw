@@ -179,14 +179,12 @@ def test_partial_migration_exits_with_code_two(tmp_path, monkeypatch):
 
     manifest = tmp_path / "manifest.json"
     manifest.write_text("{}")
-    monkeypatch.setattr(
-        workflow,
-        "_execute_metadata",
-        AsyncMock(return_value={"status": "partial_success"}),
-    )
+    execute = AsyncMock(return_value={"status": "partial_success"})
+    monkeypatch.setattr(workflow, "_execute_metadata", execute)
     result = CliRunner().invoke(
         conversation_storage_group,
-        ["migrate", "--manifest", str(manifest)],
+        ["migrate", "--manifest", str(manifest), "--workers", "2"],
     )
     assert result.exit_code == 2
     assert json.loads(result.output)["status"] == "partial_success"
+    assert execute.await_args.kwargs["workers"] == 2

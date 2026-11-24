@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 """Import a frozen Chat registry while leaving the original NAS files in place."""
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from datetime import datetime, timezone
+from functools import partial
 from itertools import groupby
 from pathlib import Path
 import json
@@ -181,13 +184,21 @@ def prepare(workspaces, schema, manifest):
     return data
 
 
-def prepare_scan(workspace_root, schema, manifest):
+def prepare_scan(workspace_root, schema, manifest, *, workers=4):
     root = existing_root(workspace_root).resolve(strict=True)
     service = service_unit_from_env()
     output = Path(manifest).resolve()
     workspaces, errors = [], []
-    for entry in sorted(root.iterdir()):
-        _scan_scope(entry, service, workspaces, errors)
+    entries = sorted(root.iterdir())
+    scan = partial(_scan_scope, service=service)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        for outcome in executor.map(scan, entries):
+            if outcome is None:
+                continue
+            if "scope" in outcome:
+                workspaces.append(outcome)
+            else:
+                errors.append(outcome)
     if not workspaces and not errors:
         raise ValueError("no default workspace found under the NAS root")
     if any(output.is_relative_to(Path(item["root"])) for item in workspaces):
@@ -205,7 +216,7 @@ def prepare_scan(workspace_root, schema, manifest):
     return result
 
 
-def _scan_scope(entry, service, workspaces, errors):
+def _scan_scope(entry, *, service):
     root = entry / "workspaces" / "default"
     recognized = entry.name.startswith("default_")
     scope_error = None
@@ -219,7 +230,7 @@ def _scan_scope(entry, service, workspaces, errors):
             recognized = True
             tenant, source = decode_scope_id(canonical)
             if tenant == "default":
-                return
+                return None
             if entry.name != canonical:
                 raise ValueError(
                     f"workspace scope directory must be {canonical}",
@@ -237,21 +248,18 @@ def _scan_scope(entry, service, workspaces, errors):
             mode = path.lstat().st_mode
             if S_ISLNK(mode) or not S_ISDIR(mode):
                 if path == entry and (not recognized or not S_ISLNK(mode)):
-                    return
+                    return None
                 raise ValueError(f"not a regular workspace directory: {path}")
     except FileNotFoundError:
-        return
+        return None
     except (OSError, ValueError) as error:
         item["scan_error"] = str(error)
 
     if scope is None:
-        errors.append(
-            {
-                "root": str(root),
-                "detail": item.get("scan_error") or scope_error,
-            },
-        )
-        return
+        return {
+            "root": str(root),
+            "detail": item.get("scan_error") or scope_error,
+        }
     if "scan_error" not in item:
         try:
             raw = _registry_bytes(root)
@@ -262,7 +270,7 @@ def _scan_scope(entry, service, workspaces, errors):
                 raise ValueError("Chat registry must contain a chats list")
         except WORKSPACE_ERRORS as error:
             item["scan_error"] = str(error)
-    workspaces.append(item)
+    return item
 
 
 def _write_new_json(path, data):
@@ -492,38 +500,69 @@ async def migrate(
     full_audit=False,
     resume_from=None,
     progress=None,
+    workers=1,
 ):
+    if workers < 1:
+        raise ValueError("migration workers must be at least 1")
+
     def by_source(item):
         return tuple(item["scope"][:3])
+
+    groups = [
+        (key, list(group))
+        for key, group in groupby(
+            sorted(manifest["workspaces"], key=by_source),
+            key=by_source,
+        )
+    ]
+    results = {}
+    pending = iter(enumerate(groups))
+
+    async def process_sources():
+        for index, (key, workspaces) in pending:
+            skipped_workspaces = []
+            try:
+                state, errors = await _migrate_source(
+                    database,
+                    manifest["migration_id"],
+                    manifest_digest,
+                    workspaces,
+                    apply=apply,
+                    full_audit=full_audit,
+                    resume_from=resume_from,
+                    progress=progress,
+                    skipped_workspaces=skipped_workspaces,
+                    live_registry="workspace_root" in manifest,
+                )
+            except (ConflictError, DataError, SQLIntegrityError) as error:
+                state = "failed"
+                errors = [{"source": key, "detail": str(error)}]
+            results[index] = (key, state, errors, skipped_workspaces)
+
+    if workers == 1:
+        await process_sources()
+    else:
+        tasks = [
+            asyncio.create_task(process_sources())
+            for _ in range(min(workers, len(groups)))
+        ]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     published, skipped = [], []
     failed = [
         dict(error, phase="scan") for error in manifest.get("scan_errors", [])
     ]
     skipped_workspaces = []
-    workspaces = [] if failed else manifest["workspaces"]
-    for key, group in groupby(
-        sorted(workspaces, key=by_source),
-        key=by_source,
-    ):
-        workspaces = list(group)
-        try:
-            state, errors = await _migrate_source(
-                database,
-                manifest["migration_id"],
-                manifest_digest,
-                workspaces,
-                apply=apply,
-                full_audit=full_audit,
-                resume_from=resume_from,
-                progress=progress,
-                skipped_workspaces=skipped_workspaces,
-                live_registry="workspace_root" in manifest,
-            )
-        except (ConflictError, DataError, SQLIntegrityError) as error:
-            failed.append({"source": key, "detail": str(error)})
-            continue
+    for index in range(len(groups)):
+        key, state, errors, reused = results[index]
         failed.extend(errors)
+        skipped_workspaces.extend(reused)
         if state == "skipped":
             skipped.append(key)
         elif state == "ready":
@@ -640,7 +679,7 @@ async def _migrate_source(
                 return "skipped", []
 
     if live_registry:
-        workspaces = _live_registries(workspaces)
+        workspaces = await asyncio.to_thread(_live_registries, workspaces)
     if replace_binding:
         await _check_resume_bindings(
             database,
@@ -675,7 +714,11 @@ async def _migrate_source(
                 )
                 skipped_workspaces.append(tuple(item["scope"]))
                 continue
-            _verify_workspace(item, full_audit=full_audit)
+            await asyncio.to_thread(
+                _verify_workspace,
+                item,
+                full_audit=full_audit,
+            )
         except WORKSPACE_ERRORS as error:
             failures.append(_workspace_failure(item, "preflight", error))
         else:
@@ -727,14 +770,14 @@ async def _migrate_source(
 
 async def _import_verified_workspace(database, item, progress, *, full_audit):
     chat_count = await _import_workspace(database, item)
-    _verify_workspace(item, full_audit=full_audit)
+    await asyncio.to_thread(_verify_workspace, item, full_audit=full_audit)
     if progress is not None:
         progress.record(item, chat_count, full_audit=full_audit)
 
 
 async def _import_workspace(database, item):
     scope, root = _workspace(item)
-    registry = _frozen_registry(item, scope, root)
+    registry = await asyncio.to_thread(_frozen_registry, item, scope, root)
     root_key = identity_bytes(str(root), 1024)
     digest = bytes.fromhex(item["registry_sha256"])
     repo = MySQLMetadataRepository(database, scope, importing=True)

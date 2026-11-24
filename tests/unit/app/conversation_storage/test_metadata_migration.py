@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
+import asyncio
 import json
 from contextlib import asynccontextmanager
+from threading import Barrier
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
@@ -15,6 +17,56 @@ from swe.app.conversation_storage.metadata_repository import (
 )
 from swe.app.runner.models import ChatsFile
 from swe.config.context import encode_scope_id
+
+
+@pytest.mark.asyncio
+async def test_migration_runs_independent_sources_with_bounded_concurrency(
+    monkeypatch,
+):
+    active = set()
+    paired = asyncio.Event()
+    finished = []
+
+    async def migrate_source(_db, _id, _digest, workspaces, **_options):
+        source = workspaces[0]["scope"][2]
+        active.add(source)
+        assert len(active) <= 2
+        if source == "a":
+            await paired.wait()
+        if source == "b":
+            assert active == {"a", "b"}
+            assert len(workspaces) == 2
+            paired.set()
+            active.remove(source)
+            raise metadata.ConflictError("invalid source")
+        active.remove(source)
+        finished.append(source)
+        return "ready", []
+
+    monkeypatch.setattr(metadata, "_migrate_source", migrate_source)
+    manifest = {
+        "migration_id": "test",
+        "workspaces": [
+            {"scope": ("svc", "tenant", source, agent)}
+            for source, agent in [
+                ("a", "1"),
+                ("b", "1"),
+                ("b", "2"),
+                ("c", "1"),
+            ]
+        ],
+    }
+    result = await asyncio.wait_for(
+        metadata.migrate(None, manifest, b"digest", apply=True, workers=2),
+        timeout=2,
+    )
+    assert finished == ["c", "a"]
+    assert result["status"] == "partial_success"
+    assert result["published"] == [
+        ("svc", "tenant", "a"),
+        ("svc", "tenant", "c"),
+    ]
+    assert result["failed"][0]["source"] == ("svc", "tenant", "b")
 
 
 @pytest.mark.asyncio
@@ -115,6 +167,33 @@ def _prepare(tmp_path, chats):
     return registry, manifest
 
 
+def test_prepare_scan_reads_workspaces_concurrently(tmp_path, monkeypatch):
+    monkeypatch.setenv("CMB_CAAS_SERVICEUNITID", "svc")
+    nas = tmp_path / "nas"
+    roots = []
+    for source in ("b", "a"):
+        root = nas / f"default_{source}" / "workspaces" / "default"
+        root.mkdir(parents=True)
+        (root / "chats.json").write_text('{"version": 1, "chats": []}')
+        roots.append(str(root))
+    both_reading = Barrier(2, timeout=3)
+    read_registry = metadata._registry_bytes
+
+    def read_together(root):
+        both_reading.wait()
+        return read_registry(root)
+
+    monkeypatch.setattr(metadata, "_registry_bytes", read_together)
+    result = metadata.prepare_scan(
+        nas,
+        "test_schema",
+        tmp_path / "scan.json",
+        workers=2,
+    )
+    assert result["scan_errors"] == []
+    assert [item["root"] for item in result["workspaces"]] == sorted(roots)
+
+
 def test_scan_uses_unencoded_system_defaults(tmp_path, monkeypatch):
     monkeypatch.setenv("CMB_CAAS_SERVICEUNITID", "svc")
     nas = tmp_path / "nas"
@@ -143,7 +222,7 @@ def test_scan_uses_unencoded_system_defaults(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("invalid_scope", ["unresolved", "legacy"])
-async def test_unresolved_workspace_blocks_apply(
+async def test_unresolved_workspace_does_not_block_apply(
     tmp_path,
     monkeypatch,
     invalid_scope,
@@ -161,15 +240,28 @@ async def test_unresolved_workspace_blocks_apply(
     path = tmp_path / "scan.json"
     metadata.prepare_scan(nas, "test_schema", path)
     manifest, digest = metadata.read_manifest(path, "test_schema")
-    database = SimpleNamespace(fetch_one=AsyncMock(), execute=AsyncMock())
+    database = SimpleNamespace(
+        fetch_one=AsyncMock(return_value=None),
+        execute=AsyncMock(return_value=1),
+    )
+    import_workspace = AsyncMock(return_value=0)
+    monkeypatch.setattr(metadata, "_import_workspace", import_workspace)
 
     result = await metadata.migrate(database, manifest, digest, apply=True)
 
     assert result["status"] == "partial_success"
-    assert result["published"] == []
+    assert result["published"] == [("svc", "tenant", "source")]
     assert result["failed"][0]["phase"] == "scan"
     assert "scope cannot be resolved" in result["failed"][0]["detail"]
-    database.execute.assert_not_awaited()
+    import_workspace.assert_awaited_once()
+    assert import_workspace.await_args.args[1]["root"] == str(
+        nas / canonical / "workspaces" / "default",
+    )
+    assert "SET published=1" in database.execute.await_args.args[0]
+    preview = await metadata.migrate(None, manifest, digest, apply=False)
+    assert preview["status"] == "partial_success"
+    assert preview["validated"] == result["published"]
+    assert preview["failed"] == result["failed"]
 
 
 @pytest.mark.asyncio

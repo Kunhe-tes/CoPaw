@@ -26,15 +26,18 @@ MANIFEST="$AUDIT_DIR/workspace-scan.json"
 ```bash
 swe conversation-storage prepare \
   --workspace-root "$NAS_ROOT" \
-  --manifest "$MANIFEST"
+  --manifest "$MANIFEST" \
+  --workers 4
 ```
 
 扫描按固定路径读取每个 scope 的 `workspaces/default`，检查 `chats.json` 的基本格式。清单记录 `migration_id`、目标库、NAS 根、每个 workspace 的路径和作用域，以及扫描异常。文件内容摘要由后续导入阶段处理。
 
+根目录扫描默认最多使用 4 个线程，可用 `--workers` 调整。`--workers 1` 按顺序扫描。这个参数只影响 NAS 扫描，与数据库连接池独立。
+
 | 输出 | 操作 |
 | --- | --- |
 | `prepared`，退出 0 | 核对 workspace 数量、路径和 scope。核对 NAS 上预期参与的租户和来源都在清单中。 |
-| `partial_success`，退出 2，顶层 `scan_errors` 有记录 | 处理路径或归属问题后，用新文件名重新扫描。该清单会阻止整次迁移。普通租户的旧前缀 `scope.v1.*` workspace 应先按现场规定收敛到线上使用的规范路径。 |
+| `partial_success`，退出 2，顶层 `scan_errors` 有记录 | 同一份清单可用于预览和导入。`migrate` 跳过这些目录，在 `failed` 中报告扫描错误，并继续处理已识别的 workspace。需要补迁时，先确认目录归属及线上路径，再为待补迁来源准备清单。 |
 | `partial_success`，退出 2，某个 workspace 带 `scan_error` | 检查对应路径和文件。清单仍包含该 workspace，若仅修复其读取权限或 `chats.json`，可用原清单重新预览。 |
 
 扫描结果文件必须是新文件。扫描范围只覆盖各 scope 的默认 Agent。扫描后如果新增了 workspace，在首次导入前重新扫描。默认 workspace 已存在、`chats.json` 缺失且 `sessions/` 和 `dialog/` 均为空时，工具按空工作区处理。
@@ -43,8 +46,7 @@ swe conversation-storage prepare \
 
 ```bash
 swe conversation-storage migrate \
-  --manifest "$MANIFEST" \
-  --full-audit
+  --manifest "$MANIFEST"
 ```
 
 预览重新读取当前 `chats.json`，校验 Chat 身份、元数据和 Session 文件名映射。加上 `--full-audit` 后，还会只读解析存在的关联 Session 和归档。预览不连接目标库，数据库结构和连接仍需按第 1 步核对。
@@ -56,11 +58,14 @@ swe conversation-storage migrate \
 ```bash
 swe conversation-storage migrate \
   --manifest "$MANIFEST" \
-  --apply \
-  --full-audit
+  --apply
 ```
 
 命令连接目标库并获取该库的迁移命名锁。每个 workspace 以执行时读取的 `chats.json` 为准，每批最多写入 100 条 Chat。SQL 业务数据和批次进度同事务提交。工作区首次导入时，摘要与首批写入同事务提交。全部批次完成后，程序读回 SQL 目录并核对源文件，再按 `(service_unit_id, tenant_id, source_id)` 发布。
+
+`--full-audit` 为可选项，预览和正式导入都可以启用。默认导入仍会校验 `chats.json`、NAS 路径和文件类型，并读回 SQL 数据核对。额外审计会解析存在的 Session 和归档，增加 NAS 读取和解析时间。
+
+预览和导入默认最多并行处理 4 个独立来源，可用 `--workers` 调整。同一来源内的 workspace 及各自批次按顺序处理。正式导入并发还受进程环境变量 `SWE_DB_MAX_CONN` 限制，默认值为 10。在执行迁移的终端运行 `export SWE_DB_MAX_CONN=10`，或在运行迁移的容器中设置同名环境变量。`SWE_DB_MIN_CONN` 默认值为 2，须小于或等于连接池上限。为对比耗时，可在相同输入和数据库条件下分别使用 `--workers 1` 和 `--workers 4`。
 
 | 结果字段 | 含义 |
 | --- | --- |

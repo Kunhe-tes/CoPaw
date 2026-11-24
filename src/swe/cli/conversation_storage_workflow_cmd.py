@@ -16,6 +16,7 @@ async def _execute_metadata(
     destination=None,
     full_audit=False,
     resume_from=None,
+    workers=4,
 ):
     from swe.app.conversation_storage.migration import metadata
     from swe.database.config import get_database_config
@@ -30,6 +31,7 @@ async def _execute_metadata(
             digest,
             apply=False,
             full_audit=full_audit,
+            workers=workers,
         )
     original = (
         metadata.read_manifest(resume_from, config.database)
@@ -75,6 +77,7 @@ async def _execute_metadata(
                 full_audit=full_audit,
                 resume_from=original,
                 progress=progress,
+                workers=min(workers, config.max_connections),
             )
     finally:
         try:
@@ -107,7 +110,14 @@ def register_workflow_commands(group):
         help="NAS working directory containing encoded tenant scope directories.",
     )
     @click.option("--manifest", required=True, type=click.Path(dir_okay=False))
-    def prepare_command(mode, workspaces, workspace_root, manifest):
+    @click.option(
+        "--workers",
+        type=click.IntRange(min=1),
+        default=4,
+        show_default=True,
+        help="Maximum number of NAS scan workers with --workspace-root.",
+    )
+    def prepare_command(mode, workspaces, workspace_root, manifest, workers):
         from swe.app.conversation_storage.chat_mutations import (
             load_metadata_json,
         )
@@ -125,6 +135,7 @@ def register_workflow_commands(group):
                     workspace_root,
                     schema,
                     manifest,
+                    workers=workers,
                 )
                 failures = len(result["scan_errors"]) + sum(
                     "scan_error" in item for item in result["workspaces"]
@@ -176,11 +187,18 @@ def register_workflow_commands(group):
     @click.option("--apply", is_flag=True)
     @click.option("--full-audit", is_flag=True)
     @click.option(
+        "--workers",
+        type=click.IntRange(min=1),
+        default=4,
+        show_default=True,
+        help="Maximum number of source groups processed concurrently.",
+    )
+    @click.option(
         "--resume-from",
         type=click.Path(exists=True, dir_okay=False),
         help="Previous manifest for the unpublished sources being repaired.",
     )
-    def migrate_command(manifest, apply, full_audit, resume_from):
+    def migrate_command(manifest, apply, full_audit, workers, resume_from):
         if resume_from is not None and not apply:
             raise click.UsageError("--resume-from requires --apply")
         try:
@@ -191,6 +209,7 @@ def register_workflow_commands(group):
                     apply=apply,
                     full_audit=full_audit,
                     resume_from=resume_from,
+                    workers=workers,
                 ),
             )
             _echo(result)
