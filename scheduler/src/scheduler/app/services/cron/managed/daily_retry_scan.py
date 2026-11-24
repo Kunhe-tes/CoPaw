@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """只读取已登记执行，按固定失败窗口分页，再以最新事实筛选。"""
 
-from .....config.constant import CRON_BATCH_MAX_ATTEMPTS
 from .daily_retry_filters import scan_filter
 from .daily_retry_policy import (
     excluded_failure,
@@ -125,7 +124,7 @@ def definition_reason(row):
     return None
 
 
-def native_retry_reason(row, current, member):
+def native_retry_reason(row, current, member, max_attempts):
     if member is None:
         return None
     if retry_marker(row):
@@ -138,6 +137,6 @@ def native_retry_reason(row, current, member):
     ] or row["enqueued_state_version"] < (
         current.get("state_queue_invalidation_version") or 0
     )
-    if attempt < CRON_BATCH_MAX_ATTEMPTS and not invalidated:
+    if attempt < max_attempts and not invalidated:
         return "cron_daily_retry_native_retry_pending"
     return None
