@@ -12,6 +12,8 @@ from ..capacity_claim import (
     set_managed_priority,
 )
 from ..scheduling_service import get_cron_scheduling_service
+from ..system.swe_client import SystemSweClient
+from .batch_retry_policy import BatchRetryPolicy
 from .capacity import ManagedCapacityGate
 from .dispatcher import ManagedSweExecutionClient
 from .platform import ManagedPlatformClient, platform_config
@@ -38,6 +40,11 @@ async def create_managed_worker(db):
     resources = ManagedSweClient(base)
     execution = ManagedSweExecutionClient(base)
     platform = ManagedPlatformClient(platform_config())
+    system_client = SystemSweClient(base)
+    internal_token = os.environ.get("SWE_INTERNAL_TOKEN")
+    retry_policy = BatchRetryPolicy(
+        lambda: system_client.get_batch_retry_overrides(internal_token),
+    )
     return ManagedRecoveryWorker(
         db,
         resources,
@@ -45,6 +52,7 @@ async def create_managed_worker(db):
         execution,
         capacity=ManagedCapacityGate(legacy),
         rechecks_enabled=rechecks_enabled,
+        retry_overrides=retry_policy.read_overrides,
     )
 
 
