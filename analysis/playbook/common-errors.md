@@ -978,6 +978,11 @@
 - 写事务超时只说明当前等待被客户端终止，最终提交结果可能未知。保留原 `operation_key` 和 prepared publication，先对账再续跑，不能把超时直接重试成新写入。
 - 远端 MySQL 返回 `InterfaceError 2013` 或握手重置时属于连接中断，不等于 SQL timeout；先确认 `SELECT 1` 和连接池恢复，再评估是否在同一 manifest 重跑。
 
+## Agent 报 session execution is not active
+
+- 若堆栈指向 `stream_admission` 的 `terminal_turn_status`，检查会话提交后提前关闭、观测收尾再读取状态的顺序；会话内容可能已经保存，但定时任务会因收尾异常显示失败。
+- 当前实现关闭事务时保留 turn 状态供收尾使用。核对实际业务操作与通知结果后再决定是否重跑，避免重复执行。
+
 ## 会话迁移 fast verify 报消息批次或正文证据不匹配
 
 - fast verify 按 manifest 中的 Session 身份核对消息 publication 归属、连续范围、恢复目录、`history_high` 和恢复 publication 中的 `message_body_hashes`；artifact 或 Turn 路径中的 `/messages:` 不作为消息批次。
