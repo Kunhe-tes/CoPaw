@@ -51,6 +51,7 @@ from .expert_binding import (
     is_ordinary_chat,
 )
 from .models import (
+    MANUAL_CHAT_TITLE_META_KEY,
     ChatArchiveMetadata,
     ChatArchivePage,
     ChatCompactionBoundary,
@@ -75,6 +76,7 @@ TASK_RUN_SECTION_FINAL = "final"
 _SERVER_OWNED_CHAT_META_KEYS = frozenset(
     {
         GOAL_DRAFT_DELEGATION_META_KEY,
+        MANUAL_CHAT_TITLE_META_KEY,
         "expert_main_binding",
         "multi_agent_mode_enabled",
         "scenario_preset_snapshot",
@@ -123,7 +125,6 @@ def _merge_chat_update(
     merged = existing.model_dump()
 
     for field_name in (
-        "name",
         "session_id",
         "user_id",
         "channel",
@@ -136,7 +137,9 @@ def _merge_chat_update(
 
     if "meta" in updates:
         # Plan Mode 只会提交一个 meta 开关，合并可避免覆盖其他会话元数据。
-        incoming_meta = updates["meta"] or {}
+        incoming_meta = dict(updates["meta"] or {})
+        # Older clients send back the metadata from the preceding GET.
+        incoming_meta.pop(MANUAL_CHAT_TITLE_META_KEY, None)
         _reject_server_owned_chat_meta(incoming_meta)
         merged["meta"] = {
             **(existing.meta or {}),
@@ -148,6 +151,29 @@ def _merge_chat_update(
                 None,
             )
 
+    if patch.name is not None and patch.name != existing.name:
+        name = patch.name.strip()
+        if not 1 <= len(name) <= 100:
+            raise HTTPException(
+                status_code=422,
+                detail="Chat name must contain 1 to 100 characters",
+            )
+        if name != existing.name:
+            if patch.updated_at is not None and (
+                patch.updated_at.replace(tzinfo=timezone.utc)
+                if patch.updated_at.tzinfo is None
+                else patch.updated_at
+            ) < (
+                existing.updated_at.replace(tzinfo=timezone.utc)
+                if existing.updated_at.tzinfo is None
+                else existing.updated_at
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Chat changed since patch was read",
+                )
+            merged["name"] = name
+            merged["meta"][MANUAL_CHAT_TITLE_META_KEY] = True
     return ChatSpec.model_validate(merged)
 
 

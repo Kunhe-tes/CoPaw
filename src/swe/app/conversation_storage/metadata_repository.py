@@ -12,6 +12,7 @@ from ..runner.expert_binding import (
     read_expert_binding,
 )
 from ..runner.chat_summary import display_metadata
+from ..runner.models import MANUAL_CHAT_TITLE_META_KEY
 from ..runner.session import session_filename
 from .chat_mutations import (
     ChatMetadataInstall,
@@ -298,8 +299,21 @@ class MySQLMetadataRepository(MetadataCatalog):
             row = await self._raw_chat(spec.id)
             if row is None or row["deleted_at"] is not None:
                 return None
-            if expected_chat is not None and expected_chat != self._spec(row):
+            existing = self._spec(row)
+            if expected_chat is not None and expected_chat != existing:
                 raise ConflictError("Chat changed since patch was read")
+            if expected_chat is None and existing.meta.get(
+                MANUAL_CHAT_TITLE_META_KEY,
+            ):
+                spec = spec.model_copy(
+                    update={
+                        "name": existing.name,
+                        "meta": {
+                            **spec.meta,
+                            MANUAL_CHAT_TITLE_META_KEY: True,
+                        },
+                    },
+                )
             session = await self._session_for(spec)
             await self._install(spec, session, row)
             return await self.get_chat(spec.id)
