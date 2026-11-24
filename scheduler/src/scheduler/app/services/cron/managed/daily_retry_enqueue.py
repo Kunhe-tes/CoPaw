@@ -94,7 +94,7 @@ async def _receipt(db, member, *, lock=False):
     )
 
 
-async def lock_retry(tx, row, prepared):
+async def lock_retry(tx, row, prepared, *, verify_membership=False):
     if prepared.receipt:
         await tx.fetch_one(
             f"SELECT job_id FROM swe_cron_jobs_v2 WHERE {JOB_WHERE} FOR UPDATE",
@@ -123,6 +123,12 @@ async def lock_retry(tx, row, prepared):
         member = await tx.fetch_one(
             f"SELECT * FROM {MEMBERS} WHERE batch_id=%s AND member_id=%s FOR UPDATE",
             (prepared.member["batch_id"], prepared.member["member_id"]),
+        )
+    elif verify_membership:
+        # 普通执行可能在预读取后被批次复用；未锁定该批回执时跳过本轮。
+        member = await tx.fetch_one(
+            f"SELECT * FROM {MEMBERS} WHERE current_execution_id=%s",
+            (row["execution_id"],),
         )
     return current, locked, member, receipt
 
