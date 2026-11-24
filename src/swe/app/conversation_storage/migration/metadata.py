@@ -244,12 +244,8 @@ def _scan_scope(entry, *, service):
 
     item = {"root": str(root), "scope": scope}
     try:
-        for path in (entry, root.parent, root):
-            mode = path.lstat().st_mode
-            if S_ISLNK(mode) or not S_ISDIR(mode):
-                if path == entry and (not recognized or not S_ISLNK(mode)):
-                    return None
-                raise ValueError(f"not a regular workspace directory: {path}")
+        if not _is_workspace_directory(entry, root, recognized):
+            return None
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as error:
@@ -271,6 +267,17 @@ def _scan_scope(entry, *, service):
         except WORKSPACE_ERRORS as error:
             item["scan_error"] = str(error)
     return item
+
+
+def _is_workspace_directory(entry, root, recognized):
+    for path in (entry, root.parent, root):
+        mode = path.lstat().st_mode
+        if S_ISDIR(mode):
+            continue
+        if path == entry and (not recognized or not S_ISLNK(mode)):
+            return False
+        raise ValueError(f"not a regular workspace directory: {path}")
+    return True
 
 
 def _write_new_json(path, data):
