@@ -27,7 +27,7 @@ def _join(alias):
 
 
 JOB_QUERY = (
-    "SELECT o.id AS job_id,o.name,o.tenant_id,o.source_id,"
+    "SELECT o.id AS job_id,o.name,o.tenant_id,o.source_id,o.cron_expr,"
     f"{AGENT} AS agent_id,{PARENT} AS parent_job_id,"
     "CASE WHEN j.status='completed' AND d.deleted_at IS NOT NULL THEN 'migrated_deleted' "
     "WHEN j.status='completed' THEN 'migrated' WHEN j.operation_id IS NOT NULL THEN 'in_progress' "

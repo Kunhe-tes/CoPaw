@@ -41,6 +41,7 @@ it("展示匹配总量和子任务计数，服务端翻页并清空上页选择"
           agent_id: "default",
           migration_status: "not_migrated",
           child_count: page === "2" ? 0 : 7,
+          cron_expr: page === "2" ? "*/10 * * * *" : "15 9 * * 1-5",
         },
       ],
       total: 21,
@@ -53,12 +54,21 @@ it("展示匹配总量和子任务计数，服务端翻页并清空上页选择"
   expect(
     screen.getByRole("columnheader", { name: "子任务数" }),
   ).toBeInTheDocument();
+  expect(
+    screen.getByRole("columnheader", { name: "Cron 表达式" }),
+  ).toBeInTheDocument();
   const parentRow = within(parent.closest("tr")!);
   expect(parentRow.getByRole("cell", { name: "7" })).toBeInTheDocument();
+  expect(
+    parentRow.getByRole("cell", { name: "15 9 * * 1-5" }),
+  ).toBeInTheDocument();
   fireEvent.click(parentRow.getByRole("checkbox"));
   expect(screen.getByRole("button", { name: "预览迁移（1）" })).toBeEnabled();
   fireEvent.click(screen.getByTitle("2"));
   expect(await screen.findByText("独立任务甲")).toBeInTheDocument();
+  expect(
+    screen.getByRole("cell", { name: "*/10 * * * *" }),
+  ).toBeInTheDocument();
   expect(screen.getByRole("status")).toHaveTextContent(/^共 28 个任务$/);
   expect(screen.queryByText("父任务甲")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "预览迁移（0）" })).toBeDisabled();

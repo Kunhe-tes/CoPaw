@@ -30,6 +30,7 @@ export interface MigrationProgress {
 export interface ChannelMigrationJob {
   job_id: string;
   name: string;
+  cron_expr: string;
   tenant_id: string;
   source_id: string;
   agent_id: string | null;
