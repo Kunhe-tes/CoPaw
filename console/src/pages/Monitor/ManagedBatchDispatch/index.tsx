@@ -45,6 +45,7 @@ function Board({ source, actor }: { source: string; actor: string }) {
   const [shortcut, setShortcut] = useState("today");
   const [range, setRange] = useState<[Dayjs, Dayjs]>(() => buildRange("today"));
   const [status, setStatus] = useState("");
+  const [memberPresence, setMemberPresence] = useState("");
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState("");
@@ -64,9 +65,10 @@ function Board({ source, actor }: { source: string; actor: string }) {
       start_time: start,
       end_time: end,
       status,
+      has_members: memberPresence ? memberPresence === "true" : undefined,
       query,
     }),
-    [start, end, status, query],
+    [start, end, status, memberPresence, query],
   );
   const loadBatches = useCallback(
     (signal: AbortSignal) => {
@@ -181,6 +183,20 @@ function Board({ source, actor }: { source: string; actor: string }) {
           ]}
           onChange={(value) => {
             setStatus(value);
+            setPage(1);
+          }}
+        />
+        <Select
+          aria-label="可执行成员"
+          value={memberPresence}
+          className={styles.statusSelect}
+          options={[
+            { value: "", label: "全部成员" },
+            { value: "true", label: "有可执行成员" },
+            { value: "false", label: "无可执行成员" },
+          ]}
+          onChange={(value) => {
+            setMemberPresence(value);
             setPage(1);
           }}
         />

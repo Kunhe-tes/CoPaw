@@ -14,17 +14,25 @@ interface Props {
 
 function FailureDetails({ source, filters, value }: Omit<Props, "refresh">) {
   const [retry, setRetry] = useState(0);
-  const { start_time, end_time, status, query } = filters;
+  const { start_time, end_time, status, has_members, query } = filters;
   const load = useCallback(
     (signal: AbortSignal) => {
       void retry;
       return managedBatchBoard.failureSummary(
         source,
-        { start_time, end_time, status, query },
+        { start_time, end_time, status, has_members, query },
         signal,
       );
     },
-    [source, start_time, end_time, status, query, retry],
+    [
+      source,
+      start_time,
+      end_time,
+      status,
+      has_members,
+      query,
+      retry,
+    ],
   );
   const resource = useBoardResource(load);
   if (resource.loading) return <Spin size="small" aria-label="加载失败明细" />;
@@ -123,6 +131,7 @@ export default function FailureSummary(props: Props) {
     filters.start_time,
     filters.end_time,
     filters.status,
+    filters.has_members,
     filters.query,
     refresh,
   ]);

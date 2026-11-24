@@ -210,6 +210,63 @@ it("非管理员不加载跨用户看板数据", () => {
   expect(api.workerOccupants).not.toHaveBeenCalled();
 });
 
+it("成员筛选传给批次清单和失败汇总，并回到第一页", async () => {
+  api.batches.mockResolvedValue({
+    items: [],
+    total: 8,
+    stats: {
+      total_batches: 8,
+      total_members: 0,
+      done_members: 0,
+      failed_members: 0,
+      running_batches: 0,
+    },
+  });
+  api.failureSummary.mockResolvedValue({
+    total: 0,
+    groups: [],
+    queried_at: "2026-11-24T01:00:00Z",
+  });
+  render(<ManagedBatchDispatchPage />);
+  fireEvent.click(await screen.findByTitle("2"));
+  await waitFor(() =>
+    expect(api.batches).toHaveBeenLastCalledWith(
+      "bank",
+      expect.objectContaining({ page: 2 }),
+      expect.any(AbortSignal),
+    ),
+  );
+  const filter = screen.getByRole("combobox", { name: "可执行成员" });
+  fireEvent.mouseDown(filter);
+  fireEvent.click(await screen.findByText("有可执行成员", { exact: true }));
+  await waitFor(() =>
+    expect(api.batches).toHaveBeenLastCalledWith(
+      "bank",
+      expect.objectContaining({ has_members: true, page: 1 }),
+      expect.any(AbortSignal),
+    ),
+  );
+  fireEvent.mouseDown(filter);
+  fireEvent.click(await screen.findByText("无可执行成员", { exact: true }));
+  await waitFor(() =>
+    expect(api.batches).toHaveBeenLastCalledWith(
+      "bank",
+      expect.objectContaining({ has_members: false, page: 1 }),
+      expect.any(AbortSignal),
+    ),
+  );
+  fireEvent.click(
+    await screen.findByRole("button", { name: /查看失败类型及详情/ }),
+  );
+  await waitFor(() =>
+    expect(api.failureSummary).toHaveBeenCalledWith(
+      "bank",
+      expect.objectContaining({ has_members: false }),
+      expect.any(AbortSignal),
+    ),
+  );
+});
+
 it("当前 Worker 占用独立查询并展示任务明细", async () => {
   api.workerOccupants.mockResolvedValue({
     total: 1,
