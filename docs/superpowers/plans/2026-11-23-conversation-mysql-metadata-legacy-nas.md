@@ -73,7 +73,7 @@ swe conversation-storage migrate --manifest /audit/metadata-manifest.json --appl
 swe conversation-storage export-metadata --manifest /audit/metadata-manifest.json --destination /audit/metadata-rollback
 ```
 
-`prepare` 记录固定路径下发现的工作区、归属和扫描异常，并对 `chats.json` 做基本格式校验。扫描清单不记录 `chats.json` 摘要。发现异常时退出 2，同时保留扫描结果。工作区文件修复后，`migrate` 会从同一清单重新读取并校验。无法确认归属或发现重复归属时，修复后重新扫描。扫描后新增的工作区也需要重新扫描。
+`prepare` 记录固定路径下发现的工作区、归属和扫描异常，并对 `chats.json` 做基本格式校验。source 系统级 `default` 用户只扫描 `default_<source-id>/workspaces/default`，跳过属于该用户的编码目录。扫描清单不记录 `chats.json` 摘要。发现异常时退出 2，同时保留扫描结果。工作区文件修复后，`migrate` 会从同一清单重新读取并校验。无法确认归属或发现重复归属时，修复后重新扫描。扫描后新增的工作区也需要重新扫描。
 
 `migrate --apply` 读取执行时的 `chats.json` 并写入数据库。开始导入一个工作区时，在数据库中记录本次读取的摘要，供中断续跑时核对。`--full-audit` 增加对关联 Session 和归档的只读解析。已发布来源在应用重跑时跳过。原 `--workspaces` 显式清单入口仍可使用，并保留原有的摘要校验行为。
 

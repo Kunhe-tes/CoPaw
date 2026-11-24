@@ -17,7 +17,11 @@ from mysql.connector.errors import (
     IntegrityError as SQLIntegrityError,
 )
 
-from ....config.context import canonicalize_scope_id, decode_scope_id
+from ....config.context import (
+    canonicalize_scope_id,
+    decode_scope_id,
+    is_valid_identity_value,
+)
 from ...runner.expert_binding import (
     EXPERT_BINDING_META_KEY,
     read_expert_binding,
@@ -203,14 +207,25 @@ def prepare_scan(workspace_root, schema, manifest):
 
 def _scan_scope(entry, service, workspaces, errors):
     root = entry / "workspaces" / "default"
-    canonical = None
+    recognized = entry.name.startswith("default_")
     scope_error = None
     try:
-        canonical = canonicalize_scope_id(entry.name)
-        if entry.name != canonical:
-            raise ValueError(f"workspace scope directory must be {canonical}")
+        if recognized:
+            tenant, source = "default", entry.name.removeprefix("default_")
+            if not is_valid_identity_value(source):
+                raise ValueError("invalid default workspace source ID")
+        else:
+            canonical = canonicalize_scope_id(entry.name)
+            recognized = True
+            tenant, source = decode_scope_id(canonical)
+            if tenant == "default":
+                return
+            if entry.name != canonical:
+                raise ValueError(
+                    f"workspace scope directory must be {canonical}",
+                )
         scope = WorkspaceScope.from_values(
-            (service, *decode_scope_id(canonical), "default"),
+            (service, tenant, source, "default"),
         ).values
     except ValueError as error:
         scope_error = f"workspace scope cannot be resolved: {error}"
@@ -221,7 +236,7 @@ def _scan_scope(entry, service, workspaces, errors):
         for path in (entry, root.parent, root):
             mode = path.lstat().st_mode
             if S_ISLNK(mode) or not S_ISDIR(mode):
-                if path == entry and (canonical is None or not S_ISLNK(mode)):
+                if path == entry and (not recognized or not S_ISLNK(mode)):
                     return
                 raise ValueError(f"not a regular workspace directory: {path}")
     except FileNotFoundError:

@@ -115,6 +115,32 @@ def _prepare(tmp_path, chats):
     return registry, manifest
 
 
+def test_scan_uses_unencoded_system_defaults(tmp_path, monkeypatch):
+    monkeypatch.setenv("CMB_CAAS_SERVICEUNITID", "svc")
+    nas = tmp_path / "nas"
+    source = "source.with_dot"
+    folders = {
+        f"default_{source}": '{"version": 1, "chats": []}',
+        encode_scope_id("default", source): "broken JSON",
+        "scope.v1." + encode_scope_id("default", source): "broken JSON",
+        encode_scope_id("default", "encoded-only"): "broken JSON",
+    }
+    for folder, contents in folders.items():
+        root = nas / folder / "workspaces" / "default"
+        root.mkdir(parents=True)
+        (root / "chats.json").write_text(contents)
+
+    result = metadata.prepare_scan(nas, "test_schema", tmp_path / "scan.json")
+
+    assert result["scan_errors"] == []
+    assert result["workspaces"] == [
+        {
+            "root": str(nas / f"default_{source}" / "workspaces" / "default"),
+            "scope": ("svc", "default", source, "default"),
+        },
+    ]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("invalid_scope", ["unresolved", "legacy"])
 async def test_unresolved_workspace_blocks_apply(
