@@ -163,7 +163,17 @@ def relation_reason(row, member, receipt):
     return None if valid else "cron_daily_retry_batch_not_current"
 
 
-async def eligible_reason(tx, call, row, current, member, receipt, prepared):
+async def eligible_reason(
+    tx,
+    call,
+    row,
+    current,
+    member,
+    receipt,
+    prepared,
+    *,
+    max_attempts,
+):
     if (
         row["source_id"] != call["source_id"]
         or row["kind"] not in {"ordinary", "batch"}
@@ -187,7 +197,7 @@ async def eligible_reason(tx, call, row, current, member, receipt, prepared):
     return (
         relation_reason(row, member, receipt)
         or await history_reason(tx, row)
-        or native_retry_reason(row, current, member)
+        or native_retry_reason(row, current, member, max_attempts)
     )
 
 
@@ -241,7 +251,17 @@ def retry_command(call, row, current, member):
     )
 
 
-async def enqueue_retry(tx, call, row, current, member, prepared, now):
+async def enqueue_retry(
+    tx,
+    call,
+    row,
+    current,
+    member,
+    prepared,
+    now,
+    *,
+    max_attempts,
+):
     key = tuple(row[name] for name in IDENTITY_FIELDS)
     caller = CallerIdentity(*key[:3], row["actor_id"] or row["tenant_id"])
     command = retry_command(call, row, current, member)
@@ -251,6 +271,7 @@ async def enqueue_retry(tx, call, row, current, member, prepared, now):
         command.dispatch_meta["dispatch_lane"] = await lane_for_batch(
             tx,
             member["batch_id"],
+            max_attempts,
         )
     run, reused = await ExecutionStore(
         tx,
