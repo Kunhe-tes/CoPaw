@@ -99,18 +99,50 @@ def register_workflow_commands(group):
     )
     @click.option(
         "--workspaces",
-        required=True,
         type=click.Path(exists=True, dir_okay=False),
     )
+    @click.option(
+        "--workspace-root",
+        type=click.Path(exists=True, file_okay=False),
+        help="NAS working directory containing encoded tenant scope directories.",
+    )
     @click.option("--manifest", required=True, type=click.Path(dir_okay=False))
-    def prepare_command(mode, workspaces, manifest):
+    def prepare_command(mode, workspaces, workspace_root, manifest):
         from swe.app.conversation_storage.chat_mutations import (
             load_metadata_json,
         )
         from swe.app.conversation_storage.migration import metadata
         from swe.database.config import get_database_config
 
+        if (workspaces is None) == (workspace_root is None):
+            raise click.UsageError(
+                "provide exactly one of --workspace-root and --workspaces",
+            )
         try:
+            schema = get_database_config().database
+            if workspace_root is not None:
+                result = metadata.prepare_scan(
+                    workspace_root,
+                    schema,
+                    manifest,
+                )
+                failures = len(result["scan_errors"]) + sum(
+                    "scan_error" in item for item in result["workspaces"]
+                )
+                _echo(
+                    {
+                        "status": (
+                            "partial_success" if failures else "prepared"
+                        ),
+                        "migration_id": result["migration_id"],
+                        "manifest": manifest,
+                        "workspaces": len(result["workspaces"]),
+                        "failed": failures,
+                    },
+                )
+                if failures:
+                    raise click.exceptions.Exit(2)
+                return
             items = load_metadata_json(Path(workspaces).read_bytes())
             if isinstance(items, dict):
                 items = items.get("workspaces")
@@ -118,12 +150,14 @@ def register_workflow_commands(group):
                 raise ValueError("workspaces must be a JSON list")
             result = metadata.prepare(
                 items,
-                get_database_config().database,
+                schema,
                 manifest,
             )
             _echo(
                 {"status": "prepared", "migration_id": result["migration_id"]},
             )
+        except click.exceptions.Exit:
+            raise
         except (
             OSError,
             RuntimeError,

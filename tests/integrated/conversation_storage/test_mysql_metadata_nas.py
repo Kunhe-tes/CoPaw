@@ -36,6 +36,48 @@ from tests.integrated.conversation_storage.conftest import (
 
 
 @pytest.mark.asyncio
+async def test_default_workspace_scan_imports_registry_changed_after_prepare(
+    conversation_test_database,
+    tmp_path,
+    monkeypatch,
+):
+    db = conversation_test_database
+    await apply_sql_script(db, SQL_ROOT / "conversation_mysql_metadata.sql")
+    monkeypatch.setenv("CMB_CAAS_SERVICEUNITID", "svc")
+    nas = tmp_path / "nas"
+    scope_id = encode_scope_id("tenant", "source")
+    root = nas / scope_id / "workspaces" / "default"
+    root.mkdir(parents=True)
+    registry = root / "chats.json"
+    registry.write_text('{"version": 1, "chats": []}')
+    path = tmp_path / "scan.json"
+    metadata.prepare_scan(nas, db.config.database, path)
+
+    chat = ChatSpec(session_id="session", user_id="user", channel="console")
+    registry.write_text(
+        json.dumps({"version": 1, "chats": [chat.model_dump(mode="json")]}),
+    )
+    manifest = metadata.read_manifest(path, db.config.database)
+
+    async def fail_first_batch(*_args):
+        raise ValueError("first batch failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(metadata, "_insert_chats", fail_first_batch)
+        result = await metadata.migrate(db, *manifest, apply=True)
+    assert result["failed"][0]["detail"] == "first batch failed"
+    assert not await db.fetch_all(f"SELECT 1 FROM {metadata.WORKSPACES}")
+
+    registry.write_text(registry.read_text() + "\n")
+    result = await metadata.migrate(db, *manifest, apply=True)
+    assert result["published"] == [("svc", "tenant", "source")]
+    row = await db.fetch_one(
+        "SELECT external_chat_key FROM swe_conversation_chats",
+    )
+    assert row["external_chat_key"] == chat.id.encode()
+
+
+@pytest.mark.asyncio
 # pylint: disable-next=too-many-statements
 async def test_metadata_cutover_keeps_nas_as_the_online_content_store(
     conversation_test_database,

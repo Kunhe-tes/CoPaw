@@ -14,6 +14,7 @@ from swe.app.conversation_storage.metadata_repository import (
     session_filename,
 )
 from swe.app.runner.models import ChatsFile
+from swe.config.context import encode_scope_id
 
 
 @pytest.mark.asyncio
@@ -112,6 +113,37 @@ def _prepare(tmp_path, chats):
         manifest,
     )
     return registry, manifest
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_scope", ["unresolved", "legacy"])
+async def test_unresolved_workspace_blocks_apply(
+    tmp_path,
+    monkeypatch,
+    invalid_scope,
+):
+    monkeypatch.setenv("CMB_CAAS_SERVICEUNITID", "svc")
+    nas = tmp_path / "nas"
+    canonical = encode_scope_id("tenant", "source")
+    invalid = (
+        f"scope.v1.{canonical}" if invalid_scope == "legacy" else invalid_scope
+    )
+    for scope_id in (canonical, invalid):
+        root = nas / scope_id / "workspaces" / "default"
+        root.mkdir(parents=True)
+        (root / "chats.json").write_text('{"version": 1, "chats": []}')
+    path = tmp_path / "scan.json"
+    metadata.prepare_scan(nas, "test_schema", path)
+    manifest, digest = metadata.read_manifest(path, "test_schema")
+    database = SimpleNamespace(fetch_one=AsyncMock(), execute=AsyncMock())
+
+    result = await metadata.migrate(database, manifest, digest, apply=True)
+
+    assert result["status"] == "partial_success"
+    assert result["published"] == []
+    assert result["failed"][0]["phase"] == "scan"
+    assert "scope cannot be resolved" in result["failed"][0]["detail"]
+    database.execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio

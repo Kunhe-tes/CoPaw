@@ -7,6 +7,7 @@ from itertools import groupby
 from pathlib import Path
 import json
 import logging
+from stat import S_ISDIR, S_ISLNK
 from uuid import UUID, uuid4
 
 from mysql.connector.errorcode import ER_CHECK_CONSTRAINT_VIOLATED
@@ -16,6 +17,7 @@ from mysql.connector.errors import (
     IntegrityError as SQLIntegrityError,
 )
 
+from ....config.context import canonicalize_scope_id, decode_scope_id
 from ...runner.expert_binding import (
     EXPERT_BINDING_META_KEY,
     read_expert_binding,
@@ -38,6 +40,7 @@ from ..identity import (
     SessionIdentity,
     chat_key_bytes,
     identity_bytes,
+    service_unit_from_env,
 )
 from .legacy import read_archive, read_session
 from ..metadata_repository import (
@@ -94,15 +97,20 @@ def _registry_digest(raw):
 def _parse_registry(root, raw):
     if raw is None:
         return ChatsFile(version=1, chats=[])
-    path = root / "chats.json"
+    return ChatsFile.model_validate(_registry_document(root, raw))
+
+
+def _registry_document(root, raw):
     document = load_metadata_json(raw)
     if (
         not isinstance(document, dict)
         or type(document.get("version")) is not int
         or document["version"] != 1
     ):
-        raise ValueError(f"unsupported Chat registry version at {path}")
-    return ChatsFile.model_validate(document)
+        raise ValueError(
+            f"unsupported Chat registry version at {root / 'chats.json'}",
+        )
+    return document
 
 
 def _validate_chats(scope, chats):
@@ -169,6 +177,79 @@ def prepare(workspaces, schema, manifest):
     return data
 
 
+def prepare_scan(workspace_root, schema, manifest):
+    root = existing_root(workspace_root).resolve(strict=True)
+    service = service_unit_from_env()
+    output = Path(manifest).resolve()
+    workspaces, errors = [], []
+    for entry in sorted(root.iterdir()):
+        _scan_scope(entry, service, workspaces, errors)
+    if not workspaces and not errors:
+        raise ValueError("no default workspace found under the NAS root")
+    if any(output.is_relative_to(Path(item["root"])) for item in workspaces):
+        raise ValueError("manifest must be outside the Chat workspace")
+    result = {
+        "version": 1,
+        "mode": MODE,
+        "migration_id": str(uuid4()),
+        "schema": schema,
+        "workspace_root": str(root),
+        "workspaces": workspaces,
+        "scan_errors": errors,
+    }
+    _write_new_json(output, result)
+    return result
+
+
+def _scan_scope(entry, service, workspaces, errors):
+    root = entry / "workspaces" / "default"
+    canonical = None
+    scope_error = None
+    try:
+        canonical = canonicalize_scope_id(entry.name)
+        if entry.name != canonical:
+            raise ValueError(f"workspace scope directory must be {canonical}")
+        scope = WorkspaceScope.from_values(
+            (service, *decode_scope_id(canonical), "default"),
+        ).values
+    except ValueError as error:
+        scope_error = f"workspace scope cannot be resolved: {error}"
+        scope = None
+
+    item = {"root": str(root), "scope": scope}
+    try:
+        for path in (entry, root.parent, root):
+            mode = path.lstat().st_mode
+            if S_ISLNK(mode) or not S_ISDIR(mode):
+                if path == entry and (canonical is None or not S_ISLNK(mode)):
+                    return
+                raise ValueError(f"not a regular workspace directory: {path}")
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError) as error:
+        item["scan_error"] = str(error)
+
+    if scope is None:
+        errors.append(
+            {
+                "root": str(root),
+                "detail": item.get("scan_error") or scope_error,
+            },
+        )
+        return
+    if "scan_error" not in item:
+        try:
+            raw = _registry_bytes(root)
+            if raw is not None and not isinstance(
+                _registry_document(root, raw).get("chats", []),
+                list,
+            ):
+                raise ValueError("Chat registry must contain a chats list")
+        except WORKSPACE_ERRORS as error:
+            item["scan_error"] = str(error)
+    workspaces.append(item)
+
+
 def _write_new_json(path, data):
     payload = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
     with path.open("x", encoding="utf-8") as target:
@@ -190,9 +271,9 @@ def read_manifest(path, schema):
     ):
         raise ValueError("configured database or migration identity differs")
     bindings = data["workspaces"]
-    if not bindings or len({tuple(item["scope"]) for item in bindings}) != len(
-        bindings,
-    ):
+    if (not bindings and not data.get("scan_errors")) or len(
+        {tuple(item["scope"]) for item in bindings},
+    ) != len(bindings):
         raise ValueError(
             "migration manifest contains invalid workspace scopes",
         )
@@ -236,12 +317,28 @@ def _frozen_registry(item, scope, root):
     if (raw is None) != item.get("registry_missing", False) or (
         _registry_digest(raw) != item["registry_sha256"]
     ):
-        raise ConflictError(
-            f"Chat registry changed after preparation at {root}",
+        stage = (
+            "migration started" if item.get("live_registry") else "preparation"
         )
+        raise ConflictError(f"Chat registry changed after {stage} at {root}")
     registry = _parse_registry(root, raw)
     _validate_chats(scope, registry.chats)
     return registry
+
+
+def _live_registries(workspaces):
+    current = []
+    for item in workspaces:
+        item = dict(item, live_registry=True)
+        try:
+            _, root = _workspace(item)
+            raw = _registry_bytes(root)
+            item["registry_sha256"] = _registry_digest(raw)
+            item["registry_missing"] = raw is None
+        except WORKSPACE_ERRORS as error:
+            item["prepare_error"] = str(error)
+        current.append(item)
+    return current
 
 
 def _verify_workspace(item, *, full_audit):
@@ -384,10 +481,14 @@ async def migrate(
     def by_source(item):
         return tuple(item["scope"][:3])
 
-    published, skipped, failed = [], [], []
+    published, skipped = [], []
+    failed = [
+        dict(error, phase="scan") for error in manifest.get("scan_errors", [])
+    ]
     skipped_workspaces = []
+    workspaces = [] if failed else manifest["workspaces"]
     for key, group in groupby(
-        sorted(manifest["workspaces"], key=by_source),
+        sorted(workspaces, key=by_source),
         key=by_source,
     ):
         workspaces = list(group)
@@ -402,6 +503,7 @@ async def migrate(
                 resume_from=resume_from,
                 progress=progress,
                 skipped_workspaces=skipped_workspaces,
+                live_registry="workspace_root" in manifest,
             )
         except (ConflictError, DataError, SQLIntegrityError) as error:
             failed.append({"source": key, "detail": str(error)})
@@ -501,6 +603,7 @@ async def _migrate_source(
     resume_from,
     progress,
     skipped_workspaces,
+    live_registry=False,
 ):
     source_key = WorkspaceScope.from_values(workspaces[0]["scope"]).sql_values[
         :3
@@ -518,16 +621,19 @@ async def _migrate_source(
         if row is not None:
             original_identity = (row["migration_id"], row["manifest_digest"])
             replace_binding = original_identity != (migration_id, digest)
-            if replace_binding:
-                await _check_resume_bindings(
-                    database,
-                    source_key,
-                    workspaces,
-                    row,
-                    resume_from,
-                )
-            elif row["published"]:
+            if not replace_binding and row["published"]:
                 return "skipped", []
+
+    if live_registry:
+        workspaces = _live_registries(workspaces)
+    if replace_binding:
+        await _check_resume_bindings(
+            database,
+            source_key,
+            workspaces,
+            row,
+            resume_from,
+        )
 
     completed = (
         await _completed_workspaces(
@@ -579,10 +685,12 @@ async def _migrate_source(
             raise ConflictError("source binding changed during resume")
     for item in eligible:
         try:
-            chat_count = await _import_workspace(database, item)
-            _verify_workspace(item, full_audit=full_audit)
-            if progress is not None:
-                progress.record(item, chat_count, full_audit=full_audit)
+            await _import_verified_workspace(
+                database,
+                item,
+                progress,
+                full_audit=full_audit,
+            )
         except WORKSPACE_ERRORS as error:
             failures.append(_workspace_failure(item, "import", error))
         except DatabaseError as error:
@@ -602,20 +710,32 @@ async def _migrate_source(
     return "ready", []
 
 
+async def _import_verified_workspace(database, item, progress, *, full_audit):
+    chat_count = await _import_workspace(database, item)
+    _verify_workspace(item, full_audit=full_audit)
+    if progress is not None:
+        progress.record(item, chat_count, full_audit=full_audit)
+
+
 async def _import_workspace(database, item):
     scope, root = _workspace(item)
     registry = _frozen_registry(item, scope, root)
     root_key = identity_bytes(str(root), 1024)
     digest = bytes.fromhex(item["registry_sha256"])
     repo = MySQLMetadataRepository(database, scope, importing=True)
-    await database.execute(
-        f"INSERT INTO {WORKSPACES} "
-        "(service_unit_key,tenant_key,source_key,agent_key,workspace_root,registry_digest) "
-        "VALUES (%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE imported_count=imported_count",
-        (*scope.sql_values, root_key, digest),
-    )
-    while await _import_batch(repo, registry, root_key, digest):
-        pass
+    if item.get("live_registry"):
+        more = await _import_batch(
+            repo,
+            registry,
+            root_key,
+            digest,
+            bind_workspace=True,
+        )
+    else:
+        await _bind_workspace(database, scope, root_key, digest)
+        more = True
+    while more:
+        more = await _import_batch(repo, registry, root_key, digest)
     if not await _verify_import(repo, registry.chats):
         raise ConflictError(
             f"SQL Chat registry verification failed for {root}",
@@ -660,9 +780,27 @@ async def _verify_import(repo, chats):
         order, row_id = rows[-1]["registry_order"], rows[-1]["id"]
 
 
-async def _import_batch(repo, registry, root_key, digest):
+async def _bind_workspace(database, scope, root_key, digest):
+    await database.execute(
+        f"INSERT INTO {WORKSPACES} "
+        "(service_unit_key,tenant_key,source_key,agent_key,workspace_root,registry_digest) "
+        "VALUES (%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE imported_count=imported_count",
+        (*scope.sql_values, root_key, digest),
+    )
+
+
+async def _import_batch(
+    repo,
+    registry,
+    root_key,
+    digest,
+    *,
+    bind_workspace=False,
+):
     database, scope = repo.db, repo.scope
     async with database.transaction():
+        if bind_workspace:
+            await _bind_workspace(database, scope, root_key, digest)
         await repo._assert_writes_allowed()
         row = await database.fetch_one(
             f"SELECT workspace_root,registry_digest,imported_count FROM {WORKSPACES} WHERE "
