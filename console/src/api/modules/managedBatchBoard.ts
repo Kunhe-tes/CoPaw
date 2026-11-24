@@ -105,7 +105,6 @@ export type ManagedFailureFilters = {
   start_time?: string;
   end_time?: string;
   status?: string;
-  child_status?: string;
   query?: string;
 };
 export interface ManagedFailureSummary {
