@@ -63,8 +63,8 @@
 - **现象**：回答段落的高亮区域宽度正常，但其中一行越出段落右边界，消息区底部出现横向滚动条。若该段落含有 `span.inline-katex`，检查其中的 `.katex-display > .katex` 是否为 `white-space: nowrap`。
 - **原因**：共享 Markdown 组件启用了 XMarkdown 的 `Latex()` 插件。插件可把成对的公式定界符之间的说明文字当成公式，且行内 token 也使用 `displayMode: true`。段落的 `overflow-wrap: anywhere` 无法使这一公式子节点换行。超出段落的内容进入 `.swe-bubble-list-scroll` 的滚动范围，该容器使用 `overflow: auto`。
 - **排查入口**：`console/src/components/agentscope-chat/Markdown/Markdown.tsx` 和 `Markdown/styles.ts` 控制解析与段落样式，`Bubble/style/list.ts` 定义列表滚动。对照历史消息原始 Markdown 与公式 DOM 确认具体定界符，同时比较问题段落及消息列表的 `scrollWidth` 与 `clientWidth`。
-- **处理**：给 Markdown 内部的 `.inline-katex > .katex-display` 设置 `max-width: 100%` 和 `overflow-x: auto`。XMarkdown 将该节点显示为 `inline-block`，需要显式限宽才能把横向滚动留在公式内。Markdown 解析和公式定界符规则保持原样。
-- **验证**：在 Chrome 158 用真实消息列表、响应卡片和 Markdown 组件渲染模拟历史消息。桌面列表从 850/13278 px（可见/滚动）恢复为 850/850 px，公式可滚到右端，短公式尺寸及普通文本、粗体、行内代码和链接输出一致。覆盖普通和模拟 `hideMenu=true` 布局。现场原始消息与 Chromium 108 未验证。
+- **处理**：给 Markdown 内部的 `.katex-display` 设置 `max-width: 100%` 和 `overflow-x: auto`。独立 `$$` 公式直接生成 `.katex-display`，行内公式的该节点位于 `.inline-katex` 内。两种结构共用宽度限制和内部滚动，Markdown 解析和公式定界符规则保持原样。
+- **验证**：在 Chrome 158 用真实消息列表、响应卡片和 Markdown 组件渲染模拟历史消息。独立多行公式的桌面列表从 850/5248 px（可见/滚动）恢复为 850/850 px，超宽独立公式和行内公式均可在内部滚到右端。短行内公式尺寸及普通文本、粗体、行内代码和链接输出一致。覆盖普通和模拟 `hideMenu=true` 布局。现场原始消息与 Chromium 108 未验证。
 
 ## 财富规划看板在旧内核浏览器点击刷新不发请求
 
