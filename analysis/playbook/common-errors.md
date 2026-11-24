@@ -58,6 +58,14 @@
 - **财富工作台复用**：聊天页面和工作台通过 `console/src/styles/scrollbar.less` 的 `.thin-scrollbar()` 复用浅灰圆角滚动条。工作台在 `.root` 及其后代应用，覆盖页面、表格、筛选列表和原生 dialog 内部的实际滚动容器；横向与纵向 WebKit 滚动条均为 4px。iframe 内部文档与挂载到工作台子树之外的第三方弹层需各自处理。
 - **验证**：在实际溢出的消息容器上检查 `getComputedStyle(element, '::-webkit-scrollbar').display` 和宽度，覆盖样式延迟注入、长消息滚动与键盘翻页。当前 Chrome 的标准属性禁用实验只能验证 WebKit 回退分支，不能替代真实 360 / Chromium 108 验收。
 
+## 聊天回答中的 KaTeX 内容撑出消息列表
+
+- **现象**：回答段落的高亮区域宽度正常，但其中一行越出段落右边界，消息区底部出现横向滚动条。若该段落含有 `span.inline-katex`，检查其中的 `.katex-display > .katex` 是否为 `white-space: nowrap`。
+- **原因**：共享 Markdown 组件启用了 XMarkdown 的 `Latex()` 插件。插件可把成对的公式定界符之间的说明文字当成公式，且行内 token 也使用 `displayMode: true`。段落的 `overflow-wrap: anywhere` 无法使这一公式子节点换行。超出段落的内容进入 `.swe-bubble-list-scroll` 的滚动范围，该容器使用 `overflow: auto`。
+- **排查入口**：`console/src/components/agentscope-chat/Markdown/Markdown.tsx` 和 `Markdown/styles.ts` 控制解析与段落样式，`Bubble/style/list.ts` 定义列表滚动。对照历史消息原始 Markdown 与公式 DOM 确认具体定界符，同时比较问题段落及消息列表的 `scrollWidth` 与 `clientWidth`。
+- **处理**：给 Markdown 内部的 `.inline-katex > .katex-display` 设置 `max-width: 100%` 和 `overflow-x: auto`。XMarkdown 将该节点显示为 `inline-block`，需要显式限宽才能把横向滚动留在公式内。Markdown 解析和公式定界符规则保持原样。
+- **验证**：在 Chrome 158 用真实消息列表、响应卡片和 Markdown 组件渲染模拟历史消息。桌面列表从 850/13278 px（可见/滚动）恢复为 850/850 px，公式可滚到右端，短公式尺寸及普通文本、粗体、行内代码和链接输出一致。覆盖普通和模拟 `hideMenu=true` 布局。现场原始消息与 Chromium 108 未验证。
+
 ## 财富规划看板在旧内核浏览器点击刷新不发请求
 
 - 排查入口：`Board/index.tsx` → `useBoardRefresh.ts` → `requestTimeout.ts` 的 `withBoardRequestTimeout()` → `store.ts` 的 `refreshPlans()`。
