@@ -257,6 +257,10 @@ async def test_channel_migration_pages_roots_and_counts_their_children():
             ("other", "bob", "other", "其他渠道独立任务", root, None),
         ],
     )
+    db.conn.executemany(
+        "UPDATE swe_cron_jobs SET cron_expr=? WHERE id=?",
+        [("15 9 * * 1-5", "parent"), ("*/10 * * * *", "standalone")],
+    )
     path = "/scheduler/cron/migrations/channel/jobs"
     headers = {
         "X-User-Id": "admin-user",
@@ -274,17 +278,17 @@ async def test_channel_migration_pages_roots_and_counts_their_children():
             first = first.json()
             assert (first["total"], first["task_total"]) == (2, 4)
             assert [
-                (item["job_id"], item["child_count"])
+                (item["job_id"], item["child_count"], item["cron_expr"])
                 for item in first["items"]
-            ] == [("parent", 2)]
+            ] == [("parent", 2, "15 9 * * 1-5")]
             second = (
                 await client.get(path, params={"page": 2, "limit": 1})
             ).json()
             assert (second["total"], second["task_total"]) == (2, 4)
             assert [
-                (item["job_id"], item["child_count"])
+                (item["job_id"], item["child_count"], item["cron_expr"])
                 for item in second["items"]
-            ] == [("standalone", 0)]
+            ] == [("standalone", 0, "*/10 * * * *")]
             outside = (
                 await client.get(path, params={"page": 3, "limit": 1})
             ).json()

@@ -190,11 +190,27 @@ def aggregate_query(where):
     return f"{_aggregate_ctes(where)} SELECT * FROM board_batches"
 
 
-def list_query(where, filtered):
-    stats_filter = (
-        "WHERE status=%s OR status='unavailable'" if filtered else ""
+def batch_list_filter(filtered, has_members, *, include_unavailable=False):
+    conditions = ["status=%s"] if filtered else []
+    if has_members is not None:
+        conditions.append(
+            "member_count>0" if has_members else "member_count=0",
+        )
+    if not conditions:
+        return ""
+    predicate = " AND ".join(conditions)
+    if include_unavailable:
+        predicate = f"({predicate}) OR status='unavailable'"
+    return f"WHERE {predicate}"
+
+
+def list_query(where, filtered, has_members=None):
+    stats_filter = batch_list_filter(
+        filtered,
+        has_members,
+        include_unavailable=True,
     )
-    page_filter = "WHERE status=%s" if filtered else ""
+    page_filter = batch_list_filter(filtered, has_members)
     return (
         f"{_aggregate_ctes(where)}, board_stats AS ("
         "SELECT COUNT(*) AS total_batches, SUM(member_count) AS total_members, "

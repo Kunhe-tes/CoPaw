@@ -127,7 +127,7 @@ function MigrationPage() {
         {totals && `共 ${totals.task_total} 个任务`}
       </div>
       <Table<ChannelMigrationJob> rowKey="job_id" dataSource={jobs.value?.items ?? []} loading={jobs.loading}
-        scroll={{ x: 800 }}
+        scroll={{ x: 1000 }}
         locale={{ emptyText: "暂无匹配的父任务或独立任务" }}
         pagination={false} rowSelection={{
           selectedRowKeys: selected, onChange: (keys) => setSelected(keys.map(String)),
@@ -136,6 +136,21 @@ function MigrationPage() {
         columns={[
           { title: "任务名称", dataIndex: "name", ellipsis: true },
           { title: "任务 ID", dataIndex: "job_id", ellipsis: true },
+          {
+            title: "Cron 表达式",
+            dataIndex: "cron_expr",
+            width: 200,
+            render: (_, row) =>
+              row.cron_expr ? (
+                <code
+                  style={{ overflowWrap: "anywhere", whiteSpace: "pre-wrap" }}
+                >
+                  {row.cron_expr}
+                </code>
+              ) : (
+                "—"
+              ),
+          },
           { title: "租户", dataIndex: "tenant_id" },
           { title: "Agent", render: (_, row) => row.agent_id || "—" },
           { title: "子任务数", dataIndex: "child_count", align: "right" },
