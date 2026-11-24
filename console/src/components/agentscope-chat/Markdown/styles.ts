@@ -112,7 +112,7 @@ export default createGlobalStyle`
     word-break: break-word;
   }
 
-  .inline-katex > .katex-display {
+  .katex-display {
     max-width: 100%;
     overflow-x: auto;
   }
