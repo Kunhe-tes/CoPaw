@@ -10,7 +10,10 @@ from pydantic import ValidationError
 
 from scheduler.app.routers import batch_status_reports as report_api
 from scheduler.app.routers.batch_status_reports import ReportRequest
-from scheduler.app.services.cron.batch_status_report.render import render_parts
+from scheduler.app.services.cron.batch_status_report.render import (
+    batch_lines,
+    render_parts,
+)
 from scheduler.app.services.cron.batch_status_report import (
     runtime,
     store as report_store,
@@ -179,6 +182,8 @@ def test_render_empty_report_keeps_current_worker_capacity():
     assert len(parts) == 1
     assert "暂无可报告的批次" in parts[0]
     assert "7 / 10" in parts[0]
+    assert "批次共 0 个" in parts[0]
+    assert "第 1/1 段" not in parts[0]
 
 
 def test_recipient_projection_preserves_failure_and_unknown():
@@ -204,7 +209,7 @@ def test_render_splits_all_batches_without_losing_failure_counts():
         snapshot["batches"].append(
             {
                 "batch_id": f"batch-{index:02}",
-                "name": "客户计划" * 4,
+                "name": f"客户计划 {index:02}",
                 "logical_fire_at": "2026-11-24T03:00:00+00:00",
                 "status": "failed",
                 "done_count": 1,
@@ -215,14 +220,131 @@ def test_render_splits_all_batches_without_losing_failure_counts():
                 "active_count": 0,
                 "waiting_count": 0,
                 "subtasks": {"failures": 2},
+                "failure_details": {
+                    "main_count": 0,
+                    "subtask_types": {"API + Prompt": 1},
+                },
                 "workers": [],
             },
         )
     parts = render_parts("S", "2026-11-24", snapshot, 1024)
     assert len(parts) > 1
     assert all(len(part.encode()) <= 1024 for part in parts)
-    for position, part in enumerate(parts, 1):
-        assert f"第 {position}/{len(parts)} 段" in part
-    text = "\n".join(parts)
-    assert text.count("异步子任务异常 2") == 20
-    assert all(text.count(f"batch-{index:02}") == 1 for index in range(20))
+    summary, *details = parts
+    assert "批次共 20 个 · 已失败 20" in summary
+    assert "共享模型池" in summary
+    assert "客户计划" not in summary
+    for position, part in enumerate(details, 1):
+        assert f"第 {position}/{len(details)} 段" in part
+        assert "批次共" not in part
+    text = "\n".join(details)
+    assert text.count("主任务失败 0 · 子任务失败 1（API + Prompt 1）") == 20
+    assert all(text.count(f"客户计划 {index:02}") == 1 for index in range(20))
+    assert "batch-" not in text
+
+
+def test_render_oversized_batch_continuation_uses_name_and_time():
+    workers = [
+        {
+            "provider_id": "provider",
+            "model_id": f"model-{index:02}",
+            "occupied": 1,
+        }
+        for index in range(20)
+    ]
+    snapshot = {
+        "snapshot_at": "2026-11-24T04:00:00+00:00",
+        "pools": [],
+        "batches": [
+            {
+                "batch_id": "private-batch-id",
+                "name": "客户计划",
+                "logical_fire_at": "2026-11-24T03:00:00+00:00",
+                "status": "running",
+                "done_count": 0,
+                "member_count": 20,
+                "success_count": 0,
+                "failed_count": 0,
+                "skipped_count": 0,
+                "active_count": 20,
+                "waiting_count": 0,
+                "subtasks": {},
+                "workers": workers,
+            },
+        ],
+    }
+    summary, *details = render_parts("S", "2026-11-24", snapshot, 650)
+    assert "客户计划" not in summary
+    assert len(details) > 1
+    assert all(len(part.encode()) <= 650 for part in details)
+    text = "\n".join(details)
+    assert "11:00 · 客户计划 · 运行中（续）" in text
+    assert "private-batch-id" not in text
+    assert "失败成员" not in text
+    assert "异步子任务" not in text
+    assert "主任务失败" not in text
+    assert all(text.count(worker["model_id"]) == 1 for worker in workers)
+
+
+@pytest.mark.parametrize(
+    ("failure_details", "expected"),
+    [
+        (
+            {"main_count": 1, "subtask_types": {"API + Prompt": 2, "超时": 1}},
+            ["主任务失败 1 · 子任务失败 3（API + Prompt 2、超时 1）"],
+        ),
+        (
+            {
+                "main_count": 1,
+                "subtask_types": {kind * 80: 1 for kind in "ABC"},
+            },
+            [
+                "主任务失败 1 · 子任务失败 3",
+                *(f"子任务失败类型 · {kind * 80} 1" for kind in "ABC"),
+            ],
+        ),
+        (None, ["失败分类暂不可用"]),
+    ],
+)
+def test_batch_lines_render_failed_members_by_stage(failure_details, expected):
+    batch = {
+        "name": "客户计划",
+        "logical_fire_at": "2026-11-24T03:00:00+00:00",
+        "status": "failed",
+        "done_count": 4,
+        "member_count": 4,
+        "success_count": 0,
+        "failed_count": 4,
+        "skipped_count": 0,
+        "active_count": 0,
+        "waiting_count": 0,
+        "subtasks": {"failures": 8},
+        "workers": [],
+    }
+    if failure_details is not None:
+        batch["failure_details"] = failure_details
+    assert batch_lines(batch)[3:] == expected
+
+
+def test_render_overflow_model_pools_keep_one_summary_and_all_pools():
+    pools = [
+        {
+            "provider_id": "provider",
+            "model_id": f"model-{index:02}",
+            "occupied": index,
+            "capacity": 20,
+        }
+        for index in range(20)
+    ]
+    snapshot = {
+        "snapshot_at": "2026-11-24T04:00:00+00:00",
+        "batches": [],
+        "pools": pools,
+    }
+    summary, *details = render_parts("S", "2026-11-24", snapshot, 500)
+    assert "批次共 0 个" in summary
+    assert "共享模型池见后续明细" in summary
+    assert all(len(part.encode()) <= 500 for part in (summary, *details))
+    text = "\n".join(details)
+    assert "共享模型池" in text
+    assert all(text.count(pool["model_id"]) == 1 for pool in pools)
