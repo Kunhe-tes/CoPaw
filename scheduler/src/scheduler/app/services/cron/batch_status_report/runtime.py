@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 
+from .....config.constant import SWE_INTERNAL_API_BASE_URL_ENV
 from ....database.connection import get_db_connection
 from ..managed.swe_client import checked_base
 from .render import render_parts
@@ -159,7 +160,7 @@ async def report_lifespan(app):
     try:
         store = ReportStore(get_db_connection())
         swe_url = checked_base(
-            os.environ.get("SCHEDULER_SWE_API_BASE_URL", ""),
+            os.environ.get(SWE_INTERNAL_API_BASE_URL_ENV, ""),
         ).removesuffix("/api")
         await store.ready()
     except Exception as exc:

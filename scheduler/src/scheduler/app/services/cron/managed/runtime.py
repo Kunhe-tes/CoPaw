@@ -6,6 +6,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
+from .....config.constant import SWE_INTERNAL_API_BASE_URL_ENV
 from ....database.connection import get_db_connection
 from ..capacity_claim import (
     enable_managed_capacity_accounting,
@@ -27,6 +28,13 @@ from .recheck_worker import prepare_recheck_storage
 logger = logging.getLogger(__name__)
 
 
+async def _fetch_batch_retry_overrides():
+    client = SystemSweClient(os.environ.get(SWE_INTERNAL_API_BASE_URL_ENV, ""))
+    return await client.get_batch_retry_overrides(
+        os.environ.get("SWE_INTERNAL_TOKEN"),
+    )
+
+
 async def create_managed_worker(db):
     await assert_managed_schema_ready(db)
     await assert_managed_board_schema_ready(db)
@@ -40,11 +48,7 @@ async def create_managed_worker(db):
     resources = ManagedSweClient(base)
     execution = ManagedSweExecutionClient(base)
     platform = ManagedPlatformClient(platform_config())
-    system_client = SystemSweClient(base)
-    internal_token = os.environ.get("SWE_INTERNAL_TOKEN")
-    retry_policy = BatchRetryPolicy(
-        lambda: system_client.get_batch_retry_overrides(internal_token),
-    )
+    retry_policy = BatchRetryPolicy(_fetch_batch_retry_overrides)
     return ManagedRecoveryWorker(
         db,
         resources,

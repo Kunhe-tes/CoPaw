@@ -106,7 +106,7 @@ sequenceDiagram
 
 | 调用 | 请求与结果 | 接入方式 |
 | --- | --- | --- |
-| Scheduler → SWE，`POST /api/internal/cron/batch-status-reports/snapshot` | 传已落库的 `source_id`、`business_date`，返回同源统计快照。 | 复用现有 `SCHEDULER_SWE_API_BASE_URL`，环境已有内部令牌时继续使用。 |
+| Scheduler → SWE，`POST /api/internal/cron/batch-status-reports/snapshot` | 传已落库的 `source_id`、`business_date`，返回同源统计快照。 | 使用 `SCHEDULER_SWE_INTERNAL_API_BASE_URL`，环境已有内部令牌时继续使用。 |
 | SWE → Monitor，`POST /api/monitor/internal/cron/batch-status-report-snapshot` | 按来源和业务日返回 `snapshot_at`、全部可报告批次和模型池，整次读取失败返回 503。 | 复用 `MonitorSyncClient` 和已有 `SWE_MONITOR_API_URL`，由可信内网调用。 |
 | Scheduler → SWE，`POST /api/internal/cron/batch-status-reports/send-part` | 传 `report_id`、`part_no`、`delivery_id`、`source_id`、单个 `recipient_id` 和已冻结的消息正文。返回 `sent`、`failed` 或 `outcome_unknown`，以及可用的回执 ID 和公开错误码。 | 复用既有 SWE 地址及可选内部令牌。 |
 

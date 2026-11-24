@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
+import json
 from datetime import datetime
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -45,19 +46,83 @@ async def test_platform_submits_directly_without_identity_headers(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_report_worker_starts_with_existing_swe_address_only(
+@pytest.mark.parametrize("configured", [True, False])
+async def test_report_worker_requires_dedicated_swe_address(
     monkeypatch,
+    configured,
 ):
-    monkeypatch.setenv("SCHEDULER_SWE_API_BASE_URL", "http://swe.example/api/")
+    monkeypatch.setenv("SCHEDULER_SWE_API_BASE_URL", "http://gateway/api/")
+    monkeypatch.delenv("SCHEDULER_SWE_INTERNAL_API_BASE_URL", raising=False)
+    if configured:
+        monkeypatch.setenv(
+            "SCHEDULER_SWE_INTERNAL_API_BASE_URL",
+            "http://swe-internal/api/",
+        )
     monkeypatch.delenv("SWE_INTERNAL_TOKEN", raising=False)
     store = AsyncMock()
+    worker = Mock(return_value=AsyncMock())
     monkeypatch.setattr(runtime, "get_db_connection", object)
     monkeypatch.setattr(runtime, "ReportStore", lambda _: store)
+    monkeypatch.setattr(runtime, "BatchReportWorker", worker)
     app = FastAPI()
     async with runtime.report_lifespan(app):
-        assert app.state.batch_report_ready
+        assert app.state.batch_report_ready == configured
     assert not app.state.batch_report_ready
-    store.ready.assert_awaited_once()
+    if configured:
+        store.ready.assert_awaited_once()
+        assert worker.call_args.args[2] == "http://swe-internal"
+    else:
+        worker.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_report_snapshot_and_delivery_use_internal_swe_address(
+    monkeypatch,
+):
+    monkeypatch.setenv("SWE_INTERNAL_TOKEN", "report-test-token")
+    store = AsyncMock()
+    sources = {}
+
+    def swe_gateway(request):
+        body = json.loads(request.content)
+        assert request.url.host == "swe-internal"
+        assert (
+            request.headers["X-Internal-Token"] == "Bearer report-test-token"
+        )
+        endpoint = request.url.path.rsplit("/", 1)[-1]
+        sources[endpoint] = body["source_id"]
+        if endpoint == "snapshot":
+            return httpx.Response(
+                200,
+                json={
+                    "snapshot_at": "2026-11-24T04:00:00+00:00",
+                    "batches": [],
+                    "pools": [],
+                },
+            )
+        return httpx.Response(200, json={"status": "sent"})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(swe_gateway),
+    ) as client:
+        worker = runtime.BatchReportWorker(
+            store,
+            client,
+            "http://swe-internal",
+        )
+        await worker.collect(
+            {"source_id": "bank", "business_date": "2026-11-24"},
+        )
+        await worker.deliver({"source_id": "retail"})
+
+    assert sources == {"snapshot": "bank", "send-part": "retail"}
+    store.freeze.assert_awaited_once()
+    store.finish_delivery.assert_awaited_once_with(
+        {"source_id": "retail"},
+        "sent",
+        None,
+        None,
+    )
 
 
 def test_platform_request_normalizes_recipient_set():

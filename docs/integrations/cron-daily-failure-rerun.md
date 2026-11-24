@@ -7,7 +7,7 @@
 1. 人工执行 `scripts/sql/cron_daily_failure_retry.sql`，仅新增一张调用表 `swe_cron_failure_retry_calls`，表名与列均带中文 comment。
 2. 核对 `SHOW INDEX FROM swe_cron_execution_runs`，按 `scripts/sql/cron_daily_failure_retry_indexes.sql` 补三个不存在的索引。索引 SQL 不可重复执行；请遵循行内数据库变更窗口。
 3. 先部署 SWE，再部署 Scheduler。混合版本期间先不要在外部平台启用本入口，避免旧 SWE 忽略补跑历史关联。
-4. 使用已有新版后台及 `SCHEDULER_SWE_API_BASE_URL` 配置，不增加新环境变量、内部密钥、调用凭证或用户 Header。
+4. 使用已有新版后台及 `SCHEDULER_SWE_API_BASE_URL` 配置。另为重试上限查询设置 `SCHEDULER_SWE_INTERNAL_API_BASE_URL`，填写 Scheduler 可直连的 SWE 内网根地址。
 
 应用启动不会执行上述建表或加索引语句。未建调用表时，新 POST 返回 503；新后台工作域退避诊断，不阻断已有任务派发。其他新版必需表与既有后台配置仍需就绪。
 
@@ -15,7 +15,7 @@
 
 自动重试和补跑按批成员所属来源的「批调度最大尝试次数」判断原生重试机会是否已用完。来源管理员可在「系统特性配置 → 定时任务设置」保存覆盖值，后续判定会读到新值。留空时继承 `SCHEDULER_CRON_BATCH_MAX_ATTEMPTS`，缺省为 3。上限包含首次执行，设为 1 时关闭自动重试。已入队的执行继续推进。关系无法确认时跳过。
 
-Scheduler 通过现有的 `SCHEDULER_SWE_API_BASE_URL` 访问 SWE 内部只读配置接口，结果在每个进程缓存 5 秒。上线时先部署 SWE 接口，再更新 Scheduler。若 SWE 配置了 `SWE_INTERNAL_TOKEN`，Scheduler 进程需要收到同一个内部凭据。完成上线后，在线保存无需重启。配置读取故障时，相关自动重试和当日失败补跑判定延后，已入队执行和超时结算继续处理。
+Scheduler 用 `SCHEDULER_SWE_INTERNAL_API_BASE_URL` 访问 SWE 内部只读配置接口，结果在每个进程缓存 5 秒。上线时先部署 SWE 接口，再更新 Scheduler。若 SWE 配置了 `SWE_INTERNAL_TOKEN`，Scheduler 进程需要收到同一个内部凭据。完成上线后，在线保存无需重启。独立地址缺失或读取故障时，相关自动重试和当日失败补跑判定延后，已入队执行和超时结算继续处理。
 
 本接口按确认不加鉴权、角色、来源白名单、限流或业务补跑次数上限。任何能到达接口的调用方均能触发指定来源下全部用户的候选补跑；来源参数不是权限控制。
 
