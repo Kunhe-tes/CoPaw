@@ -2,6 +2,7 @@
 """只读取已登记执行，按固定失败窗口分页，再以最新事实筛选。"""
 
 from .....config.constant import CRON_BATCH_MAX_ATTEMPTS
+from .daily_retry_filters import scan_filter
 from .daily_retry_policy import (
     excluded_failure,
     failure_time,
@@ -18,11 +19,12 @@ AUTOMATIC = (
 )
 
 
-async def candidates(db, call, limit):
+async def candidates(db, call, limit, filters=None):
     # 两种失败时间分别走索引，每支最多取一页，避免 OR 扫描来源的全部历史。
+    scoped, selection = scan_filter(filters)
     base = (
-        f"SELECT * FROM {RUN_TABLE} WHERE source_id=%s AND source_id COLLATE utf8mb4_bin=%s "
-        f"AND queue_order>%s AND queue_order<=%s AND {AUTOMATIC} AND "
+        f"SELECT r.* FROM {RUN_TABLE} r WHERE source_id=%s AND source_id COLLATE utf8mb4_bin=%s "
+        f"AND queue_order>%s AND queue_order<=%s AND {AUTOMATIC}{scoped} AND "
     )
     main = (
         base
@@ -37,6 +39,7 @@ async def candidates(db, call, limit):
         call["source_id"],
         call["queue_cursor"],
         call["max_queue_order"],
+        *selection,
         utc_time(call["window_start"]),
         utc_time(call["cutoff_at"]),
         limit,
