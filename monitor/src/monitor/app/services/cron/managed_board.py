@@ -40,7 +40,12 @@ def batch_item(row):
     result.update(
         {
             name: sql.time_text(row[name])
-            for name in ("logical_fire_at", "physical_fire_at", "created_at")
+            for name in (
+                "logical_fire_at",
+                "physical_fire_at",
+                "created_at",
+                "finished_at",
+            )
         },
     )
     result["completion_rate"] = (

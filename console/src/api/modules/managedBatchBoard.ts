@@ -25,6 +25,7 @@ export interface ManagedBatch {
   logical_fire_at: string;
   physical_fire_at: string;
   created_at: string;
+  finished_at?: string | null;
 }
 export interface ManagedBatchMember {
   member_id: string;

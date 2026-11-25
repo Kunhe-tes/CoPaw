@@ -106,24 +106,22 @@ function Board({ source, actor }: { source: string; actor: string }) {
   const batch = items.find((item) => item.batch_id === selected) || items[0];
   const stats = batches.value?.stats;
   const metrics = [
-    ["Batch 总数", stats?.total_batches, "当前全局筛选范围"],
-    ["任务总数", stats?.total_members, "含父任务，重试不增加任务数"],
-    ["运行中 Batch", stats?.running_batches, "含等待子任务完成"],
+    ["批次总数", stats?.total_batches],
+    ["任务总数", stats?.total_members],
+    ["运行中批次", stats?.running_batches],
     [
       "任务完成率",
       stats?.total_members
         ? `${((stats.done_members / stats.total_members) * 100).toFixed(1)}%`
         : "-",
-      "明确终态 / 任务总数",
     ],
-    ["失败任务", stats?.failed_members, "当前业务尝试"],
+    ["失败任务", stats?.failed_members],
     [
       "有效 Worker",
       workers.value?.current_capacity.reduce(
         (sum, item) => sum + item.effective_workers,
         0,
       ),
-      "新旧共享模型池",
     ],
   ];
   return (
@@ -131,7 +129,6 @@ function Board({ source, actor }: { source: string; actor: string }) {
       <header className={styles.header}>
         <div>
           <h1>批调度看板（新）</h1>
-          <p>新链路执行批次、逻辑成员、执行事件与共享模型池。</p>
         </div>
         <Space>
           <Tag color="blue" className={styles.sourceTag}>
@@ -202,7 +199,7 @@ function Board({ source, actor }: { source: string; actor: string }) {
         />
       </section>
       <section className={styles.summaryStrip} aria-label="新版批调度概览">
-        {metrics.map(([title, value, hint]) => (
+        {metrics.map(([title, value]) => (
           <div className={styles.summaryMetric} key={title}>
             <span>{title}</span>
             {title === "失败任务" ? (
@@ -215,7 +212,6 @@ function Board({ source, actor }: { source: string; actor: string }) {
             ) : (
               <strong>{value ?? "-"}</strong>
             )}
-            <em>{hint}</em>
           </div>
         ))}
       </section>
@@ -257,15 +253,14 @@ function Board({ source, actor }: { source: string; actor: string }) {
         <article className={styles.batchPane}>
           <div className={styles.paneHeader}>
             <div>
-              <h2>所有 Batch</h2>
-              <span>按逻辑计划时间倒序展示</span>
+              <h2>所有批次</h2>
             </div>
             <strong>共 {batches.value?.total ?? "-"} 个全局结果</strong>
           </div>
           <Input
             allowClear
-            aria-label="全局筛选新版 Batch"
-            placeholder="全局筛选 Batch、任务、租户、Agent 或模型"
+            aria-label="全局筛选新版批次"
+            placeholder="全局筛选批次、任务、租户、Agent 或模型"
             value={query}
             onChange={(event) => {
               setQuery(event.target.value);
@@ -273,7 +268,7 @@ function Board({ source, actor }: { source: string; actor: string }) {
             }}
           />
           <div className={styles.batchListHeader}>
-            <span>任务 / Batch</span>
+            <span>任务 / 批次</span>
             <span>计划 / 回调</span>
             <span>状态 / 进度</span>
           </div>
@@ -301,6 +296,10 @@ function Board({ source, actor }: { source: string; actor: string }) {
                   <span className={styles.batchTiming}>
                     <strong>{timeText(item.logical_fire_at)}</strong>
                     <em>回调 {timeText(item.created_at)}</em>
+                    {["completed", "failed"].includes(item.status) &&
+                      item.finished_at && (
+                        <em>完成 {timeText(item.finished_at)}</em>
+                      )}
                     <small title="父任务本次执行的冻结模型；各成员模型见成员列表">
                       {item.provider_id || "-"} / {item.model_id || "-"}
                     </small>
@@ -339,11 +338,11 @@ function Board({ source, actor }: { source: string; actor: string }) {
                 </button>
               ))}
               {!batches.loading && !items.length && (
-                <Empty description="当前范围内暂无 Batch" />
+                <Empty description="当前范围内暂无批次" />
               )}
             </div>
           </Spin>
-          <nav className={styles.batchPagination} aria-label="新版 Batch 分页">
+          <nav className={styles.batchPagination} aria-label="新版批次分页">
             <Pagination
               current={page}
               pageSize={4}
@@ -367,7 +366,7 @@ function Board({ source, actor }: { source: string; actor: string }) {
             />
           ) : (
             <div className={styles.detailEmpty}>
-              <Empty description="请选择一个 Batch" />
+              <Empty description="请选择一个批次" />
             </div>
           )}
         </article>
