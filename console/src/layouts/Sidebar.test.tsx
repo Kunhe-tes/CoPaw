@@ -102,7 +102,6 @@ const expandedLabels = [
   "批调度监控",
   "批调度看板（新）",
   "定时任务追踪",
-  "Claw数据看板",
   "Claw技能运行看板",
   "Messages",
   "异步任务中心",
@@ -117,7 +116,6 @@ const conditionalLabels = new Set([
   "批调度监控",
   "批调度看板（新）",
   "定时任务追踪",
-  "Claw数据看板",
   "Claw技能运行看板",
   "异步任务中心",
 ]);
@@ -128,7 +126,7 @@ const governanceLabels = [
   "批调度看板（新）",
   "定时任务追踪",
 ];
-const clawLabels = ["Claw数据看板", "Claw技能运行看板"];
+const clawLabels = ["Claw技能运行看板"];
 
 describe("Sidebar behavior preservation", () => {
   const scenarios: {
@@ -249,7 +247,10 @@ describe("Sidebar behavior preservation", () => {
       "/analytics/claw-skill-data-overview",
     );
 
-    fireEvent.click(screen.getByText("Claw数据看板"));
+    fireEvent.click(screen.getByText("运营看板"));
+    expect(screen.getByTestId("location")).toHaveTextContent(
+      "/analytics/business-overview",
+    );
     fireEvent.click(screen.getByRole("button"));
     const skillLink = container.querySelector(
       '[data-tooltip-title="Claw技能运行看板"]',
@@ -290,29 +291,22 @@ function LocationProbe() {
 }
 
 describe("Sidebar Claw report navigation", () => {
-  it("places the Claw dashboard after operations and navigates to its route", () => {
+  it("hides the Claw data dashboard menu in the RM_ASSISTANCE space", () => {
     iframeState.source = "OTHER";
     iframeState.space = "RM_ASSISTANCE";
-    render(
+    const { container } = render(
       <MemoryRouter>
         <Sidebar selectedKey="analytics-business-overview" />
-        <LocationProbe />
       </MemoryRouter>,
     );
 
-    const operations = screen.getByText("运营看板");
-    const claw = screen.getByText("Claw数据看板");
-    expect(
-      operations.compareDocumentPosition(claw) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-
-    fireEvent.click(claw);
-    expect(screen.getByTestId("location")).toHaveTextContent(
-      "/analytics/claw-data-overview",
-    );
-    expect(screen.getAllByText("Claw数据看板")).toHaveLength(1);
+    expect(screen.queryByText("Claw数据看板")).not.toBeInTheDocument();
     expect(screen.getByText("Claw技能运行看板")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button"));
+    expect(
+      container.querySelector('[data-tooltip-title="Claw数据看板"]'),
+    ).not.toBeInTheDocument();
   });
 
   it("hides the Claw dashboards outside the RM_ASSISTANCE space", () => {
