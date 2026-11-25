@@ -36,6 +36,7 @@ class ToolOutputBudgetMixin:
             ],
             "system",
         )
+        tool_output_compacted = False
         try:
             tool_result_compact = resolve_tool_result_compact_config(
                 self._agent_config.running.tool_result_compact,
@@ -65,6 +66,7 @@ class ToolOutputBudgetMixin:
                     # Cancellation during compaction must retain this chunk.
                     tool_res_msg.content[0]["output"] = output
                     if tool_result_compact.enabled:
+                        original_output = output
                         compacted_chunk_msg = Msg(
                             "system",
                             [
@@ -86,6 +88,7 @@ class ToolOutputBudgetMixin:
                             workspace_dir=workspace_dir,
                         )
                         output = compacted_chunk_msg.content[0]["output"]
+                        tool_output_compacted = output != original_output
 
                     tool_res_msg.content[0]["output"] = output
                     await self.print(tool_res_msg, chunk.is_last)
@@ -102,4 +105,10 @@ class ToolOutputBudgetMixin:
 
             return None
         finally:
+            if tool_output_compacted:
+                from ..observability.instrumentation import (
+                    mark_tool_output_compacted,
+                )
+
+                mark_tool_output_compacted(tool_res_msg.id)
             await self.memory.add(tool_res_msg)

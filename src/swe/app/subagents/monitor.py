@@ -109,6 +109,67 @@ class SubAgentMonitorService:
             runs=[self._snapshot_item(record) for record in records],
         )
 
+    async def population(
+        self,
+        *,
+        chats_by_session: dict[str, set[str]],
+        start_at,
+        end_at,
+        limit: int = 50_000,
+    ) -> dict[str, Any]:
+        """Count retained SubAgent records only for visible Chat/Session pairs."""
+        return await run_runtime_state_work(
+            self._population_sync,
+            chats_by_session,
+            start_at,
+            end_at,
+            limit,
+        )
+
+    def _population_sync(
+        self,
+        chats_by_session: dict[str, set[str]],
+        start_at,
+        end_at,
+        limit: int,
+    ) -> dict[str, Any]:
+        counts: dict[str, int] = {}
+        total = 0
+        unresolved = 0
+        has_more = False
+        scanned = 0
+        for path in self._scope.run_store_dir.glob("subagent-*.json"):
+            if scanned >= limit:
+                has_more = True
+                break
+            scanned += 1
+            record = self._read_record(path)
+            if record is None:
+                continue
+            created_at = record.created_at
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            if not start_at <= created_at < end_at:
+                continue
+            session_id = record.spec.parent_thread_id
+            chats = chats_by_session.get(session_id)
+            if not chats:
+                continue
+            chat_id = record.spec.parent_chat_id
+            if chat_id and chat_id not in chats:
+                continue
+            total += 1
+            if not chat_id:
+                unresolved += 1
+            counts[record.status] = counts.get(record.status, 0) + 1
+        return {
+            "count": total,
+            "scanned_count": scanned,
+            "by_status": counts,
+            "unresolved_count": unresolved,
+            "has_more": has_more,
+        }
+
     async def cancel(
         self,
         *,

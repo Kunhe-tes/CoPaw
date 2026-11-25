@@ -19,6 +19,17 @@ from .session import (
 logger = logging.getLogger(__name__)
 
 TURN_STATES_KEY = "turn_states"
+_TERMINAL_TURN_STATUSES = frozenset(
+    {
+        "completed",
+        "failed",
+        "stopped",
+        "interrupted",
+        "rejected",
+        "cancelled",
+        "timed_out",
+    },
+)
 
 
 def _user_turn_anchor(
@@ -174,10 +185,40 @@ async def admit_user_turn(
     msgs: list[Any],
     request: Any,
 ) -> str | None:
+    turn_id, _, _ = await _admit_user_turn(
+        execution,
+        msgs=msgs,
+        request=request,
+    )
+    return turn_id
+
+
+async def admit_user_turn_with_creation(
+    execution: Any,
+    *,
+    msgs: list[Any],
+    request: Any,
+    observability_context: Any = None,
+) -> tuple[str | None, bool, Any]:
+    return await _admit_user_turn(
+        execution,
+        msgs=msgs,
+        request=request,
+        observability_context=observability_context,
+    )
+
+
+async def _admit_user_turn(
+    execution: Any,
+    *,
+    msgs: list[Any],
+    request: Any,
+    observability_context: Any = None,
+) -> tuple[str | None, bool, Any]:
     """Durably record the submitted user anchor before preflight/Agent work."""
     anchor = _user_turn_anchor(msgs, request)
     if anchor is None:
-        return None
+        return None, False, None
     turn_id, message = anchor
     hydrate_turn = getattr(execution, "hydrate_turn", None)
     if hydrate_turn is not None:
@@ -188,7 +229,35 @@ async def admit_user_turn(
         turn_states = {}
         state[TURN_STATES_KEY] = turn_states
     existing = turn_states.get(turn_id)
-    if not isinstance(existing, dict) or existing.get("message") != message:
+    is_reconnect = (
+        isinstance(existing, dict)
+        and existing.get("message") == message
+        and (
+            observability_context is None
+            or existing.get("status") not in _TERMINAL_TURN_STATUSES
+        )
+    )
+    if not is_reconnect and observability_context is not None:
+        carrier = (
+            existing.get("agent_observability_context")
+            if isinstance(existing, dict)
+            else None
+        )
+        if isinstance(carrier, dict):
+            try:
+                from ...observability.models import ObservabilityContext
+
+                previous = ObservabilityContext.from_carrier(carrier)
+                business_ref = {
+                    **observability_context.business_ref,
+                    "predecessor_run_id": previous.obs_run_id,
+                }
+                observability_context = observability_context.with_updates(
+                    business_ref=business_ref,
+                )
+            except Exception:
+                pass
+    if not is_reconnect:
         admitted_state = {
             "status": "admitted",
             "message": message,
@@ -201,11 +270,19 @@ async def admit_user_turn(
         )
         if isinstance(chat_id, str) and chat_id:
             admitted_state["chat_id"] = chat_id
+        if observability_context is not None:
+            admitted_state["agent_observability_context"] = (
+                observability_context.to_carrier()
+            )
         turn_states[turn_id] = admitted_state
-    if not isinstance(existing, dict) or existing.get("message") != message:
+    if not is_reconnect:
         execution.mark_state_dirty()
         await execution.commit_state(state)
-    return turn_id
+    return (
+        turn_id,
+        not is_reconnect,
+        (observability_context if not is_reconnect else None),
+    )
 
 
 if TYPE_CHECKING:

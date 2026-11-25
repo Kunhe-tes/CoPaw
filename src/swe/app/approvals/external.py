@@ -487,6 +487,43 @@ async def notify_cron_approval_result(
         )
 
 
+async def _resolve_external_approval_chat(workspace, pending, decision):
+    manager = workspace.chat_manager
+    user_id = pending.user_id or "external-approval"
+    extra = getattr(pending, "extra", None) or {}
+    chat_id = extra.get("chat_id")
+    channel = getattr(pending, "channel", None) or CONSOLE_CHANNEL
+    if chat_id:
+        chat = await manager.get_chat(chat_id)
+        if (
+            chat is None
+            or chat.user_id != user_id
+            or chat.session_id != pending.session_id
+        ):
+            raise RuntimeError("Original approval Chat is unavailable")
+        return chat
+    if channel != CONSOLE_CHANNEL:
+        matches = await manager.list_chats_by_session(
+            pending.session_id,
+            user_id,
+            channel,
+        )
+        if len(matches) != 1:
+            raise RuntimeError("Original approval Chat is unavailable")
+        return matches[0]
+    return await manager.get_or_create_chat(
+        pending.session_id,
+        user_id,
+        CONSOLE_CHANNEL,
+        name=_command_for_decision(decision, pending.request_id),
+        meta=(
+            {"agent_id": workspace.agent_id}
+            if getattr(workspace, "agent_id", None)
+            else None
+        ),
+    )
+
+
 async def submit_external_approval_decision(
     *,
     workspace: Any,
@@ -498,8 +535,20 @@ async def submit_external_approval_decision(
     source_id: str | None = None,
     user_name: str | None = None,
     bbk_id: str | None = None,
+    caller_user_id: str | None = None,
 ) -> ExternalApprovalSubmission:
-    """Submit an external approval decision through the console runner."""
+    """Submit an external approval decision through the console runner.
+
+    ``caller_user_id`` 是服务端解析出的调用方身份；与审批归属不一致时
+    直接拒绝，避免同 scope 内跨用户批准。
+    """
+    owner_user_id = getattr(pending, "user_id", None)
+    if (
+        caller_user_id is not None
+        and owner_user_id
+        and owner_user_id != caller_user_id
+    ):
+        raise PermissionError("approval belongs to another user")
     if pending.status != "pending":
         return ExternalApprovalSubmission(
             request_id=pending.request_id,
@@ -514,17 +563,7 @@ async def submit_external_approval_decision(
     if console_channel is None:
         raise RuntimeError("console channel not found")
 
-    chat = await workspace.chat_manager.get_or_create_chat(
-        pending.session_id,
-        pending.user_id or "external-approval",
-        CONSOLE_CHANNEL,
-        name=_command_for_decision(decision, pending.request_id),
-        meta=(
-            {"agent_id": workspace.agent_id}
-            if getattr(workspace, "agent_id", None)
-            else None
-        ),
-    )
+    chat = await _resolve_external_approval_chat(workspace, pending, decision)
 
     await _wait_until_run_idle(workspace.task_tracker, chat.id)
 
@@ -549,6 +588,8 @@ async def submit_external_approval_decision(
         user_name=user_name,
         bbk_id=bbk_id,
     )
+    payload["channel_id"] = getattr(chat, "channel", CONSOLE_CHANNEL)
+    payload["meta"]["chat_id"] = chat.id
     await _append_external_approval_message(
         workspace=workspace,
         pending=pending,
@@ -561,7 +602,17 @@ async def submit_external_approval_decision(
     if coordinator is None:
         raise RuntimeError("answer-turn coordinator is not configured")
 
+    submission_ready = asyncio.Event()
+    submission_accepted = False
+
     async def producer(identity: TurnIdentity, bound_payload: Any):
+        await submission_ready.wait()
+        if not submission_accepted:
+            await coordinator.cancel_unstarted(identity)
+            return
+        if not await coordinator.mark_producer_started(identity):
+            await coordinator.cancel_unstarted(identity)
+            return
         next_payload = {
             **bound_payload,
             "meta": {
@@ -573,21 +624,26 @@ async def submit_external_approval_decision(
         async for event in console_channel.stream_one(next_payload):
             yield event
 
-    lease = await coordinator.start_or_attach(
-        chat.id,
-        payload,
-        producer,
-        msgid=f"approval-{pending.request_id}",
-    )
-    is_new_run = lease.is_new_run
+    try:
+        lease = await coordinator.start_or_attach(
+            chat.id,
+            payload,
+            producer,
+            msgid=f"approval-{pending.request_id}",
+            defer_producer_start=True,
+        )
+        is_new_run = lease.is_new_run
 
-    await get_approval_service().record_external_submission(
-        pending,
-        decision=decision.value,
-        source_channel=source_channel,
-        source_user_id=source_user_id,
-        source_message_id=source_message_id,
-    )
+        await get_approval_service().record_external_submission(
+            pending,
+            decision=decision.value,
+            source_channel=source_channel,
+            source_user_id=source_user_id,
+            source_message_id=source_message_id,
+        )
+        submission_accepted = True
+    finally:
+        submission_ready.set()
 
     await notify_cron_approval_result(
         workspace,

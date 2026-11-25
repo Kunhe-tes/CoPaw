@@ -64,6 +64,7 @@ SAFE_WORKER_REQUEST_CONTEXT_KEYS = frozenset(
         "scope_id",
         "agent_id",
         "plan_mode_enabled",
+        "agent_observability_context",
     },
 )
 SECRET_LIKE_FIELD_FRAGMENTS = (

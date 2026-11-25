@@ -43,12 +43,15 @@ from ...app.subagents.run_access import (
 from ...app.subagents.session_dependencies import (
     initialize_community_expert_dependency_view,
 )
+from ...observability.context import current_context
+from ...observability.instrumentation import Observability
 
 _RUN_ID_CONTEXT_KEYS = (
     "subagent_run_id",
     "requested_subagent_run_id",
 )
 _DEFAULT_SUPERVISOR = BackgroundSubAgentSupervisor()
+_OBSERVABILITY = Observability()
 
 
 @dataclass(frozen=True)
@@ -239,6 +242,45 @@ async def _link_goal_subagent_run(
     )
 
 
+def _finish_start_observability_span(
+    span: Any | None,
+    attributes: dict[str, str],
+    result: Any,
+) -> bool:
+    if span is None:
+        return False
+    if isinstance(result, BackgroundSubAgentStartBlocked):
+        span.end(
+            status="rejected",
+            subagent={**attributes, "result_status": "blocked"},
+        )
+        return False
+    worker = getattr(result, "worker", None)
+    worker_pid = getattr(worker, "pid", None)
+    if isinstance(worker_pid, int) and worker_pid > 0:
+        return True
+    result_status = getattr(result, "status", None)
+    status = {
+        "completed": "succeeded",
+        "partial": "partial",
+        "blocked": "rejected",
+        "failed": "failed",
+        "cancelled": "cancelled",
+        "expired": "timed_out",
+    }.get(result_status if isinstance(result_status, str) else "", "failed")
+    span.end(
+        status=status,
+        subagent={
+            **attributes,
+            "business_subagent_key": getattr(result, "run_id", "unknown"),
+            "result_status": (
+                result_status if isinstance(result_status, str) else "unknown"
+            ),
+        },
+    )
+    return False
+
+
 def _effective_subagent_skills(context, definition):
     if (
         definition.skill_owned is not None
@@ -273,6 +315,10 @@ def _create_start_subagent_tool(
                     "reason": "invalid_request",
                 },
             )
+        # 必须在 try 之前初始化，否则异常分支会引用未绑定变量。
+        observability_span = None
+        observability_span_transferred = False
+        supervisor_start_in_progress = False
         try:
             definition, definition_match, failure = (
                 _resolve_subagent_start_definition(
@@ -284,8 +330,33 @@ def _create_start_subagent_tool(
             )
             if failure is not None:
                 return failure
+            if definition is None:
+                return _json_response(
+                    {
+                        "status": "failed",
+                        "reason": "expert_not_found",
+                    },
+                )
             start_context = dict(context.request_context)
             start_context.pop("_expert_dependency_view_root", None)
+            observability_context = current_context()
+            subagent_attributes = {
+                "mode": "background",
+                "execution_agent_key": definition.name,
+            }
+            if (
+                observability_context is not None
+                and observability_context.capture_enabled
+            ):
+                observability_span = _OBSERVABILITY.span(
+                    "SubAgent",
+                    "agent.execute",
+                    subagent=subagent_attributes,
+                )
+                if observability_span is not None:
+                    start_context["agent_observability_context"] = (
+                        observability_span.to_carrier()
+                    )
             dependency_view = await run_runtime_state_work(
                 initialize_community_expert_dependency_view,
                 workspace_dir=context.workspace_dir,
@@ -314,6 +385,7 @@ def _create_start_subagent_tool(
             goal_id = str(context.request_context.get("goal_id") or "").strip()
             if goal_id:
                 context.request_context.setdefault("goal_subagent_run_ids", [])
+            supervisor_start_in_progress = True
             result = await context.supervisor.start(
                 scope=context.tool_scope,
                 spec=spec,
@@ -338,6 +410,13 @@ def _create_start_subagent_tool(
                 skill_snapshot_signatures=context.skill_snapshot_signatures,
                 skill_snapshot_dirs=context.skill_snapshot_dirs,
             )
+            supervisor_start_in_progress = False
+            # The worker owns the end slot after a durable PID is recorded.
+            observability_span_transferred = _finish_start_observability_span(
+                observability_span,
+                subagent_attributes,
+                result,
+            )
             await _link_goal_subagent_run(
                 goal_id=goal_id,
                 result=result,
@@ -345,7 +424,20 @@ def _create_start_subagent_tool(
                 supervisor=context.supervisor,
                 scope=context.tool_scope,
             )
+        except asyncio.CancelledError:
+            if (
+                observability_span is not None
+                and not observability_span_transferred
+                and not supervisor_start_in_progress
+            ):
+                observability_span.end(status="cancelled")
+            raise
         except Exception as exc:
+            if (
+                observability_span is not None
+                and not observability_span_transferred
+            ):
+                observability_span.end(status="failed")
             return _json_response(
                 {
                     "status": "failed",
@@ -659,14 +751,15 @@ def _build_definition_catalog(
             ),
             None,
         )
+        definition = (
+            selected_package.definition
+            if selected_package is not None
+            else None
+        )
         return build_definition_catalog(
             skill_definitions=[],
             builtin_definitions=[],
-            agent_owned_definitions=(
-                [selected_package.definition]
-                if selected_package is not None
-                else []
-            ),
+            agent_owned_definitions=[definition] if definition else [],
         )
     return build_definition_catalog(
         skill_definitions=load_skill_owned_definitions(

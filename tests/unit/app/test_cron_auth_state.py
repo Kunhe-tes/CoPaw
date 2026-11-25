@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
@@ -618,3 +618,22 @@ async def test_cleanup_cron_auth_endpoint_returns_summary(monkeypatch):
     assert response["deleted_dirs"] == ["C:/workspace/tenant-a"]
     assert response["forced_deleted_tenant_ids"] == ["tenant-a"]
     assert response["force_delete_tenant_ids"] == ["tenant-a"]
+
+
+def test_raise_if_user_info_expired_does_not_write_stdout(
+    capsys,
+    monkeypatch,
+):
+    """未过期时只写 debug 日志，不能污染观测 JSONL 的 stdout 出口。"""
+    state = auth_state.CronAuthState(
+        user_info={"id": 1},
+        user_info_expires_at=auth_state.utc_now() + timedelta(hours=1),
+    )
+    debug = MagicMock()
+    monkeypatch.setattr(auth_state.logger, "debug", debug)
+
+    auth_state._raise_if_user_info_expired(state)
+
+    assert capsys.readouterr().out == ""
+    debug.assert_called_once()
+    assert "user_info expires_at" in debug.call_args.args[0]

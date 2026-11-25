@@ -7,6 +7,8 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, Iterable
 
+from .observation import timed_operation
+
 _MAX_PARAMETERS = 65535
 _CACHE_SIZE = 4
 
@@ -22,6 +24,7 @@ class PreparedInsert:
     prefix: str
     row_template: str
     suffix: str = ""
+    allow_single_text_insert: bool = False
     columns: int = field(init=False)
 
     def __post_init__(self):
@@ -68,7 +71,8 @@ async def _execute_chunk(session, template, rows, params):
     sql, cursor = cached
     # Connector/Python checks SQL object identity, so use the cached str object.
     # prepared.executemany loops execute per row and must not be used here.
-    await session._run(cursor.execute(sql, tuple(params)))
+    with timed_operation("db_statement"):
+        await session._run(cursor.execute(sql, tuple(params)))
 
 
 async def execute_prepared(
@@ -82,7 +86,8 @@ async def execute_prepared(
     """Insert a lazy row stream; transaction ownership belongs to the facade.
 
     Return processed rows, independent of MySQL's upsert affected-row count.
-    A row can exceed the caller's batch budget but never the server packet bound.
+    A row can exceed the caller's batch budget. Opted-in templates use a
+    single text INSERT near the server packet bound to preserve legacy behavior.
     """
     if max_rows <= 0 or max_bytes <= 0:
         raise ValueError("Prepared batch limits must be positive")
@@ -103,7 +108,8 @@ async def execute_prepared(
             raise ValueError(f"Expected {template.columns} prepared columns")
         # Two type bytes plus at most one null-bitmap byte per parameter.
         row_bytes = sql_row_bytes + 3 * len(row) + sum(map(_value_bytes, row))
-        if base_bytes + row_bytes > packet_budget:
+        use_text = base_bytes + row_bytes > packet_budget
+        if use_text and not template.allow_single_text_insert:
             raise ValueError("Prepared row exceeds max_allowed_packet budget")
         if count and (
             count >= row_limit or batch_bytes + row_bytes > batch_budget
@@ -113,6 +119,13 @@ async def execute_prepared(
             params = []
             count = 0
             batch_bytes = base_bytes
+        if use_text:
+            await session.execute(
+                template.prefix + template.row_template + template.suffix,
+                row,
+            )
+            confirmed += 1
+            continue
         params.extend(row)
         count += 1
         batch_bytes += row_bytes

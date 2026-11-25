@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from agentscope.message import Msg, TextBlock
 
 from . import control_commands
+from ..conversation_storage.errors import StorageError
 from .daemon_commands import (
     DaemonContext,
     DaemonCommandHandlerMixin,
@@ -156,6 +157,7 @@ async def _run_daemon_command(
         agent_id=agent_id,
         tenant_id=tenant_id,
         session_id=context.session_id,
+        user_id=context.user_id,
     )
     msg = await handler.handle_daemon_command(query, daemon_ctx)
     yield msg, True
@@ -255,6 +257,45 @@ def _is_expert_conversation(request, runner: AgentRunner) -> bool:
     )
 
 
+async def _load_command_session_state(runner, context, session_execution):
+    """读取命令执行所需的会话状态。"""
+    if session_execution is None:
+        return await runner.session.get_session_state_dict(
+            session_id=context.session_id,
+            user_id=context.user_id,
+        )
+    return await session_execution.read_state()
+
+
+def _command_memory_manager(runner, memory, expert):
+    """按是否专家主执行选择内存管理器。"""
+    if not expert:
+        return runner.memory_manager
+    if hasattr(memory, "_long_term_memory"):
+        memory._long_term_memory = ""
+    return ExpertMainMemoryManager(runner.memory_manager)
+
+
+async def _persist_command_memory(
+    runner,
+    context,
+    session_execution,
+    memory,
+) -> None:
+    """把命令处理后的内存状态写回会话。"""
+    if session_execution is not None:
+        state = session_execution.state
+        state.setdefault("agent", {})["memory"] = memory.state_dict()
+        await session_execution.commit_state(state)
+        return
+    await runner.session.update_session_state(
+        session_id=context.session_id,
+        key="agent.memory",
+        value=memory.state_dict(),
+        user_id=context.user_id,
+    )
+
+
 async def _run_conversation_command(
     query: str,
     request,
@@ -266,13 +307,11 @@ async def _run_conversation_command(
     memory = runner.memory_manager.get_in_memory_memory(
         chat_id=context.chat_id or None,
     )
-    if session_execution is None:
-        session_state = await runner.session.get_session_state_dict(
-            session_id=context.session_id,
-            user_id=context.user_id,
-        )
-    else:
-        session_state = await session_execution.read_state()
+    session_state = await _load_command_session_state(
+        runner,
+        context,
+        session_execution,
+    )
     memory_state = session_state.get("agent", {}).get("memory", {})
     memory.load_state_dict(memory_state, strict=False)
 
@@ -284,11 +323,7 @@ async def _run_conversation_command(
     }:
         yield _command_error("专家主执行不使用 Profile 长期记忆。"), True
         return
-    manager = runner.memory_manager
-    if expert:
-        if hasattr(memory, "_long_term_memory"):
-            memory._long_term_memory = ""
-        manager = ExpertMainMemoryManager(manager)
+    manager = _command_memory_manager(runner, memory, expert)
     conv_handler = CommandHandler(
         agent_name="Friday",
         memory=memory,
@@ -318,6 +353,8 @@ async def _run_conversation_command(
             )
     except asyncio.CancelledError:
         raise
+    except StorageError:
+        raise
     except Exception:
         logger.exception("Conversation command failed: %s", query)
         command = query.strip().split(maxsplit=1)[0]
@@ -326,35 +363,16 @@ async def _run_conversation_command(
             "Please retry or check server logs.",
             prefix="**Command Failed**\n\n",
         )
-    yield response_msg, True
-    await _persist_conversation_memory(
-        context,
-        runner,
-        memory,
-        session_execution,
-    )
-
-
-async def _persist_conversation_memory(
-    context: _CommandRequestContext,
-    runner: AgentRunner,
-    memory,
-    session_execution,
-) -> None:
-    if context.session_id and context.user_id:
-        if session_execution is not None:
-            state = session_execution.state
-            agent_state = state.setdefault("agent", {})
-            agent_state["memory"] = memory.state_dict()
-            await session_execution.commit_state(state)
-            return
-        await runner.session.update_session_state(
-            session_id=context.session_id,
-            key="agent.memory",
-            value=memory.state_dict(),
-            user_id=context.user_id,
+    if context.session_id:
+        await _persist_command_memory(
+            runner,
+            context,
+            session_execution,
+            memory,
         )
+        yield response_msg, True
         return
+    yield response_msg, True
     logger.warning(
         "Skipping session_state update for conversation memory due to missing "
         "session_id or user_id (session_id=%r, user_id=%r)",

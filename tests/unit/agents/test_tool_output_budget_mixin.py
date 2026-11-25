@@ -265,6 +265,63 @@ async def test_compacts_source_resolved_tool_result_before_print_and_memory(
 
 
 @pytest.mark.asyncio
+async def test_tool_output_compaction_marks_exact_saved_message(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    marked = []
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.mark_tool_output_compacted",
+        marked.append,
+    )
+    agent = _AgentScopeLikeAgent(
+        config=ToolResultCompactConfig(
+            enabled=True,
+            recent_max_bytes=1000,
+        ),
+        workspace_dir=tmp_path,
+        chunks=[_chunk("private tool body " * 1024)],
+    )
+
+    await agent._acting({"id": "tool-1", "name": "read_file", "input": {}})
+
+    saved_message = agent.memory.messages[0]
+    assert marked == [saved_message.id]
+    assert "private tool body" not in json.dumps(marked)
+
+
+@pytest.mark.asyncio
+async def test_compaction_marker_follows_final_saved_tool_chunk(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    marked = []
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.mark_tool_output_compacted",
+        marked.append,
+    )
+    agent = _AgentScopeLikeAgent(
+        config=ToolResultCompactConfig(
+            enabled=True,
+            recent_max_bytes=1000,
+        ),
+        workspace_dir=tmp_path,
+        chunks=[
+            _chunk("private tool body " * 1024),
+            _chunk("final small result"),
+        ],
+    )
+
+    await agent._acting({"id": "tool-1", "name": "read_file", "input": {}})
+
+    saved_message = agent.memory.messages[0]
+    assert (
+        saved_message.content[0]["output"][0]["text"] == "final small result"
+    )
+    assert marked == []
+
+
+@pytest.mark.asyncio
 async def test_compacts_with_fallback_workspace_when_workspace_is_none(
     tmp_path: Path,
     monkeypatch,

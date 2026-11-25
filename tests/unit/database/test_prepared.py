@@ -166,6 +166,33 @@ async def test_oversized_single_row_allowed_only_below_server_packet_limit():
 
 
 @pytest.mark.asyncio
+async def test_opted_in_text_insert_preserves_order_near_packet_limit():
+    from dataclasses import replace
+    from swe.database.prepared import execute_prepared
+
+    session = ProtocolSession(packet_limit=4 * 1024 * 1024)
+    statement = replace(template(), allow_single_text_insert=True)
+    large = (2, "x" * 3_900_000)
+
+    async def execute_text(sql, params):
+        assert session.executes == [(1, (1, "before"))]
+        assert sql == statement.prefix + statement.row_template
+        assert params == large
+
+    session.execute = AsyncMock(side_effect=execute_text)
+    assert (
+        await execute_prepared(
+            session,
+            statement,
+            [(1, "before"), large, (3, "after")],
+        )
+        == 3
+    )
+    session.execute.assert_awaited_once()
+    assert session.executes == [(1, (1, "before")), (1, (3, "after"))]
+
+
+@pytest.mark.asyncio
 async def test_parameter_limit_splits_even_with_large_row_limit():
     from swe.database.prepared import execute_prepared
 

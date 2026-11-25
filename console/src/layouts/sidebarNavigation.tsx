@@ -27,6 +27,7 @@ import {
   Wrench,
   Puzzle,
   SlidersHorizontal,
+  Activity,
 } from "lucide-react";
 import { KEY_TO_PATH } from "./constants";
 

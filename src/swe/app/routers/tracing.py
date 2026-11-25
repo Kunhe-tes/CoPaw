@@ -13,8 +13,17 @@ from ...config.utils import (
     load_config,
 )
 from ..identity_resolver import resolve_user_identity
-from ..runner.api import _archive_page, _build_chat_history
+from ..runner.api import (
+    _archive_page,
+    _build_chat_history,
+    _storage_call,
+)
 from ..runner.models import ChatArchivePage, ChatHistory, ChatSpec
+from ..runner.chat_summary import (
+    ChatSummaryPage,
+    MAX_SUMMARY_PAGE_SIZE,
+    MAX_SUMMARY_CURSOR_LENGTH,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,25 +126,60 @@ async def get_user_chats(
     )
 
 
+@router.get("/tracing/chats/-/summaries", response_model=ChatSummaryPage)
+async def get_user_chat_summaries(
+    request: Request,
+    user_id: str = Query(...),
+    channel: str | None = Query(None),
+    session_id: str | None = Query(None),
+    page_size: int = Query(100, ge=1, le=MAX_SUMMARY_PAGE_SIZE),
+    cursor: str | None = Query(None, max_length=MAX_SUMMARY_CURSOR_LENGTH),
+):
+    """Read target-user discovery fields without complete metadata bodies."""
+    workspace = await _get_target_workspace(request, user_id)
+    try:
+        return await _storage_call(
+            workspace.chat_manager.list_summaries,
+            user_id=user_id,
+            channel=channel,
+            session_id=session_id,
+            page_size=page_size,
+            cursor=cursor,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
 async def _target_chat(request: Request, user_id: str, chat_id: str):
     """Resolve a target chat; operator access follows the existing gateway policy."""
     workspace = await _get_target_workspace(request, user_id)
-    chat = await workspace.chat_manager.get_chat(chat_id)
-    if not chat or chat.user_id != user_id:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Chat not found: {chat_id}",
-        )
     expected = {
         "source_id": _request_source_id(request),
         "agent_id": request.headers.get("X-Agent-Id")
         or getattr(workspace, "agent_id", None),
     }
-    for key, value in expected.items():
-        stored = (chat.meta or {}).get(key)
-        if value and isinstance(stored, str) and stored and stored != value:
+
+    def authorize(chat: ChatSpec):
+        if chat.id != chat_id or chat.user_id != user_id:
             raise HTTPException(status_code=404, detail="Chat not found")
-    return workspace, chat
+        for key, value in expected.items():
+            stored = (chat.meta or {}).get(key)
+            if (
+                value
+                and isinstance(stored, str)
+                and stored
+                and stored != value
+            ):
+                raise HTTPException(status_code=404, detail="Chat not found")
+
+    chat = await workspace.chat_manager.get_chat(chat_id)
+    if chat is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Chat not found: {chat_id}",
+        )
+    authorize(chat)
+    return workspace, chat, authorize
 
 
 @router.get("/tracing/chats/{chat_id}", response_model=ChatHistory)
@@ -145,7 +189,8 @@ async def get_user_chat(
     user_id: str = Query(..., description="目标用户 ID"),
 ) -> ChatHistory:
     """Read target-user history using the same durable assembly as Chat."""
-    workspace, chat = await _target_chat(request, user_id, chat_id)
+    workspace, chat, _ = await _target_chat(request, user_id, chat_id)
+
     return await _build_chat_history(
         chat,
         session=workspace.runner.session,
@@ -163,7 +208,7 @@ async def get_user_chat_history(
     limit: int = Query(50, ge=1, le=50),
 ) -> ChatArchivePage:
     """Page through the target user's compacted history without impersonation."""
-    workspace, chat = await _target_chat(request, user_id, chat_id)
+    workspace, chat, _ = await _target_chat(request, user_id, chat_id)
     try:
         return await _archive_page(workspace, chat.id, before, limit)
     except ValueError as exc:

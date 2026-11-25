@@ -21,8 +21,62 @@ from .launch_snapshot import (
 from .models import SubAgentRunRecord, WorkerLaunchSpec
 from .run_store import PerRunSubAgentRunStore
 from .runtime import SubAgentRuntime
+from ...observability.context import bind_context
+from ...observability.instrumentation import Observability
+from ...observability.models import ObservabilityContext
 
 _GENERIC_FAILURE_MESSAGE = "SubAgent execution failed."
+_OBSERVABILITY = Observability()
+_SUBAGENT_SPAN_STATUSES = {
+    "completed": "succeeded",
+    "partial": "partial",
+    "blocked": "rejected",
+    "failed": "failed",
+    "cancelled": "cancelled",
+}
+
+
+def _restore_observability_context(
+    request_context: dict[str, Any],
+) -> tuple[ObservabilityContext | None, dict[str, Any] | None]:
+    carrier = request_context.pop("agent_observability_context", None)
+    if not isinstance(carrier, dict):
+        return None, None
+    span_carrier = (
+        carrier if isinstance(carrier.get("context"), dict) else None
+    )
+    context_carrier = (
+        span_carrier.get("context") if span_carrier is not None else carrier
+    )
+    if not isinstance(context_carrier, dict):
+        return None, None
+    try:
+        context = ObservabilityContext.from_carrier(context_carrier)
+    except Exception:
+        return None, None
+    scope = context.scope
+    expected_scope = (
+        str(request_context.get("source_id") or "default"),
+        str(request_context.get("tenant_id") or "default"),
+        str(request_context.get("agent_id") or "default"),
+    )
+    actual_scope = (scope.source_id, scope.tenant_id, scope.agent_id)
+    if actual_scope != expected_scope:
+        return None, None
+    business = context.business_ref
+    for request_key, business_key in (
+        ("session_id", "session_id"),
+        ("chat_id", "chat_id"),
+        ("msgid", "root_question_msgid"),
+    ):
+        expected = request_context.get(request_key)
+        if expected is not None and business.get(business_key) != str(
+            expected,
+        ):
+            return None, None
+    if not context.capture_enabled:
+        return None, None
+    return context, span_carrier
 
 
 def load_launch_spec(path: Path) -> WorkerLaunchSpec:
@@ -66,7 +120,10 @@ async def run_worker(launch_spec_path: Path) -> int:
     )
     try:
         runtime = SubAgentRuntime(store=store)
-        context = launch_spec.request_context
+        context = dict(launch_spec.request_context)
+        observability_context, span_carrier = _restore_observability_context(
+            context,
+        )
         workspace_dir = Path(launch_spec.workspace_dir)
         mcp_clients: list[Any] = []
         selected_slot, selected_provider, parent_slot, parent_provider = (
@@ -100,24 +157,32 @@ async def run_worker(launch_spec_path: Path) -> int:
                 ],
             )
             try:
-                result = await runtime.run(
-                    run=runtime_record,
-                    definition=launch_spec.definition,
-                    spec=launch_spec.delegation_spec,
-                    parent_agent_config=AgentProfileConfig.model_validate(
+                runtime_args = {
+                    "run": runtime_record,
+                    "definition": launch_spec.definition,
+                    "spec": launch_spec.delegation_spec,
+                    "parent_agent_config": AgentProfileConfig.model_validate(
                         launch_spec.parent_agent_config,
                     ),
-                    workspace_dir=workspace_dir,
-                    effective_policy=launch_spec.effective_policy,
-                    request_context=context,
-                    skill_snapshot_dirs=_validated_skill_snapshot_dirs(
+                    "workspace_dir": workspace_dir,
+                    "effective_policy": launch_spec.effective_policy,
+                    "request_context": context,
+                    "skill_snapshot_dirs": _validated_skill_snapshot_dirs(
                         launch_spec,
                     ),
-                    mcp_clients=mcp_clients,
-                    model_slot_override=selected_slot,
-                    model_provider_override=selected_provider,
-                    fallback_model_slot=parent_slot,
-                    fallback_model_provider=parent_provider,
+                    "mcp_clients": mcp_clients,
+                    "model_slot_override": selected_slot,
+                    "model_provider_override": selected_provider,
+                    "fallback_model_slot": parent_slot,
+                    "fallback_model_provider": parent_provider,
+                }
+                result = await _run_background_runtime(
+                    runtime,
+                    runtime_args,
+                    observability_context,
+                    span_carrier,
+                    launch_spec.run_id,
+                    launch_spec.definition.name,
                 )
             finally:
                 await _cleanup_mcp_clients(mcp_clients)
@@ -132,6 +197,99 @@ async def run_worker(launch_spec_path: Path) -> int:
         return 1
     finally:
         _remove_private_snapshot_paths(launch_spec)
+        _shutdown_worker_observability()
+
+
+def _shutdown_worker_observability() -> None:
+    """排空 worker 自己的 emitter，避免退出时丢失尾事件。"""
+    try:
+        emitter = getattr(_OBSERVABILITY, "_provided_emitter", None)
+        if emitter is not None:
+            emitter.close()
+            return
+        from swe.observability.emitter import shutdown_default_emitter
+
+        shutdown_default_emitter()
+    except Exception:
+        pass
+
+
+async def _run_with_subagent_span(
+    runtime,
+    runtime_args,
+    span,
+    subagent_attributes,
+    *,
+    span_carrier=None,
+):
+    def end_span(status, result_status=None):
+        attributes = {**subagent_attributes}
+        if result_status is not None:
+            attributes["result_status"] = result_status
+        if span is not None:
+            span.end(status=status, subagent=attributes)
+        elif span_carrier is not None:
+            _OBSERVABILITY.end_carried_span(
+                span_carrier,
+                status=status,
+                subagent=attributes,
+            )
+
+    try:
+        result = await runtime.run(**runtime_args)
+    except asyncio.CancelledError:
+        end_span("cancelled")
+        raise
+    except Exception:
+        end_span("failed")
+        raise
+    end_span(_SUBAGENT_SPAN_STATUSES[result.status], result.status)
+    return result
+
+
+async def _run_background_runtime(
+    runtime,
+    runtime_args,
+    observability_context,
+    span_carrier,
+    run_id,
+    agent_name,
+):
+    if observability_context is None:
+        return await runtime.run(**runtime_args)
+    runtime_context = observability_context
+    if span_carrier is not None:
+        runtime_context = runtime_context.with_updates(
+            parent_obs_span_id=span_carrier.get("obs_span_id"),
+        )
+    with bind_context(runtime_context):
+        attributes = {
+            "business_subagent_key": run_id,
+            "mode": "background",
+            "execution_agent_key": agent_name,
+        }
+        if span_carrier is not None:
+            return await _run_with_subagent_span(
+                runtime,
+                runtime_args,
+                None,
+                attributes,
+                span_carrier=span_carrier,
+            )
+        span = _OBSERVABILITY.span(
+            "SubAgent",
+            "agent.execute",
+            subagent=attributes,
+        )
+        if span is None:
+            return await runtime.run(**runtime_args)
+        with span:
+            return await _run_with_subagent_span(
+                runtime,
+                runtime_args,
+                span,
+                attributes,
+            )
 
 
 async def _connect_snapshotted_mcp_clients(

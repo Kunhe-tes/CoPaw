@@ -74,7 +74,10 @@ from ..file_manager_execution import (
     run_file_manager_read,
 )
 from ..runner.context_references import MAX_CONTEXT_REFERENCES
-from ..answer_turn.coordinator import TurnSettlementPendingError
+from ..answer_turn.coordinator import (
+    TurnSettlementPendingError,
+    TurnStoppingError,
+)
 from ..answer_turn.models import TurnIdentity, TurnStatus
 
 logger = logging.getLogger(__name__)
@@ -1415,19 +1418,21 @@ async def _start_or_attach_console_turn(
     msgid: str,
     before_start: Callable[[], None] | None,
 ) -> Any:
-    if await coordinator.status(chat.id) == TurnStatus.STOPPING:
-        raise HTTPException(status_code=409, detail="Chat is stopping")
     if chat.channel and chat.channel != "console":
         native_payload["meta"]["session_channel"] = chat.channel
-    kwargs = {"msgid": msgid}
-    if before_start is not None:
-        kwargs["before_start"] = before_start
-    return await coordinator.start_or_attach(
-        chat.id,
-        native_payload,
-        _console_turn_producer(console_channel),
-        **kwargs,
-    )
+    observed_turn = await coordinator.current_identity(chat.id)
+    try:
+        return await coordinator.start_or_attach(
+            chat.id,
+            native_payload,
+            _console_turn_producer(console_channel),
+            msgid=msgid,
+            before_start=before_start,
+            attach_current=True,
+            observed_turn=observed_turn,
+        )
+    except TurnStoppingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 async def _start_new_chat(
@@ -2460,9 +2465,12 @@ async def _resolve_console_stop_chat_id(
 ) -> str | None:
     if requested_chat_id is not None or not session_id:
         return requested_chat_id
-    candidates = await workspace.chat_manager.list_chats(
-        user_id=user_id,
-        channel="console",
+    manager = workspace.chat_manager
+    lookup = getattr(manager, "list_chats_by_session", None)
+    candidates = (
+        await lookup(session_id, user_id, "console")
+        if lookup is not None
+        else await manager.list_chats(user_id=user_id, channel="console")
     )
     matches = [
         chat

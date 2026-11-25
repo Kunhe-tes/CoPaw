@@ -64,13 +64,26 @@ class _WorkspaceGoalPort:
 
 
 class _WorkspaceApprovalPort:
+    def __init__(self, runner: AgentRunner) -> None:
+        self._runner = runner
+
     async def supersede_for_turn(self, identity: TurnIdentity) -> None:
         from ..approvals import get_approval_service
+        from ...observability.runner_lifecycle import (
+            update_deferred_query_run_approval,
+        )
 
-        await get_approval_service().supersede_pending_for_turn(
+        superseded = await get_approval_service().supersede_pending_for_turn(
             identity.chat_id,
             identity.msgid,
         )
+        if superseded:
+            update_deferred_query_run_approval(
+                self._runner,
+                identity,
+                waiting_for_approval=False,
+                clear_attempt=True,
+            )
 
 
 class _WorkspaceSubAgentPort:
@@ -166,6 +179,9 @@ class Workspace:
         self.agent_id = agent_id
         self.workspace_dir = Path(workspace_dir).expanduser()
         self.tenant_id = tenant_id
+        from ...config.context import get_current_source_id
+
+        self.source_id = get_current_source_id()
         self._source_system_config_service = source_system_config_service
         self._workflow_config_store = workflow_config_store
         self._continuous_governance_service = continuous_governance_service
@@ -270,7 +286,7 @@ class Workspace:
             session=runner,
             goal=_WorkspaceGoalPort(self),
             subagent=_WorkspaceSubAgentPort(self),
-            approval=_WorkspaceApprovalPort(),
+            approval=_WorkspaceApprovalPort(runner),
         )
         runner.set_answer_turn_coordinator(coordinator)
         self._answer_turn_coordinator = coordinator

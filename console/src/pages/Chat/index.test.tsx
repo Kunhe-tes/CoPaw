@@ -300,6 +300,7 @@ vi.mock("../../stores/agentStore", () => {
   const useAgentStore = (selector?: (value: typeof state) => unknown) =>
     selector ? selector(state) : state;
   useAgentStore.getState = () => state;
+  useAgentStore.subscribe = () => () => {};
   return { useAgentStore };
 });
 
@@ -337,6 +338,7 @@ vi.mock("../../stores/iframeStore", () => {
     clearNavigationParams: mocks.clearNavigationParams,
   });
 
+  useIframeStore.subscribe = () => () => {};
   return {
     getIframeContext: () => ({ userId: "test-user" }),
     useIframeStore,
@@ -369,6 +371,7 @@ vi.mock("../../api/modules/chat", () => ({
 vi.mock("../../api/modules/cronjob", () => ({
   cronJobApi: {
     listCronJobs: mocks.listCronJobs,
+    listCronJobsForContext: mocks.listCronJobs,
     pauseCronJob: vi.fn(async () => undefined),
     resumeCronJob: vi.fn(async () => undefined),
     runCronJob: vi.fn(async () => undefined),
@@ -434,6 +437,8 @@ vi.mock("./sessionApi", () => {
     getRealIdForSession: (sessionId: string) =>
       mocks.getRealIdForSession(sessionId),
     getSessionList: vi.fn(async () => []),
+    getLoadedSessionView: () => [],
+    projectSessionView: (sessions: unknown[]) => sessions,
     attachDraftChat: vi.fn(),
     setLastUserMessage: vi.fn(),
     updateSession: mocks.updateSession,

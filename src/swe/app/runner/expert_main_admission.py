@@ -306,6 +306,7 @@ async def _resume_approval(workspace, chat, text, source_id, msgid):
         get_approval_service(),
         session_id=chat.session_id,
         request_id=approval_id,
+        user_id=str(getattr(chat, "user_id", "") or ""),
     )
     if pending is not None:
         approval_id = pending.request_id

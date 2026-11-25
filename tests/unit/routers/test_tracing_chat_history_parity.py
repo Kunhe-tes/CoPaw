@@ -44,7 +44,12 @@ async def history_client(tmp_path, monkeypatch):
     app.dependency_overrides[api.get_workspace] = lambda: workspace
     app.dependency_overrides[api.get_chat_manager] = lambda: manager
     app.dependency_overrides[api.get_session] = lambda: session
-    return TestClient(app), session, chat, workspace
+    return (
+        TestClient(app, raise_server_exceptions=False),
+        session,
+        chat,
+        workspace,
+    )
 
 
 @pytest.mark.asyncio
@@ -213,3 +218,9 @@ async def test_empty_archive_and_missing_target(history_client):
         ).status_code
         == 404
     )
+
+
+def _assert_indexed_read_counts(store, workspace, count=1):
+    assert store.chats._hydrate.await_count == count
+    assert store._finish.await_count == count
+    workspace.chat_manager.get_chat.assert_not_awaited()

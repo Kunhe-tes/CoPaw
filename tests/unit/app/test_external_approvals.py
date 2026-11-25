@@ -403,6 +403,231 @@ async def test_external_decision_resolves_source_config_from_workspace_service()
 
 
 @pytest.mark.asyncio
+async def test_cancelled_external_submission_cleans_new_turn(monkeypatch):
+    from swe.app.answer_turn.coordinator import AnswerTurnCoordinator
+    from swe.app.answer_turn.in_memory import (
+        InMemoryApproval,
+        InMemoryExecution,
+        InMemoryGoal,
+        InMemorySession,
+        InMemorySubagent,
+    )
+    from swe.app.answer_turn.models import TurnStatus
+    from swe.app.runner.task_tracker import TaskTracker
+
+    service = ApprovalService()
+    tracker = TaskTracker()
+    coordinator = AnswerTurnCoordinator(
+        stream=tracker,
+        execution=InMemoryExecution(),
+        session=InMemorySession(),
+        goal=InMemoryGoal(),
+        subagent=InMemorySubagent(),
+        approval=InMemoryApproval(),
+    )
+    workspace = _workspace(tracker)
+    workspace.answer_turn_coordinator = coordinator
+    monkeypatch.setattr(
+        "swe.app.approvals.external.get_approval_service",
+        lambda: service,
+    )
+
+    async def cancel_audit(*_args, **_kwargs):
+        await asyncio.sleep(0)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(service, "record_external_submission", cancel_audit)
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_Result(),
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await submit_external_approval_decision(
+                workspace=workspace,
+                pending=pending,
+                decision=ExternalApprovalDecision.APPROVE,
+                source_channel="zhaohu",
+            )
+
+    assert await tracker.wait_all_done(timeout=1)
+    assert await tracker.list_active_tasks() == []
+    assert await coordinator.status("chat:session-1") is None
+    assert len(coordinator.session.calls) == 1
+    assert coordinator.session.calls[0][1].status == TurnStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_deferred_start_cancellation_is_atomic_with_producer_start():
+    from swe.app.answer_turn.coordinator import AnswerTurnCoordinator
+    from swe.app.answer_turn.in_memory import (
+        InMemoryApproval,
+        InMemoryExecution,
+        InMemoryGoal,
+        InMemorySession,
+        InMemorySubagent,
+    )
+    from swe.app.answer_turn.models import TurnStatus
+    from swe.app.runner.task_tracker import TaskTracker
+
+    tracker = TaskTracker()
+    session = InMemorySession()
+    coordinator = AnswerTurnCoordinator(
+        stream=tracker,
+        execution=InMemoryExecution(),
+        session=session,
+        goal=InMemoryGoal(),
+        subagent=InMemorySubagent(),
+        approval=InMemoryApproval(),
+    )
+    persist_started = asyncio.Event()
+    release_persist = asyncio.Event()
+    release_producer = asyncio.Event()
+
+    async def persist_outcome(outcome):
+        persist_started.set()
+        await release_persist.wait()
+        session.calls.append((outcome.identity, outcome))
+
+    session.persist_outcome = persist_outcome
+
+    async def producer(_identity, _payload):
+        await release_producer.wait()
+        yield 'data: {"started": true}\n\n'
+
+    lease = await coordinator.start_or_attach(
+        "chat-atomic",
+        {},
+        producer,
+        msgid="approval-1",
+        defer_producer_start=True,
+    )
+    cancel = asyncio.create_task(
+        coordinator.cancel_unstarted(lease.identity),
+    )
+    await asyncio.wait_for(persist_started.wait(), timeout=1)
+    mark_started = asyncio.create_task(
+        coordinator.mark_producer_started(lease.identity),
+    )
+    await asyncio.sleep(0)
+    assert not mark_started.done()
+
+    release_persist.set()
+    assert await cancel
+    assert await mark_started is False
+    release_producer.set()
+    assert await tracker.wait_all_done(timeout=1)
+    assert session.calls[0][1].status == TurnStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_stop_before_external_gate_release_settles_turn(monkeypatch):
+    from swe.app.answer_turn.coordinator import AnswerTurnCoordinator
+    from swe.app.answer_turn.in_memory import (
+        InMemoryApproval,
+        InMemoryExecution,
+        InMemoryGoal,
+        InMemorySession,
+        InMemorySubagent,
+    )
+    from swe.app.answer_turn.models import TurnStatus
+    from swe.app.runner.task_tracker import TaskTracker
+
+    service = ApprovalService()
+    tracker = TaskTracker()
+    session = InMemorySession()
+    coordinator = AnswerTurnCoordinator(
+        stream=tracker,
+        execution=InMemoryExecution(),
+        session=session,
+        goal=InMemoryGoal(),
+        subagent=InMemorySubagent(),
+        approval=InMemoryApproval(),
+        hard_cancel_delay=10,
+    )
+    workspace = _workspace(tracker)
+    workspace.answer_turn_coordinator = coordinator
+    monkeypatch.setattr(
+        "swe.app.approvals.external.get_approval_service",
+        lambda: service,
+    )
+    console = workspace.channel_manager.console
+    console.stream_one_calls = 0
+    original_stream_one = console.stream_one
+
+    async def count_stream_one(payload):
+        console.stream_one_calls += 1
+        async for event in original_stream_one(payload):
+            yield event
+
+    console.stream_one = count_stream_one
+    submission_started = asyncio.Event()
+    release_submission = asyncio.Event()
+    original_record_submission = service.record_external_submission
+
+    async def delayed_submission(
+        request,
+        *,
+        decision,
+        source_channel,
+        source_user_id=None,
+        source_message_id=None,
+    ):
+        submission_started.set()
+        await release_submission.wait()
+        await original_record_submission(
+            request,
+            decision=decision,
+            source_channel=source_channel,
+            source_user_id=source_user_id,
+            source_message_id=source_message_id,
+        )
+
+    monkeypatch.setattr(
+        service,
+        "record_external_submission",
+        delayed_submission,
+    )
+
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_Result(),
+        )
+        submit = asyncio.create_task(
+            submit_external_approval_decision(
+                workspace=workspace,
+                pending=pending,
+                decision=ExternalApprovalDecision.APPROVE,
+                source_channel="zhaohu",
+            ),
+        )
+        await asyncio.wait_for(submission_started.wait(), timeout=1)
+        identity = await coordinator.current_identity("chat:session-1")
+        assert identity is not None
+        stop = await coordinator.claim_stop(
+            identity,
+            msgid=identity.msgid,
+        )
+        assert stop.accepted
+        release_submission.set()
+        result = await submit
+
+    assert result.submitted
+    assert await tracker.wait_all_done(timeout=1)
+    assert await tracker.list_active_tasks() == []
+    assert await coordinator.status("chat:session-1") is None
+    assert console.stream_one_calls == 0
+    assert session.calls[0][1].status == TurnStatus.CANCELLED
+
+
+@pytest.mark.asyncio
 async def test_pending_notification_applies_to_all_sessions() -> None:
     service = get_approval_service()
     workspace = _workspace()

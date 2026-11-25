@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import asyncio
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -26,6 +27,392 @@ from swe.security.tool_guard.approval import ApprovalDecision
 
 def _result():
     return SimpleNamespace(findings=[], findings_count=0)
+
+
+@pytest.mark.asyncio
+async def test_runner_replay_repairs_audit_without_resuming_tool(monkeypatch):
+    from swe.observability.runner_lifecycle import observe_approval_resolution
+
+    service = ApprovalService()
+    monkeypatch.setattr("swe.app.approvals.service._approval_service", service)
+    events = []
+
+    class FlakyStore:
+        failed = False
+
+        async def upsert_request(self, *_args, **_kwargs):
+            pass
+
+        async def add_event(self, _pending, event_type, **kwargs):
+            if event_type == "resolved" and not self.failed:
+                self.failed = True
+                raise OSError("audit unavailable")
+            events.append((event_type, kwargs.get("status")))
+
+    service.set_store(FlakyStore())
+    observed = []
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+        )
+        runner = AgentRunner()
+        await runner._resolve_pending_approval(
+            "session-1",
+            f"/deny {pending.request_id}",
+        )
+        with observe_approval_resolution(lambda *args: observed.append(args)):
+            replay = await runner._resolve_pending_approval(
+                "session-1",
+                f"/approve {pending.request_id}",
+            )
+
+    response, consumed, tool_call = replay
+    assert response is not None and consumed and tool_call is None
+    assert pending.status == "denied"
+    assert observed == [(None, "denied", False)]
+    assert events == [("created", "pending"), ("resolved", "denied")]
+
+
+@pytest.mark.asyncio
+async def test_approval_replay_preflight_preserves_memory_and_checks_user(
+    monkeypatch,
+):
+    from swe.app.runner.query_preflight import prepare_query_preflight
+
+    service = ApprovalService()
+    monkeypatch.setattr("swe.app.approvals.service._approval_service", service)
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+        )
+        await service.resolve_request(
+            pending.request_id,
+            ApprovalDecision.DENIED,
+        )
+        result = await prepare_query_preflight(
+            AgentRunner(),
+            session_id="session-1",
+            user_id="user-1",
+            query=f"/approve {pending.request_id}",
+            request=SimpleNamespace(user_id="user-1"),
+        )
+        other = await AgentRunner()._resolve_pending_approval(
+            "session-1",
+            f"/approve {pending.request_id}",
+            request=SimpleNamespace(user_id="user-2"),
+        )
+    assert result.response is not None and result.approval_consumed
+    assert not result.cleanup_denied_memory
+    assert other == (None, False, None)
+
+
+@pytest.mark.asyncio
+async def test_approval_observer_failure_does_not_change_decision(monkeypatch):
+    from swe.observability.runner_lifecycle import observe_approval_resolution
+
+    service = ApprovalService()
+    monkeypatch.setattr("swe.app.approvals.service._approval_service", service)
+
+    def failing_observer(*_args):
+        raise RuntimeError("observer unavailable")
+
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+        )
+        with observe_approval_resolution(failing_observer):
+            (
+                response,
+                consumed,
+                tool_call,
+            ) = await AgentRunner()._resolve_pending_approval(
+                "session-1",
+                f"/deny {pending.request_id}",
+            )
+    assert pending.status == "denied"
+    assert response is not None and consumed and tool_call is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [OSError("audit unavailable"), asyncio.CancelledError()],
+)
+async def test_approval_transition_is_observed_before_audit_failure(
+    monkeypatch,
+    failure,
+):
+    from unittest.mock import AsyncMock
+
+    from swe.observability import runner_lifecycle
+    from swe.observability.runner_lifecycle import observe_approval_resolution
+
+    service = ApprovalService()
+    monkeypatch.setattr("swe.app.approvals.service._approval_service", service)
+    observed = []
+    context = object()
+    monkeypatch.setattr(
+        runner_lifecycle,
+        "restore_approval_context",
+        lambda *_: context,
+    )
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+        )
+        monkeypatch.setattr(
+            service,
+            "_persist_request",
+            AsyncMock(side_effect=failure),
+        )
+        with observe_approval_resolution(lambda *args: observed.append(args)):
+            with pytest.raises(type(failure)):
+                await AgentRunner()._resolve_pending_approval(
+                    "session-1",
+                    f"/deny {pending.request_id}",
+                )
+        assert pending.status == "denied"
+    assert observed == [(context, "denied", True)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("carrier_state", ["missing", "mismatched"])
+async def test_approval_never_uses_unrelated_current_run(
+    monkeypatch,
+    carrier_state,
+):
+    from swe.observability import Observability, Scope, bind_context
+    from swe.observability import runner_lifecycle
+
+    service = ApprovalService()
+    monkeypatch.setattr("swe.app.approvals.service._approval_service", service)
+    calls = []
+    monkeypatch.setattr(
+        runner_lifecycle,
+        "record_approval_resolved",
+        lambda *args, **kwargs: calls.append(args),
+    )
+    monkeypatch.setattr(
+        runner_lifecycle,
+        "finish_query_run",
+        lambda *args, **kwargs: calls.append(args),
+    )
+    context = Observability().prepare_run(
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+        business_ref={"chat_id": "chat", "root_question_msgid": "question"},
+    )
+    extra = {}
+    if carrier_state == "mismatched":
+        extra["agent_observability_context"] = context.to_carrier()
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+            extra=extra,
+        )
+        with bind_context(context):
+            (
+                response,
+                consumed,
+                tool_call,
+            ) = await AgentRunner()._resolve_pending_approval(
+                "session-1",
+                f"/deny {pending.request_id}",
+                request=SimpleNamespace(
+                    session_id="session-1",
+                    user_id="user-1",
+                    source_id="source-a",
+                    channel_meta={},
+                ),
+            )
+    assert response is not None and consumed and tool_call is None
+    assert pending.status == "denied"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("query", "timeout", "winner"),
+    [
+        ("/approve", False, ApprovalDecision.DENIED),
+        ("/deny", False, ApprovalDecision.APPROVED),
+        ("/deny", True, ApprovalDecision.APPROVED),
+    ],
+)
+async def test_runner_does_not_observe_losing_approval_decision(
+    monkeypatch,
+    query,
+    timeout,
+    winner,
+):
+    from swe.observability import runner_lifecycle
+
+    service = ApprovalService()
+    observed = []
+    monkeypatch.setattr(
+        "swe.app.approvals.service._approval_service",
+        service,
+    )
+    monkeypatch.setattr(
+        runner_lifecycle,
+        "record_approval_resolved",
+        lambda *args, **kwargs: observed.append(args),
+    )
+    monkeypatch.setattr(
+        runner_lifecycle,
+        "finish_query_run",
+        lambda *args, **kwargs: observed.append(args),
+    )
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+        )
+        resolve = service.resolve_request_once
+
+        async def concurrent_resolution(
+            request_id,
+            decision,
+            *,
+            on_transition=None,
+            user_id=None,
+        ):
+            await resolve(request_id, winner)
+            return await resolve(
+                request_id,
+                decision,
+                on_transition=on_transition,
+                user_id=user_id,
+            )
+
+        monkeypatch.setattr(
+            service,
+            "resolve_request_once",
+            concurrent_resolution,
+        )
+        runner = AgentRunner()
+        if timeout:
+            runner._APPROVAL_TIMEOUT_SECONDS = -1
+        response, consumed, tool_call = await runner._resolve_pending_approval(
+            "session-1",
+            f"{query} {pending.request_id}",
+        )
+        assert (
+            await service.get_request(pending.request_id)
+        ).status == winner.value
+        assert response is not None and consumed and tool_call is None
+    assert observed == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "second",
+    [ApprovalDecision.DENIED, ApprovalDecision.APPROVED],
+)
+async def test_concurrent_approval_resolution_has_one_transition(second):
+    service = ApprovalService()
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+        )
+        results = await asyncio.gather(
+            service.resolve_request_once(
+                pending.request_id,
+                ApprovalDecision.DENIED,
+            ),
+            service.resolve_request_once(pending.request_id, second),
+        )
+    assert sum(changed for _, changed in results) == 1
+    assert all(record is pending for record, _ in results)
+    assert pending.status == "denied"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_runner_approval_resumes_tool_only_once(monkeypatch):
+    from swe.app.runner import runner as runner_module
+    from swe.observability import runner_lifecycle
+
+    service = ApprovalService()
+    monkeypatch.setattr("swe.app.approvals.service._approval_service", service)
+    observed = []
+    monkeypatch.setattr(
+        runner_lifecycle,
+        "record_approval_resolved",
+        lambda *args, **kwargs: observed.append(args),
+    )
+    ready = asyncio.Event()
+    selected = 0
+    original_select = runner_module._select_pending_approval
+
+    async def select(*args, **kwargs):
+        nonlocal selected
+        pending = await original_select(
+            args[0],
+            session_id=kwargs["session_id"],
+            request_id=kwargs["request_id"],
+        )
+        selected += 1
+        if selected == 2:
+            ready.set()
+        await ready.wait()
+        return pending
+
+    monkeypatch.setattr(runner_module, "_select_pending_approval", select)
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+            extra={
+                "tool_call": {
+                    "id": "call-1",
+                    "name": "execute_shell_command",
+                    "input": {},
+                },
+            },
+        )
+        runner = AgentRunner()
+        results = await asyncio.gather(
+            runner._resolve_pending_approval(
+                "session-1",
+                f"/approve {pending.request_id}",
+            ),
+            runner._resolve_pending_approval(
+                "session-1",
+                f"/approve {pending.request_id}",
+            ),
+        )
+    assert sum(tool is not None for _, _, tool in results) == 1
+    assert sum(response is not None for response, _, _ in results) == 1
+    assert observed == []
 
 
 class _GoalWakeService:
@@ -796,3 +1183,93 @@ async def test_runner_external_approval_does_not_duplicate_zhaohu_result(
     assert consumed is True
     assert approved_tool_call is None
     assert zhaohu.result_calls == []
+
+
+@pytest.mark.asyncio
+async def test_pending_approval_rejects_other_user(monkeypatch):
+    """同 scope 内其他用户不能消费不属于自己的待审批请求。"""
+    service = ApprovalService()
+    monkeypatch.setattr("swe.app.approvals.service._approval_service", service)
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+        )
+        result = await AgentRunner()._resolve_pending_approval(
+            "session-1",
+            f"/approve {pending.request_id}",
+            request=SimpleNamespace(
+                session_id="session-1",
+                user_id="user-2",
+            ),
+        )
+    assert result == (None, False, None)
+    assert pending.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_get_pending_by_session_filters_by_user():
+    """FIFO 选择只能命中调用方自己的请求。"""
+    service = ApprovalService()
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        first = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+        )
+        second = await service.create_pending(
+            session_id="session-1",
+            user_id="user-2",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+        )
+        assert (
+            await service.get_pending_by_session(
+                "session-1",
+                user_id="user-2",
+            )
+            is second
+        )
+        assert (
+            await service.get_pending_by_session(
+                "session-1",
+                user_id="user-3",
+            )
+            is None
+        )
+    assert first.status == "pending" and second.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_resolve_request_once_rejects_other_user():
+    """决议接口在锁内再校验一次归属，防止先读后改窗口。"""
+    service = ApprovalService()
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+        )
+        rejected = await service.resolve_request_once(
+            pending.request_id,
+            ApprovalDecision.APPROVED,
+            user_id="user-2",
+        )
+        assert rejected == (None, False)
+        assert pending.status == "pending"
+        resolved, changed = await service.resolve_request_once(
+            pending.request_id,
+            ApprovalDecision.APPROVED,
+            user_id="user-1",
+        )
+    assert changed is True
+    assert resolved is pending
+    assert pending.status == "approved"

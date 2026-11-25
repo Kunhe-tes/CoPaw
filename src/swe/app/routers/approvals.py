@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Approval APIs."""
 
 from __future__ import annotations
@@ -195,6 +196,24 @@ async def _submit_decision(
         _pending_snapshot(pending),
     )
 
+    # 同 scope 可能服务多个用户，必须比对调用方身份与审批归属。
+    caller_user_id = getattr(request.state, "user_id", None) or (
+        request.headers.get("X-User-Id")
+    )
+    owner_user_id = getattr(pending, "user_id", None)
+    if owner_user_id and caller_user_id != owner_user_id:
+        logger.warning(
+            "External approval rejected for foreign user: request_id=%s "
+            "caller_user_id=%s owner_user_id=%s",
+            request_id,
+            caller_user_id,
+            owner_user_id,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="approval belongs to another user",
+        )
+
     try:
         submission = await submit_external_approval_decision(
             workspace=workspace,
@@ -207,7 +226,10 @@ async def _submit_decision(
             or request.headers.get("X-Source-Id"),
             user_name=getattr(request.state, "user_name", None),
             bbk_id=getattr(request.state, "bbk_id", None),
+            caller_user_id=caller_user_id,
         )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except TimeoutError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -235,7 +257,13 @@ async def get_approval_status(
 ) -> ApprovalStatusResponse:
     """Return approval state for click-time frontend conflict checks."""
     service = get_approval_service()
-    status = await service.get_request_status(request_id)
+    caller_user_id = getattr(request.state, "user_id", None) or (
+        request.headers.get("X-User-Id")
+    )
+    status = await service.get_request_status(
+        request_id,
+        user_id=caller_user_id,
+    )
     if status is None:
         logger.info(
             "Approval status not visible: request_id=%s state=%s headers=%s",

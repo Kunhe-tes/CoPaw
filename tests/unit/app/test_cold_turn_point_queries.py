@@ -64,7 +64,7 @@ async def test_answer_turn_reads_only_requested_cold_turn(
         chat_id="chat-a" if by_chat else None,
         mgr=SimpleNamespace(
             get_chat=AsyncMock(return_value=chat()),
-            list_chats=AsyncMock(return_value=[chat()]),
+            list_chats_by_session=AsyncMock(return_value=[chat()]),
         ),
         session=session,
         workspace=SimpleNamespace(workspace_dir=None),

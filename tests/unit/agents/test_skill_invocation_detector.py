@@ -14,7 +14,7 @@ import asyncio
 import json
 from datetime import datetime
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from swe.agents.skill_tool_registry import (
     SkillToolRegistry,
@@ -44,6 +44,52 @@ from swe.agents.skill_invocation_detector import (
 )
 from swe.agents.skill_runtime_profile import SkillRuntimeProfile
 from swe.agents.skills_manager import get_workspace_skill_manifest_path
+
+
+@pytest.mark.asyncio
+async def test_confirmed_skill_activation_emits_snapshot_asset(monkeypatch):
+    import io
+
+    from types import SimpleNamespace
+
+    from swe.observability import ObservabilityContext, Scope, bind_context
+    from swe.observability.config import EmitterConfig
+    from swe.observability.emitter import JsonlEmitter
+
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+    detector = SkillInvocationDetector(
+        context_manager=SimpleNamespace(record_tool_call=Mock()),
+    )
+    detector._ensure_skill_active = AsyncMock()
+    detector._skill_signatures = {"research": "sha256:abc123"}
+    context = ObservabilityContext.new_run(
+        capture_enabled=True,
+        scope=Scope("svc", "source", "tenant", "agent"),
+    )
+
+    with bind_context(context):
+        assert await detector._activate_and_record_skill(
+            "research",
+            1.0,
+            "read_file",
+            None,
+        ) == ("research", {"research": 1.0})
+    emitter.close()
+
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    assert [event["event_name"] for event in events] == ["asset.used"]
+    assert events[0]["asset"] == {
+        "asset_type": "skill",
+        "asset_id": "research",
+        "asset_source": "runtime_snapshot",
+        "asset_digest": "sha256:abc123",
+    }
+    detector._ensure_skill_active.assert_awaited_once()
 
 
 @pytest.fixture(autouse=True)

@@ -40,7 +40,9 @@ class ChatShareStore:
             chat_id=str(row["chat_id"]),
             creator_id=str(row["creator_id"]),
             snapshot_key=str(row["snapshot_key"]),
-            tenant_id=str(row.get("tenant_id") or "default"),
+            tenant_id=(
+                str(row["tenant_id"]) if "tenant_id" in row else "default"
+            ),
             created_at=row["created_at"],
             access_count=int(row.get("access_count") or 0),
             last_access_at=row.get("last_access_at"),
@@ -72,7 +74,7 @@ class ChatShareStore:
 
     async def record_access(self, token: str) -> None:
         now = datetime.now(timezone.utc)
-        await self.db.execute(
+        changed = await self.db.execute(
             f"""
             UPDATE {_TABLE}
             SET access_count = access_count + 1, last_access_at = %s
@@ -80,3 +82,7 @@ class ChatShareStore:
             """,
             (now, token),
         )
+        if changed != 1:
+            raise RuntimeError(
+                "Chat share access count update was not confirmed",
+            )

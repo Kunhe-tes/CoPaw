@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from io import StringIO
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +14,13 @@ from agentscope.message import Msg
 from swe.agents.agent_trace_output import ToolTraceOutcome
 from swe.agents.react_agent import SWEAgent
 from swe.agents.tool_guard_mixin import ToolGuardMixin
+from swe.observability import (
+    Observability,
+    ObservabilityContext,
+    Scope,
+    bind_context,
+)
+from swe.observability.emitter import JsonlEmitter
 from trace_sdk import chat_traced
 from trace_sdk._records import reset, spans
 
@@ -144,3 +153,95 @@ async def test_public_tool_boundary_keeps_business_result_and_traces_memory_outp
         "truncated": False,
         "output_preview": {"message": "safe result"},
     }
+
+
+@pytest.mark.asyncio
+async def test_real_tool_boundary_classifies_structured_results_and_cancellation(
+    monkeypatch,
+):
+    from swe.observability import instrumentation
+
+    class Agent(ToolGuardMixin):
+        def __init__(self, result):
+            self.result = result
+            self.memory = SimpleNamespace(content=[])
+
+        async def _run_tool_call_with_hard_timeout_raw(self, *_args):
+            if isinstance(self.result, BaseException):
+                raise self.result
+            return self.result
+
+        def _extract_current_tool_response(self, *_args, **_kwargs):
+            return self.result
+
+        def _resolve_mcp_server(self, _tool_name):
+            return None
+
+        def _tool_has_specific_timeout(self, _tool_name):
+            return False
+
+    sink = StringIO()
+    emitter = JsonlEmitter(stream=sink)
+    observability = Observability(emitter)
+    monkeypatch.setattr(
+        instrumentation,
+        "Observability",
+        lambda: observability,
+    )
+    context = observability.prepare_run(
+        scope=Scope("svc", "source", "tenant", "agent"),
+        enabled=True,
+    )
+    assert context.capture_enabled is True
+
+    async def execute(result):
+        with bind_context(context):
+            return await Agent(result)._run_tool_call_with_hard_timeout_impl(
+                {"id": "call-1"},
+                "read_file",
+                {"path": "/private/path"},
+            )
+
+    successful = {"content": "private result"}
+    assert await execute(successful) == successful
+
+    structured_failure = {
+        "isError": True,
+        "error_type": "permission_denied",
+        "content": [{"type": "text", "text": "private detail"}],
+    }
+    assert await execute(structured_failure) == structured_failure
+
+    assert await execute({"isError": True}) == {"isError": True}
+
+    with pytest.raises(RuntimeError, match="private exception"):
+        await execute(RuntimeError("private exception"))
+
+    with pytest.raises(asyncio.CancelledError):
+        await execute(asyncio.CancelledError())
+    assert emitter.close(timeout=1) == 0
+    events = [json.loads(line) for line in sink.getvalue().splitlines()]
+    ended = [event for event in events if event["event_name"] == "span.ended"]
+    assert [event["status"] for event in ended] == [
+        "succeeded",
+        "failed",
+        "failed",
+        "failed",
+        "cancelled",
+    ]
+    assert ended[0]["technical_status"] == "OK"
+    assert ended[0]["has_error"] is False
+    assert ended[0]["tool"]["tool_key"] == "read_file"
+    assert ended[0]["tool"]["tool_call_id"] == "call-1"
+    assert ended[1]["technical_status"] == "OK"
+    assert ended[1]["has_error"] is False
+    assert ended[1]["error_type"] == "permission_denied"
+    assert ended[2]["error_type"] == "tool_failure"
+    assert ended[3]["technical_status"] == "ERROR"
+    assert ended[3]["has_error"] is True
+    assert "technical_status" not in ended[4]
+    serialized = sink.getvalue()
+    assert "/private/path" not in serialized
+    assert "private result" not in serialized
+    assert "private detail" not in serialized
+    assert "private exception" not in serialized
