@@ -89,7 +89,7 @@ def get_database_config(
         return val if val else default
 
     def _get_password(name: str, default: str) -> str:
-        """Get password from environment and strip first 3 characters."""
+        """Load a password, removing the optional BEE_ deployment prefix."""
         import logging
 
         logger = logging.getLogger(__name__)
@@ -98,8 +98,7 @@ def get_database_config(
         if not val:
             logger.info("Database password not set (SWE_DB_ACCESS)")
             return default
-        # Strip first 4 characters (e.g., "BEE_" prefix)
-        result = val[4:] if len(val) > 4 else val
+        result = val[4:] if val.startswith("BEE_") else val
         logger.info("Database password loaded")
         return result
 

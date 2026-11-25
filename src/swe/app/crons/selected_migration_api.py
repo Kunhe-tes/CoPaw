@@ -15,7 +15,11 @@ from ...runtime_workers import run_runtime_state_work
 from .managed_api import ResourceRequest, _identity, _locked_operation
 from .managed_diagnostics import format_storage_error
 from .migration_source import capture_loaded_states
-from .selected_migration_source import read_member, stop_legacy_member
+from .selected_migration_source import (
+    read_member,
+    stop_legacy_member,
+    verify_sql_member_chat,
+)
 
 router = APIRouter(
     prefix="/internal/cron/managed",
@@ -74,12 +78,21 @@ async def _member(db, key, loaded, row):
         "AND (async_status IS NULL OR async_status IN ('success','failed','error')) ORDER BY id",
         (key[3], key[0], key[3], key[0]),
     )
+    from ..conversation_storage.runtime import (
+        METADATA_AUTHORITY,
+        storage_authority,
+    )
+
+    sql_catalog = storage_authority() == METADATA_AUTHORITY
     result = await run_runtime_state_work(
         read_member,
         config_utils.WORKING_DIR,
         key,
         loaded,
+        **({"validate_chat": False} if sql_catalog else {}),
     )
+    if sql_catalog:
+        await verify_sql_member_chat(result, key)
     definition, state = result["definition"], result["state"]
     if row.get("creator_user_id") != definition["creator_user_id"]:
         raise ValueError("cron_migration_owner_conflict")

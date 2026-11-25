@@ -57,6 +57,8 @@ class DaemonContext:
     tenant_id: Optional[str] = None
     # Session ID for approval commands.
     session_id: str = ""
+    # Caller identity for approval commands.
+    user_id: str = ""
 
 
 def run_daemon_status(context: DaemonContext) -> str:
@@ -145,31 +147,59 @@ def run_daemon_version(context: DaemonContext) -> str:
 async def run_daemon_approve(
     _context: DaemonContext,
     session_id: str = "",
+    request_id: str | None = None,
+    user_id: str = "",
 ) -> str:
-    """Resolve the next pending tool-guard approval for *session_id*.
+    """Resolve a pending tool-guard approval for *session_id*.
 
-    Called when the user sends ``/daemon approve`` in the chat while a
-    tool-guard approval is pending.  The runner intercepts the message
-    before it reaches this function in most cases, but this serves as
-    a fallback and returns a helpful message when no approval is
-    pending.
+    Called when the user sends ``/daemon approve`` or ``/approve`` in the
+    chat while a tool-guard approval is pending.  When ``request_id`` is
+    given, only that exact request may be approved; a miss returns an
+    explicit error instead of falling back to the session FIFO queue.
     """
     try:
         from ..approvals import get_approval_service
         from ...security.tool_guard.approval import ApprovalDecision
 
         svc = get_approval_service()
-        pending = await svc.get_pending_by_session(session_id)
-        if pending is None:
-            return (
-                "**没有待审批请求**\n\n"
-                "- 当前会话没有等待处理的工具审批。\n"
-                "- 该命令仅在敏感工具调用等待你审核时有效。"
+        # 空身份必须按严格空值匹配，不能退化为“不过滤用户”。
+        owner_filter = str(user_id or "")
+        if request_id:
+            pending = await svc.get_request(
+                request_id,
+                user_id=owner_filter,
             )
-        await svc.resolve_request(
+            if (
+                pending is None
+                or pending.session_id != session_id
+                or pending.status != "pending"
+            ):
+                return (
+                    "**审批请求不存在**\n\n"
+                    f"- 未找到待审批请求 `{request_id[:8]}…`。\n"
+                    "- 请刷新会话后重试，不会自动批准其他请求。"
+                )
+        else:
+            pending = await svc.get_pending_by_session(
+                session_id,
+                user_id=owner_filter,
+            )
+            if pending is None:
+                return (
+                    "**没有待审批请求**\n\n"
+                    "- 当前会话没有等待处理的工具审批。\n"
+                    "- 该命令仅在敏感工具调用等待你审核时有效。"
+                )
+        _, changed = await svc.resolve_request_once(
             pending.request_id,
             ApprovalDecision.APPROVED,
+            user_id=owner_filter,
         )
+        if not changed:
+            return (
+                "**审批请求已处理**\n\n"
+                f"- 请求 `{pending.request_id[:8]}…` 已不是待审批状态。"
+            )
         return (
             f"**Tool execution approved** ✅\n\n"
             f"- Tool: `{pending.tool_name}`\n"
@@ -242,7 +272,13 @@ class DaemonCommandHandlerMixin:
             text = run_daemon_version(context)
         elif sub == "approve":
             session_id = getattr(context, "session_id", "") or ""
-            text = await run_daemon_approve(context, session_id=session_id)
+            user_id = getattr(context, "user_id", "") or ""
+            text = await run_daemon_approve(
+                context,
+                session_id=session_id,
+                request_id=args[0] if args else None,
+                user_id=user_id,
+            )
         else:
             text = "Unknown daemon subcommand."
         logger.info("handle_daemon_command %s completed", query)

@@ -6,7 +6,7 @@ with integrated tools, skills, and memory management.
 """
 
 import asyncio
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from enum import Enum
 import logging
@@ -461,6 +461,21 @@ class ResearchPhaseResult:
     reply: Msg | None
     turns_used: int
     messages: tuple[Msg, ...] = ()
+
+
+def _agent_operation_span():
+    """主 Agent 调用边界的观测 Span；观测关闭时退化为 nullcontext。"""
+    try:
+        from ..observability.instrumentation import Observability
+
+        span = Observability().span(
+            "Agent",
+            "agent.execute",
+            name="agent.execute",
+        )
+    except Exception:
+        span = None
+    return span if span is not None else nullcontext()
 
 
 class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
@@ -2148,6 +2163,8 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         Calls ``super()._reasoning`` to keep the ToolGuardMixin
         interception active.
         """
+        # 记录进入本次推理前的 step 索引，供媒体回退重试复用。
+        step_index_before = getattr(self, "_observability_step_index", 0) or 0
         with self.agent_phase(AgentPhase.REASONING, reason="reasoning"):
             # --- Proactive filtering layer ---
             if not get_active_model_supports_multimodal():
@@ -2187,6 +2204,8 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                     e,
                     n_stripped,
                 )
+                # 同一步内的重试不应占用新的 step，恢复首次调用前的索引。
+                self._observability_step_index = step_index_before
                 return await self._run_reasoning_with_internal_context(
                     tool_choice=tool_choice,
                 )
@@ -2485,6 +2504,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         await self._retrieve_from_knowledge(msg)
 
         last_reply: Msg | None = None
+        self._observability_step_index = 0
         previous_reply_task = self._reply_task
         self._reply_task = asyncio.current_task()
         self._required_structured_model = None
@@ -2526,6 +2546,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         finally:
             self._stop_watchdog()
             self._reply_task = previous_reply_task
+            self._observability_step_index = None
 
     async def _research_messages(self) -> tuple[Msg, ...]:
         """Snapshot research memory for a bounded terminal handoff."""
@@ -2631,13 +2652,16 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         ):
             try:
                 self._start_watchdog()
+                self._observability_step_index = 0
                 with self.agent_phase(AgentPhase.REASONING, reason="reply"):
-                    return await super().reply(
-                        msg=msg,
-                        structured_model=structured_model,
-                    )
+                    with _agent_operation_span():
+                        return await super().reply(
+                            msg=msg,
+                            structured_model=structured_model,
+                        )
             finally:
                 self._stop_watchdog()
+                self._observability_step_index = None
 
     async def interrupt(self, msg: Msg | list[Msg] | None = None) -> None:
         """Interrupt the current reply process and wait for cleanup.

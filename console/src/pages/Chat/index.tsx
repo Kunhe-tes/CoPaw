@@ -52,6 +52,7 @@ import {
 } from "@/api/modules/cronTaskSources";
 import { cronAccessKey } from "@/api/cronTaskContext";
 import { useChatTaskSources } from "./useChatTaskSources";
+import { useTaskSessionView } from "./useTaskSessionView";
 import { useManagedTaskActions } from "./useManagedTaskActions";
 import { useTaskReadOnOpen } from "./useTaskReadOnOpen";
 import { detailToJob } from "../Control/SchedulerCronJobs/helpers";
@@ -247,7 +248,6 @@ import { shouldRouteGoalRequestAsSteering } from "./goalSteeringRouting";
 import { FilePreviewPresentationProvider } from "@/components/agentscope-chat/FilePreviewPresentationContext";
 
 const CHAT_ATTACHMENT_MAX_MB = 10;
-const TASK_RUNNING_POLL_MS = 30_000;
 
 function useExternalApprovalResolvedRefresh() {
   const { refreshSession } = useChatAnywhereSessions();
@@ -313,8 +313,6 @@ const chatCardRenderers = {
     );
   },
 };
-const TASK_PAGE_POLL_MS = 30_000;
-const TASK_PENDING_POLL_MS = 30_000;
 
 function createTimedAbortSignal(
   externalSignal?: AbortSignal,
@@ -724,12 +722,22 @@ function ChatPageContent() {
     jobs,
     setJobs,
     refreshJobs,
+    beginTaskMutation,
+    presence,
+    loaded: tasksLoaded,
+    active: taskSourcesActive,
+    epoch: taskEpoch,
     error: taskQueryError,
     scopeKey: taskScopeKey,
-  } = useChatTaskSources();
-  const taskViewRef = useRef({ scopeKey: taskScopeKey });
-  if (taskViewRef.current.scopeKey !== taskScopeKey)
-    taskViewRef.current = { scopeKey: taskScopeKey };
+  } = useChatTaskSources(chatId);
+  const taskViewKey = JSON.stringify([taskScopeKey, taskEpoch]);
+  useTaskSessionView(presence, taskViewKey, taskSourcesActive);
+  const taskViewRef = useRef({ scopeKey: taskScopeKey, epoch: taskEpoch });
+  if (
+    taskViewRef.current.scopeKey !== taskScopeKey ||
+    taskViewRef.current.epoch !== taskEpoch
+  )
+    taskViewRef.current = { scopeKey: taskScopeKey, epoch: taskEpoch };
   const taskView = taskViewRef.current;
   const currentTaskJobsRef = useRef(jobs);
   currentTaskJobsRef.current = jobs;
@@ -1184,7 +1192,7 @@ function ChatPageContent() {
 
   // taskId 导航需要等待 jobs 加载完成
   useEffect(() => {
-    if (!taskIdRef.current || jobs.length === 0) return;
+    if (!taskIdRef.current || !tasksLoaded) return;
 
     const task = taskQueryError
       ? null
@@ -1203,7 +1211,7 @@ function ChatPageContent() {
     } else {
       taskIdRef.current = null;
     }
-  }, [jobs, navigate, message, taskQueryError]);
+  }, [jobs, navigate, message, taskQueryError, tasksLoaded]);
   // ==================== URL 导航参数结束 ====================
 
   // Setup multimodal capabilities tracking via custom hook
@@ -1228,8 +1236,26 @@ function ChatPageContent() {
     },
     [message],
   );
+  const refreshSchedulerJobs = useCallback(
+    () => refreshJobs({ owner: "scheduler" }),
+    [refreshJobs],
+  );
+  const beginSchedulerMutation = useCallback(
+    () => beginTaskMutation("scheduler"),
+    [beginTaskMutation],
+  );
+  const onTaskReadChanged = useCallback(async () => undefined, []);
+  const beginReadMutation = useCallback(
+    (task: CronJobSpecOutput) => beginTaskMutation(taskOrigin(task)!.owner),
+    [beginTaskMutation],
+  );
   const { perform: performManagedTask, update: updateManagedTask } =
-    useManagedTaskActions(taskScopeKey, refreshJobs, notifyManagedTask);
+    useManagedTaskActions(
+      taskViewKey,
+      refreshSchedulerJobs,
+      notifyManagedTask,
+      beginSchedulerMutation,
+    );
   const notifyReadFailure = useCallback(
     (text: string) => {
       message.warning(text);
@@ -1246,13 +1272,18 @@ function ChatPageContent() {
     setEditingTask(null);
     taskEditForm.resetFields();
     setTaskEditSaving(false);
-  }, [taskScopeKey, taskEditForm]);
+  }, [taskScopeKey, taskEpoch, taskEditForm]);
 
   const { tasks, currentTask } = useMemo(
     () => deriveChatTaskState(jobs, chatId),
     [jobs, chatId],
   );
-  useTaskReadOnOpen(currentTask, refreshJobs, notifyReadFailure);
+  useTaskReadOnOpen(
+    currentTask,
+    onTaskReadChanged,
+    notifyReadFailure,
+    beginReadMutation,
+  );
   const feedbackTask = useMemo(
     () =>
       currentTask
@@ -1318,10 +1349,6 @@ function ChatPageContent() {
   const feedbackLookup = useMemo<FeedbackLookupMap>(
     () => buildFeedbackLookup(feedbackItems, activeFeedbackResponses),
     [activeFeedbackResponses, feedbackItems],
-  );
-  const hasRunningTask = useMemo(
-    () => tasks.some((task) => task.task?.is_running),
-    [tasks],
   );
   const lastFeedbackSessionIdRef = useRef<string | null>(null);
   const feedbackLookupPending = Boolean(
@@ -2020,42 +2047,6 @@ function ChatPageContent() {
   }, []);
 
   useEffect(() => {
-    // 仅从其他标签页切换回来时刷新（移除 window.focus 触发，减少不必要的 API 调用）
-    const handleVisibilityRefresh = () => {
-      if (document.visibilityState === "visible") {
-        void refreshJobs();
-      }
-    };
-
-    // 监听定时任务创建成功事件
-    const handleTaskCreated = () => {
-      void refreshJobs();
-    };
-
-    document.addEventListener("visibilitychange", handleVisibilityRefresh);
-    document.addEventListener("taskCreated", handleTaskCreated);
-
-    return () => {
-      document.removeEventListener("visibilitychange", handleVisibilityRefresh);
-      document.removeEventListener("taskCreated", handleTaskCreated);
-    };
-  }, [refreshJobs]);
-
-  useEffect(() => {
-    const pollMs = hasRunningTask
-      ? TASK_RUNNING_POLL_MS
-      : currentTask?.task?.has_scheduled_result === false
-      ? TASK_PENDING_POLL_MS
-      : TASK_PAGE_POLL_MS;
-
-    const intervalId = window.setInterval(() => {
-      void refreshJobs();
-    }, pollMs);
-
-    return () => window.clearInterval(intervalId);
-  }, [currentTask?.task?.has_scheduled_result, hasRunningTask, refreshJobs]);
-
-  useEffect(() => {
     const hadResult = Boolean(currentTask?.task?.has_scheduled_result);
     if (hadResult && !taskHadResultRef.current) {
       setFeedbackRefreshKey((prev) => prev + 1);
@@ -2090,6 +2081,7 @@ function ChatPageContent() {
         await performManagedTask(task, "resume");
         return;
       }
+      const finish = beginTaskMutation("legacy");
       setJobs((prev) =>
         prev.map((job) =>
           sameTask(job, task)
@@ -2114,20 +2106,20 @@ function ChatPageContent() {
         await cronJobApi.resumeCronJob(task.id);
         if (!isCurrentTaskView(task)) return;
         message.success("任务已恢复");
-        void refreshJobs();
       } catch {
         if (!isCurrentTaskView(task)) return;
         message.error("恢复失败");
-        void refreshJobs();
+      } finally {
+        await finish();
       }
     },
     [
       message,
-      refreshJobs,
+      beginTaskMutation,
       performManagedTask,
       setJobs,
       isCurrentTaskView,
-      canWriteTask,
+        canWriteTask,
     ],
   );
 
@@ -2138,6 +2130,7 @@ function ChatPageContent() {
         await performManagedTask(task, "pause");
         return;
       }
+      const finish = beginTaskMutation("legacy");
       setJobs((prev) =>
         prev.map((job) =>
           sameTask(job, task)
@@ -2160,20 +2153,20 @@ function ChatPageContent() {
         await cronJobApi.pauseCronJob(task.id);
         if (!isCurrentTaskView(task)) return;
         message.success("任务已停止");
-        void refreshJobs();
       } catch {
         if (!isCurrentTaskView(task)) return;
         message.error("停止失败");
-        void refreshJobs();
+      } finally {
+        await finish();
       }
     },
     [
       message,
-      refreshJobs,
+      beginTaskMutation,
       performManagedTask,
       setJobs,
       isCurrentTaskView,
-      canWriteTask,
+        canWriteTask,
     ],
   );
 
@@ -2184,6 +2177,7 @@ function ChatPageContent() {
         await performManagedTask(task, "run");
         return;
       }
+      const finish = beginTaskMutation("legacy");
       setJobs((prev) =>
         prev.map((job) =>
           sameTask(job, task)
@@ -2209,20 +2203,20 @@ function ChatPageContent() {
         await cronJobApi.runCronJob(task.id);
         if (!isCurrentTaskView(task)) return;
         message.success("任务已开始执行");
-        void refreshJobs();
       } catch {
         if (!isCurrentTaskView(task)) return;
         message.error("执行失败");
-        void refreshJobs();
+      } finally {
+        await finish();
       }
     },
     [
       message,
-      refreshJobs,
+      beginTaskMutation,
       performManagedTask,
       setJobs,
       isCurrentTaskView,
-      canWriteTask,
+        canWriteTask,
     ],
   );
 
@@ -2248,6 +2242,7 @@ function ChatPageContent() {
               navigate("/chat", { replace: true });
             return;
           }
+          const finish = beginTaskMutation("legacy");
           setJobs((prev) => prev.filter((job) => !sameTask(job, task)));
           if (task.task?.chat_id && task.task.chat_id === chatIdRef.current) {
             navigate("/chat", { replace: true });
@@ -2256,11 +2251,11 @@ function ChatPageContent() {
             await cronJobApi.deleteCronJob(task.id);
             if (!isCurrentTaskView(task)) return;
             message.success("任务已删除");
-            void refreshJobs();
           } catch {
             if (!isCurrentTaskView(task)) return;
             message.error("删除失败");
-            void refreshJobs();
+          } finally {
+            await finish();
           }
         },
       });
@@ -2268,7 +2263,7 @@ function ChatPageContent() {
     [
       message,
       navigate,
-      refreshJobs,
+      beginTaskMutation,
       performManagedTask,
       setJobs,
       isCurrentTaskView,
@@ -2328,6 +2323,9 @@ function ChatPageContent() {
       if (!editingTask) return;
       if (!canWriteTask(editingTask)) return;
 
+      const finish = isSchedulerTask(editingTask)
+        ? null
+        : beginTaskMutation("legacy");
       setTaskEditSaving(true);
       try {
         if (isSchedulerTask(editingTask)) {
@@ -2354,7 +2352,6 @@ function ChatPageContent() {
         message.success("任务已更新");
         setEditingTask(null);
         taskEditForm.resetFields();
-        void refreshJobs();
       } catch (error) {
         if (!isCurrentTaskView(editingTask)) return;
         console.error("Failed to update cron task from chat sidebar:", error);
@@ -2362,13 +2359,14 @@ function ChatPageContent() {
           error instanceof SyntaxError ? "任务配置格式不正确" : "保存失败",
         );
       } finally {
+        await finish?.();
         if (isCurrentTaskView(editingTask)) setTaskEditSaving(false);
       }
     },
     [
       editingTask,
       message,
-      refreshJobs,
+      beginTaskMutation,
       taskEditForm,
       updateManagedTask,
       isCurrentTaskView,

@@ -9,7 +9,7 @@ import asyncio
 import copy
 import logging
 import math
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from typing import Any, AsyncGenerator, Protocol, cast
 
 from agentscope.message import Msg, TextBlock
@@ -20,10 +20,15 @@ from ...config.context import (
     set_current_file_url_network,
 )
 from ...runtime_invocation_claims import runtime_invocation_claims_context
+from ...observability.nas_evidence import (
+    collect_nas_evidence,
+    publish_nas_evidence,
+)
 from ...tracing.models import TraceStatus
 from ...tracing.agent_trace_capture import mark_turn_cancelled
 from ...tracing.agent_trace_sdk import OperationName, start_child_span
 from ..agent_context import set_current_agent_id
+from ..channels.schema import DEFAULT_CHANNEL
 from .query_contracts import (
     QueryPersistenceResult,
     _QueryPreflight,
@@ -401,6 +406,13 @@ async def stream_single_query_attempt(
                 "msgid",
             ),
         )
+        indexed_query = getattr(
+            attempt_input.session_execution,
+            "indexed_query",
+            None,
+        )
+        if indexed_query is not None:
+            await indexed_query.bind_runtime(runtime)
         retry_state.agent = runtime.agent
         retry_state.session_state_loaded = attempt_state.session_state_loaded
         skill_freshness_refresh = await owner._refresh_session_skill_freshness(
@@ -491,18 +503,7 @@ async def _stream_retry_attempt(
     request: AgentRequest,
     session_execution: Any,
     session_id: str,
-    backoff_base: float,
-    backoff_cap: float,
 ) -> AsyncGenerator[tuple[Msg, bool], None]:
-    async for item in owner._stream_retry_backoff_notice(
-        retry_attempt=retry_attempt,
-        max_retries=max_retries,
-        backoff_base=backoff_base,
-        backoff_cap=backoff_cap,
-        session_id=session_id,
-        retry_state=retry_state,
-    ):
-        yield item
     try:
         async with start_child_span(
             "agent.attempt",
@@ -538,6 +539,12 @@ async def _stream_retry_attempt(
         attempt_state.should_return = True
         return
     except Exception as exc:
+        from ..conversation_storage.errors import StorageError
+
+        if isinstance(exc, StorageError):
+            if session_execution is not None and hasattr(exc, "operation_key"):
+                session_execution.pending_operation = exc.operation_key
+            raise
         if getattr(outcome, "stop_append_started", False):
             log_append_diagnostic(
                 "Stop append finalization failed category=%s trace_id=%s",
@@ -600,9 +607,46 @@ async def _stream_retry_attempts(
     session_execution: Any,
     session_id: str,
     retry_settings: tuple[int, int, float, float],
+    observability_context=None,
+    observability_attempt_ref=None,
 ) -> AsyncGenerator[tuple[Msg, bool], None]:
     max_retry_attempts, max_retries, backoff_base, backoff_cap = retry_settings
     for retry_attempt in range(max_retry_attempts):
+        if retry_attempt:
+            async for item in owner._stream_retry_backoff_notice(
+                retry_attempt=retry_attempt,
+                max_retries=max_retries,
+                backoff_base=backoff_base,
+                backoff_cap=backoff_cap,
+                session_id=session_id,
+                retry_state=retry_state,
+            ):
+                yield item
+            if observability_attempt_ref is not None:
+                from ...observability.runner_lifecycle import (
+                    end_query_attempt,
+                    start_query_retry_attempt,
+                )
+
+                previous = observability_attempt_ref["value"]
+                end_query_attempt(previous, status="failed")
+                next_attempt = start_query_retry_attempt(previous)
+                observability_attempt_ref["value"] = next_attempt
+            if observability_context is not None:
+                from ...observability.runner_lifecycle import (
+                    bind_query_context,
+                )
+
+                attempt_context = (
+                    observability_attempt_ref["value"]
+                    if observability_attempt_ref is not None
+                    else observability_context
+                )
+                attempt_binding = bind_query_context(attempt_context)
+            else:
+                attempt_binding = nullcontext()
+        else:
+            attempt_binding = nullcontext()
         retry_state.prev_agent = retry_state.agent
         retry_state.prev_session_state_loaded = (
             retry_state.session_state_loaded
@@ -611,23 +655,22 @@ async def _stream_retry_attempts(
         retry_state.session_state_loaded = False
         attempt_state = owner._new_query_attempt_state()
         attempt_state_ref["value"] = attempt_state
-        async for item in _stream_retry_attempt(
-            owner,
-            retry_attempt=retry_attempt,
-            max_retry_attempts=max_retry_attempts,
-            max_retries=max_retries,
-            retry_state=retry_state,
-            attempt_state=attempt_state,
-            attempt_input=attempt_input,
-            outcome=outcome,
-            trace_id=trace_id,
-            request=request,
-            session_execution=session_execution,
-            session_id=session_id,
-            backoff_base=backoff_base,
-            backoff_cap=backoff_cap,
-        ):
-            yield item
+        with attempt_binding:
+            async for item in _stream_retry_attempt(
+                owner,
+                retry_attempt=retry_attempt,
+                max_retry_attempts=max_retry_attempts,
+                max_retries=max_retries,
+                retry_state=retry_state,
+                attempt_state=attempt_state,
+                attempt_input=attempt_input,
+                outcome=outcome,
+                trace_id=trace_id,
+                request=request,
+                session_execution=session_execution,
+                session_id=session_id,
+            ):
+                yield item
         if attempt_state.should_return or attempt_state.succeeded:
             return
 
@@ -842,6 +885,13 @@ async def _save_and_close_session_execution(
             session_execution=session_execution,
         )
         if committed:
+            publish_nas_evidence(
+                _get_memory_entry_message(entry)
+                for entry in _get_persisted_memory_entries(
+                    session_execution.state,
+                )
+                or ()
+            )
             (
                 assistant_message_count,
                 persisted_assistant_content,
@@ -1082,6 +1132,8 @@ async def stream_query_after_preflight(
     session_id: str,
     preflight: _QueryPreflight,
     session_execution: Any = None,
+    observability_context=None,
+    observability_attempt_ref=None,
 ) -> AsyncGenerator[tuple[Msg, bool], None]:
     """Run retry attempts and final cleanup after preflight succeeds."""
     cleanup_runtime: _QueryRuntime | None = None
@@ -1089,13 +1141,16 @@ async def stream_query_after_preflight(
     runtime_start = None
     outcome = None
     try:
-        async with _query_session_execution(
-            owner,
-            session_id,
-            str(getattr(request, "user_id", "") or ""),
-            request=request,
-            session_execution=session_execution,
-        ) as session_execution:
+        async with (
+            collect_nas_evidence(),
+            _query_session_execution(
+                owner,
+                session_id,
+                str(getattr(request, "user_id", "") or ""),
+                request=request,
+                session_execution=session_execution,
+            ) as session_execution,
+        ):
             logger.debug(
                 "AgentRunner.stream_query: request=%s, agent_id=%s",
                 request,
@@ -1136,6 +1191,8 @@ async def stream_query_after_preflight(
                     session_execution=session_execution,
                     session_id=session_id,
                     retry_settings=_query_retry_settings(owner, preflight),
+                    observability_context=observability_context,
+                    observability_attempt_ref=observability_attempt_ref,
                 ):
                     yield item
             finally:
@@ -1189,6 +1246,14 @@ async def _query_session_execution(
     if session is None or not hasattr(session, "execution"):
         yield None
         return
+    manager = getattr(owner, "_chat_manager", None)
+    claim = getattr(manager, "claim_session_path", None)
+    if claim is not None and request is not None:
+        await claim(
+            session_id,
+            user_id,
+            getattr(request, "channel", None) or DEFAULT_CHANNEL,
+        )
     async with session.execution(
         session_id,
         user_id=user_id,

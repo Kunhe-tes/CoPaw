@@ -13,7 +13,7 @@ from typing import Any, Optional
 from uuid import UUID
 
 from ...agents.memory.conversation_archive import ConversationArchiveStore
-from .models import ChatPage, ChatSpec
+from .models import MANUAL_CHAT_TITLE_META_KEY, ChatPage, ChatSpec
 from .repo import BaseChatRepository
 from ..channels.schema import DEFAULT_CHANNEL
 
@@ -120,6 +120,13 @@ class ChatManager:
             expected_revision,
         )
 
+    async def claim_session_path(self, session_id, user_id, channel):
+        claim = getattr(self._repo, "ensure_session_path", None)
+        if claim is None:
+            claim = getattr(self._repo, "claim_session", None)
+        if claim is not None:
+            await claim(session_id, user_id, channel)
+
     # ----- Read Operations -----
 
     async def list_chats(
@@ -145,6 +152,18 @@ class ChatManager:
             channel=channel,
         )
         return self._repo.sort_chats_by_recency(chats)
+
+    async def list_chats_by_session(self, session_id, user_id, channel):
+        lookup = getattr(self._repo, "filter_chats_by_session", None)
+        if lookup is not None:
+            return self._repo.sort_chats_by_recency(
+                await lookup(session_id, user_id, channel),
+            )
+        return [
+            chat
+            for chat in await self.list_chats(user_id=user_id, channel=channel)
+            if chat.session_id == session_id
+        ]
 
     async def list_chats_page(
         self,
@@ -187,6 +206,24 @@ class ChatManager:
             cursor=cursor,
         )
 
+    async def list_summaries(
+        self,
+        *,
+        page_size=100,
+        cursor=None,
+        user_id=None,
+        channel=None,
+        session_id=None,
+    ):
+        """List discovery fields without requesting complete metadata."""
+        return await self._repo.list_summaries(
+            page_size=page_size,
+            cursor=cursor,
+            user_id=user_id,
+            channel=channel,
+            session_id=session_id,
+        )
+
     async def get_chat(self, chat_id: str) -> Optional[ChatSpec]:
         """Get chat spec by chat_id (UUID).
 
@@ -209,6 +246,9 @@ class ChatManager:
         The normal product invariant is unique by session, user, and channel.
         If legacy data has duplicates, return the most recently updated match.
         """
+        latest = getattr(self._repo, "latest_chat_by_session", None)
+        if latest is not None:
+            return await latest(session_id, channel, user_id)
         chats = await self._repo.filter_chats(
             user_id=user_id,
             channel=channel,
@@ -338,9 +378,31 @@ class ChatManager:
                     )
                 )
             except BaseException:
-                self._delete_session_resources([spec.id])
+                if (
+                    getattr(
+                        self._repo,
+                        "deferred_resource_cleanup",
+                        False,
+                    )
+                    is not True
+                    and getattr(
+                        self._repo,
+                        "preserve_failed_scenario_resources",
+                        False,
+                    )
+                    is not True
+                ):
+                    self._delete_session_resources([spec.id])
                 raise
-            if not created:
+            if (
+                not created
+                and getattr(
+                    self._repo,
+                    "deferred_resource_cleanup",
+                    False,
+                )
+                is not True
+            ):
                 self._delete_session_resources([spec.id])
             return chat, created
 
@@ -362,7 +424,12 @@ class ChatManager:
         async with self._lock:
             return await self._repo.create_chat_if_absent_by_session(spec)
 
-    async def update_chat(self, spec: ChatSpec) -> ChatSpec:
+    async def update_chat(
+        self,
+        spec: ChatSpec,
+        *,
+        expected_chat: ChatSpec | None = None,
+    ) -> ChatSpec:
         """Update an existing chat spec.
 
         Args:
@@ -373,6 +440,12 @@ class ChatManager:
         """
         async with self._lock:
             existing = await self._repo.get_chat(spec.id)
+            if existing is None:
+                raise KeyError(spec.id)
+            if expected_chat is not None and existing != expected_chat:
+                from ..conversation_storage.errors import ConflictError
+
+                raise ConflictError("Chat changed since patch was read")
             if existing is not None and _should_keep_generated_title(
                 existing=existing,
                 incoming=spec,
@@ -386,7 +459,18 @@ class ChatManager:
                 await self._repo.upsert_chat(spec)
                 updated = await self._repo.get_chat(spec.id)
             else:
-                updated = await update(spec)
+                conditional_update = getattr(
+                    self._repo,
+                    "update_chat_if_unchanged",
+                    None,
+                )
+                if (
+                    expected_chat is not None
+                    and conditional_update is not None
+                ):
+                    updated = await conditional_update(spec, expected_chat)
+                else:
+                    updated = await update(spec)
             if updated is None:
                 raise KeyError(spec.id)
             return updated
@@ -416,6 +500,9 @@ class ChatManager:
                     chat_id,
                 )
                 return False
+            if spec.meta.get(MANUAL_CHAT_TITLE_META_KEY):
+                return False
+            expected_chat = spec.model_copy(deep=True)
             spec.name = name
             if meta:
                 spec.meta = {
@@ -423,10 +510,23 @@ class ChatManager:
                     **meta,
                 }
             spec.updated_at = datetime.now(timezone.utc)
-            await self._repo.upsert_chat(spec)
-            return True
+            conditional_update = getattr(
+                self._repo,
+                "update_chat_if_unchanged",
+                None,
+            )
+            if conditional_update is not None:
+                return (
+                    await conditional_update(spec, expected_chat) is not None
+                )
+            return await self._repo.update_chat_if_exists(spec) is not None
 
-    async def delete_chats(self, chat_ids: list[str]) -> bool:
+    async def delete_chats(
+        self,
+        chat_ids: list[str],
+        *,
+        expected_chats=None,
+    ) -> bool:
         """Delete a chat spec.
 
         Note: This only deletes the spec. Redis session state is NOT deleted.
@@ -438,6 +538,30 @@ class ChatManager:
             True if deleted, False if not found
         """
         async with self._lock:
+            if (
+                getattr(self._repo, "pending_resource_cleanup", None)
+                is not None
+            ):
+                deleted = await self._repo.delete_chats(
+                    chat_ids,
+                    expected_chats=expected_chats,
+                )
+                await self.cleanup_deleted_chat_resources(chat_ids=chat_ids)
+                return deleted
+            if getattr(self._repo, "deferred_resource_cleanup", False) is True:
+                if expected_chats is not None:
+                    return await self._repo.delete_chats(
+                        chat_ids,
+                        expected_chats=expected_chats,
+                    )
+                return await self._repo.delete_chats(chat_ids)
+            if expected_chats is not None:
+                from ..conversation_storage.errors import ConflictError
+
+                for chat_id in chat_ids:
+                    current = await self._repo.get_chat(chat_id)
+                    if current != expected_chats.get(chat_id):
+                        raise ConflictError("Chat changed since authorization")
             existing_ids = {
                 chat.id
                 for chat in await self._repo.list_chats()
@@ -459,7 +583,36 @@ class ChatManager:
 
             return deleted
 
-    def _delete_session_resources(self, chat_ids: list[str]) -> None:
+    async def cleanup_deleted_chat_resources(self, *, chat_ids=None):
+        pending = getattr(self._repo, "pending_resource_cleanup", None)
+        if pending is None:
+            return
+        after = b""
+        while ids := await pending(chat_ids=chat_ids, after=after):
+            for chat_id in ids:
+                await self._cleanup_deleted_chat(chat_id)
+            after = ids[-1].encode()
+
+    async def _cleanup_deleted_chat(self, chat_id):
+        if not _is_valid_chat_id(chat_id):
+            return
+        try:
+            if self._archive_store is not None:
+                await self._archive_store.delete_chat(chat_id)
+            self._delete_session_resources([chat_id], strict=True)
+            await self._repo.finish_resource_cleanup(chat_id)
+        except (OSError, RuntimeError):
+            logger.exception(
+                "Chat resource cleanup will be retried for %s",
+                chat_id,
+            )
+
+    def _delete_session_resources(
+        self,
+        chat_ids: list[str],
+        *,
+        strict: bool = False,
+    ) -> None:
         if (
             self._resource_root is None
             and self._expert_dependency_root is None
@@ -487,7 +640,15 @@ class ChatManager:
                 except OSError:
                     safe_to_remove = False
                 if safe_to_remove:
-                    shutil.rmtree(target, ignore_errors=True)
+                    if strict:
+                        try:
+                            shutil.rmtree(target)
+                        except FileNotFoundError:
+                            pass
+                    else:
+                        shutil.rmtree(target, ignore_errors=True)
+                elif strict:
+                    raise OSError(f"invalid Chat resource path: {target}")
             if self._expert_dependency_root is not None:
                 from ..subagents import (
                     release_community_expert_dependency_view_for_chat,
@@ -496,6 +657,7 @@ class ChatManager:
                 release_community_expert_dependency_view_for_chat(
                     workspace_dir=self._expert_dependency_root,
                     chat_id=chat_id,
+                    strict=strict,
                 )
 
     async def count_chats(

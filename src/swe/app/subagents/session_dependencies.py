@@ -170,6 +170,7 @@ def release_community_expert_dependency_view_for_chat(
     *,
     workspace_dir: Path,
     chat_id: str,
+    strict: bool = False,
 ) -> None:
     """Release all received-expert bindings belonging to an ended Chat."""
     canonical_chat_id = _canonical_uuid(chat_id, "chat id")
@@ -178,7 +179,7 @@ def release_community_expert_dependency_view_for_chat(
         / _EXPERT_SESSION_ROOT_NAME
         / canonical_chat_id
     )
-    _remove_snapshot_tree(root)
+    _remove_snapshot_tree(root, strict=strict)
 
 
 def capture_community_expert_session_dependencies(

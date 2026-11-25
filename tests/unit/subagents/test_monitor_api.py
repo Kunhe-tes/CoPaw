@@ -105,6 +105,69 @@ async def test_monitor_records_scan_runs_filesystem_io_off_event_loop(
     assert len(calls) == 1
 
 
+@pytest.mark.asyncio
+async def test_population_counts_only_visible_chat_session_records(tmp_path):
+    now = datetime.now(timezone.utc)
+    records = {
+        "subagent-a.json": SimpleNamespace(
+            spec=SimpleNamespace(
+                parent_thread_id="session-a",
+                parent_chat_id="chat-a",
+            ),
+            created_at=now,
+            status="succeeded",
+        ),
+        "subagent-b.json": SimpleNamespace(
+            spec=SimpleNamespace(
+                parent_thread_id="session-a",
+                parent_chat_id="",
+            ),
+            created_at=now,
+            status="running",
+        ),
+        "subagent-c.json": SimpleNamespace(
+            spec=SimpleNamespace(
+                parent_thread_id="session-b",
+                parent_chat_id="",
+            ),
+            created_at=now,
+            status="running",
+        ),
+        "subagent-other.json": SimpleNamespace(
+            spec=SimpleNamespace(
+                parent_thread_id="session-other",
+                parent_chat_id="chat-other",
+            ),
+            created_at=now,
+            status="failed",
+        ),
+    }
+    for name in records:
+        (tmp_path / name).touch()
+    service = SubAgentMonitorService(
+        supervisor=SimpleNamespace(),
+        scope=SimpleNamespace(run_store_dir=tmp_path),
+    )
+    service._read_record = lambda path: records.get(path.name)
+
+    result = await service.population(
+        chats_by_session={
+            "session-a": {"chat-a", "chat-b"},
+            "session-b": {"chat-b"},
+        },
+        start_at=now - timedelta(minutes=1),
+        end_at=now + timedelta(minutes=1),
+    )
+
+    assert result == {
+        "count": 3,
+        "scanned_count": 4,
+        "by_status": {"running": 2, "succeeded": 1},
+        "unresolved_count": 2,
+        "has_more": False,
+    }
+
+
 def _client(
     tmp_path,
     *,

@@ -31,6 +31,8 @@ class Cursor:
             "value": "中文",
             "max_allowed_packet": 1048576,
             "sql_mode": self.conn.sql_mode,
+            "database_name": self.conn.kwargs.get("database"),
+            "server_uuid": self.conn.server_uuid,
         }
 
     async def fetchall(self):
@@ -48,6 +50,7 @@ class Connection:
         self.calls = []
         self.failure = None
         self.sql_mode = ""
+        self.server_uuid = "server"
         self.in_transaction = False
         self.closed = False
         self.autocommit = True
@@ -118,6 +121,27 @@ async def test_crud_result_and_reuse(db):
 
 
 @pytest.mark.asyncio
+async def test_packet_capability_is_local_task_owned_and_read_only(db):
+    async with db.transaction() as session:
+        before = list(Connection.instances[0].calls)
+        assert session.max_allowed_packet == 1048576
+        async with db.acquire() as nested:
+            assert nested is session
+            assert nested.max_allowed_packet == 1048576
+        assert Connection.instances[0].calls == before
+        with pytest.raises(AttributeError):
+            session.max_allowed_packet = 1
+
+        async def foreign_task():
+            with pytest.raises(RuntimeError, match="different task"):
+                return session.max_allowed_packet
+
+        await asyncio.create_task(foreign_task())
+    with pytest.raises(RuntimeError, match="no longer usable"):
+        _ = session.max_allowed_packet
+
+
+@pytest.mark.asyncio
 async def test_nested_transaction_and_lock_share_one_session(db):
     async with db.named_lock("key"):
         async with db.transaction() as session:
@@ -145,6 +169,22 @@ async def test_cross_database_and_child_task_binding(db, monkeypatch):
         assert len(Connection.instances) == 2
     finally:
         await other.close()
+
+
+@pytest.mark.asyncio
+async def test_independent_task_does_not_inherit_database_session(db):
+    session = object()
+    token = module._CURRENT_CONNECTION.set({db: session})
+    try:
+
+        async def current_session():
+            return db._current()
+
+        task = db.create_independent_task(current_session())
+        assert await task is None
+        assert module._CURRENT_CONNECTION.get() == {db: session}
+    finally:
+        module._CURRENT_CONNECTION.reset(token)
 
 
 @pytest.mark.asyncio
@@ -241,6 +281,23 @@ async def test_connect_uses_official_constructor_contract(db):
     assert conn.kwargs["autocommit"] is True
     assert isinstance(conn.kwargs["read_timeout"], int)
     assert isinstance(conn.kwargs["write_timeout"], int)
+
+
+@pytest.mark.asyncio
+async def test_expected_database_identity_accepts_matching_pool_connection(db):
+    db.expect_identity("server", db.config.database)
+    await db.execute("QUERY")
+    assert len(Connection.instances) == 1
+
+
+@pytest.mark.asyncio
+async def test_expected_database_identity_rejects_new_connection_on_other_server(
+    db,
+):
+    db.expect_identity("expected-server", db.config.database)
+    with pytest.raises(RuntimeError, match="connection identity differs"):
+        await db.execute("QUERY")
+    assert not db._pool._entries
 
 
 @pytest.mark.asyncio
@@ -694,3 +751,84 @@ async def test_closed_pool_does_not_start_rollback_io(db):
         await db.close()
         await db._rollback(session)
         rollback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_control_reservation_preserves_capacity_and_pool_limit(db):
+    db.config.max_connections = 2
+    db.config.acquire_timeout = 0.03
+    async with db.reserve_control_capacity():
+        async with db.acquire():
+
+            async def ordinary():
+                async with db.acquire():
+                    pytest.fail("ordinary work consumed control capacity")
+
+            with pytest.raises(TimeoutError):
+                await contextvars.Context().run(
+                    asyncio.create_task,
+                    ordinary(),
+                )
+
+            async def control():
+                with db.control_priority():
+                    async with db.acquire():
+                        assert len(db._pool._entries) == 2
+
+            await contextvars.Context().run(asyncio.create_task, control())
+        assert len(db._pool._entries) == 2
+    # Reservation ends, both physical positions are available to ordinary work.
+    async with db.acquire():
+
+        async def ordinary_after_release():
+            async with db.acquire():
+                return True
+
+        assert await contextvars.Context().run(
+            asyncio.create_task,
+            ordinary_after_release(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_control_reservations_share_one_slot_and_single_connection_works(
+    db,
+):
+    async with db.reserve_control_capacity():
+        async with db.reserve_control_capacity():
+            async with db.acquire():
+                assert len(db._pool._entries) == 1
+        with db.control_priority():
+            async with db.acquire():
+                assert len(db._pool._entries) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_capacity_scope_releases_reservation_and_wakes_waiter(
+    db,
+):
+    db.config.max_connections = 2
+    db.config.acquire_timeout = 0.5
+    active = asyncio.Event()
+
+    async def reserve():
+        async with db.reserve_control_capacity():
+            active.set()
+            await asyncio.Event().wait()
+
+    reservation = asyncio.create_task(reserve())
+    await active.wait()
+    async with db.acquire():
+
+        async def ordinary():
+            async with db.acquire():
+                return True
+
+        waiter = contextvars.Context().run(asyncio.create_task, ordinary())
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        reservation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reservation
+        assert await asyncio.wait_for(waiter, 0.2)
+    assert db._pool.control_reservations == 0

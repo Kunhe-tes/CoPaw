@@ -76,6 +76,43 @@ function managedTask(
   return tagTask(job, "scheduler", context, accessKey) as SourcedManagedTask;
 }
 
+export async function loadTaskSource(
+  owner: CronTaskOrigin["owner"],
+  context: ManagedCronContext,
+  signal?: AbortSignal,
+  accessKey = cronAccessKey(context),
+): Promise<SourcedCronTask[]> {
+  const [jobs, ownership] = await Promise.all([
+    owner === "scheduler"
+      ? schedulerCronApi
+          .listAll(context, { signal })
+          .then((items) =>
+            items.map((item) => managedTask(item, context, accessKey)),
+          )
+      : cronJobApi.listCronJobsForContext(context, signal).then((items) => {
+          if (!Array.isArray(items)) throw new Error("invalid_legacy_task_list");
+          return items.map((item) => tagTask(item, "legacy", context, accessKey));
+        }),
+    cronMigrationApi.ownership(context, signal),
+  ]);
+  return filterMigrationOwnedTasks(jobs, owner, ownership);
+}
+
+function filterMigrationOwnedTasks(
+  jobs: SourcedCronTask[],
+  owner: CronTaskOrigin["owner"],
+  ownership: MigrationOwnership[],
+) {
+  const facts = new Map(ownership.map((fact) => [ownershipKey(fact), fact]));
+  return jobs.filter((job) => {
+    const fact = facts.get(taskMigrationKey(job));
+    if (!fact) return true;
+    if (!bindingMatches(job, fact))
+      throw new Error("task_migration_binding_conflict");
+    return owner === "scheduler" ? fact.completed : !fact.completed;
+  });
+}
+
 /** 两个来源各自成功或失败；新列表必须完整遍历，失败不能解释为任务已删除。 */
 export async function listTaskSources(
   context: ManagedCronContext,

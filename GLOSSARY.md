@@ -4,6 +4,34 @@ This context defines the domain language for Swe's agent orchestration runtime, 
 
 ## Language
 
+**Independent Agent Observability (独立 Agent 可观测)**:
+The separately governed view of Agent execution, evidence, assets, failures, and performance. Its execution records and lifecycle are independent of the existing Agent Trace and tracing SDK concepts.
+_Avoid_: SDK upgrade, legacy trace migration, merged tracing pipeline
+
+**Observability Run (可观测 Run)**:
+One user question's logical processing from acceptance to its terminal outcome within Independent Agent Observability. Retries and approval continuation before that outcome retain the Run; execution after a terminal outcome creates a new Run, while reconnecting creates none.
+_Avoid_: conversation run, Goal lifetime, SDK trace, Execution Trace ID
+
+**Observability Attempt (可观测 Attempt)**:
+One continuous execution within an Observability Run. Agent-level re-execution or continuation after approval starts a new Attempt; model-request retries remain within their current Attempt, and reconnecting creates none.
+_Avoid_: model retry, HTTP request, conversation turn, new Run
+
+**Observability Approval Wait (可观测审批等待)**:
+The non-terminal state of an Observability Run while its user question awaits an approval decision, even when the business Answer Turn carrying the approval prompt has completed. Approval continuation belongs to a new Observability Attempt in the same Run.
+_Avoid_: successful Run, completed task, model retry
+
+**Observability Trace View (可观测执行链路视图)**:
+The presentation of an Observability Attempt's actual operations and their timing within its Run. It is navigated through the Run and Attempt identities; approval continuation remains a separate Attempt, and associated background work can outlive its initiating execution.
+_Avoid_: legacy SDK Trace, new execution identity, conversation lifetime
+
+**Observability Metadata Event (可观测元数据事件)**:
+A fact about an Observability Run or one of its operations, containing identity, relationships, lifecycle, measurements, or evidence references. Conversation text, model messages, tool arguments and results, and free-form exception text are not Observability Metadata.
+_Avoid_: raw prompt event, body preview, SDK span export
+
+**Observability Content Evidence (可观测正文证据)**:
+An existing persisted conversation fragment that an authorized operator can inspect in relation to an Observability Run. It proves only the content actually retained and available at inspection time, not the model's entire input or internal reasoning.
+_Avoid_: complete prompt reconstruction, deterministic replay, log body
+
 **当日失败补跑**:
 外部按来源触发、针对当日实际确认失败的最新调度尝试进行的补偿执行。人工执行不参与这条筛选链；新失败可在后续扫描中继续补跑，但不能绕过停用、暂停、成功覆盖和在途执行等约束。
 _Avoid_: 按原计划日期扫全部历史失败、强制复活停用任务、一次调用无限循环补跑、把来源标识当授权凭据
@@ -2075,6 +2103,10 @@ _Avoid_: Chat Record creation time, message timestamp, Logical Chat Session time
 The authoritative identity, ownership, relationships, lifecycle state, ordering, and content references of Chats, Logical Chat Sessions, Answer Turns, messages, compaction archives, checkpoints, and shares. It includes Chat titles and content locations and extents, but excludes conversation bodies and semantic summaries; related SubAgent and Goal state remains owned by those domains.
 _Avoid_: Chat-list fields only, arbitrary JSON payload, duplicated conversation body
 
+**Conversation Service Unit（会话服务单元）**:
+A stable backend service grouping whose replicas share one conversation NAS mount. Different Conversation Service Units use isolated NAS mounts while sharing the conversation metadata database. A Conversation Service Unit remains the same across replica restarts and scaling and is distinct from a tenant, source, Agent, workspace, or Runtime Instance.
+_Avoid_: Pod identity, execution owner, tenant alias, filesystem path
+
 **Conversation Content**:
 The retained user and assistant messages, tool arguments and results, semantic summaries and checkpoint facts, and Agent recovery snapshot payloads belonging to a conversation. Its identity, ownership, ordering, lifecycle, and extent are described by Conversation Metadata.
 _Avoid_: plain text only, current model context only, conversation metadata
@@ -2098,6 +2130,10 @@ _Avoid_: request routing affinity, automatic failover execution, permission to r
 **Conversation Migration Snapshot**:
 The complete, internally consistent final legacy conversation state captured after legacy writers have drained and stopped. It includes every conversation change committed before that boundary and remains the source of truth for migration validation.
 _Avoid_: live working directory copy, earlier rehearsal snapshot, ordinary backup recovery point
+
+**Conversation Tenant Publication**:
+The admission of one service's tenant to the new conversation authority after all of that tenant's sources, Agents, workspaces and permanent shares have completed migration and validation. Other tenants may remain unavailable without reversing an already completed publication.
+_Avoid_: partial Agent migration, whole-service readiness, fallback to legacy
 
 **Conversation Rollback Export**:
 The complete conversation state prepared for the fixed pre-cutover application version, including changes committed after cutover. It is distinct from restoring the original Conversation Migration Snapshot.

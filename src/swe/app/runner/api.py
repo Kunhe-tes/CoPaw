@@ -31,6 +31,11 @@ from .context_usage import (
     ContextUsageUnavailable,
 )
 from .manager import ChatManager
+from .chat_summary import (
+    ChatSummaryPage,
+    MAX_SUMMARY_PAGE_SIZE,
+    MAX_SUMMARY_CURSOR_LENGTH,
+)
 from .expert_binding import (
     ChatExpertBinding,
     EXPERT_BINDING_META_KEY,
@@ -46,6 +51,7 @@ from .expert_binding import (
     is_ordinary_chat,
 )
 from .models import (
+    MANUAL_CHAT_TITLE_META_KEY,
     ChatArchiveMetadata,
     ChatArchivePage,
     ChatCompactionBoundary,
@@ -70,6 +76,7 @@ TASK_RUN_SECTION_FINAL = "final"
 _SERVER_OWNED_CHAT_META_KEYS = frozenset(
     {
         GOAL_DRAFT_DELEGATION_META_KEY,
+        MANUAL_CHAT_TITLE_META_KEY,
         "expert_main_binding",
         "multi_agent_mode_enabled",
         "scenario_preset_snapshot",
@@ -109,29 +116,65 @@ class MultiAgentModeUpdate(BaseModel):
     expected_revision: int = Field(ge=0, strict=True)
 
 
+def _chat_title_update(
+    existing: ChatSpec,
+    patch: ChatUpdateRequest,
+) -> str | None:
+    if patch.name is None or patch.name == existing.name:
+        return None
+
+    name = patch.name.strip()
+    if not 1 <= len(name) <= 100:
+        raise HTTPException(
+            status_code=422,
+            detail="Chat name must contain 1 to 100 characters",
+        )
+    if name == existing.name:
+        return None
+
+    if patch.updated_at is not None:
+        submitted_at = patch.updated_at
+        current_at = existing.updated_at
+        if submitted_at.tzinfo is None:
+            submitted_at = submitted_at.replace(tzinfo=timezone.utc)
+        if current_at.tzinfo is None:
+            current_at = current_at.replace(tzinfo=timezone.utc)
+        if submitted_at < current_at:
+            raise HTTPException(
+                status_code=409,
+                detail="Chat changed since patch was read",
+            )
+    return name
+
+
 def _merge_chat_update(
     existing: ChatSpec,
     patch: ChatUpdateRequest,
 ) -> ChatSpec:
     """将部分更新合并到已有会话，保留调用方没有提交的字段。"""
-    updates = patch.model_dump(exclude_unset=True)
     merged = existing.model_dump()
 
-    for field_name in (
-        "name",
-        "session_id",
-        "user_id",
-        "channel",
-        "created_at",
-        "updated_at",
-        "status",
-    ):
-        if field_name in updates and updates[field_name] is not None:
-            merged[field_name] = updates[field_name]
+    merged.update(
+        patch.model_dump(
+            include={
+                "session_id",
+                "user_id",
+                "channel",
+                "created_at",
+                "updated_at",
+                "status",
+            },
+            exclude_unset=True,
+            exclude_none=True,
+        ),
+    )
 
-    if "meta" in updates:
+    meta_update = patch.model_dump(include={"meta"}, exclude_unset=True)
+    if "meta" in meta_update:
         # Plan Mode 只会提交一个 meta 开关，合并可避免覆盖其他会话元数据。
-        incoming_meta = updates["meta"] or {}
+        incoming_meta = dict(meta_update["meta"] or {})
+        # Older clients send back the metadata from the preceding GET.
+        incoming_meta.pop(MANUAL_CHAT_TITLE_META_KEY, None)
         _reject_server_owned_chat_meta(incoming_meta)
         merged["meta"] = {
             **(existing.meta or {}),
@@ -143,6 +186,10 @@ def _merge_chat_update(
                 None,
             )
 
+    name = _chat_title_update(existing, patch)
+    if name is not None:
+        merged["name"] = name
+        merged["meta"][MANUAL_CHAT_TITLE_META_KEY] = True
     return ChatSpec.model_validate(merged)
 
 
@@ -952,6 +999,29 @@ async def _build_chat_history(
     )
 
 
+async def _storage_call(
+    operation,
+    *args,
+    not_found_detail="Chat history not found",
+    **kwargs,
+):
+    from ..conversation_storage.errors import StorageError
+    from mysql.connector.errors import Error as MySQLError
+
+    try:
+        return await operation(*args, **kwargs)
+    except KeyError as error:
+        raise HTTPException(
+            status_code=404,
+            detail=not_found_detail,
+        ) from error
+    except (StorageError, OSError, RuntimeError, MySQLError) as error:
+        raise HTTPException(
+            status_code=503,
+            detail="Conversation storage unavailable",
+        ) from error
+
+
 def _archive_store(workspace) -> ConversationArchiveStore | None:
     workspace_dir = getattr(workspace, "workspace_dir", None)
     if workspace_dir is None:
@@ -1037,6 +1107,70 @@ def _slice_answer_turn(
             end_index = index
             break
     return messages[anchor_index:end_index]
+
+
+@router.get("/-/summaries", response_model=ChatSummaryPage)
+async def list_chat_summaries(
+    request: Request,
+    user_id: str | None = Query(None),
+    channel: str | None = Query(None),
+    session_id: str | None = Query(None),
+    page_size: int = Query(100, ge=1, le=MAX_SUMMARY_PAGE_SIZE),
+    cursor: str | None = Query(None, max_length=MAX_SUMMARY_CURSOR_LENGTH),
+    mgr: ChatManager = Depends(get_chat_manager),
+    workspace=Depends(get_workspace),
+):
+    """Discover chats using light fields and live latest-update pagination."""
+    current_user = _request_user_id(request)
+    if current_user is not None:
+        if user_id is not None:
+            _authorize_requested_user(request, user_id)
+        user_id = current_user
+    try:
+        result = await _storage_call(
+            mgr.list_summaries,
+            user_id=user_id,
+            channel=channel,
+            session_id=session_id,
+            page_size=page_size,
+            cursor=cursor,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    coordinator = getattr(workspace, "answer_turn_coordinator", None)
+    if coordinator is not None:
+        ids = [item.id for item in result.items]
+        batch = getattr(coordinator, "statuses", None)
+        statuses = (
+            await batch(ids)
+            if callable(batch)
+            else dict(
+                zip(
+                    ids,
+                    await asyncio.gather(
+                        *(coordinator.status(key) for key in ids),
+                    ),
+                ),
+            )
+        )
+        result = result.model_copy(
+            update={
+                "items": [
+                    item.model_copy(
+                        update={
+                            "status": getattr(
+                                statuses.get(item.id),
+                                "value",
+                                statuses.get(item.id),
+                            )
+                            or "idle",
+                        },
+                    )
+                    for item in result.items
+                ],
+            },
+        )
+    return result
 
 
 @router.get("", response_model=list[ChatSpec] | ChatPage)
@@ -1352,13 +1486,23 @@ async def batch_delete_chats(
 
     """
     authorized_ids: list[str] = []
+    expected_chats = {}
     for chat_id in chat_ids:
         chat = await mgr.get_chat(chat_id)
         if chat is None:
             continue
         _authorize_chat(request, chat, None)
         authorized_ids.append(chat_id)
-    deleted = await mgr.delete_chats(chat_ids=authorized_ids)
+        expected_chats[chat_id] = chat
+    from ..conversation_storage.errors import ConflictError
+
+    try:
+        deleted = await mgr.delete_chats(
+            chat_ids=authorized_ids,
+            expected_chats=expected_chats,
+        )
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"deleted": deleted}
 
 
@@ -1392,14 +1536,11 @@ async def get_answer_turn(
             except HTTPException:
                 chat_spec = None
     elif sessionid:
-        candidate_chats = [
-            chat
-            for chat in await mgr.list_chats(
-                user_id=user_id,
-                channel="console",
-            )
-            if chat.session_id == sessionid
-        ]
+        candidate_chats = await mgr.list_chats_by_session(
+            sessionid,
+            user_id,
+            "console",
+        )
         for candidate in candidate_chats:
             try:
                 _authorize_chat(request, candidate, workspace)
@@ -1518,6 +1659,7 @@ async def get_chat_history_page(
     workspace=Depends(get_workspace),
 ):
     """Load one display-safe page of compacted history for a chat record."""
+
     chat_spec = await mgr.get_chat(chat_id)
     if not chat_spec:
         raise HTTPException(
@@ -1543,6 +1685,7 @@ async def get_chat_context_usage(
     workspace=Depends(get_workspace),
 ) -> ContextUsageResponse:
     """Return the last committed numeric context-occupancy snapshot."""
+
     chat_spec = await mgr.get_chat(chat_id)
     if not chat_spec:
         raise HTTPException(
@@ -1615,6 +1758,7 @@ async def get_chat(
     Raises:
         HTTPException: If chat not found (404)
     """
+
     chat_spec = await mgr.get_chat(chat_id)
     if not chat_spec:
         raise HTTPException(
@@ -1824,10 +1968,14 @@ async def update_chat(
         _authorize_requested_user(request, patch.user_id)
 
     spec = _merge_chat_update(existing, patch)
+    from ..conversation_storage.errors import ConflictError
+
     try:
-        updated = await mgr.update_chat(spec)
+        updated = await mgr.update_chat(spec, expected_chat=existing)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Chat not found") from exc
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return updated
 
 
@@ -1859,7 +2007,15 @@ async def delete_chat(
             detail=f"Chat not found: {chat_id}",
         )
     _authorize_chat(request, existing, None)
-    deleted = await mgr.delete_chats(chat_ids=[chat_id])
+    from ..conversation_storage.errors import ConflictError
+
+    try:
+        deleted = await mgr.delete_chats(
+            chat_ids=[chat_id],
+            expected_chats={chat_id: existing},
+        )
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not deleted:
         raise HTTPException(
             status_code=404,

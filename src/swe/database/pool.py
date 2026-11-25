@@ -12,6 +12,10 @@ logger = logging.getLogger(__name__)
 _PENDING_TASKS = set()
 
 
+class DatabaseIdentityMismatchError(RuntimeError):
+    pass
+
+
 def _request_cancel(task):
     """Request cancellation once; repeated requests can interrupt cleanup."""
     if not task.done() and not getattr(task, "_swe_cancel_requested", False):
@@ -40,6 +44,23 @@ class ConnectionPool:
         self._condition = asyncio.Condition()
         self._closed = False
         self._tasks = set()
+        self.control_reservations = 0
+        self.expected_identity = None
+
+    def expect_identity(self, expected):
+        if self.expected_identity not in (None, expected):
+            raise DatabaseIdentityMismatchError(
+                "Database pool identity already differs",
+            )
+        for entry in self._entries:
+            if (
+                entry.baseline.get("server_uuid"),
+                entry.baseline.get("database_name"),
+            ) != expected:
+                raise DatabaseIdentityMismatchError(
+                    "Database pool connection identity differs",
+                )
+        self.expected_identity = expected
 
     def _retain(self, task, log_errors=True):
         self._tasks.add(task)
@@ -127,7 +148,7 @@ class ConnectionPool:
                 "@@session.character_set_connection AS character_set_connection, "
                 "@@session.character_set_results AS character_set_results, "
                 "@@session.collation_connection AS collation_connection, "
-                "DATABASE() AS database_name",
+                "DATABASE() AS database_name,@@server_uuid AS server_uuid",
             )
             row = await cursor.fetchone()
             packet_limit = int(row["max_allowed_packet"])
@@ -146,17 +167,29 @@ class ConnectionPool:
                     exc_info=True,
                 )
 
-    async def acquire(self):
+    async def acquire(self, *, control=False):
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.config.acquire_timeout
         while True:
             async with self._condition:
                 if self._closed:
                     raise RuntimeError("Database pool is closed")
-                if self._idle:
+                reserve = int(
+                    self.control_reservations > 0
+                    and self.config.max_connections > 1
+                    and not control,
+                )
+                available = (
+                    len(self._entries) - len(self._idle)
+                    < self.config.max_connections - reserve
+                )
+                if available and self._idle:
                     entry = self._idle.pop()
                     create = False
-                elif len(self._entries) < self.config.max_connections:
+                elif (
+                    available
+                    and len(self._entries) < self.config.max_connections
+                ):
                     # _create reserves synchronously before its first await.
                     entry = None
                     create = True
@@ -194,6 +227,9 @@ class ConnectionPool:
             except asyncio.CancelledError:
                 await self.discard(entry)
                 raise
+            except DatabaseIdentityMismatchError:
+                await self.discard(entry)
+                raise
             except Exception:
                 await self.discard(entry)
                 if self._closed or loop.time() >= deadline:
@@ -220,6 +256,17 @@ class ConnectionPool:
             self._session_state(entry),
             remaining(config.read_timeout),
         )
+        if (
+            self.expected_identity is not None
+            and (
+                entry.baseline.get("server_uuid"),
+                entry.baseline.get("database_name"),
+            )
+            != self.expected_identity
+        ):
+            raise DatabaseIdentityMismatchError(
+                "Database connection identity differs",
+            )
         entry.max_allowed_packet = int(entry.baseline["max_allowed_packet"])
         if self._closed:
             raise RuntimeError("Database pool is closed")
@@ -246,6 +293,17 @@ class ConnectionPool:
             )
             if state != entry.baseline:
                 raise RuntimeError("Database session baseline changed")
+            if (
+                self.expected_identity is not None
+                and (
+                    state.get("server_uuid"),
+                    state.get("database_name"),
+                )
+                != self.expected_identity
+            ):
+                raise DatabaseIdentityMismatchError(
+                    "Database connection identity differs",
+                )
         except BaseException:
             entry.usable = False
             await self.discard(entry)
@@ -253,7 +311,8 @@ class ConnectionPool:
         async with self._condition:
             if not self._closed:
                 self._idle.append(entry)
-                self._condition.notify()
+                # Control and ordinary waiters have different admission limits.
+                self._condition.notify_all()
                 return
         await self.discard(entry)
 

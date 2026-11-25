@@ -155,14 +155,15 @@ def _message_payload(message: Any) -> dict[str, Any]:
 
 
 async def _share_context(chat, workspace, selected_turn_ids=None):
+    session = workspace.runner.session
     state = await _read_history_state(
-        workspace.runner.session,
+        session,
         chat.session_id,
         chat.user_id,
     )
     if state.get("schema_version") == 3:
         if selected_turn_ids is None:
-            state = await workspace.runner.session.materialize_turn_states(
+            state = await session.materialize_turn_states(
                 chat.session_id,
                 chat.user_id,
                 state,
@@ -170,14 +171,14 @@ async def _share_context(chat, workspace, selected_turn_ids=None):
             )
         else:
             state = await _select_history_turns(
-                workspace.runner.session,
+                session,
                 chat,
                 state,
                 selected_turn_ids,
             )
     history: ChatHistory = await _build_chat_history(
         chat,
-        session=workspace.runner.session,
+        session=session,
         workspace=workspace,
         non_blocking=True,
         state=state,

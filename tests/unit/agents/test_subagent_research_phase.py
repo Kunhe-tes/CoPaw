@@ -168,3 +168,36 @@ async def test_research_phase_reports_turn_limit_without_summarizing(
     assert result.turns_used == 1
     agent._acting.assert_awaited_once()
     agent._summarizing.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reasoning_assigns_monotonic_observability_step_indexes():
+    from swe.agents import tool_guard_mixin
+    from swe.agents.tool_guard_mixin import ToolGuardMixin
+    from swe.observability.instrumentation import current_agent_step_index
+
+    observed = []
+
+    class BaseReasoning:
+        async def _reasoning(self, tool_choice=None):
+            observed.append(current_agent_step_index())
+            return Msg("Friday", "reply", "assistant")
+
+    class Agent(ToolGuardMixin, BaseReasoning):
+        def __init__(self):
+            self.name = "Friday"
+            self._request_context = {}
+            self.memory = SimpleNamespace(content=[])
+
+    agent = Agent()
+    first = await agent._reasoning()
+    second = await agent._reasoning()
+    setattr(agent, tool_guard_mixin._PLAN_INTERACTION_TURN_BOUNDARY_ATTR, True)
+    short_circuit = await agent._reasoning()
+
+    assert first.get_text_content() == "reply"
+    assert second.get_text_content() == "reply"
+    assert observed == [1, 2]
+    assert short_circuit.get_content_blocks("tool_use") == []
+    assert agent._observability_step_index == 2
+    assert current_agent_step_index() is None

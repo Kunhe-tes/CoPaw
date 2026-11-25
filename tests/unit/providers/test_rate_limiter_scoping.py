@@ -497,6 +497,32 @@ async def test_empty_model_output_retries_once_when_llm_retry_disabled():
 
 
 @pytest.mark.asyncio
+async def test_request_attempt_callback_counts_each_actual_inner_call():
+    bottom = _SequenceChatModel(
+        [
+            ChatResponse(content=[]),
+            ChatResponse(content=[{"type": "text", "text": "retry ok"}]),
+        ],
+    )
+    attempts = []
+
+    async def on_attempt(index, streaming):
+        attempts.append((index, streaming))
+
+    model = RetryChatModel(
+        bottom,
+        retry_config=RetryConfig(enabled=False, max_retries=1),
+        rate_limit_config=RateLimitConfig(max_qpm=0),
+        on_request_attempt=on_attempt,
+    )
+
+    await model()
+
+    assert bottom.calls == 2
+    assert attempts == [(1, False), (2, False)]
+
+
+@pytest.mark.asyncio
 async def test_empty_model_output_retry_does_not_consume_transient_retries():
     bottom = _SequenceChatModel(
         [

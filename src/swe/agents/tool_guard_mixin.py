@@ -85,6 +85,26 @@ _DEFAULT_LOCAL_TOOL_EXECUTION_HARD_TIMEOUT = min(
     QUERY_TIMEOUT_SECONDS,
     max(AGENT_WATCHDOG_TIMEOUT * 2.0, AGENT_WATCHDOG_TIMEOUT + 60.0),
 )
+_TOOL_FAILURE_TYPES = frozenset(
+    {
+        "approval_required",
+        "hook_denied",
+        "invalid_arguments",
+        "mcp_tool_error",
+        "mcp_transport_error",
+        "not_found",
+        "permission_denied",
+        "process_limit_exceeded",
+        "shell_command_failed",
+        "shell_concurrency_limit_exceeded",
+        "tool_timeout",
+        "tool_guard_denied",
+        "unexpected_tool_error",
+    },
+)
+_TECHNICAL_TOOL_FAILURE_TYPES = frozenset(
+    {"mcp_transport_error", "tool_timeout", "unexpected_tool_error"},
+)
 try:
     LOCAL_TOOL_EXECUTION_HARD_TIMEOUT = max(
         float(
@@ -396,7 +416,145 @@ class ToolGuardMixin:
         finally:
             await self.memory.add(tool_res_msg)
 
+    def _start_tool_execution_span(
+        self,
+        tool_name: str,
+        tool_call_id: str,
+    ) -> Any:
+        """创建 Tool 执行 Span 并记录已注册资产；失败时返回 None。"""
+        try:
+            from ..observability.instrumentation import Observability
+
+            mcp_server = self._resolve_mcp_server(tool_name)
+            registered = self._tool_is_registered(tool_name)
+            tool_metadata = {
+                "tool_key": tool_name,
+                "tool_call_id": tool_call_id,
+                "tool_execution_id": str(_uuid.uuid4()),
+                "executor_kind": (
+                    "unregistered"
+                    if not registered
+                    else "mcp_tool" if mcp_server else "agent_tool"
+                ),
+            }
+            timeout_budget_ms = LOCAL_TOOL_EXECUTION_HARD_TIMEOUT * 1000
+            if (
+                not self._tool_has_specific_timeout(tool_name)
+                and 1 <= timeout_budget_ms <= 0xFFFFFFFF
+            ):
+                tool_metadata["timeout_budget_ms"] = int(timeout_budget_ms)
+            step_index = getattr(self, "_observability_step_index", None)
+            span_attributes: dict[str, Any] = {"tool": tool_metadata}
+            if type(step_index) is int and step_index > 0:
+                span_attributes["step_index"] = step_index
+            span = Observability().span(
+                "Tool",
+                "execute",
+                name="registered.tool",
+                **span_attributes,
+            )
+            if span is not None:
+                if registered:
+                    span.asset_used(
+                        "tool",
+                        tool_name,
+                        source="runtime_registered",
+                        version="unknown",
+                    )
+                if mcp_server:
+                    request_context = (
+                        getattr(self, "_request_context", {}) or {}
+                    )
+                    mcp_asset_id = _subagent_mcp_server_key(
+                        mcp_server,
+                        request_context,
+                    )
+                    if mcp_asset_id:
+                        span.asset_used(
+                            "mcp_server",
+                            mcp_asset_id,
+                            source="runtime_snapshot",
+                            version="unknown",
+                        )
+            return span
+        except Exception:
+            return None
+
     async def _run_tool_call_with_hard_timeout_impl(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> dict | None:
+        from ..observability.instrumentation import bind_tool_span
+        from ..observability.context import current_context
+
+        context = current_context()
+        if context is None or not context.capture_enabled:
+            return await self._run_tool_call_with_hard_timeout_raw(
+                tool_call,
+                tool_name,
+                tool_input,
+            )
+        tool_call_id = str(tool_call.get("id") or "")
+        span = self._start_tool_execution_span(tool_name, tool_call_id)
+        try:
+            with bind_tool_span(span):
+                result = await self._run_tool_call_with_hard_timeout_raw(
+                    tool_call,
+                    tool_name,
+                    tool_input,
+                )
+        except asyncio.CancelledError:
+            if span is not None:
+                span.end(status="cancelled")
+            raise
+        except Exception as exc:
+            if span is not None:
+                span.end(
+                    status="failed",
+                    technical_status="ERROR",
+                    has_error=True,
+                    error_type=type(exc).__name__,
+                    phase="tool_execution",
+                )
+            raise
+        if span is not None:
+            terminal_output = result
+            if terminal_output is None:
+                terminal_output = self._extract_current_tool_response(
+                    tool_call_id,
+                    include_structured_failure=True,
+                )
+            structured_failure = (
+                isinstance(terminal_output, dict)
+                and terminal_output.get("isError") is True
+            )
+            failure_type = (
+                terminal_output.get("error_type")
+                if structured_failure
+                else None
+            )
+            if structured_failure and failure_type not in _TOOL_FAILURE_TYPES:
+                failure_type = "tool_failure"
+            failed = failure_type is not None
+            technical_failure = failure_type in _TECHNICAL_TOOL_FAILURE_TYPES
+            span.end(
+                status="failed" if failed else "succeeded",
+                technical_status=("ERROR" if technical_failure else "OK"),
+                has_error=technical_failure,
+                **(
+                    {
+                        "error_type": failure_type,
+                        "phase": "tool_execution",
+                    }
+                    if failure_type
+                    else {}
+                ),
+            )
+        return result
+
+    async def _run_tool_call_with_hard_timeout_raw(
         self,
         tool_call: dict[str, Any],
         tool_name: str,
@@ -850,6 +1008,30 @@ class ToolGuardMixin:
         except Exception:
             pass
         return None
+
+    def _tool_is_registered(self, tool_name: str) -> bool:
+        """判断工具名是否存在于当前 toolkit 注册表。
+
+        toolkit 缺失时无法判定，保持原有行为，避免把正常工具误标为未注册。
+        """
+        try:
+            toolkit = getattr(self, "toolkit", None)
+            if toolkit is None:
+                return True
+            tools = getattr(toolkit, "tools", None)
+            if not isinstance(tools, dict):
+                return True
+            return tool_name in tools
+        except Exception:
+            return True
+
+    def _tool_executor_kind(self, tool_name: str) -> str:
+        """按注册表与 MCP 归属给出受限的工具执行器分类。"""
+        if not self._tool_is_registered(tool_name):
+            return "unregistered"
+        return (
+            "mcp_tool" if self._resolve_mcp_server(tool_name) else "agent_tool"
+        )
 
     async def _emit_tool_trace_start(
         self,
@@ -1671,6 +1853,7 @@ class ToolGuardMixin:
             tool_name,
             tool_input,
         ):
+            self._hook_short_circuit_reason = "shell_policy_denied"
             return tool_call, tool_input, True, None
         if pre_hook_result.decision in {
             HookDecision.BLOCK,
@@ -1681,6 +1864,7 @@ class ToolGuardMixin:
                 tool_name,
                 pre_hook_result.reason,
             )
+            self._hook_short_circuit_reason = "hook_denied"
             return tool_call, tool_input, True, result
         if (
             pre_hook_result.decision == HookDecision.ASK
@@ -1697,6 +1881,7 @@ class ToolGuardMixin:
                     tool_name,
                     "Background SubAgent calls cannot await interactive approval.",
                 )
+                self._hook_short_circuit_reason = "hook_denied"
                 return tool_call, tool_input, True, result
             result = await self._acting_with_approval(
                 tool_call,
@@ -1711,6 +1896,7 @@ class ToolGuardMixin:
                     pre_hook_result,
                 ),
             )
+            self._hook_short_circuit_reason = "hook_waiting_approval"
             return tool_call, tool_input, True, result
         if pre_hook_result.decision == HookDecision.ASK:
             await self._record_tool_hook_result(
@@ -1765,6 +1951,11 @@ class ToolGuardMixin:
             tool_name,
             tool_input,
         ):
+            self._observe_guard_decision(
+                tool_call,
+                "rejected",
+                reason_code="shell_policy_denied",
+            )
             return None
 
         if await self._acting_policy_denial(
@@ -1773,8 +1964,14 @@ class ToolGuardMixin:
             tool_input,
             include_budget=True,
         ):
+            self._observe_guard_decision(
+                tool_call,
+                "rejected",
+                reason_code="policy_denied",
+            )
             return None
 
+        self._hook_short_circuit_reason = "hook_denied"
         (
             tool_call,
             tool_input,
@@ -1782,6 +1979,16 @@ class ToolGuardMixin:
             hook_result,
         ) = await self._apply_pre_tool_hook(tool_call, tool_name, tool_input)
         if hook_handled:
+            hook_reason = getattr(
+                self,
+                "_hook_short_circuit_reason",
+                "hook_denied",
+            )
+            self._observe_guard_decision(
+                tool_call,
+                self._hook_guard_status(hook_reason),
+                reason_code=hook_reason,
+            )
             return hook_result
         if await self._acting_policy_denial(
             tool_call,
@@ -1789,6 +1996,11 @@ class ToolGuardMixin:
             tool_input,
             include_budget=False,
         ):
+            self._observe_guard_decision(
+                tool_call,
+                "rejected",
+                reason_code="policy_denied",
+            )
             return None
 
         await self._notify_skill_detector_tool_call(
@@ -1825,6 +2037,7 @@ class ToolGuardMixin:
                     guard_check_failed = True
 
         if guard_check_failed:
+            self._observe_guard_decision(tool_call, "failed")
             result = await self._acting_hook_denied(
                 tool_call,
                 tool_name,
@@ -1834,6 +2047,10 @@ class ToolGuardMixin:
             return result
 
         if action is not None and action.kind != "preapproved":
+            self._observe_guard_decision(
+                tool_call,
+                self._guard_decision_status(action),
+            )
             result = await self._execute_guard_action(action, tool_call)
             await self._emit_tool_trace_end(span_id, result)
             return result
@@ -1845,6 +2062,62 @@ class ToolGuardMixin:
             tool_input,
             span_id,
         )
+
+    def _guard_decision_status(self, action: Any) -> str:
+        """根据 Guard 决策与 Agent 角色给出 Span 状态。"""
+        if action.kind != "needs_approval":
+            return "rejected"
+        request_context = getattr(self, "_request_context", {}) or {}
+        if request_context.get("agent_role") == "subagent":
+            return "rejected"
+        return "waiting_approval"
+
+    @staticmethod
+    def _hook_guard_status(reason: str) -> str:
+        """把 hook 短路原因映射为 Guard Span 状态。"""
+        return (
+            "waiting_approval"
+            if reason == "hook_waiting_approval"
+            else "rejected"
+        )
+
+    def _observe_guard_decision(
+        self,
+        tool_call: dict[str, Any],
+        status: str,
+        *,
+        reason_code: str | None = None,
+    ) -> None:
+        """Record a guard short-circuit without counting a tool execution."""
+        try:
+            from ..observability.instrumentation import Observability
+
+            tool_name = str(tool_call.get("name") or "")
+            span = Observability().span(
+                "Guard",
+                "tool",
+                name="registered.tool",
+                tool={
+                    "tool_key": tool_name,
+                    "tool_call_id": str(tool_call.get("id") or ""),
+                    "executor_kind": self._tool_executor_kind(tool_name),
+                },
+            )
+            if span is not None:
+                extra = (
+                    {"reason_code": reason_code}
+                    if reason_code is not None
+                    else {}
+                )
+                span.end(
+                    status=status,
+                    technical_status=("ERROR" if status == "failed" else "OK"),
+                    has_error=status == "failed",
+                    phase="tool_guard",
+                    **extra,
+                )
+        except Exception:
+            return
 
     async def _run_guarded_tool_call(
         self,
@@ -1899,6 +2172,13 @@ class ToolGuardMixin:
         except PreToolUseTerminalStop:
             raise
         except Exception as e:
+            failure_check = getattr(
+                self,
+                "_conversation_check_tool_failure",
+                None,
+            )
+            if failure_check is not None:
+                failure_check(e)
             failure_hook_result = await self._emit_tool_hook(
                 HookEventName.POST_TOOL_USE_FAILURE,
                 tool_name=tool_name,
@@ -2208,12 +2488,18 @@ class ToolGuardMixin:
             extra["goal_id"] = goal_id
         chat_id = str(self._request_context.get("chat_id") or "").strip()
         msgid = str(self._request_context.get("msgid") or "").strip()
-        if chat_id and msgid:
+        if chat_id:
             extra["chat_id"] = chat_id
+        if chat_id and msgid:
             extra["msgid"] = msgid
         execution_identity = self._request_context.get("execution_identity")
         if isinstance(execution_identity, dict):
             extra["execution_identity"] = dict(execution_identity)
+        from ..observability.runner_lifecycle import approval_context_carrier
+
+        observability_context = approval_context_carrier()
+        if observability_context is not None:
+            extra["agent_observability_context"] = observability_context
         if hook_ask_handler_ids:
             extra["hook_ask_handler_ids"] = list(hook_ask_handler_ids)
         if original_msg is not None:
@@ -2348,6 +2634,14 @@ class ToolGuardMixin:
             result=guard_result,
             extra=extra,
         )
+        from ..observability.context import current_context
+        from ..observability.runner_lifecycle import record_approval_requested
+
+        record_approval_requested(
+            current_context(),
+            pending_request.request_id,
+            started_at=getattr(pending_request, "created_at", None),
+        )
         await self._notify_approval_pending(pending_request)
 
         guardians = list(
@@ -2414,9 +2708,14 @@ class ToolGuardMixin:
         from ..app.runner.expert_main_runtime import consume_expert_reasoning
 
         consume_expert_reasoning(self._request_context)
-        return await super()._reasoning(  # type: ignore[misc]
-            tool_choice=tool_choice,
-        )
+        from ..observability.instrumentation import bind_agent_step_index
+
+        step_index = (getattr(self, "_observability_step_index", 0) or 0) + 1
+        self._observability_step_index = step_index
+        with bind_agent_step_index(step_index):
+            return await super()._reasoning(  # type: ignore[misc]
+                tool_choice=tool_choice,
+            )
 
     def _consume_plan_interaction_turn_boundary(self) -> bool:
         """Consume the plan-card turn boundary marker once."""

@@ -334,6 +334,52 @@ async def _initialize_database_connection() -> Any | None:
         ) from e
 
 
+async def _initialize_agent_observability_storage(app: FastAPI) -> None:
+    """Connect the separately configured observability database if available."""
+    from ..observability.db_config import get_observability_database_config
+    from ..observability.store import ObservabilityStore
+
+    app.state.agent_observability_connection = None
+    app.state.agent_observability_store = None
+    app.state.agent_observability_projector = None
+    connection = None
+    try:
+        config = get_observability_database_config()
+        if config is None:
+            return
+        from ..database import DatabaseConnection
+
+        connection = DatabaseConnection(config)
+        await connection.connect()
+        store = ObservabilityStore(connection)
+        readiness = await store.readiness()
+        app.state.agent_observability_connection = connection
+        if readiness["ready"]:
+            app.state.agent_observability_store = store
+            from ..observability.projector import InboxProjector
+
+            projector = InboxProjector(store)
+            app.state.agent_observability_projector = projector
+            await projector.start()
+        else:
+            logger.warning(
+                "Agent observability database schema is not ready: tables=%s columns=%s indexes=%s",
+                readiness["missing_tables"],
+                readiness["missing_columns"],
+                readiness["invalid_indexes"],
+            )
+    except Exception as exc:
+        logger.warning(
+            "Agent observability database unavailable: %s",
+            type(exc).__name__,
+        )
+        if connection is not None:
+            try:
+                await connection.close()
+            except Exception:
+                logger.warning("Agent observability database cleanup failed")
+
+
 def _env_enabled(key: str, default: str = "false") -> bool:
     return os.environ.get(key, default).lower() in ("true", "1", "yes")
 
@@ -860,6 +906,38 @@ async def _shutdown_lifespan_resources_impl(
         logger.warning("Error stopping service heartbeat: %s", e)
     manager_stopped = await _stop_multi_agent_manager(app)
     pool_stopped = await _stop_tenant_workspace_pool(app)
+    try:
+        from ..agents.tools.subagent_background import (
+            get_default_background_subagent_supervisor,
+        )
+
+        supervisor = get_default_background_subagent_supervisor()
+        cancelled = await supervisor.shutdown(grace_seconds=2.0)
+        if cancelled:
+            logger.info(
+                "Cancelled %s background SubAgent run(s) at shutdown",
+                cancelled,
+            )
+    except Exception as e:
+        logger.warning(
+            "Error stopping background SubAgent supervisor: %s",
+            e,
+        )
+    try:
+        from ..observability.emitter import shutdown_default_emitter
+
+        remaining = shutdown_default_emitter()
+        if remaining:
+            logger.warning(
+                "Agent observability output shutdown left %s events unconfirmed",
+                remaining,
+            )
+    except Exception as e:
+        logger.warning(
+            "Error closing independent agent observability output: %s",
+            e,
+        )
+
     if transient_cleanup is not None:
         from ..agents.memory.base_memory_manager import summary_task_stats
 
@@ -905,6 +983,29 @@ async def _shutdown_lifespan_resources_impl(
     from .crons.auth_mirror import set_cron_auth_repository
 
     set_cron_auth_repository(None)
+    agent_observability_connection = getattr(
+        app.state,
+        "agent_observability_connection",
+        None,
+    )
+    agent_observability_projector = getattr(
+        app.state,
+        "agent_observability_projector",
+        None,
+    )
+    if agent_observability_projector is not None:
+        try:
+            await agent_observability_projector.stop()
+        except Exception as e:
+            logger.warning(
+                "Error stopping Agent observability projector: %s",
+                e,
+            )
+    if agent_observability_connection is not None:
+        try:
+            await agent_observability_connection.close()
+        except Exception as e:
+            logger.warning("Error closing Agent observability database: %s", e)
     if db_connection:
         try:
             await db_connection.close()
@@ -989,11 +1090,15 @@ async def lifespan(
     # --- Initialize database connection (required for tracing and instance modules) ---
     db_connection = await _initialize_database_connection()
     app.state.db_connection = db_connection
+    await _initialize_agent_observability_storage(app)
     from .crons.auth_mirror import configure_cron_auth_mirror
 
     configure_cron_auth_mirror(db_connection)
 
     try:
+        from .conversation_storage.runtime import configure_runtime
+
+        await configure_runtime(db_connection)
         await _initialize_tracing_manager(db_connection)
         logger.info("Instance module initialized")
 
@@ -1045,7 +1150,12 @@ async def lifespan(
         await _start_lifespan_background_services(app, multi_agent_manager)
         yield
     finally:
-        await _shutdown_lifespan_resources(app, db_connection)
+        from .conversation_storage.runtime import reset_runtime
+
+        try:
+            await _shutdown_lifespan_resources(app, db_connection)
+        finally:
+            reset_runtime()
 
 
 app = FastAPI(
@@ -1054,6 +1164,12 @@ app = FastAPI(
     redoc_url="/redoc" if DOCS_ENABLED else None,
     openapi_url="/openapi.json" if DOCS_ENABLED else None,
 )
+from .conversation_storage.tenant_admission import (
+    TenantNotPublished,
+    tenant_maintenance_response,
+)
+
+app.add_exception_handler(TenantNotPublished, tenant_maintenance_response)
 app.state.runtime_diagnostic_manager = runtime_diagnostic_manager
 
 # Apply CORS middleware if CORS_ORIGINS is set

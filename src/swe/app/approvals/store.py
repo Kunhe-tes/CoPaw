@@ -69,6 +69,14 @@ class ApprovalAuditStore:
         """追加审批过程事件。"""
         if not self.is_available:
             return
+        if event_type == "resolved":
+            existing = await self.db.fetch_one(
+                f"SELECT event_id FROM {_EVENT_TABLE} "
+                "WHERE request_id=%s AND event_type=%s LIMIT 1",
+                (getattr(pending, "request_id", ""), event_type),
+            )
+            if existing is not None:
+                return
         await self._execute(
             "insert approval event",
             _INSERT_EVENT,

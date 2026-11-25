@@ -6,6 +6,8 @@ import logging
 import sys
 from dataclasses import dataclass
 
+from .observation import timed_operation
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,6 +28,12 @@ class DatabaseSession:
         self._owner = asyncio.current_task()
         self._usable = True
         self._in_transaction = False
+
+    @property
+    def max_allowed_packet(self):
+        """Return this lease's verified server limit without another query."""
+        self._check()
+        return self._entry.max_allowed_packet
 
     def _check(self):
         if asyncio.current_task() is not self._owner:
@@ -61,9 +69,11 @@ class DatabaseSession:
         cursor = await self._connection.cursor(buffered=True, dictionary=True)
         try:
             if mode == "many":
-                await cursor.executemany(query, params)
+                with timed_operation("db_executemany"):
+                    await cursor.executemany(query, params)
             else:
-                await cursor.execute(query, params)
+                with timed_operation("db_statement"):
+                    await cursor.execute(query, params)
             if mode == "one":
                 row = await cursor.fetchone()
                 return dict(row) if row is not None else None

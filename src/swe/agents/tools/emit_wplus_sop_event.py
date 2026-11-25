@@ -80,17 +80,23 @@ async def emit_wplus_sop_event(
             },
         )
 
+    assert tenant_id is not None
+    assert source_id is not None
+    assert agent_id is not None
     store = WPlusSopStore(store_path_for_workspace(workspace_dir))
     assert trusted_runtime is not None
     record = store.get_session(trusted_runtime.sop_session_id)
     if (
         record is None
         or not record.projection.holds_chat_slot
-        or record.projection.ownership.tenant_id != tenant_id
-        or record.projection.ownership.source_id != source_id
-        or record.projection.ownership.user_id != user_id
-        or record.projection.ownership.agent_id != agent_id
-        or record.projection.ownership.chat_id != chat_id
+        or (
+            record.projection.ownership.tenant_id,
+            record.projection.ownership.source_id,
+            record.projection.ownership.user_id,
+            record.projection.ownership.agent_id,
+            record.projection.ownership.chat_id,
+        )
+        != (tenant_id, source_id, user_id, agent_id, chat_id)
     ):
         return _response(
             {
@@ -102,15 +108,24 @@ async def emit_wplus_sop_event(
     ownership = OwnershipTuple.model_validate(
         record.projection.ownership,
     )
+    from ...app.conversation_storage.runtime import (
+        workspace_metadata_repository,
+    )
+    from ...app.runner.manager import ChatManager
+
+    workspace = SimpleNamespace(
+        workspace_dir=workspace_dir,
+        agent_id=agent_id,
+        tenant_id=tenant_id,
+        source_id=source_id,
+    )
+    repo = await workspace_metadata_repository(workspace)
     chats_path = Path(workspace_dir) / "chats.json"
-    chat_manager = None
-    if chats_path.is_file():
-        from ...app.runner.manager import ChatManager
+    if repo is None and chats_path.is_file():
         from ...app.runner.repo.json_repo import JsonChatRepository
 
-        chat_manager = ChatManager(
-            repo=JsonChatRepository(str(chats_path)),
-        )
+        repo = JsonChatRepository(str(chats_path))
+    chat_manager = ChatManager(repo=repo) if repo is not None else None
     service = WPlusSopService(
         workspace=SimpleNamespace(
             workspace_dir=workspace_dir,

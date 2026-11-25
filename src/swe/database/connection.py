@@ -3,12 +3,13 @@
 
 import asyncio
 import logging
-from contextlib import asynccontextmanager
-from contextvars import ContextVar
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar, copy_context
 from hashlib import sha256
 from typing import Any
 
 from .config import DatabaseConfig
+from .observation import timed_operation
 from .pool import ConnectionPool
 from .session import DatabaseSession, ExecutionResult
 
@@ -23,6 +24,10 @@ logger = logging.getLogger(__name__)
 _CURRENT_CONNECTION: ContextVar[dict | None] = ContextVar(
     "swe_db_connection",
     default=None,
+)
+_CONTROL_CONNECTIONS: ContextVar[frozenset] = ContextVar(
+    "swe_db_control_connections",
+    default=frozenset(),
 )
 
 
@@ -74,12 +79,52 @@ class DatabaseConnection:
         if self._pool is not None:
             await self._pool.close()
 
+    def expect_identity(self, server_uuid, schema):
+        if not self.is_connected:
+            raise RuntimeError("Database not connected")
+        expected = (server_uuid, schema)
+        self._pool.expect_identity(expected)
+
     def _current(self):
         binding = _CURRENT_CONNECTION.get() or {}
         session = binding.get(self)
         if session is not None:
             session._check()
         return session
+
+    @property
+    def has_current_session(self):
+        return self._current() is not None
+
+    def create_independent_task(self, coroutine):
+        """Start work without inheriting database sessions from this task."""
+        context = copy_context()
+        context.run(_CURRENT_CONNECTION.set, {})
+        return context.run(asyncio.create_task, coroutine)
+
+    @contextmanager
+    def control_priority(self):
+        """Allow this task's short control IO to use reserved pool capacity."""
+        token = _CONTROL_CONNECTIONS.set(_CONTROL_CONNECTIONS.get() | {self})
+        try:
+            yield
+        finally:
+            _CONTROL_CONNECTIONS.reset(token)
+
+    @asynccontextmanager
+    async def reserve_control_capacity(self):
+        """Share one reserved position across all live conversation leases."""
+        if not self.is_connected:
+            raise RuntimeError("Database not connected")
+        pool = self._pool
+        pool.control_reservations += 1
+        try:
+            yield
+        finally:
+            # No await before decrement: cancellation must not leak reservations.
+            pool.control_reservations -= 1
+            async with pool._condition:
+                pool._condition.notify_all()
 
     @asynccontextmanager
     async def acquire(self):
@@ -90,7 +135,11 @@ class DatabaseConnection:
         if not self.is_connected:
             raise RuntimeError("Database not connected")
         pool = self._pool
-        entry = await pool.acquire()
+        entry = (
+            await pool.acquire(control=True)
+            if self in _CONTROL_CONNECTIONS.get()
+            else await pool.acquire()
+        )
         session = DatabaseSession(pool, entry)
         token = _CURRENT_CONNECTION.set(
             {**(_CURRENT_CONNECTION.get() or {}), self: session},
@@ -112,11 +161,12 @@ class DatabaseConnection:
         ):
             return
         try:
-            await session._pool.run(
-                entry,
-                session._connection.rollback(),
-                self.config.cleanup_timeout,
-            )
+            with timed_operation("db_transaction_rollback"):
+                await session._pool.run(
+                    entry,
+                    session._connection.rollback(),
+                    self.config.cleanup_timeout,
+                )
         except (Exception, asyncio.CancelledError):
             logger.warning(
                 "Database transaction rollback failed",
@@ -130,10 +180,12 @@ class DatabaseConnection:
                 yield session
                 return
             try:
-                await session._run(session._connection.start_transaction())
+                with timed_operation("db_transaction_begin"):
+                    await session._run(session._connection.start_transaction())
                 session._in_transaction = True
                 yield session
-                await session._run(session._connection.commit())
+                with timed_operation("db_transaction_commit"):
+                    await session._run(session._connection.commit())
             except BaseException:
                 session._discard()
                 await self._rollback(session)

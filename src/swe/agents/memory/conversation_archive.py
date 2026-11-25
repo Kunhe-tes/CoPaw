@@ -21,7 +21,7 @@ from collections import deque
 from datetime import datetime, timezone
 from functools import cache
 from pathlib import Path
-from typing import Any, Collection, Sequence
+from typing import Any, Callable, Collection, Sequence
 
 import fcntl
 
@@ -1697,6 +1697,51 @@ class ConversationArchiveStore:
         start, end = bounds
         return start <= parsed <= end
 
+    async def find_messages(
+        self,
+        chat_id: str,
+        matches: Callable[[Msg], bool],
+        *,
+        limit: int,
+    ) -> list[Msg]:
+        """Search visible batches once, stopping when enough matches are found."""
+        return await _durable_thread(
+            self._find_messages,
+            chat_id,
+            matches,
+            limit,
+        )
+
+    def _find_messages(self, chat_id, matches, limit):
+        chat_id = self._validate_chat_id(chat_id)
+        chat_dir = self.path_for(chat_id)
+        found = []
+        with self._chat_lock(chat_id):
+            if self._tombstone_path(chat_id).exists():
+                return found
+            manifest = self._read_manifest(chat_dir / _MANIFEST_NAME)
+            for boundary in reversed(
+                self._visible_boundaries(manifest, chat_id),
+            ):
+                path = chat_dir / f"{boundary.id}.jsonl"
+                rows, count, first, last = self._batch_window(
+                    path,
+                    None,
+                    limit - len(found),
+                    matches=matches,
+                )
+                if not self._batch_matches_endpoints(
+                    boundary,
+                    count,
+                    first,
+                    last,
+                ):
+                    continue
+                found.extend(message for _, message in rows)
+                if len(found) == limit:
+                    break
+        return found
+
     async def read_page(
         self,
         chat_id: str,
@@ -2152,13 +2197,21 @@ class ConversationArchiveStore:
             )
             return None
 
-    def _batch_window(self, path: Path, upper: int | None, limit: int):
+    def _batch_window(
+        self,
+        path: Path,
+        upper: int | None,
+        limit: int,
+        *,
+        matches=None,
+    ):
         """Read a bounded row window; offsets are an optional derived index."""
         if not path.is_file():
             return [], 0, None, None
         offsets = path.with_suffix(".offsets")
         if (
-            offsets.is_file()
+            matches is None
+            and offsets.is_file()
             and offsets.stat().st_size >= 16
             and offsets.stat().st_size % 8 == 0
         ):
@@ -2221,7 +2274,11 @@ class ConversationArchiveStore:
                     first = message
                 last = message
                 count += 1
-                if message is not None and (upper is None or position < upper):
+                if (
+                    message is not None
+                    and (upper is None or position < upper)
+                    and (matches is None or matches(message))
+                ):
                     selected.append((position, message))
         return list(reversed(selected)), count, first, last
 
@@ -2247,14 +2304,7 @@ class ConversationArchiveStore:
                 upper,
                 limit + 1 - len(selected),
             )
-            endpoints = first is not None and last is not None
-            matches = endpoints and (
-                first.id == boundary.first_message_id
-                and last.id == boundary.last_message_id
-                and first.timestamp == boundary.first_timestamp
-                and last.timestamp == boundary.last_timestamp
-            )
-            if count < boundary.archived_message_count or not matches:
+            if not self._batch_matches_endpoints(boundary, count, first, last):
                 logger.warning(
                     "Skipping inconsistent conversation archive batch: %s",
                     boundary.id,
@@ -2272,17 +2322,25 @@ class ConversationArchiveStore:
         boundary: ConversationArchiveBoundary,
         records: list[Msg | None],
     ) -> bool:
-        if len(records) < boundary.archived_message_count:
-            return False
-        if not records or records[0] is None or records[-1] is None:
-            return False
-        first_message = records[0]
-        last_message = records[-1]
         return bool(
-            first_message.id == boundary.first_message_id
-            and last_message.id == boundary.last_message_id
-            and first_message.timestamp == boundary.first_timestamp
-            and last_message.timestamp == boundary.last_timestamp,
+            records,
+        ) and ConversationArchiveStore._batch_matches_endpoints(
+            boundary,
+            len(records),
+            records[0],
+            records[-1],
+        )
+
+    @staticmethod
+    def _batch_matches_endpoints(boundary, count, first, last):
+        return (
+            count >= boundary.archived_message_count
+            and first is not None
+            and last is not None
+            and first.id == boundary.first_message_id
+            and last.id == boundary.last_message_id
+            and first.timestamp == boundary.first_timestamp
+            and last.timestamp == boundary.last_timestamp
         )
 
     def _write_batch(self, path: Path, messages: Sequence[Msg]) -> None:
@@ -2490,8 +2548,13 @@ def attach_conversation_archive(
     memory: Any,
     dialog_root: str | Path,
     chat_id: str,
+    *,
+    archive_store=None,
 ) -> Any:
     """Make a ReMe in-memory object archive compactions by chat record ID."""
+    if archive_store is not None:
+        archive_store.attach_memory(memory, chat_id)
+        return memory
     archive_store = ConversationArchiveStore(dialog_root)
     canonical_chat_id = archive_store._validate_chat_id(chat_id)
     if getattr(memory, "_chat_checkpoint_chat_id", None) == canonical_chat_id:
@@ -2555,6 +2618,14 @@ def attach_conversation_archive(
             if index not in selected_indexes
         ]
 
+    def publish_archived_evidence(messages: Sequence[Msg]) -> None:
+        from ...observability.nas_evidence import publish_nas_evidence
+
+        publish_nas_evidence(
+            (message.to_dict() for message in messages),
+            chat_id=canonical_chat_id,
+        )
+
     async def add(*args: Any, **kwargs: Any) -> Any:
         """Append an event only after ReMe has accepted the message."""
         if original_add is None:
@@ -2573,6 +2644,9 @@ def attach_conversation_archive(
                 facts={"message_id": message.id, "role": message.role},
                 source_refs=(f"message:{message.id}",),
             )
+        from ...observability.nas_evidence import remember_nas_message
+
+        remember_nas_message(canonical_chat_id, message)
         return result
 
     async def archive_compacted_messages(
@@ -2580,6 +2654,7 @@ def attach_conversation_archive(
     ) -> ConversationArchiveBoundary:
         advances_event_cursor = archived_messages_are_online_prefix(messages)
         boundary = await archive_store.commit(canonical_chat_id, messages)
+        publish_archived_evidence(messages)
         if advances_event_cursor:
             await archive_store.advance_archived_message_events(
                 canonical_chat_id,
@@ -2599,6 +2674,7 @@ def attach_conversation_archive(
             messages,
             candidate_id,
         )
+        publish_archived_evidence(messages)
         remove_archived_online_messages(messages)
         await install_checkpoint_projection(result.record)
         return result
@@ -2653,6 +2729,7 @@ def attach_conversation_archive(
         )
         if result is None:
             return False
+        publish_archived_evidence(messages)
         remove_archived_online_messages(messages)
         await install_checkpoint_projection()
         return True

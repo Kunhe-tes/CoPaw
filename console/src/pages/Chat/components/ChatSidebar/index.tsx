@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from "react";
 import { flushSync } from "react-dom";
 import { useNavigate, useLocation } from "react-router-dom";
-import { Image, Modal, Tooltip } from "antd";
+import { Image, message, Modal, Tooltip } from "antd";
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { useContextSelector } from "use-context-selector";
 import useChatAnywhereEventEmitter from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/useChatAnywhereEventEmitter";
@@ -22,10 +22,11 @@ import {
 } from "@/components/agentscope-chat";
 import { useAgentStore } from "@/stores/agentStore";
 import { useIframeStore } from "@/stores/iframeStore";
-import sessionApi from "../../sessionApi";
+import sessionApi, { renameSessionInList } from "../../sessionApi";
 import { getSessionAgentId } from "../../sessionApi/sessionAgent";
 import { resolveRequestedSessionId } from "../../sessionApi/resolvedSessionMapping";
 import { HistorySessionRow } from "./HistorySessionRow";
+import RenameHistorySessionModal from "./RenameHistorySessionModal";
 import { HistorySkeleton } from "./HistorySkeleton";
 import { HistoryInfiniteScrollTrigger } from "./HistoryInfiniteScrollTrigger";
 import { mergeConcurrentSessions } from "./mergeConcurrentSessions";
@@ -119,6 +120,11 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   const [loadMoreHistoryFailed, setLoadMoreHistoryFailed] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [activePanel, setActivePanel] = useState<PanelType>(null);
+  const [renameTarget, setRenameTarget] = useState<{
+    chatId: string;
+    name: string;
+    trigger: HTMLButtonElement | null;
+  } | null>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
   const historyScrollContainerRef = useRef<HTMLDivElement>(null);
   // Guide image preview state
@@ -162,11 +168,13 @@ export default function ChatSidebar(props: ChatSidebarProps) {
       try {
         const sessionList = await sessionApi.getSessionList();
         setSessions(
-          mergeConcurrentSessions(
-            sessionList,
-            getSessions(),
-            false,
-            excludedSessions,
+          sessionApi.projectSessionView(
+            mergeConcurrentSessions(
+              sessionList,
+              getSessions(),
+              false,
+              excludedSessions,
+            ),
           ),
         );
         setLoadMoreHistoryFailed(false);
@@ -183,7 +191,11 @@ export default function ChatSidebar(props: ChatSidebarProps) {
     setLoadMoreHistoryFailed(false);
     try {
       const sessionList = await sessionApi.loadMoreSessions();
-      setSessions(mergeConcurrentSessions(sessionList, getSessions(), true));
+      setSessions(
+        sessionApi.projectSessionView(
+          mergeConcurrentSessions(sessionList, getSessions(), true),
+        ),
+      );
     } catch {
       setLoadMoreHistoryFailed(true);
     } finally {
@@ -231,10 +243,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   }, [sharedSessions]);
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
-  const historyTotal = Math.max(
-    sessionApi.getSessionTotal() - tasks.length,
-    sessions.length,
-  );
+  const historyTotal = sessions.length;
 
   const handleToggleHistory = useCallback(() => {
     setHistoryCollapsed((prev) => !prev);
@@ -310,6 +319,13 @@ export default function ChatSidebar(props: ChatSidebarProps) {
 
     window.open(OPERATION_GUIDE_URL, "_blank", "noopener,noreferrer");
   }, [isOperationGuideContext]);
+
+  const handleRenameSession = useCallback(
+    (chatId: string, name: string, trigger: HTMLButtonElement | null) => {
+      setRenameTarget({ chatId, name, trigger });
+    },
+    [],
+  );
 
   const handleDeleteSession = useCallback(
     (
@@ -468,7 +484,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
                 >
                   <div className="chat-sidebar-history-title">
                     <HistoryIcon />
-                    历史记录({historyTotal})
+                    历史记录(已加载{historyTotal})
                   </div>
                   <ToggleIcon collapsed={historyCollapsed} />
                 </div>
@@ -494,6 +510,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
                                 currentChatId,
                               )}
                               onSessionClick={handleSessionClick}
+                              onSessionRename={handleRenameSession}
                               onSessionDelete={handleDeleteSession}
                             />
                           );
@@ -533,6 +550,34 @@ export default function ChatSidebar(props: ChatSidebarProps) {
           )}
         </div>
       </div>
+      {renameTarget && (
+        <RenameHistorySessionModal
+          name={renameTarget.name}
+          onSave={async (name) => {
+            const updated = await sessionApi.renameSession(
+              renameTarget.chatId,
+              name,
+            );
+            if (updated === "unavailable") {
+              setSessions(sessionApi.projectSessionView(getSessions()));
+              void message.warning("此会话已不可用");
+            } else if (updated) {
+              setSessions(
+                getSessions().map((session) =>
+                  renameSessionInList(session, updated),
+                ),
+              );
+            }
+          }}
+          onClose={() => {
+            const trigger = renameTarget.trigger;
+            setRenameTarget(null);
+            requestAnimationFrame(
+              () => trigger?.focus({ preventScroll: true }),
+            );
+          }}
+        />
+      )}
       {/* Guide Image Preview */}
       {isOriginY && isOperationGuideContext && (
         <div style={{ display: "none" }}>

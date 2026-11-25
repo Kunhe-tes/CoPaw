@@ -1,4 +1,19 @@
+> 会话 bundle 相关旧排查记录仅供历史参考；现行迁移步骤见 [会话元数据迁移](conversation-metadata-migration.md)。
+
 # 常见报错
+
+## SQL 会话已 completed 但 answer_turn 只有问题
+
+- 先比较同一 scope/Session 的完整恢复根、current history 与 answer_turn；如果前两者
+  都含回答，且 Turn 为 completed，应检查 `conversation_storage/history.py` 的
+  `_turn_snapshot()`，不要重新执行模型或修改已提交的终态。
+- admission anchor 和 recovery memory 可能各有同一 question 的 occurrence。
+  已关联持久 Turn 的问题应在原 Session/Chat 可见性约束下按 Turn 取消息；
+  若仍按下一条 user occurrence 截断，会把重复问题当作下一轮并漏掉回答。
+  legacy／未关联问题继续使用原区间，不能移除 scope、归档可见性或读取后重验。
+- 回归入口：`tests/integrated/conversation_storage/test_execution_mysql.py` 的
+  `test_answer_turn_includes_response_after_admission_projects_question`，覆盖无后续
+  Turn、同 Chat 后续 Turn 和另一 Chat 后续 Turn；使用完整 `Msg.to_dict()` 夹具。
 
 ## 新会话切换多智能体模式后出现 409
 
@@ -881,6 +896,13 @@
 - **其他检查**：顶栏和 Toast 的 inset 改用常规定位；焦点提示改用 :focus；min-inline-size 和 border-block-color 改用常规宽度及上下边框。`clamp()`、普通 Grid 已兼容 Chromium 80，保留；Flex gap 在 80–83 不支持，按用户确认暂不整改。Popover 和请求取消 API 已有能力检测或兼容处理。
 - **验证**：普通/自定义周期、多条不同排程、长场景名、客户数、排序、删除、空状态，及 1280、1440、1920 宽度与头部隐藏场景。真实内核版本和极速/兼容模式仍需在目标环境确认；仅修改 User-Agent 不能模拟 CSS 支持能力。完整边界见 [财富工作台兼容性记录](../../console/src/pages/WealthWorkbench/COMPATIBILITY.md)。
 
+## MySQL 会话 publication 结果未知后 Session 长时间 busy
+
+- `UnknownCommit` 不代表事务回滚，也不能通过 lease 过期断言旧 Pod 已死亡。始终保留原 `operation_key`、publication 行和 NAS 正文。
+- 本进程请求已结束且 source、续约任务和 NAS worker 已收敛时，Runner 用原 operation 对账：durable prepared 复用完整提交校验；已提交 admission/语义边界从完整恢复根提交 interrupted；未发布准入用原 key 的 aborted tombstone 拒绝并清理 reserved 槽。
+- 预留行缺失时，仅当保留原 `PublicationRequest` 元数据或原准入参数，才参与同 key 的唯一键竞争。缺少原身份/CAS 基线、主库不可达、正文损坏或跨进程 owner 退出证据不足时保持 unavailable/busy，不猜 revision/epoch、不重跑模型或工具。
+- 排查入口：`conversation_storage/runner_integration.py:IndexedQuery`、`execution.py`、`publications.py:reconcile`；回归入口：`tests/integrated/conversation_storage/test_runner_integration_mysql.py`。恢复根必须保留未知顶层模块与 managed cron receipts。
+
 ## 客户名单调整列顺序后，右侧固定列互相遮挡
 
 - **现象**：表头和数据顺序已调整，但横向滚动时“最近接触时间”遮住“经营方案”，或经营方案按钮与执行按钮重叠。
@@ -902,3 +924,67 @@
 - **统计边界**：无 `file_url` 且无 `list_key` 的点击保留在事件明细、按钮汇总和客户点击统计中；名单点击汇总和名单客户并集排除该类事件。已有 URL 或显式 `list_key` 的事件沿用原分组规则。
 - **前端**：工作台只上报洞察 `insight`、电访 `phone`，不传 `file_url`；客户 ID 使用 `custUid`，来源为 `WP_AGENT_WORKSPACE_TASK_LIST` / `WP`，运行时 API 补齐操作者与机构信息。
 - **回归入口**：`tests/unit/app/test_html_preview_clicks.py`、`console/src/pages/WealthWorkbench/Tasks/groupTables.test.tsx`、`console/src/api/modules/htmlPreviewEvents.test.ts`。先部署允许省略字段的后端，再部署工作台前端。
+
+## 会话迁移全局审计发现的恢复与规模边界（尚未修复）
+
+- `restore requires an empty metadata target`：当前 backup 按单 workspace scope 捕获，但 restore 要求七表整体为空；首个 scope 恢复后不能继续恢复第二个 scope。不要删除已恢复数据重试，也不要直接去掉空表保护；需要完整的多 scope 聚合恢复能力。
+- `publication pins require bounded positive integer IDs`：先检查去重后的 publication 引用数是否超过 4096。`projection_publication._existing` 和 `projection_references.snapshot_projection` 当前没有对整个集合分批 pin，长期 Session/Cron 历史可能触发；不是数据库连接错误，不应删历史规避。
+- `conversation-storage export --apply` 在旧冻结源路径报 ENOENT：当前 CLI 在导出前仍重扫原 inventory，即使一致性 backup 自足也会被阻断。保留备份和原源，不以空目录或修改成功标记绕过核验。
+- 这三项是 `858fc4d65` 基线的已确认问题，本次仅记录审计，未修复。复现、修复方向及验收范围见[全局审计](../../docs/superpowers/reports/2026-11-01-conversation-global-review.md)。
+
+
+## MySQL/NAS 会话有归档，但运营看板没有加载入口
+
+- **原因**：旧 Tracing SQL 路由调用 `HistoryStore.tracing_view`，只取 memory/task，缺少 error/anchor、Chat metadata 和归档 boundary，导致详情 `archive.has_more=false`。
+- **处理**：SQL 详情改为目标 workspace 的 `current`，归档显式调用 `archive_page`；两者共享 chat/user/source/agent 对象校验回调。首次 metadata hydrate 也经过存储错误包装，故障明确返回 503，不回退文件历史。
+- **排查入口**：`src/swe/app/routers/tracing.py`，先检查详情的 `chat`、`archive.has_more/boundaries`，再检查 history 请求及其 cursor；页级 `has_more` 与详情归档可用性含义不同。
+- **回归入口**：`tests/unit/routers/test_tracing_chat_history_parity.py`、`tests/integrated/conversation_storage/test_api_mysql.py` 和 `ReadOnlySessionChat.archive.test.tsx`。本地替身测试不能替代真实 SQL/NAS 验收，见[修复报告](../../docs/superpowers/reports/2026-11-04-tracing-history-parity-fix.md)。
+
+
+### 共享 Session reset 与并发删除授权
+
+历史正文 pin 只保护物理数据，在线历史返回前还须核对 Session.context_epoch；仅核对发起读取的 Chat 版本会漏掉另一 Chat 的 reset。删除授权时读取的归属必须传到持有 Chat 行锁的 tombstone 事务内重验，候选查询后的 Session 关联检查不能覆盖授权到候选查询之间的合法所有权转移。参见 `docs/superpowers/reports/2026-11-11-conversation-storage-fix-and-crud-review.md`。
+
+
+## 会话迁移验证在合法 8MiB 源文件上报 multi-read exceeds byte budget
+
+- 现象：原始保留文件正好 8MiB，inventory 与 publication 成功，验证合读 artifact metadata 和正文时失败。
+- 原因：单 extent 的 8MiB 限制被误用为 metadata 加正文的合计限制。
+- 处理：`migration/verify.py` 的 `_read_extents()` 最多合读两个 extent，预算取自当前 bundle reader 的单 extent 上限；共享 IO、单次打开/索引及文件状态复查仍有效。
+- 回归：`test_migration_verify_extents.py` 覆盖直接、共享 IO 和预取证据路径的正文加 metadata，以及超过两个 extent 的数量限制。
+
+## 会话迁移报 one message exceeds the message block byte limit
+
+- 现象：旧 Session 或归档中存在超过 8MiB 的合法单条消息，`migrate --apply` 在消息分块阶段失败。
+- 原因：8MiB 曾被同时用作常规打包目标、单消息硬上限和线上正文读取上限；一个消息没有可继续拆分的位置，因此不能被普通批次切分器拆开。
+- 当前规则：8MiB 只作为批次目标。超限消息单独形成一个消息块，`sessions/` 与 `dialog/` 源文件按 bundle 容器上限 256MiB 读取；线上 bundle reader 和 fast verify 也按实际 extent 字节读取。旧 artifact 保留、原地身份证据、share 单文件和 bounded runtime prefetch 不再保留 8MiB 门禁；`chats.json` registry 仍使用独立 reader 限制。
+- 回归：`test_message_bundle.py::test_single_message_larger_than_target_is_kept_as_a_singleton`、`test_bundle.py::test_online_store_reads_a_large_single_message_block`，以及使用 9MiB Session 消息跑通 import/resume/verify/finalize 的 `test_v3_migration_mysql.py`。
+
+## 会话迁移输入范围与容量限制
+
+- 输入范围采用明确包含规则：`chats.json`、`sessions/`、`dialog/`（或清单明确配置的对应入口），以及审核过的 `session_paths` 文件和对应 generation ledger。附件、代码、技能目录不递归枚举、不计入 `inventoried_source_bytes`；分享按记录指定路径读取。
+- v3 扫描不再为每个 workspace 另设内存额度，也不再以 `memory allowance / 16` 预先拒绝大 workspace。`CS_RESOURCES` 仍提供全局解析与 IO 预算；文件类型、符号链接、bundle 大小和越界检查保持不变。
+- `sessions/`、`dialog/` 中承载消息的文件使用 bundle 的 256MiB 容器上限；`chats.json` 等 registry 文件继续使用 8MiB reader 限制。单个超过 8MiB 的消息独占消息块，不会静默截断或要求人工拆 Session。
+- share 的单文件 8MiB 门禁已删除。旧冻结模式仍对所有 share snapshot 的合计大小执行 `memory_bytes / 64` 的解析预算，并限制数量为 `memory_bytes / 16384`；`manifest-v1` 源隔离流程跳过这项聚合预检。
+- 排查 `MigrationCapacityError` 时先看实际文件类型、累计字节、条目和 spool 限制，不应只提高 workers 或内存参数。
+- 容量、文件清单、只读检查和源变化检查应使用同一范围；配置证据父目录仅浅检查。未映射的 Session/ledger/归档仍需阻断，不能通过删除数据或手改成功状态绕过。
+- 正常 v3 迁移只解析 registered workspace 一次，不再生成或复核 whole-source fingerprint，也不在完成前重跑完整 inventory。已有 `freshness_protocol` 的 `chats.json` mtime 检查和明确 source 边界的正常解析校验仍保留。
+- 入口：`migration/source_inputs.py`、`inventory_parallel.spool_workspaces`、`inventory._source_files`、`inventory_v3.inventory_discovery`；操作说明见[并行迁移补充](../../docs/superpowers/plans/2026-11-12-conversation-parallel-migration-operations.md)。
+
+## MySQL 单次操作超过 30 秒会报错
+
+- `tests/integrated/conversation_storage/conftest.py` 把集成 fixture 的 `read_timeout`、`write_timeout` 设为 30 秒；这不是生产默认值。
+- 生产 `DatabaseConfig` 默认两者均为 600 秒，可分别用 `SWE_DB_READ_TIMEOUT`、`SWE_DB_WRITE_TIMEOUT` 调整。单次 database facade 操作超过期限会抛 `TimeoutError("Database operation timed out")`。
+- 写事务超时只说明当前等待被客户端终止，最终提交结果可能未知。保留原 `operation_key` 和 prepared publication，先对账再续跑，不能把超时直接重试成新写入。
+- 远端 MySQL 返回 `InterfaceError 2013` 或握手重置时属于连接中断，不等于 SQL timeout；先确认 `SELECT 1` 和连接池恢复，再评估是否在同一 manifest 重跑。
+
+## Agent 报 session execution is not active
+
+- 若堆栈指向 `stream_admission` 的 `terminal_turn_status`，检查会话提交后提前关闭、观测收尾再读取状态的顺序；会话内容可能已经保存，但定时任务会因收尾异常显示失败。
+- 当前实现关闭事务时保留 turn 状态供收尾使用。核对实际业务操作与通知结果后再决定是否重跑，避免重复执行。
+
+## 会话迁移 fast verify 报消息批次或正文证据不匹配
+
+- fast verify 按 manifest 中的 Session 身份核对消息 publication 归属、连续范围、恢复目录、`history_high` 和恢复 publication 中的 `message_body_hashes`；artifact 或 Turn 路径中的 `/messages:` 不作为消息批次。
+- 缺少尾批、跨 Session 引用、正文被替换或恢复证据缺失都会阻止 fast verify。保留原始 manifest 和 bundle，先检查 Session 归属、恢复 publication 与源快照，不能手改校验状态。
+- 在引入正文摘要前生成的恢复 publication 不含该证据，无法通过新版 fast verify；应基于保留的源快照重新导入，或按现有完整验证及迁移操作流程处理。
