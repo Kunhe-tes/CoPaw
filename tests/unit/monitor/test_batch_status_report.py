@@ -39,6 +39,41 @@ async def test_snapshot_uses_placeholder_for_unnamed_task():
     assert batch["name"] == "未命名任务"
 
 
+@pytest.mark.asyncio
+async def test_snapshot_preserves_batch_finished_at():
+    reader = AsyncMock()
+    reader.fetch_all.side_effect = [
+        [
+            {
+                "batch_id": "finished",
+                "job_name": "客户名单生成",
+                "logical_fire_at": datetime(2026, 11, 24, 3),
+                "finished_at": datetime(2026, 11, 24, 3, 25),
+                "status": "completed",
+                "member_count": 1,
+                "done_count": 1,
+                "success_count": 1,
+                "failed_count": 0,
+                "skipped_count": 0,
+                "runtime_skipped_count": 0,
+                "active_count": 0,
+                "waiting_count": 0,
+            },
+        ],
+        [],
+        [],
+        [],
+        [],
+    ]
+    snapshot = await collect(
+        reader,
+        "S",
+        date(2026, 11, 24),
+        datetime(2026, 11, 24, 4, tzinfo=timezone.utc),
+    )
+    assert snapshot["batches"][0]["finished_at"] == "2026-11-24T03:25:00+00:00"
+
+
 def test_business_window_preserves_original_day():
     now = datetime(2026, 11, 25, 1, tzinfo=timezone.utc)
     assert report_window(date(2026, 11, 24), now) == (

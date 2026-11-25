@@ -57,17 +57,26 @@ class BatchReportWorker:
             return
         try:
             snapshot = response.json()
-            parts = render_parts(
-                report["source_id"],
-                report["business_date"],
-                snapshot,
-                PART_BYTES,
-            )
+            parts = None
+            if snapshot.get("batch_scope") == "followed_batch":
+                parts = render_parts(
+                    report["source_id"],
+                    report["business_date"],
+                    snapshot,
+                    PART_BYTES,
+                )
         except (ValueError, KeyError, TypeError, AttributeError):
             await self.store.collection_failed(
                 report,
                 "cron_report_invalid_snapshot",
                 False,
+            )
+            return
+        if parts is None:
+            await self.store.collection_failed(
+                report,
+                "cron_report_snapshot_scope_unavailable",
+                True,
             )
             return
         await self.store.freeze(report, snapshot, parts)

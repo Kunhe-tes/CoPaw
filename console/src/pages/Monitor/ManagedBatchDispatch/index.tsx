@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   DatePicker,
+  Dropdown,
   Empty,
   Input,
   Pagination,
@@ -12,6 +13,7 @@ import {
   Space,
   Spin,
   Tag,
+  message,
 } from "antd";
 import dayjs, { type Dayjs } from "dayjs";
 import { RefreshCw } from "lucide-react";
@@ -24,12 +26,39 @@ import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
 import { getUserId } from "../../../utils/identity";
 import { loadWorkerHistory } from "../CronBatchDispatch/workerHistory";
 import styles from "../CronBatchDispatch/index.module.less";
-import { statusTag, timeText } from "./format";
+import {
+  followLevelOptions,
+  followLevelStars,
+  statusTag,
+  timeText,
+} from "./format";
 import { useBoardResource } from "./useBoardResource";
 import BatchDetail from "./BatchDetail";
 import SharedWorkers from "./SharedWorkers";
 import WorkerOccupants from "./WorkerOccupants";
 import FailureSummary from "./FailureSummary";
+
+const followFilterOptions = [
+  { value: "", label: "全部关注等级" },
+  { value: "followed", label: "已关注" },
+  { value: "unfollowed", label: "未关注" },
+  { value: "1", label: "关注 L1" },
+  { value: "2", label: "关注 L2" },
+  { value: "3", label: "关注 L3" },
+  { value: "4", label: "关注 L4" },
+  { value: "5", label: "关注 L5" },
+];
+
+/** 关注筛选转成看板接口的等级区间；空值表示不筛选。 */
+function followRange(value: string) {
+  if (value === "followed") return { follow_min: 1 };
+  if (value === "unfollowed") return { follow_max: 0 };
+  if (value) {
+    const level = Number(value);
+    return { follow_min: level, follow_max: level };
+  }
+  return {};
+}
 
 function buildRange(key: string): [Dayjs, Dayjs] {
   const now = dayjs();
@@ -46,6 +75,7 @@ function Board({ source, actor }: { source: string; actor: string }) {
   const [range, setRange] = useState<[Dayjs, Dayjs]>(() => buildRange("today"));
   const [status, setStatus] = useState("");
   const [memberPresence, setMemberPresence] = useState("");
+  const [followFilter, setFollowFilter] = useState("");
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState("");
@@ -54,6 +84,18 @@ function Board({ source, actor }: { source: string; actor: string }) {
     null,
   );
   const reload = useCallback(() => setRefresh((value) => value + 1), []);
+  // 右键菜单设置关注等级：成功后刷新列表，失败保留原状态。
+  const setFollowLevel = useCallback(
+    async (batchId: string, level: number) => {
+      try {
+        await managedBatchBoard.follow(source, batchId, level);
+        reload();
+      } catch {
+        message.error("关注等级更新失败，请重试");
+      }
+    },
+    [source, reload],
+  );
   const onQueued = useCallback((result: ManagedRetryResult) => {
     setRetryResult(result);
     setRefresh((value) => value + 1);
@@ -67,8 +109,9 @@ function Board({ source, actor }: { source: string; actor: string }) {
       status,
       has_members: memberPresence ? memberPresence === "true" : undefined,
       query,
+      ...followRange(followFilter),
     }),
-    [start, end, status, memberPresence, query],
+    [start, end, status, memberPresence, query, followFilter],
   );
   const loadBatches = useCallback(
     (signal: AbortSignal) => {
@@ -197,6 +240,16 @@ function Board({ source, actor }: { source: string; actor: string }) {
             setPage(1);
           }}
         />
+        <Select
+          aria-label="关注等级筛选"
+          value={followFilter}
+          className={styles.statusSelect}
+          options={followFilterOptions}
+          onChange={(value) => {
+            setFollowFilter(value);
+            setPage(1);
+          }}
+        />
       </section>
       <section className={styles.summaryStrip} aria-label="新版批调度概览">
         {metrics.map(([title, value]) => (
@@ -278,64 +331,83 @@ function Board({ source, actor }: { source: string; actor: string }) {
           >
             <div className={styles.batchList}>
               {items.map((item) => (
-                <button
-                  type="button"
+                <Dropdown
                   key={item.batch_id}
-                  onClick={() => setSelected(item.batch_id)}
-                  className={`${styles.batchRow} ${
-                    batch?.batch_id === item.batch_id
-                      ? styles.batchRowSelected
-                      : ""
-                  }`}
+                  trigger={["contextMenu"]}
+                  disabled={typeof item.batch_follow_level !== "number"}
+                  menu={{
+                    items: followLevelOptions.map((option) => ({
+                      key: String(option.value),
+                      label: option.label,
+                    })),
+                    selectable: true,
+                    selectedKeys: [String(item.batch_follow_level ?? 0)],
+                    onClick: ({ key }: { key: string }) => {
+                      void setFollowLevel(item.batch_id, Number(key));
+                    },
+                  }}
                 >
-                  <span className={styles.batchIdentity}>
-                    <strong>{item.job_name || "未命名任务"}</strong>
-                    <em title={item.batch_id}>{item.batch_id}</em>
-                    <small>{item.job_id}</small>
-                  </span>
-                  <span className={styles.batchTiming}>
-                    <strong>{timeText(item.logical_fire_at)}</strong>
-                    <em>回调 {timeText(item.created_at)}</em>
-                    {["completed", "failed"].includes(item.status) &&
-                      item.finished_at && (
-                        <em>完成 {timeText(item.finished_at)}</em>
+                  <button
+                    type="button"
+                    onClick={() => setSelected(item.batch_id)}
+                    className={`${styles.batchRow} ${
+                      batch?.batch_id === item.batch_id
+                        ? styles.batchRowSelected
+                        : ""
+                    }`}
+                  >
+                    <span className={styles.batchIdentity}>
+                      <strong>{item.job_name || "未命名任务"}</strong>
+                      {followLevelStars(item.batch_follow_level)}
+                      <em title={item.batch_id}>{item.batch_id}</em>
+                      <small>{item.job_id}</small>
+                    </span>
+                    <span className={styles.batchTiming}>
+                      <strong>{timeText(item.logical_fire_at)}</strong>
+                      <em>回调 {timeText(item.created_at)}</em>
+                      {["completed", "failed"].includes(item.status) &&
+                        item.finished_at && (
+                          <em>完成 {timeText(item.finished_at)}</em>
+                        )}
+                      <small title="父任务本次执行的冻结模型；各成员模型见成员列表">
+                        {item.provider_id || "-"} / {item.model_id || "-"}
+                      </small>
+                    </span>
+                    <span className={styles.batchProgress}>
+                      {statusTag(item.status)}
+                      {item.batch_paused && (
+                        <Tag color="warning">本批已暂停</Tag>
                       )}
-                    <small title="父任务本次执行的冻结模型；各成员模型见成员列表">
-                      {item.provider_id || "-"} / {item.model_id || "-"}
-                    </small>
-                  </span>
-                  <span className={styles.batchProgress}>
-                    {statusTag(item.status)}
-                    {item.batch_paused && <Tag color="warning">本批已暂停</Tag>}
-                    {item.dispatch_paused &&
-                      item.done_count < item.member_count && (
-                        <Tag color="warning">批调度入口已暂停</Tag>
+                      {item.dispatch_paused &&
+                        item.done_count < item.member_count && (
+                          <Tag color="warning">批调度入口已暂停</Tag>
+                        )}
+                      {(item.skipped_count ?? 0) > 0 && (
+                        <strong>跳过／取消 {item.skipped_count} 个</strong>
                       )}
-                    {(item.skipped_count ?? 0) > 0 && (
-                      <strong>跳过／取消 {item.skipped_count} 个</strong>
-                    )}
-                    {item.status === "failed" ? (
-                      <strong className={styles.batchOutcome}>
-                        <span>成功 {item.success_count ?? "-"} 个</span>
-                        <span>失败 {item.failed_count} 个</span>
-                      </strong>
-                    ) : item.completion_rate === null ? (
-                      <small>无可执行成员</small>
-                    ) : (
-                      <>
-                        <strong>
-                          {item.done_count}/{item.member_count}
+                      {item.status === "failed" ? (
+                        <strong className={styles.batchOutcome}>
+                          <span>成功 {item.success_count ?? "-"} 个</span>
+                          <span>失败 {item.failed_count} 个</span>
                         </strong>
-                        <Progress
-                          percent={Math.round(item.completion_rate * 100)}
-                          size="small"
-                          showInfo={false}
-                          status={item.failed_count ? "exception" : "normal"}
-                        />
-                      </>
-                    )}
-                  </span>
-                </button>
+                      ) : item.completion_rate === null ? (
+                        <small>无可执行成员</small>
+                      ) : (
+                        <>
+                          <strong>
+                            {item.done_count}/{item.member_count}
+                          </strong>
+                          <Progress
+                            percent={Math.round(item.completion_rate * 100)}
+                            size="small"
+                            showInfo={false}
+                            status={item.failed_count ? "exception" : "normal"}
+                          />
+                        </>
+                      )}
+                    </span>
+                  </button>
+                </Dropdown>
               ))}
               {!batches.loading && !items.length && (
                 <Empty description="当前范围内暂无批次" />

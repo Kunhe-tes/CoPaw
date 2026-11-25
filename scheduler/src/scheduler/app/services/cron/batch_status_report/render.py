@@ -38,10 +38,19 @@ def pool_name(pool):
 
 def batch_lines(batch):
     slot = datetime.fromisoformat(batch["logical_fire_at"]).astimezone(ZONE)
+    level = int(batch.get("follow_level") or 0)
     first = (
         f"{slot:%H:%M} · {label(batch['name'])}"
         f" · {LABELS[batch['status']]}"
+        + (f" · 关注 L{level}" if level > 0 else "")
     )
+    finished_at = batch.get("finished_at")
+    if batch["status"] in {"completed", "failed"} and finished_at:
+        finished = datetime.fromisoformat(finished_at).astimezone(ZONE)
+        time_format = (
+            "%H:%M" if finished.date() == slot.date() else "%Y-%m-%d %H:%M"
+        )
+        first += f" · 结束 {finished:{time_format}}"
     if batch["status"] == "unavailable":
         return [first]
     done, total = batch["done_count"], batch["member_count"]
@@ -83,14 +92,14 @@ def render_parts(source, business_date, snapshot, byte_budget):
     header = f"【定时任务批调度简报】{label(source, 48)}\n业务日 {business_date} · 取数 {local:%Y-%m-%d %H:%M}（北京时间）"
     batches = snapshot["batches"]
     states = Counter(batch["status"] for batch in batches)
-    summary = f"批次共 {len(batches)} 个" + "".join(
+    summary = f"关注批次共 {len(batches)} 个" + "".join(
         f" · {name} {states[key]}"
         for key, name in LABELS.items()
         if states[key]
     )
     summary = f"{header}\n\n{summary}"
     if not batches:
-        summary += "\n截至当前暂无可报告的批次"
+        summary += "\n截至当前暂无可报告的关注批次"
 
     pool_lines = [
         f"{pool_name(pool)} · {pool['occupied']} / "
@@ -98,7 +107,7 @@ def render_parts(source, business_date, snapshot, byte_budget):
         for pool in snapshot["pools"]
     ]
     pools = [
-        "共享模型池 · 当前占用 / 有效容量",
+        "全来源共享模型池 · 当前占用 / 有效容量",
         *(pool_lines or ["暂无模型池"]),
     ]
     blocks = [batch_lines(batch) for batch in batches]

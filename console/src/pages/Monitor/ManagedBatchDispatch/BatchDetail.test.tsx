@@ -10,7 +10,10 @@ import { afterEach, expect, it, vi } from "vitest";
 import BatchDetail from "./BatchDetail";
 import type { ManagedBatch } from "@/api/modules/managedBatchBoard";
 
-const api = vi.hoisted(() => ({ detail: vi.fn(), pause: vi.fn() }));
+const api = vi.hoisted(() => ({
+  detail: vi.fn(),
+  pause: vi.fn(),
+}));
 vi.mock("../../../api/modules/managedBatchBoard", () => ({
   managedBatchBoard: api,
 }));

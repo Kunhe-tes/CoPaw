@@ -35,6 +35,7 @@ def batch_item(row):
     result = {name: row[name] for name in fields}
     result["dispatch_paused"] = bool(row["dispatch_paused"])
     result["batch_paused"] = bool(row["batch_paused"])
+    result["batch_follow_level"] = row.get("batch_follow_level")
     # 新协议没有批次级Owner；dispatch_owner是派发令牌，不能暴露。
     result["lock_owner"] = None
     result.update(
@@ -158,6 +159,8 @@ class ManagedBoardQuery:
         query=None,
         child_status=None,
         has_members=None,
+        follow_min=None,
+        follow_max=None,
     ):
         from .managed_board_failures import failure_summary
 
@@ -171,6 +174,8 @@ class ManagedBoardQuery:
             query,
             child_status=child_status,
             has_members=has_members,
+            follow_min=follow_min,
+            follow_max=follow_max,
         )
 
     async def batches(
@@ -185,6 +190,8 @@ class ManagedBoardQuery:
         page_size=20,
         child_status=None,
         has_members=None,
+        follow_min=None,
+        follow_max=None,
     ):
         await self._ready()
         where, params = sql.batch_where(
@@ -193,6 +200,8 @@ class ManagedBoardQuery:
             end,
             query,
             child_status=child_status,
+            follow_min=follow_min,
+            follow_max=follow_max,
         )
         bound = (*params, status, status) if status else params
         rows = await self.db.fetch_all(

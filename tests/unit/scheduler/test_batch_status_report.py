@@ -79,8 +79,10 @@ async def test_report_worker_requires_dedicated_swe_address(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("followed_scope", [True, False])
 async def test_report_snapshot_and_delivery_use_internal_swe_address(
     monkeypatch,
+    followed_scope,
 ):
     monkeypatch.setenv("SWE_INTERNAL_TOKEN", "report-test-token")
     store = AsyncMock()
@@ -95,13 +97,16 @@ async def test_report_snapshot_and_delivery_use_internal_swe_address(
         endpoint = request.url.path.rsplit("/", 1)[-1]
         sources[endpoint] = body["source_id"]
         if endpoint == "snapshot":
+            snapshot = {
+                "snapshot_at": "2026-11-24T04:00:00+00:00",
+                "batches": [],
+                "pools": [],
+            }
+            if followed_scope:
+                snapshot["batch_scope"] = "followed_batch"
             return httpx.Response(
                 200,
-                json={
-                    "snapshot_at": "2026-11-24T04:00:00+00:00",
-                    "batches": [],
-                    "pools": [],
-                },
+                json=snapshot,
             )
         return httpx.Response(200, json={"status": "sent"})
 
@@ -119,7 +124,15 @@ async def test_report_snapshot_and_delivery_use_internal_swe_address(
         await worker.deliver({"source_id": "retail"})
 
     assert sources == {"snapshot": "bank", "send-part": "retail"}
-    store.freeze.assert_awaited_once()
+    if followed_scope:
+        store.freeze.assert_awaited_once()
+    else:
+        store.freeze.assert_not_awaited()
+        store.collection_failed.assert_awaited_once_with(
+            {"source_id": "bank", "business_date": "2026-11-24"},
+            "cron_report_snapshot_scope_unavailable",
+            True,
+        )
     store.finish_delivery.assert_awaited_once_with(
         {"source_id": "retail"},
         "sent",
@@ -165,6 +178,94 @@ async def test_new_report_uses_beijing_acceptance_date_across_midnight(
     assert db.execute.await_count == 2
 
 
+def test_render_marks_follow_level_only_when_followed():
+    from scheduler.app.services.cron.batch_status_report.render import (
+        render_parts,
+    )
+
+    base = {
+        "batch_id": "b1",
+        "name": "客户计划",
+        "logical_fire_at": "2026-11-24T01:00:00+00:00",
+        "status": "completed",
+        "member_count": 1,
+        "done_count": 1,
+        "success_count": 1,
+        "failed_count": 0,
+        "skipped_count": 0,
+        "active_count": 0,
+        "waiting_count": 0,
+        "subtasks": {},
+        "failure_details": None,
+        "workers": [],
+    }
+    pools = [
+        {
+            "provider_id": "p",
+            "model_id": "m",
+            "occupied": 0,
+            "capacity": 10,
+        }
+    ]
+    followed = render_parts(
+        "S",
+        "2026-11-24",
+        {
+            "snapshot_at": "2026-11-24T04:00:00+00:00",
+            "batches": [{**base, "follow_level": 3}],
+            "pools": pools,
+        },
+        1000,
+    )
+    assert "关注 L3" in "\n".join(followed)
+    plain = render_parts(
+        "S",
+        "2026-11-24",
+        {
+            "snapshot_at": "2026-11-24T04:00:00+00:00",
+            "batches": [{**base, "follow_level": 0}],
+            "pools": pools,
+        },
+        1000,
+    )
+    assert "关注 L" not in "\n".join(plain)
+
+
+@pytest.mark.parametrize(
+    ("status", "finished_at", "expected"),
+    [
+        ("completed", "2026-11-24T03:25:00+00:00", "结束 11:25"),
+        ("failed", "2026-11-24T16:05:00+00:00", "结束 2026-11-25 00:05"),
+        ("running", "2026-11-24T03:25:00+00:00", ""),
+        ("completed", None, ""),
+    ],
+)
+def test_batch_lines_show_finished_time_for_terminal_batches(
+    status,
+    finished_at,
+    expected,
+):
+    batch = {
+        "name": "客户名单生成",
+        "logical_fire_at": "2026-11-24T03:00:00+00:00",
+        "status": status,
+        "finished_at": finished_at,
+        "done_count": 1,
+        "member_count": 1,
+        "success_count": 1,
+        "failed_count": 0,
+        "skipped_count": 0,
+        "active_count": 0,
+        "waiting_count": 0,
+        "workers": [],
+    }
+    first = batch_lines(batch)[0]
+    if expected:
+        assert first.endswith(f" · {expected}")
+    else:
+        assert " · 结束 " not in first
+
+
 def test_render_empty_report_keeps_current_worker_capacity():
     snapshot = {
         "snapshot_at": "2026-11-24T04:00:00+00:00",
@@ -180,9 +281,9 @@ def test_render_empty_report_keeps_current_worker_capacity():
     }
     parts = render_parts("S", "2026-11-24", snapshot, 1000)
     assert len(parts) == 1
-    assert "暂无可报告的批次" in parts[0]
+    assert "暂无可报告的关注批次" in parts[0]
     assert "7 / 10" in parts[0]
-    assert "批次共 0 个" in parts[0]
+    assert "关注批次共 0 个" in parts[0]
     assert "第 1/1 段" not in parts[0]
 
 
@@ -231,8 +332,8 @@ def test_render_splits_all_batches_without_losing_failure_counts():
     assert len(parts) > 1
     assert all(len(part.encode()) <= 1024 for part in parts)
     summary, *details = parts
-    assert "批次共 20 个 · 已失败 20" in summary
-    assert "共享模型池" in summary
+    assert "关注批次共 20 个 · 已失败 20" in summary
+    assert "全来源共享模型池" in summary
     assert "客户计划" not in summary
     for position, part in enumerate(details, 1):
         assert f"第 {position}/{len(details)} 段" in part
@@ -342,7 +443,7 @@ def test_render_overflow_model_pools_keep_one_summary_and_all_pools():
         "pools": pools,
     }
     summary, *details = render_parts("S", "2026-11-24", snapshot, 500)
-    assert "批次共 0 个" in summary
+    assert "关注批次共 0 个" in summary
     assert "共享模型池见后续明细" in summary
     assert all(len(part.encode()) <= 500 for part in (summary, *details))
     text = "\n".join(details)

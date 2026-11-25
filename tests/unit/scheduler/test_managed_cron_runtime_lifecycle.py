@@ -20,7 +20,7 @@ class Worker:
         self.started = asyncio.Event()
         self.stopped = asyncio.Event()
 
-    async def run_loop(self, *, stop_event):
+    async def run_loop(self, *, stop_event, interval_seconds=2):
         self.started.set()
         try:
             await stop_event.wait()
@@ -225,7 +225,7 @@ async def test_accounting_is_ready_before_old_loop_can_claim(monkeypatch):
         def bind_managed_feedback(self, feedback):
             self.feedback = feedback
 
-        async def run_loop(self, *, stop_event):
+        async def run_loop(self, *, stop_event, interval_seconds=2):
             assert capacity_claim.MANAGED_CAPACITY_ACCOUNTING
             assert self.feedback is not None
             old_started.set()

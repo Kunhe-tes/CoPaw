@@ -61,6 +61,8 @@ Worker 调整按子任务采样前，在共库核对并补齐 [反馈统计列](
 
 - 网关把 `/api/scheduler/cron/jobs` 与新版 `/api/scheduler/cron/ordinary/callback`、`/batch/callback` 转发 Scheduler；旧入口仍指向原服务。Console 新页为 `/scheduler-cron-jobs`，原页 `/cron-jobs` 不变。
 - `SCHEDULER_SWE_API_BASE_URL` 为 Scheduler 可达的 SWE/网关根地址；`SWE_SERVER_DOMAIN` 为平台可达且能路由新版回调的根地址。使用现有 `SWE_CRON_SCHEDULER_*` 平台配置，不新加必配内部 Token。连接参数不全时不能创建真实启用定时器验收。
+- `SCHEDULER_MANAGED_RECOVERY_LIMIT` 可选，默认 `32`，取值 `1`–`200`。每个模型池和直派队列每轮各最多取这么多条派发候选，广播、删除、暂停也使用该值作为分页上限。当日失败补跑的每页上限取该值与 `100` 中的较小值。模型池有效 Worker 大于 32 时建议调到不小于最大池容量。配置缺失时使用 32，非法值回退 32 并记录告警。
+- `SCHEDULER_MANAGED_RECOVERY_INTERVAL_SECONDS` 可选，默认 `2`，取值 `1`–`60`。恢复巡检每轮结束后等待的秒数，实际周期为本轮耗时加该值。调小让派发更快跟上 Worker 释放，调大降低数据库轮询频率；缺失或非法值回退 2 并打一条告警。
 - 沿用可信网关身份：X-User-Id 为真实操作者，X-Tenant-Id/X-Source-Id/X-Agent-Id 为目标任务。角色由网关核验，不手工伪造 manager/admin。三服务共库不代表工作区/会话/产物共盘，必须验证同一身份路由到可访问实际资源的 SWE 实例。
 - 外部平台已确认只传注册参数解码后的固定 Body、不传 Header。新版回调也保留 jobParam 编码封装兼容。平台注册引用、完整任务身份及 scope 须匹配共库记录；平台入口沿用可信内网边界，数据库引用核验本身不是来源认证。平台未确认时区字段，注册 payload 沿用既有协议；本轮至少验证 Asia/Shanghai，不能据此承诺任意时区的平台触发正确。
 - 2026-10-17用户确认平台没有注册查询接口：无已保存平台ID按注册失败处理，错误码platform_registration_failed，原操作人工retry再次新增；已有ID只续办后续步骤。可能留下重复/孤立定时器，删除只能关闭已知ID，验收时须知晓此风险，不再等待平台查回协议。

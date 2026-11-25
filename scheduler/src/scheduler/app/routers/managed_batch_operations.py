@@ -125,6 +125,29 @@ class BatchPauseRequest(BaseModel):
     paused: bool = Field(strict=True)
 
 
+class BatchFollowRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    level: int = Field(strict=True, ge=0, le=5)
+
+
+@router.put(
+    "/{batch_id}/follow",
+    dependencies=[Depends(require_managed_runtime)],
+)
+async def follow_batch_task(
+    batch_id: str,
+    body: BatchFollowRequest,
+    caller: CallerIdentity = Depends(caller_identity),
+    db=Depends(management_database),
+):
+    from ..services.cron.managed.batch_follow import set_batch_follow_level
+
+    try:
+        return await set_batch_follow_level(db, caller, batch_id, body.level)
+    except Exception as exc:
+        raise batch_error(exc) from exc
+
+
 @router.put(
     "/{batch_id}/pause",
     dependencies=[Depends(require_managed_runtime)],

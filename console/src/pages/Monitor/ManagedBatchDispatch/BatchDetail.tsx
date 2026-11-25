@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { validate as isUuid } from "uuid";
 import {
   Alert,
@@ -296,7 +296,7 @@ export default function BatchDetail({
             </span>
           </p>
         </div>
-        <Space>
+        <Space wrap>
           {statusTag(data?.batch.status || batch.status)}
           {current.batch_paused && <span>本批已暂停</span>}
           <Tooltip title="暂停本批后续派发和重试；已交接的执行继续完成，后续新批次不受影响">

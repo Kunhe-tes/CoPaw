@@ -170,9 +170,10 @@ async def downstream_response(request, monitor, attempts):
         return response
     attempts.append((body["recipient_id"], body["part_no"]))
     if body["part_no"] == 1:
-        assert "批次共 3 个 · 已失败 2 · 运行中 1" in body["text"]
+        assert "关注批次共 3 个 · 已失败 2 · 运行中 1" in body["text"]
         assert "1 / 10" in body["text"]
         assert "异步子任务异常" not in body["text"]
+        assert "unfollowed" not in body["text"]
     else:
         assert body["part_no"] == 2
         assert body["text"].count("主任务失败") == 2
@@ -196,8 +197,14 @@ async def seed_report_batches(db, source):
         ("skipped", "skipped", False),
         ("main-failure", "error", False),
         ("subtask-failure", "success", True),
+        ("unfollowed", "error", False),
     ):
         await seed_batch(db, source, name, when, status, subtask=has_subtasks)
+    await db.execute(
+        "UPDATE swe_cron_job_states SET batch_follow_level=3 "
+        "WHERE source_id=%s AND job_id<>'unfollowed'",
+        (source,),
+    )
     await db.execute(
         "UPDATE swe_cron_execution_runs SET settled_status='error', "
         "settled_error_code='cron_async_subtasks_failed' WHERE execution_id=%s",

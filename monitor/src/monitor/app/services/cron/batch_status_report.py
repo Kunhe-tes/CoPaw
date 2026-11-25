@@ -53,7 +53,11 @@ def batch_ctes(source, business_date, now):
     where, params = sql.batch_where(source, start)
     return (
         sql._aggregate_ctes(
-            where + " AND c.logical_fire_at<%s AND c.logical_fire_at<=%s",
+            where
+            + " AND c.logical_fire_at<%s AND c.logical_fire_at<=%s"
+            + " AND ps.batch_follow_level>=1"
+            + " AND p.management_owner='scheduler'"
+            + " AND p.deleted_at IS NULL",
         ),
         (*params, end, cutoff),
     )
@@ -225,12 +229,15 @@ async def collect(reader, source, business_date, now):
         row["workers"] = info.get("workers", [])
     return {
         "snapshot_at": now.isoformat(),
+        "batch_scope": "followed_batch",
         "batches": [
             {
                 "batch_id": row["batch_id"],
                 "name": row["job_name"] or "未命名任务",
                 "logical_fire_at": sql.time_text(row["logical_fire_at"]),
+                "finished_at": sql.time_text(row.get("finished_at")),
                 "status": row["status"],
+                "follow_level": int(row.get("batch_follow_level") or 0),
                 **{
                     name: int(row[name])
                     for name in fields
