@@ -18,6 +18,58 @@ from .cron_client import (
 from ..config.utils import load_config
 
 MAX_NOTIFICATION_DELAY_MINUTES = 7 * 24 * 60
+RECHECK_DELAY_MIN_SECONDS = 60
+RECHECK_DELAY_MAX_SECONDS = 7 * 24 * 60 * 60
+RECHECK_INSTRUCTION_MAX_LENGTH = 4000
+_RECHECK_DELAY_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def _parse_recheck_delay(value: str) -> int:
+    """把 90s / 30m / 2h / 1d 或纯秒数解析成回检延迟秒数。"""
+    text = (value or "").strip().lower()
+    unit = text[-1:] if text else ""
+    if unit in _RECHECK_DELAY_UNITS:
+        factor = _RECHECK_DELAY_UNITS[unit]
+        number = text[:-1]
+    else:
+        factor = 1
+        number = text
+    try:
+        seconds = int(number) * factor
+    except ValueError:
+        raise click.BadParameter(
+            "recheck delay must look like 90s, 30m, 2h, 1d "
+            "or plain seconds",
+        ) from None
+    if not (RECHECK_DELAY_MIN_SECONDS <= seconds <= RECHECK_DELAY_MAX_SECONDS):
+        raise click.BadParameter(
+            "recheck delay must be between 60 seconds and 7 days",
+        )
+    return seconds
+
+
+def _recheck_rule(delay_seconds, instruction, *, task_type):
+    """构造 spec.recheck；延迟与检查说明必须成对出现。"""
+    if delay_seconds is None and instruction is None:
+        return None
+    if delay_seconds is None or instruction is None:
+        raise click.UsageError(
+            "--recheck-after and --recheck-instruction must be "
+            "used together",
+        )
+    if task_type != "agent":
+        raise click.UsageError("recheck is only valid for agent tasks")
+    text = instruction.strip()
+    if not text:
+        raise click.UsageError("--recheck-instruction cannot be empty")
+    if len(text) > RECHECK_INSTRUCTION_MAX_LENGTH:
+        raise click.UsageError(
+            "--recheck-instruction must be at most "
+            f"{RECHECK_INSTRUCTION_MAX_LENGTH} characters",
+        )
+    return {"delay_seconds": delay_seconds, "instruction": text}
+
+
 SCHEDULER_BASE_HELP = "Scheduler URL override; otherwise explicit global host/port, SWE_SCHEDULER_API_URL, or localhost:9100/api."
 
 
@@ -195,6 +247,8 @@ def _build_spec_from_cli(
     tenant_id: Optional[str] = None,
     job_id: str = "",
     notification_delay_minutes: int = 0,
+    recheck_delay_seconds: Optional[int] = None,
+    recheck_instruction: Optional[str] = None,
 ) -> dict:
     """Build CronJobSpec JSON payload from CLI args."""
     schedule = {"type": "cron", "cron": cron, "timezone": timezone}
@@ -214,6 +268,11 @@ def _build_spec_from_cli(
         "misfire_grace_seconds": 300,
     }
     model_slot = _resolve_model_slot(model_provider, model)
+    recheck = _recheck_rule(
+        recheck_delay_seconds,
+        recheck_instruction,
+        task_type=task_type,
+    )
     if task_type == "text":
         if not (text and text.strip()):
             raise click.UsageError(
@@ -261,6 +320,8 @@ def _build_spec_from_cli(
         }
         if model_slot is not None:
             payload["model_slot"] = model_slot
+        if recheck is not None:
+            payload["recheck"] = recheck
         return payload
     raise click.UsageError(f"Unsupported task type: {task_type}")
 
@@ -306,6 +367,8 @@ def _build_payload_from_args(
     tenant_id: Optional[str],
     job_id: str = "",
     notification_delay_minutes: int = 0,
+    recheck_delay_seconds: Optional[int] = None,
+    recheck_instruction: Optional[str] = None,
 ) -> dict:
     if file_ is not None:
         payload = json.loads(file_.read_text(encoding="utf-8"))
@@ -343,6 +406,8 @@ def _build_payload_from_args(
         tenant_id=tenant_id,
         job_id=job_id,
         notification_delay_minutes=notification_delay_minutes,
+        recheck_delay_seconds=recheck_delay_seconds,
+        recheck_instruction=recheck_instruction,
     )
 
 
@@ -514,6 +579,9 @@ def _merge_update_payload(
     model_provider: Optional[str],
     model: Optional[str],
     tenant_id: Optional[str],
+    recheck_delay_seconds: Optional[int] = None,
+    recheck_instruction: Optional[str] = None,
+    clear_recheck: bool = False,
 ) -> dict:
     payload = copy.deepcopy(existing_spec)
     payload["id"] = job_id
@@ -573,6 +641,16 @@ def _merge_update_payload(
     model_slot = _resolve_model_slot(model_provider, model)
     if model_slot is not None and effective_task_type == "agent":
         payload["model_slot"] = model_slot
+    if clear_recheck:
+        payload["recheck"] = None
+    else:
+        recheck = _recheck_rule(
+            recheck_delay_seconds,
+            recheck_instruction,
+            task_type=payload.get("task_type"),
+        )
+        if recheck is not None:
+            payload["recheck"] = recheck
     return payload
 
 
@@ -688,6 +766,22 @@ def _merge_update_payload(
     ),
 )
 @click.option(
+    "--recheck-after",
+    default=None,
+    help=(
+        "Follow-up recheck delay for agent jobs: 90s, 30m, 2h, 1d or plain "
+        "seconds (60-604800). Requires --recheck-instruction."
+    ),
+)
+@click.option(
+    "--recheck-instruction",
+    default=None,
+    help=(
+        "What the follow-up recheck must verify. Requires --recheck-after; "
+        "the recheck runs in the task session after the delay."
+    ),
+)
+@click.option(
     "--base-url",
     default=None,
     help=SCHEDULER_BASE_HELP,
@@ -725,6 +819,8 @@ def create_job(
     model_provider: Optional[str],
     model: Optional[str],
     notification_delay_minutes: int,
+    recheck_after: Optional[str],
+    recheck_instruction: Optional[str],
     base_url: Optional[str],
     agent_id: str,
     tenant_id: Optional[str],
@@ -738,6 +834,13 @@ def create_job(
     """
     if timezone is None:
         timezone = load_config().user_timezone or "UTC"
+    if file_ is not None and (recheck_after or recheck_instruction):
+        raise click.UsageError(
+            "recheck options cannot be combined with -f/--file",
+        )
+    recheck_delay_seconds = (
+        _parse_recheck_delay(recheck_after) if recheck_after else None
+    )
     base_url = _base_url(ctx, base_url)
     payload = _build_payload_from_args(
         file_=file_,
@@ -756,6 +859,8 @@ def create_job(
         model=model,
         tenant_id=tenant_id,
         notification_delay_minutes=notification_delay_minutes,
+        recheck_delay_seconds=recheck_delay_seconds,
+        recheck_instruction=recheck_instruction,
     )
     with client(base_url) as c:
         effective_user_id = _infer_effective_user_id(payload, creator_user)
@@ -789,7 +894,24 @@ def _update_job_impl(
     agent_id: str,
     tenant_id: Optional[str],
     source_id: Optional[str],
+    recheck_after: Optional[str] = None,
+    recheck_instruction: Optional[str] = None,
+    clear_recheck: bool = False,
 ) -> None:
+    if file_ is not None and (
+        recheck_after or recheck_instruction or clear_recheck
+    ):
+        raise click.UsageError(
+            "recheck options cannot be combined with -f/--file",
+        )
+    if clear_recheck and (recheck_after or recheck_instruction):
+        raise click.UsageError(
+            "--no-recheck cannot be combined with --recheck-after/"
+            "--recheck-instruction",
+        )
+    recheck_delay_seconds = (
+        _parse_recheck_delay(recheck_after) if recheck_after else None
+    )
     base_url = _base_url(ctx, base_url)
     with client(base_url) as c:
         headers = _build_headers(agent_id, tenant_id, creator_user, source_id)
@@ -832,6 +954,9 @@ def _update_job_impl(
                 model_provider=model_provider,
                 model=model,
                 tenant_id=tenant_id,
+                recheck_delay_seconds=recheck_delay_seconds,
+                recheck_instruction=recheck_instruction,
+                clear_recheck=clear_recheck,
             )
         print_json(scheduler.update(job_id, payload, current))
 
@@ -919,6 +1044,29 @@ def _update_job_impl(
     help="Model name to store in model_slot for agent jobs.",
 )
 @click.option(
+    "--recheck-after",
+    default=None,
+    help=(
+        "Follow-up recheck delay for agent jobs: 90s, 30m, 2h, 1d or plain "
+        "seconds (60-604800). Requires --recheck-instruction."
+    ),
+)
+@click.option(
+    "--recheck-instruction",
+    default=None,
+    help=(
+        "What the follow-up recheck must verify. Requires --recheck-after; "
+        "the recheck runs in the task session after the delay."
+    ),
+)
+@click.option(
+    "--no-recheck",
+    "clear_recheck",
+    is_flag=True,
+    default=False,
+    help="Remove the existing follow-up recheck rule.",
+)
+@click.option(
     "--base-url",
     default=None,
     help=SCHEDULER_BASE_HELP,
@@ -956,6 +1104,9 @@ def update_job(
     mode: Optional[str],
     model_provider: Optional[str],
     model: Optional[str],
+    recheck_after: Optional[str],
+    recheck_instruction: Optional[str],
+    clear_recheck: bool,
     base_url: Optional[str],
     agent_id: str,
     tenant_id: Optional[str],
@@ -983,6 +1134,9 @@ def update_job(
         agent_id,
         tenant_id,
         source_id,
+        recheck_after=recheck_after,
+        recheck_instruction=recheck_instruction,
+        clear_recheck=clear_recheck,
     )
 
 
