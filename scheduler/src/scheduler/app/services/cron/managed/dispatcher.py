@@ -19,7 +19,7 @@ from .run_accounting import (
     is_text_run,
     occupied_run_sql,
 )
-from .swe_client import checked_base
+from ..swe_routing import checked_base, swe_base_for_source
 from .dispatch_events import append_run_event
 from .date_policy import reason as date_reason
 from .batch_follow import read_batch_follow_level
@@ -74,7 +74,8 @@ class ManagedSweExecutionClient:
         body = {identity: row[identity], "job_id": row["job_id"]}
         if action.endswith("execute"):
             body["dispatch_token"] = row["dispatch_owner"]
-        url = f"{self.base_url}/api/internal/cron/managed/{action}"
+        base = swe_base_for_source(caller.source_id, self.base_url)
+        url = f"{base}/api/internal/cron/managed/{action}"
         if self.http is not None:
             response = await self.http.post(url, headers=headers, json=body)
         else:
