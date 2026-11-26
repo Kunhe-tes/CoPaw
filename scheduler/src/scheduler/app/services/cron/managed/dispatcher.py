@@ -22,7 +22,9 @@ from .run_accounting import (
 from .swe_client import checked_base
 from .dispatch_events import append_run_event
 from .date_policy import reason as date_reason
+from .batch_follow import read_batch_follow_level
 from .batch_pause import batch_for_execution, lock_batch
+from .definition import canonical
 
 logger = logging.getLogger(__name__)
 DISPATCH_RETRY_DELAYS_SECONDS = (5, 10, 20, 30, 60)
@@ -393,7 +395,15 @@ class ExecutionDispatcher:
         return active["count"] < maximum
 
     async def _settle(self, claimed, *, recovery=False):
+        receipt = (
+            await batch_for_execution(self.db, claimed)
+            if claimed["status"] == "dispatching"
+            else None
+        )
         async with transaction(self.db) as tx:
+            if receipt is not None:
+                # 与改级及其队列刷新串行，保持父任务先于执行记录加锁。
+                receipt = await lock_batch(tx, receipt)
             row = await tx.fetch_one(
                 f"SELECT * FROM {RUN_TABLE} WHERE execution_id=%s FOR UPDATE",
                 (claimed["execution_id"],),
@@ -442,6 +452,12 @@ class ExecutionDispatcher:
                 "version": row["version"] + 1,
                 "updated_at": self.clock(),
             }
+            if receipt is not None:
+                meta = json.loads(row["dispatch_meta_json"])
+                level = await read_batch_follow_level(tx, receipt)
+                if meta.get("batch_follow_level", 0) != level:
+                    meta["batch_follow_level"] = level
+                    values["dispatch_meta_json"] = canonical(meta)
             await update(
                 tx,
                 RUN_TABLE,

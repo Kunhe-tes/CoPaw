@@ -108,7 +108,7 @@ WHERE s 身份 = 父任务 AND r.status IN ('queued','dispatch_failed');
 
 ## Rerun inheritance
 
-当日失败补跑、人工批次重跑和自动重跑在入队事务内按批次回执的父任务身份读取当前等级，写入 `dispatch_meta_json.batch_follow_level`。人工传输重试复用原执行并刷新等级。重跑沿用原有 `batch_created_at` 和 `batch_queue_order`。
+当日失败补跑、人工批次重跑和自动重跑在入队事务内按批次回执的父任务身份读取当前等级，写入 `dispatch_meta_json.batch_follow_level`。人工传输重试和派发未确认后的自动回队都复用原执行，在持有父任务锁的事务内刷新等级。重跑沿用原有 `batch_created_at` 和 `batch_queue_order`。
 
 新触发批次由 `managed/scheduling.py` 读取父任务状态，`managed/executions.py` 透传由调用方构造的 `dispatch_meta`。
 

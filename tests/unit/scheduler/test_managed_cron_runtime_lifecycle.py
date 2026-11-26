@@ -142,7 +142,19 @@ def complete_test_schema():
 
 
 @pytest.mark.asyncio
-async def test_schema_check_is_read_only_and_validates_columns_not_just_tables():
+@pytest.mark.parametrize(
+    ("table", "column"),
+    [
+        ("swe_cron_execution_runs", "provider_id"),
+        ("swe_cron_job_states", "batch_follow_level"),
+        ("swe_cron_job_states", "batch_follow_updated_at"),
+        ("swe_cron_job_states", "batch_follow_updated_by"),
+    ],
+)
+async def test_schema_check_is_read_only_and_validates_columns_not_just_tables(
+    table,
+    column,
+):
     from scheduler.app.services.cron.managed.schema import (
         ManagedSchemaUnavailable,
         assert_managed_schema_ready,
@@ -153,11 +165,11 @@ async def test_schema_check_is_read_only_and_validates_columns_not_just_tables()
         await assert_managed_schema_ready(db)
         assert db.writes == 0
         db.conn.execute(
-            "ALTER TABLE swe_cron_execution_runs DROP COLUMN provider_id",
+            f"ALTER TABLE {table} DROP COLUMN {column}",
         )
         with pytest.raises(ManagedSchemaUnavailable) as error:
             await assert_managed_schema_ready(db)
-        assert error.value.table == "swe_cron_execution_runs"
+        assert error.value.table == table
         assert db.writes == 0
     finally:
         db.conn.close()
