@@ -79,6 +79,31 @@ def prepare_query_run(
     except Exception:
         return None
     meta = getattr(request, "channel_meta", None) or {}
+    source_id, tenant_id = _query_scope_ids(
+        owner,
+        request,
+        meta,
+        source_id,
+        tenant_id,
+    )
+    business_ref = _query_business_ref(request, meta, chat_id, question_id)
+    try:
+        return _OBSERVABILITY.prepare_run(
+            scope=Scope(
+                service_unit_id=service_unit_id(),
+                source_id=str(source_id),
+                tenant_id=str(tenant_id or "default"),
+                agent_id=str(
+                    getattr(owner, "agent_id", "default") or "default",
+                ),
+            ),
+            business_ref=business_ref,
+        )
+    except Exception:
+        return None
+
+
+def _query_scope_ids(owner, request, meta, source_id, tenant_id):
     source_id = (
         source_id
         or getattr(request, "source_id", None)
@@ -94,6 +119,10 @@ def prepare_query_run(
             "default",
             str(source_id),
         )
+    return source_id, tenant_id
+
+
+def _query_business_ref(request, meta, chat_id, question_id) -> dict[str, str]:
     if chat_id is None:
         candidate = meta.get("chat_id")
         chat_id = (
@@ -105,20 +134,7 @@ def prepare_query_run(
     session_id = getattr(request, "session_id", None)
     if isinstance(session_id, str) and session_id:
         business_ref["session_id"] = session_id
-    try:
-        return _OBSERVABILITY.prepare_run(
-            scope=Scope(
-                service_unit_id=service_unit_id(),
-                source_id=str(source_id),
-                tenant_id=str(tenant_id or "default"),
-                agent_id=str(
-                    getattr(owner, "agent_id", "default") or "default",
-                ),
-            ),
-            business_ref=business_ref,
-        )
-    except Exception:
-        return None
+    return business_ref
 
 
 def approval_context_carrier() -> dict[str, Any] | None:
@@ -212,23 +228,19 @@ def approval_identity_matches(owner: Any, request: Any, pending: Any) -> bool:
         or getattr(request, "source_id", None)
         or meta.get("source_id")
     )
-    if (
-        extra.get("source_id")
-        and source_id
-        and extra["source_id"] != source_id
-    ):
+    if not _optional_identity_matches(extra.get("source_id"), source_id):
         return False
     tenant_id = get_current_effective_tenant_id()
-    if (
-        extra.get("tenant_id")
-        and tenant_id
-        and extra["tenant_id"] != tenant_id
-    ):
+    if not _optional_identity_matches(extra.get("tenant_id"), tenant_id):
         return False
-    agent_id = getattr(owner, "agent_id", None)
-    if extra.get("agent_id") and agent_id and extra["agent_id"] != agent_id:
-        return False
-    return True
+    return _optional_identity_matches(
+        extra.get("agent_id"),
+        getattr(owner, "agent_id", None),
+    )
+
+
+def _optional_identity_matches(stored: Any, current: Any) -> bool:
+    return not stored or not current or stored == current
 
 
 def record_approval_requested(
