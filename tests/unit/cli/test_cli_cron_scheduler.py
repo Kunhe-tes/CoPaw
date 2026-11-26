@@ -753,3 +753,41 @@ def test_update_rejects_mixed_recheck_flags(invoke):
     )
     assert result.exit_code != 0
     assert "--no-recheck" in result.output
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (_create_args("--recheck-after", ""), "recheck delay must look like"),
+        (
+            ["update", "j1", "--recheck-after", ""],
+            "recheck delay must look like",
+        ),
+        (
+            ["update", "j1", "--no-recheck", "--recheck-after", ""],
+            "--no-recheck",
+        ),
+    ],
+)
+def test_empty_recheck_delay_stops_before_sending_requests(
+    invoke,
+    args,
+    message,
+):
+    run, calls, _ = invoke
+    result = run(args)
+    assert result.exit_code != 0
+    assert message in result.output
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "args",
+    [("--recheck-after", "30m"), ("--recheck-instruction", "检查报告")],
+)
+def test_update_requires_recheck_pair_before_reading_job(invoke, args):
+    run, calls, _ = invoke
+    result = run(["update", "j1", *args])
+    assert result.exit_code != 0
+    assert "used together" in result.output
+    assert calls == []

@@ -41,22 +41,26 @@ def _parse_recheck_delay(value: str) -> int:
             "recheck delay must look like 90s, 30m, 2h, 1d "
             "or plain seconds",
         ) from None
-    if not (RECHECK_DELAY_MIN_SECONDS <= seconds <= RECHECK_DELAY_MAX_SECONDS):
+    if not RECHECK_DELAY_MIN_SECONDS <= seconds <= RECHECK_DELAY_MAX_SECONDS:
         raise click.BadParameter(
             "recheck delay must be between 60 seconds and 7 days",
         )
     return seconds
 
 
-def _recheck_rule(delay_seconds, instruction, *, task_type):
-    """构造 spec.recheck；延迟与检查说明必须成对出现。"""
-    if delay_seconds is None and instruction is None:
-        return None
-    if delay_seconds is None or instruction is None:
+def _require_recheck_pair(delay_seconds, instruction):
+    if (delay_seconds is None) != (instruction is None):
         raise click.UsageError(
             "--recheck-after and --recheck-instruction must be "
             "used together",
         )
+
+
+def _recheck_rule(delay_seconds, instruction, *, task_type):
+    """构造已校验的 spec.recheck。"""
+    _require_recheck_pair(delay_seconds, instruction)
+    if delay_seconds is None:
+        return None
     if task_type != "agent":
         raise click.UsageError("recheck is only valid for agent tasks")
     text = instruction.strip()
@@ -834,12 +838,16 @@ def create_job(
     """
     if timezone is None:
         timezone = load_config().user_timezone or "UTC"
-    if file_ is not None and (recheck_after or recheck_instruction):
+    if file_ is not None and (
+        recheck_after is not None or recheck_instruction is not None
+    ):
         raise click.UsageError(
             "recheck options cannot be combined with -f/--file",
         )
     recheck_delay_seconds = (
-        _parse_recheck_delay(recheck_after) if recheck_after else None
+        _parse_recheck_delay(recheck_after)
+        if recheck_after is not None
+        else None
     )
     base_url = _base_url(ctx, base_url)
     payload = _build_payload_from_args(
@@ -898,20 +906,24 @@ def _update_job_impl(
     recheck_instruction: Optional[str] = None,
     clear_recheck: bool = False,
 ) -> None:
-    if file_ is not None and (
-        recheck_after or recheck_instruction or clear_recheck
-    ):
+    has_recheck_options = (
+        recheck_after is not None or recheck_instruction is not None
+    )
+    if file_ is not None and (has_recheck_options or clear_recheck):
         raise click.UsageError(
             "recheck options cannot be combined with -f/--file",
         )
-    if clear_recheck and (recheck_after or recheck_instruction):
+    if clear_recheck and has_recheck_options:
         raise click.UsageError(
             "--no-recheck cannot be combined with --recheck-after/"
             "--recheck-instruction",
         )
     recheck_delay_seconds = (
-        _parse_recheck_delay(recheck_after) if recheck_after else None
+        _parse_recheck_delay(recheck_after)
+        if recheck_after is not None
+        else None
     )
+    _require_recheck_pair(recheck_delay_seconds, recheck_instruction)
     base_url = _base_url(ctx, base_url)
     with client(base_url) as c:
         headers = _build_headers(agent_id, tenant_id, creator_user, source_id)
