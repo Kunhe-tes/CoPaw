@@ -214,7 +214,7 @@ async def test_set_level_keeps_parent_scoped_audit_and_idempotent(database):
             "job_id": parent,
             "batch_follow_level": 4,
             "batch_follow_updated_by": "manager",
-        }
+        },
     ]
 
 
@@ -222,10 +222,15 @@ async def test_set_level_keeps_parent_scoped_audit_and_idempotent(database):
 async def test_level_change_refreshes_only_queued_members(database):
     from scheduler.app.services.cron.managed.batch_follow import (
         set_batch_follow_level,
+        set_task_follow_level,
     )
 
     db = database
-    _, executions = seed_batch(db, "b-refresh", 0, members=2)
+    parent, executions = seed_batch(db, "b-refresh", 0, members=2)
+    db.conn.execute(
+        "UPDATE swe_cron_job_states SET dispatch_state='batch_enabled' WHERE job_id=?",
+        (parent,),
+    )
     running = executions[1]
     db.conn.execute(
         "UPDATE swe_cron_execution_runs SET status='running' WHERE execution_id=?",
@@ -233,6 +238,9 @@ async def test_level_change_refreshes_only_queued_members(database):
     )
     await set_batch_follow_level(db, manager(), "b-refresh", 5)
     assert meta_of(db, executions[0])["batch_follow_level"] == 5
+    assert meta_of(db, running)["batch_follow_level"] == 0
+    await set_task_follow_level(db, manager(), parent, 3)
+    assert meta_of(db, executions[0])["batch_follow_level"] == 3
     assert meta_of(db, running)["batch_follow_level"] == 0
     await set_batch_follow_level(db, manager(), "b-refresh", 0)
     assert meta_of(db, executions[0])["batch_follow_level"] == 0
@@ -298,7 +306,8 @@ async def test_follow_api_accepts_level_only(database):
     path = "/api/scheduler/cron/managed-dispatch/batches/b-api/follow"
     identity = {"X-User-Id": "operator", "X-Source-Id": "bank"}
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
     ) as client:
         response = await client.put(path, json={"level": 3}, headers=identity)
         assert response.status_code == 403
@@ -330,7 +339,7 @@ def test_retry_command_does_not_copy_previous_follow_level():
                 "batch_created_at": "2026-10-27 01:00:00",
                 "batch_queue_order": 6,
                 "batch_follow_level": 4,
-            }
+            },
         ),
     }
     command = retry_command(

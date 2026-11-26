@@ -24,6 +24,7 @@ from ..services.cron.managed.batch_retry import (
     BatchRetryService,
     ManagedBatchRetryRequest,
 )
+from ..services.cron.managed.contracts import BatchFollowRequest
 from ..services.cron.managed.identity import CallerIdentity
 
 router = APIRouter(
@@ -123,11 +124,6 @@ async def _dispatch_urgent(db, dispatcher, results):
 class BatchPauseRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     paused: bool = Field(strict=True)
-
-
-class BatchFollowRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    level: int = Field(strict=True, ge=0, le=5)
 
 
 @router.put(

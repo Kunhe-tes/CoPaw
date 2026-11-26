@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """按批次父任务保存唯一的关注等级。"""
 
-from .batch_failures import read_batch
+from .batch_failures import read_batch, require_manager
 from .batch_members import MEMBERS
+from .contracts import ManagedCronNotFound
 from .executions import JOB_WHERE
 from .operations import utc_now
 from .repository import IDENTITY_FIELDS
@@ -11,6 +12,7 @@ from .storage import transaction
 RECEIPTS = "swe_cron_managed_trigger_receipts"
 FOLLOWED_LEVEL = 1
 MAX_FOLLOW_LEVEL = 5
+BATCH_MODES = {"batch_enabled", "batch_paused"}
 
 PARENT_DEFINITION_JOIN = " AND ".join(
     f"p.{name}=s.{name}" for name in IDENTITY_FIELDS
@@ -78,23 +80,66 @@ async def set_batch_follow_level(db, caller, batch_id, level):
             or tuple(current[name] for name in IDENTITY_FIELDS) != key
         ):
             raise LookupError("cron_batch_parent_not_found")
-        state = await tx.fetch_one(
-            "SELECT batch_follow_level FROM swe_cron_job_states "
-            f"WHERE {JOB_WHERE} FOR UPDATE",
+        await _persist_parent_level(tx, key, level, caller.actor_id)
+    return {"batch_id": batch_id, "batch_follow_level": level}
+
+
+async def set_task_follow_level(db, caller, job_id, level):
+    """通过父任务身份设置与批次看板相同的等级。"""
+    require_manager(caller)
+    level = checked_follow_level(level)
+    key = caller.job_key(job_id)
+    async with transaction(db) as tx:
+        parent = await tx.fetch_one(
+            "SELECT tenant_id,source_id,agent_id,job_id,management_owner,"
+            f"deleted_at,parent_job_id FROM swe_cron_jobs_v2 WHERE {JOB_WHERE} FOR UPDATE",
             key,
         )
-        if state is None:
-            raise RuntimeError("cron_state_record_missing")
-        if state["batch_follow_level"] != level:
-            await tx.execute(
-                "UPDATE swe_cron_job_states SET batch_follow_level=%s,"
-                "batch_follow_updated_at=%s,batch_follow_updated_by=%s "
-                f"WHERE {JOB_WHERE}",
-                (level, utc_now(), caller.actor_id, *key),
-            )
-            # 同一事务内刷新排队成员，改级对已排队批次立即生效。
-            await _refresh_queued_level(tx, key, level)
-    return {"batch_id": batch_id, "batch_follow_level": level}
+        if (
+            parent is None
+            or tuple(parent[name] for name in IDENTITY_FIELDS) != key
+            or parent["management_owner"] != "scheduler"
+            or parent["deleted_at"] is not None
+            or parent["parent_job_id"]
+        ):
+            raise ManagedCronNotFound("cron_batch_parent_not_found")
+        await _persist_parent_level(
+            tx,
+            key,
+            level,
+            caller.actor_id,
+            batch_mode_required=True,
+        )
+    return {"batch_follow_level": level}
+
+
+async def _persist_parent_level(
+    tx,
+    key,
+    level,
+    actor_id,
+    *,
+    batch_mode_required=False,
+):
+    state = await tx.fetch_one(
+        "SELECT batch_follow_level,dispatch_state FROM swe_cron_job_states "
+        f"WHERE {JOB_WHERE} FOR UPDATE",
+        key,
+    )
+    if state is None:
+        raise RuntimeError("cron_state_record_missing")
+    if batch_mode_required and state["dispatch_state"] not in BATCH_MODES:
+        raise ManagedCronNotFound("cron_batch_parent_not_found")
+    if state["batch_follow_level"] == level:
+        return
+    await tx.execute(
+        "UPDATE swe_cron_job_states SET batch_follow_level=%s,"
+        "batch_follow_updated_at=%s,batch_follow_updated_by=%s "
+        f"WHERE {JOB_WHERE}",
+        (level, utc_now(), actor_id, *key),
+    )
+    # 同一事务内刷新排队成员，改级对已排队批次立即生效。
+    await _refresh_queued_level(tx, key, level)
 
 
 async def read_batch_follow_level(tx, receipt):

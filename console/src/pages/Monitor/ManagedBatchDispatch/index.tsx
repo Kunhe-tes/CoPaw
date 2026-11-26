@@ -26,12 +26,8 @@ import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
 import { getUserId } from "../../../utils/identity";
 import { loadWorkerHistory } from "../CronBatchDispatch/workerHistory";
 import styles from "../CronBatchDispatch/index.module.less";
-import {
-  followLevelOptions,
-  followLevelStars,
-  statusTag,
-  timeText,
-} from "./format";
+import { followLevelStars, statusTag, timeText } from "./format";
+import { followLevelOptions } from "@/constants/batchFollow";
 import { useBoardResource } from "./useBoardResource";
 import BatchDetail from "./BatchDetail";
 import SharedWorkers from "./SharedWorkers";

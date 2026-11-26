@@ -49,16 +49,6 @@ export function settledStatusTag(status: string, settled: string | null) {
 export const timeText = (value?: string | null) =>
   value ? dayjs(value).format("YYYY-MM-DD HH:mm:ss") : "-";
 
-/** 关注等级选项；列表右键菜单与详情选择器共用。 */
-export const followLevelOptions = [
-  { value: 0, label: "不关注" },
-  { value: 1, label: "关注 L1" },
-  { value: 2, label: "关注 L2" },
-  { value: 3, label: "关注 L3" },
-  { value: 4, label: "关注 L4" },
-  { value: 5, label: "关注 L5" },
-];
-
 /** 关注等级星标；0 与缺失都表示未关注，不展示。 */
 export function followLevelStars(level?: number | null) {
   const raw = typeof level === "number" ? level : 0;
