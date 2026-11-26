@@ -272,6 +272,7 @@ export const chatApi = {
     user_id?: string;
     channel?: string;
     session_id?: string;
+    include_history_total?: boolean;
   }) => {
     const search = new URLSearchParams({ page_size: String(params.page_size) });
     if (params.cursor !== undefined)
@@ -280,6 +281,8 @@ export const chatApi = {
     if (params.channel !== undefined) search.append("channel", params.channel);
     if (params.session_id !== undefined)
       search.append("session_id", params.session_id);
+    if (params.include_history_total)
+      search.append("include_history_total", "true");
     return request<ChatSummaryPage>(`/chats/-/summaries?${search.toString()}`);
   },
 

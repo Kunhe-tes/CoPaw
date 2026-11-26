@@ -214,6 +214,7 @@ class ChatManager:
         user_id=None,
         channel=None,
         session_id=None,
+        include_history_total=False,
     ):
         """List discovery fields without requesting complete metadata."""
         return await self._repo.list_summaries(
@@ -222,6 +223,7 @@ class ChatManager:
             user_id=user_id,
             channel=channel,
             session_id=session_id,
+            include_history_total=include_history_total,
         )
 
     async def get_chat(self, chat_id: str) -> Optional[ChatSpec]:

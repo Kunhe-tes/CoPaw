@@ -185,8 +185,9 @@ class MetadataCatalog(BaseChatRepository):
         user_id=None,
         channel=None,
         session_id=None,
+        include_history_total=False,
     ):
-        """Read one statement snapshot without counts, body pins or NAS IO."""
+        """Read lightweight metadata and optionally count chat history."""
         validate_summary_page(page_size, cursor)
         where, params = self._where(user_id=user_id, channel=channel)
         if session_id is not None:
@@ -195,22 +196,33 @@ class MetadataCatalog(BaseChatRepository):
                 " AND c.external_session_key=s.external_session_key"
             )
             params.append(identity_bytes(session_id, 1024))
+        page_where = where
+        page_params = params.copy()
         if cursor:
             version, (stamp, key) = self._decode_cursor(cursor)
             if version != "v2":
                 raise ValueError("Chat summaries require a v2 cursor")
-            where += (
+            page_where += (
                 " AND (c.updated_at<%s OR (c.updated_at=%s "
                 "AND c.external_chat_key<%s))"
             )
-            params.extend(
+            page_params.extend(
                 [_sql_time(stamp), _sql_time(stamp), chat_key_bytes(key)],
             )
         rows = await self.db.fetch_all(
             self.select_summary
-            + where
+            + page_where
             + " ORDER BY c.updated_at DESC,c.external_chat_key DESC LIMIT %s",
-            (*params, page_size + 1),
+            (*page_params, page_size + 1),
+        )
+        history_total = (
+            await self._count(
+                where + " AND COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT("
+                "c.metadata_text, '$.session_kind')) AS BINARY), '') <> 'task'",
+                params,
+            )
+            if include_history_total
+            else None
         )
         has_more = len(rows) > page_size
         items = [self._summary(row) for row in rows[:page_size]]
@@ -218,6 +230,7 @@ class MetadataCatalog(BaseChatRepository):
             items=items,
             page_size=page_size,
             has_more=has_more,
+            history_total=history_total,
             next_cursor=(
                 self._encode_cursor(self._recency_sort_key(items[-1]))
                 if has_more

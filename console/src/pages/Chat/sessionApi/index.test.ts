@@ -485,16 +485,17 @@ describe("SessionApi identity mapping", () => {
 
         page_size: 100,
         has_more: false,
+        history_total: 42,
       });
     const api = new SessionApi();
     const old = api.getSessionList();
     useAgentStore.setState({ selectedAgent: "agent-b" });
+    expect(api.getHistoryTotal()).toBeUndefined();
     const current = api.getSessionList();
     const newList = await current;
     resolveOld({
       items: [{ id: "old-chat", name: "旧工作区", meta: {} }],
-      total: 1,
-      page: 1,
+      history_total: 1,
       page_size: 100,
       has_more: false,
     });
@@ -502,6 +503,7 @@ describe("SessionApi identity mapping", () => {
     expect((await old).map((session) => session.id)).toEqual([
       "new-scope-chat",
     ]);
+    expect(api.getHistoryTotal()).toBe(42);
   });
 
   it("身份切走期间旧请求结束，切回后仍能发起新的刷新", async () => {
@@ -1317,6 +1319,7 @@ describe("SessionApi identity mapping", () => {
     expect(apiMocks.listChatSummaries).toHaveBeenCalledWith({
       page_size: 100,
       cursor: null,
+      include_history_total: true,
     });
     expect(list.map((session) => session.id)).toEqual([
       "chat-newest",
@@ -1650,6 +1653,7 @@ describe("SessionApi identity mapping", () => {
     expect(apiMocks.listChatSummaries).toHaveBeenNthCalledWith(1, {
       page_size: 100,
       cursor: null,
+      include_history_total: true,
     });
     expect(apiMocks.listChatSummaries).toHaveBeenNthCalledWith(2, {
       page_size: 100,
@@ -1689,6 +1693,7 @@ describe("SessionApi identity mapping", () => {
     expect(apiMocks.listChatSummaries).toHaveBeenNthCalledWith(1, {
       page_size: 42,
       cursor: null,
+      include_history_total: true,
     });
     expect(apiMocks.listChatSummaries).toHaveBeenNthCalledWith(2, {
       page_size: 42,
@@ -1718,6 +1723,7 @@ describe("SessionApi identity mapping", () => {
     expect(apiMocks.listChatSummaries).toHaveBeenCalledWith({
       page_size: 100,
       cursor: null,
+      include_history_total: true,
     });
   });
 

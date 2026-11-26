@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import json
@@ -80,6 +81,38 @@ async def test_session_candidate_lookup_treats_oversized_id_as_missing():
         await repo.filter_chats_by_session("会" * 342, "user", "console") == []
     )
     db.fetch_all.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_summary_count_uses_scope_filters_without_the_cursor():
+    db = SimpleNamespace(
+        fetch_one=AsyncMock(return_value={"total": 42}),
+        fetch_all=AsyncMock(return_value=[]),
+    )
+    scope = WorkspaceScope("t", "s", "a", service_unit_id="svc")
+    repo = MySQLMetadataRepository(db, scope)
+    page = await repo.list_summaries(
+        user_id="user",
+        channel="console",
+        session_id="session",
+    )
+    assert page.history_total is None
+    db.fetch_one.assert_not_awaited()
+
+    cursor = repo._encode_cursor((datetime.now(timezone.utc), "chat"))
+    page = await repo.list_summaries(
+        user_id="user",
+        channel="console",
+        session_id="session",
+        cursor=cursor,
+        include_history_total=True,
+    )
+    assert page.history_total == 42
+    statement, params = db.fetch_one.await_args.args
+    assert "c.deleted_at IS NULL" in statement
+    assert "$.session_kind" in statement
+    assert "c.updated_at<" not in statement
+    assert params == (*scope.sql_values, b"user", b"console", b"session")
 
 
 @pytest.mark.asyncio
