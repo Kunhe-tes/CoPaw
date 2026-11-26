@@ -73,3 +73,4 @@ class ChatSummaryPage(BaseModel):
     page_size: int = Field(ge=1, le=MAX_SUMMARY_PAGE_SIZE)
     has_more: bool
     next_cursor: str | None = None
+    history_total: int | None = Field(default=None, ge=0)

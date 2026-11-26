@@ -20,7 +20,7 @@ const mocks = vi.hoisted(() => ({
   setSelectedAgent: vi.fn(),
   loadMoreSessions: vi.fn(),
   hasMoreSessions: vi.fn(),
-  getSessionTotal: vi.fn(),
+  getHistoryTotal: vi.fn(),
   getSessions: vi.fn(),
   openExternalLink: vi.fn(),
   context: {
@@ -151,7 +151,7 @@ vi.mock("../../sessionApi", () => ({
     loadMoreSessions: mocks.loadMoreSessions,
     projectSessionView: (sessions: unknown[]) => sessions,
     hasMoreSessions: mocks.hasMoreSessions,
-    getSessionTotal: mocks.getSessionTotal,
+    getHistoryTotal: mocks.getHistoryTotal,
     removeSession: vi.fn(),
   },
 }));
@@ -164,7 +164,7 @@ describe("ChatSidebar infinite history scrolling", () => {
     mocks.setSelectedAgent.mockReset();
     mocks.loadMoreSessions.mockReset();
     mocks.hasMoreSessions.mockReset();
-    mocks.getSessionTotal.mockReset();
+    mocks.getHistoryTotal.mockReset();
     mocks.getSessions.mockReset();
     mocks.openExternalLink.mockReset();
     vi.stubGlobal("open", mocks.openExternalLink);
@@ -178,7 +178,7 @@ describe("ChatSidebar infinite history scrolling", () => {
     mocks.iframeState.source = null;
     mocks.iframeState.isOriginY = false;
     mocks.hasMoreSessions.mockReturnValue(true);
-    mocks.getSessionTotal.mockReturnValue(120);
+    mocks.getHistoryTotal.mockReturnValue(120);
     mocks.getSessions.mockImplementation(() => mocks.context.sessions);
     mocks.loadMoreSessions.mockResolvedValue([
       ...mocks.context.sessions,
@@ -212,11 +212,10 @@ describe("ChatSidebar infinite history scrolling", () => {
     );
   });
 
-  it("shows the loaded history count without claiming an exact total", () => {
+  it("shows the history total before all pages are loaded", () => {
     const { getAllByText } = render(<ChatSidebar tasks={[]} />);
 
-    expect(getAllByText("历史记录(已加载1)").length).toBeGreaterThan(0);
-    expect(mocks.getSessionTotal).not.toHaveBeenCalled();
+    expect(getAllByText("历史记录（共 120 条）").length).toBeGreaterThan(0);
   });
 
   it("restores the sidebar from the collapsed toolbar", () => {
@@ -235,7 +234,7 @@ describe("ChatSidebar infinite history scrolling", () => {
     expect(container.querySelector(".chat-sidebar")).toBeNull();
   });
 
-  it("does not subtract unrelated task rows from loaded history", () => {
+  it("does not subtract unrelated task rows from the history total", () => {
     const tasks = [
       { id: "task-1", task: { unread_execution_count: 0 } },
       { id: "task-2", task: { unread_execution_count: 0 } },
@@ -243,7 +242,17 @@ describe("ChatSidebar infinite history scrolling", () => {
 
     const { getAllByText } = render(<ChatSidebar tasks={tasks as never} />);
 
-    expect(getAllByText("历史记录(已加载1)").length).toBeGreaterThan(0);
+    expect(getAllByText("历史记录（共 120 条）").length).toBeGreaterThan(0);
+  });
+
+  it("omits the count until it is available and displays an explicit zero", () => {
+    mocks.getHistoryTotal.mockReturnValue(undefined);
+    const { getByText, rerender } = render(<ChatSidebar tasks={[]} />);
+    expect(getByText("历史记录")).toBeInTheDocument();
+
+    mocks.getHistoryTotal.mockReturnValue(0);
+    rerender(<ChatSidebar tasks={[]} />);
+    expect(getByText("历史记录（共 0 条）")).toBeInTheDocument();
   });
 
   it("excludes the deleted session when refreshing after delete", async () => {

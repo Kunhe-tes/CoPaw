@@ -1117,6 +1117,7 @@ async def list_chat_summaries(
     session_id: str | None = Query(None),
     page_size: int = Query(100, ge=1, le=MAX_SUMMARY_PAGE_SIZE),
     cursor: str | None = Query(None, max_length=MAX_SUMMARY_CURSOR_LENGTH),
+    include_history_total: bool = Query(False),
     mgr: ChatManager = Depends(get_chat_manager),
     workspace=Depends(get_workspace),
 ):
@@ -1134,6 +1135,7 @@ async def list_chat_summaries(
             session_id=session_id,
             page_size=page_size,
             cursor=cursor,
+            include_history_total=include_history_total,
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error

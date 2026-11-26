@@ -320,6 +320,7 @@ class BaseChatRepository(ABC):
         user_id=None,
         channel=None,
         session_id=None,
+        include_history_total=False,
     ):
         """Compatibility path; SQL repositories override with a bounded query."""
         validate_summary_page(page_size, cursor)
@@ -331,11 +332,17 @@ class BaseChatRepository(ABC):
         chats = self.sort_chats_by_recency(
             await self.filter_chats(user_id=user_id, channel=channel),
         )
+        if session_id is not None:
+            chats = [chat for chat in chats if chat.session_id == session_id]
+        history_total = (
+            sum(chat.meta.get("session_kind") != "task" for chat in chats)
+            if include_history_total
+            else None
+        )
         selected = [
             chat
             for chat in chats
-            if (session_id is None or chat.session_id == session_id)
-            and (boundary is None or self._recency_sort_key(chat) < boundary)
+            if boundary is None or self._recency_sort_key(chat) < boundary
         ][: page_size + 1]
         has_more = len(selected) > page_size
         items = selected[:page_size]
@@ -343,6 +350,7 @@ class BaseChatRepository(ABC):
             items=[ChatSummary.from_chat(chat) for chat in items],
             page_size=page_size,
             has_more=has_more,
+            history_total=history_total,
             next_cursor=(
                 self._encode_cursor(self._recency_sort_key(items[-1]))
                 if has_more

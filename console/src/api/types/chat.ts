@@ -119,6 +119,7 @@ export interface ChatSummaryPage {
   page_size: number;
   has_more: boolean;
   next_cursor: string | null;
+  history_total?: number | null;
 }
 
 export interface ChatDeleteResponse {

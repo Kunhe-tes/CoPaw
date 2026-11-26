@@ -243,7 +243,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   }, [sharedSessions]);
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
-  const historyTotal = sessions.length;
+  const historyTotal = sessionApi.getHistoryTotal();
 
   const handleToggleHistory = useCallback(() => {
     setHistoryCollapsed((prev) => !prev);
@@ -484,7 +484,8 @@ export default function ChatSidebar(props: ChatSidebarProps) {
                 >
                   <div className="chat-sidebar-history-title">
                     <HistoryIcon />
-                    历史记录(已加载{historyTotal})
+                    历史记录
+                    {historyTotal !== undefined && `（共 ${historyTotal} 条）`}
                   </div>
                   <ToggleIcon collapsed={historyCollapsed} />
                 </div>

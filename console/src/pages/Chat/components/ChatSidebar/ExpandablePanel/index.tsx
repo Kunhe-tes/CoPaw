@@ -124,7 +124,7 @@ export default function ExpandablePanel({
             sessions={sessions}
             onClose={onClose}
             hasMoreSessions={hasMoreSessions}
-            sessionTotal={sessionTotal ?? sessions.length}
+            sessionTotal={sessionTotal}
             isLoadingMoreSessions={isLoadingMoreSessions}
             loadMoreSessionsFailed={loadMoreSessionsFailed}
             onLoadMoreSessions={onLoadMoreSessions}
@@ -353,7 +353,7 @@ function HistoryContent({
   sessions: IAgentScopeRuntimeWebUISession[];
   onClose: () => void;
   hasMoreSessions: boolean;
-  sessionTotal: number;
+  sessionTotal?: number;
   isLoadingMoreSessions: boolean;
   loadMoreSessionsFailed: boolean;
   onLoadMoreSessions?: () => void;
@@ -387,7 +387,8 @@ function HistoryContent({
       <div className="expandable-panel-header">
         <HistoryIconSmall />
         <span className="expandable-panel-header-title">
-          历史记录(已加载{sessionTotal})
+          历史记录
+          {sessionTotal !== undefined && `（共 ${sessionTotal} 条）`}
         </span>
       </div>
       <div className="expandable-panel-content" ref={scrollContainerRef}>

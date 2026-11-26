@@ -1272,6 +1272,7 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
   private sessionList: IAgentScopeRuntimeWebUISession[] = [];
   private hasMoreSessionPages = false;
   private nextSessionCursor: string | null | undefined = null;
+  private historyTotal: number | undefined;
   private intendedSessionId: string | null = null;
 
   /**
@@ -1319,6 +1320,7 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     this.sessionList = [];
     this.hasMoreSessionPages = false;
     this.nextSessionCursor = null;
+    this.historyTotal = undefined;
     this.sessionListRequest = null;
     this.sessionPageRequest = null;
     this.sessionRequests.clear();
@@ -1776,6 +1778,7 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
         const chatPage = await api.listChatSummaries({
           page_size: getSessionPageSize(),
           cursor: null,
+          include_history_total: true,
         });
         const chats = chatPage.items;
         if (!this.taskListScopeMatches(accessKey, generation))
@@ -1915,6 +1918,7 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
         this.preferredChatId = null;
         this.hasMoreSessionPages = chatPage.has_more;
         this.nextSessionCursor = chatPage.next_cursor;
+        this.historyTotal = chatPage.history_total ?? undefined;
 
         return this.projectSessionView(this.sessionList);
       } finally {
@@ -1928,6 +1932,12 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
 
   hasMoreSessions(): boolean {
     return this.hasMoreSessionPages;
+  }
+
+  getHistoryTotal(): number | undefined {
+    return this.taskLookupScope === cronAccessKey()
+      ? this.historyTotal
+      : undefined;
   }
 
   loadMoreSessions(): Promise<IAgentScopeRuntimeWebUISession[]> {
