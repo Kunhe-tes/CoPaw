@@ -86,6 +86,13 @@ def utc_now():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def run_lease_expired(run):
+    deadline = run.get("run_lease_until")
+    if isinstance(deadline, str):
+        deadline = datetime.fromisoformat(deadline)
+    return deadline is not None and deadline <= utc_now()
+
+
 def effective_model_values(outcome):
     slot = (outcome.execution_meta or {}).get("effective_model_slot")
     if not isinstance(slot, dict):
@@ -275,14 +282,7 @@ class ExecutionWriter:
         """将失联执行标为结果未确认的错误，不自动重跑业务任务。"""
         async with self.db.transaction():
             definition, run = await self._locked(execution_id, key)
-            deadline = run.get("run_lease_until")
-            if isinstance(deadline, str):
-                deadline = datetime.fromisoformat(deadline)
-            if (
-                run["status"] != "running"
-                or deadline is None
-                or deadline > utc_now()
-            ):
+            if run["status"] != "running" or not run_lease_expired(run):
                 return False
             await self._complete(
                 definition,

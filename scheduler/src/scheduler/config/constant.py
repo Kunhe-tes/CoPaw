@@ -92,6 +92,9 @@ SWE_API_BASE_URL = _get_str(
     "",
 ).rstrip("/")
 SWE_INTERNAL_API_BASE_URL_ENV = "SCHEDULER_SWE_INTERNAL_API_BASE_URL"
+MANAGED_SWE_READ_TIMEOUT_ENV = "SCHEDULER_MANAGED_SWE_READ_TIMEOUT_SECONDS"
+MANAGED_SWE_READ_TIMEOUT_DEFAULT = 20
+MANAGED_SWE_READ_TIMEOUT_MAX = 30
 
 DISPATCH_INTENTS_ENABLED_ENV = "SWE_CRON_DISPATCH_INTENTS_ENABLED"
 DEFAULT_SCHEDULER_LOOP_INTERVAL_SECONDS = 60
@@ -102,6 +105,16 @@ CRON_BATCH_MAX_ATTEMPTS = _get_int(
     3,
     min_value=1,
 )
+
+
+def managed_swe_read_timeout_seconds() -> int:
+    value = _get_int(
+        MANAGED_SWE_READ_TIMEOUT_ENV,
+        MANAGED_SWE_READ_TIMEOUT_DEFAULT,
+    )
+    if value <= 0:
+        return MANAGED_SWE_READ_TIMEOUT_DEFAULT
+    return min(value, MANAGED_SWE_READ_TIMEOUT_MAX)
 
 
 def get_scheduler_database_config() -> SchedulerDatabaseConfig:

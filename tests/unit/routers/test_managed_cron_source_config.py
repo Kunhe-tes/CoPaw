@@ -2,7 +2,7 @@
 """真实内部 HTTP 中间件和执行写入证明配置不回退到默认 10。"""
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import FastAPI
@@ -15,6 +15,7 @@ from scheduler.app.services.cron.managed.executions import (
 )
 from scheduler.app.services.cron.managed.identity import CallerIdentity
 from swe.app.crons import managed_execution_api as api
+from swe.app.crons import managed_results
 from swe.app.crons.managed_execution import ManagedExecutionService
 from swe.app.crons.managed_receipts import SessionResultReceipts
 from swe.app.crons.managed_results import ExecutionOutcome, ExecutionWriter
@@ -258,6 +259,62 @@ async def test_recover_uses_source_policy_without_rerunning_engine(
     }
     assert not engine.calls
     assert get_current_source_system_config() is None
+
+
+@pytest.mark.asyncio
+async def test_recover_rechecks_missing_receipt_under_lock_after_lease_expiry(
+    execution_setup,
+    monkeypatch,
+):
+    db = execution_setup[0]
+    row = await queued(execution_setup, 0)
+    execution_id, identity = row["execution_id"], key(row)
+    writer = ExecutionWriter(db)
+    await writer.accept(execution_id, identity)
+    run = await writer.start(execution_id, identity, "worker")
+    deadline = run["run_lease_until"]
+    now = deadline - timedelta(seconds=1)
+    monkeypatch.setattr(managed_results, "utc_now", lambda: now)
+    reads = []
+
+    class SessionAtDeadline(Session):
+        async def get_persisted_session_state_dict(self, *_args, **_kwargs):
+            nonlocal now
+            now = deadline
+            reads.append("snapshot")
+            return {}
+
+        async def get_session_state_dict(self, *_args, **_kwargs):
+            reads.append("locked")
+            return {}
+
+    async def factory(_request):
+        return ManagedExecutionService(
+            writer,
+            Engine(),
+            receipts=SessionResultReceipts(SessionAtDeadline()),
+        )
+
+    monkeypatch.setattr(api, "get_execution_service", factory)
+    app = configured_app(db, source_config())
+    path = "/api/internal/cron/managed/recover"
+    body = {"execution_id": execution_id, "job_id": run["job_id"]}
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as http:
+        response = await http.post(path, headers=headers(run), json=body)
+        assert response.status_code == 200
+        assert response.json()["status"] == "running"
+        assert reads == ["snapshot"]
+        response = await http.post(path, headers=headers(run), json=body)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "error"
+    assert reads == ["snapshot", "locked"]
+    assert (await writer.get(execution_id, identity))[
+        "error_code"
+    ] == "cron_execution_lease_expired"
 
 
 @pytest.mark.asyncio

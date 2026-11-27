@@ -277,3 +277,64 @@ async def test_actual_http_client_and_swe_route_share_one_execution_record(
     assert current["status"] == "success"
     assert current["history_execution_id"]
     assert len(engine.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        (None, 20),
+        ("25", 25),
+        ("30", 30),
+        ("60", 30),
+        ("invalid", 20),
+        ("0", 20),
+    ],
+)
+async def test_managed_swe_requests_share_read_timeout(
+    monkeypatch,
+    configured,
+    expected,
+):
+    import httpx
+    from scheduler.app.services.cron.managed.dispatcher import (
+        ManagedSweExecutionClient,
+    )
+    from scheduler.app.services.cron.managed.identity import CallerIdentity
+
+    name = "SCHEDULER_MANAGED_SWE_READ_TIMEOUT_SECONDS"
+    if configured is None:
+        monkeypatch.delenv(name, raising=False)
+    else:
+        monkeypatch.setenv(name, configured)
+
+    def respond(request):
+        assert request.extensions["timeout"] == {
+            "connect": 10,
+            "read": expected,
+            "write": 10,
+            "pool": 10,
+        }
+        body = json.loads(request.content)
+        return httpx.Response(200, json=body)
+
+    async_client = httpx.AsyncClient
+    transport = httpx.MockTransport(respond)
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: async_client(transport=transport, **kwargs),
+    )
+    client = ManagedSweExecutionClient("http://swe.example")
+    caller = CallerIdentity("tenant", "source", "default", "actor")
+    row = {
+        "job_id": "job",
+        "execution_id": "run",
+        "recheck_id": "recheck",
+        "dispatch_owner": "dispatch",
+    }
+
+    await client.execute(row, caller)
+    await client.recover(row, caller)
+    await client.recheck("execute", row, caller)
+    await client.recheck("recover", row, caller)
