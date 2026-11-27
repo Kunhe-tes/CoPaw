@@ -55,9 +55,14 @@ class SessionResultReceipts:
             create_if_not_exist=True,
         )
 
-    async def load(self, run):
+    async def load(self, run, *, use_persisted_snapshot=False):
         session, user = _binding(run)
-        state = await self.session.get_session_state_dict(
+        read_state = (
+            self.session.get_persisted_session_state_dict
+            if use_persisted_snapshot
+            else self.session.get_session_state_dict
+        )
+        state = await read_state(
             session_id=session,
             user_id=user,
             allow_not_exist=True,

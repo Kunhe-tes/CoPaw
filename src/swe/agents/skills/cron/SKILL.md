@@ -2,7 +2,7 @@
 name: cron
 description: Use when the user requests future scheduled or recurring work, or asks to inspect or manage an existing scheduled task. | 用户要求未来定时、周期执行，或查询和管理已有定时任务时使用。
 metadata:
-  builtin_skill_version: "1.5"
+  builtin_skill_version: "1.6"
   swe:
     emoji: "⏰"
 ---
@@ -17,7 +17,8 @@ metadata:
 
 ## 身份和地址
 
-- 每条命令必须显式传 `--agent-id <agent_id>`，使用系统提示中的实际 Agent。
+- 创建任务默认使用 `default` Agent。只有用户明确指定其他 Agent 时，才传 `--agent-id <agent_id>`。
+- 查询、管理或执行已有任务时，显式传入任务所属的 `--agent-id <agent_id>`。查询列表时传入要查询的 Agent ID。
 - tenant/source 默认读取运行时 `SWE_TENANT_ID`、`SWE_SOURCE_ID`，也可逐命令传 `--tenant-id`、`--source-id`。缺少来源要先确认，不能编造默认来源。
 - 实际操作者与 tenant 不同时，在子命令前传 `swe cron --user-id <实际操作者> ...`。不得冒充他人或附加管理员身份。
 - 地址优先使用命令 `--base-url`，其次是显式全局 `swe --host ... --port ... cron ...`，再用 `SWE_SCHEDULER_API_URL`，最后默认本地 9100 端口。不要把 SWE 8088 地址当作 Scheduler。
@@ -28,7 +29,6 @@ metadata:
 
 ```bash
 swe cron --request-id <本次创建请求ID> create \
-  --agent-id <agent_id> \
   --type agent \
   --name "每日待办报告" \
   --cron "0 9 * * *" \
@@ -47,7 +47,6 @@ swe cron --request-id <本次创建请求ID> create \
 
 ```bash
 swe cron --request-id <本次创建请求ID> create \
-  --agent-id <agent_id> \
   --type agent \
   --name "每日待办报告" \
   --cron "0 9 * * *" \
@@ -66,7 +65,7 @@ swe cron --request-id <本次创建请求ID> create \
 
 ## 先核对回执，再报告完成
 
-创建/更新/删除/启停返回 `operation` 和 `request_id`，不是任务定义。创建的任务 ID 从 `operation.job_id` 取得。
+创建/更新/删除/启停返回 `operation` 和 `request_id`，不是任务定义。创建的任务 ID 从 `operation.job_id` 取得。查询创建回执、重试创建或核对任务详情时，沿用本次创建使用的 Agent ID（默认 `default`）。
 
 - `operation.status=completed`：本次管理动作完成，可以查询任务详情核对。
 - `pending/running`：仍在处理，继续查询，不能报告创建或删除已经完成。

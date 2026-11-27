@@ -6,7 +6,7 @@ import json
 import logging
 from uuid import uuid4
 
-from .managed_results import ExecutionOutcome, TERMINAL
+from .managed_results import ExecutionOutcome, TERMINAL, run_lease_expired
 from .models import CronJobSpec
 from .managed_models import load_managed_spec
 from .managed_failure import error_metadata, public_failure_detail
@@ -121,10 +121,18 @@ class ManagedExecutionService:
         if run["status"] in TERMINAL:
             await self._clear_receipt(run)
             return True
-        if self.receipts is None or run["status"] != "running":
+        if run["status"] != "running":
             return False
-        outcome = await self.receipts.load(run)
+        expired = run_lease_expired(run)
+        outcome = (
+            await self.receipts.load(run, use_persisted_snapshot=not expired)
+            if self.receipts is not None
+            else None
+        )
         if outcome is None:
+            # 使用读凭证前的判定，避免空快照跨越租约期限后触发过期。
+            if expired:
+                await self.writer.expire(execution_id, key)
             return False
         committed = await self._commit(
             execution_id,

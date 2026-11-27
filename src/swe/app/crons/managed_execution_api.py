@@ -273,8 +273,6 @@ async def recover_managed_result(
         async with _source_config_scope(request, key):
             service = await get_execution_service(request)
             recovered = await service.recover(body.execution_id, key)
-            if not recovered:
-                await ExecutionWriter(db).expire(body.execution_id, key)
             current = await ExecutionWriter(db).get(body.execution_id, key)
         logger.info(
             "执行结果恢复核对结束 execution_id=%s status=%s recovered=%s",

@@ -874,6 +874,11 @@
 - 本次修复不重置已经 failed 的通知、不补发历史，也不恢复写 jobs.json 或修改通知时间、渠道与重试配置。
 - 回归入口：`tests/unit/app/test_managed_cron_notifications.py` 与原 `test_cron_notification_worker.py`。
 
+## Scheduler 执行结果恢复响应未确认
+
+- 看到 `error_type=ReadTimeout` 时，按 `execution_id` 查共库 `swe_cron_execution_runs`，并对照 SWE 的 `执行结果事务已提交` 和 `执行结果恢复核对结束` 日志。请求超时后，结果仍可能已经落库。
+- 读取超时默认 20 秒，由 Scheduler 的 `SCHEDULER_MANAGED_SWE_READ_TIMEOUT_SECONDS` 控制。适用接口和租约注意事项见 [部署说明](../../docs/deployment/cron_phase2_deployment.md#部署前置核对)。
+
 ## 财富规划看板「已生成任务」数量不准确
 
 - **口径**：前端直接 POST 同源 `/api/agent/workspace/skill-stats`，请求体的 `planIds` 为当前范围内去重的规划 ID 数组，不再传 `skills` 或日期区间。按返回项 `planId` 关联规划，`targetCustomerCount` 展示目标客户，`targetTaskCount` 映射为展示模型的 `generatedTaskCount`；规划概览累加当前周期内各规划的结果，不再按场景累加。

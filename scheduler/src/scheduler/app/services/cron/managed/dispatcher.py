@@ -8,6 +8,7 @@ import json
 
 import httpx
 
+from .....config.constant import managed_swe_read_timeout_seconds
 from .executions import ExecutionStore, RUN_TABLE, TERMINAL_STATUSES
 from .contracts import ManagedCronNotFound
 from .identity import CallerIdentity, encode_scope, identity_value
@@ -34,6 +35,10 @@ class ManagedSweExecutionClient:
     def __init__(self, base_url, *, http=None, headers=None):
         self.base_url = checked_base(base_url).removesuffix("/api")
         self.http = http
+        self.timeout = httpx.Timeout(
+            10,
+            read=managed_swe_read_timeout_seconds(),
+        )
         self.headers = {
             name: value
             for name, value in (headers or {}).items()
@@ -80,7 +85,7 @@ class ManagedSweExecutionClient:
             response = await self.http.post(url, headers=headers, json=body)
         else:
             async with httpx.AsyncClient(
-                timeout=10,
+                timeout=self.timeout,
                 follow_redirects=False,
             ) as client:
                 response = await client.post(url, headers=headers, json=body)
